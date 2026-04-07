@@ -508,7 +508,7 @@ export const ReleaseSummary = z.object({
   version: z.string(),
   promoted_by: z.string().nullable(),
   promoted_at: z.string(),
-  config_json: z.record(z.unknown()).optional(),
+  config: z.record(z.unknown()).optional(),
 }).openapi("ReleaseSummary");
 
 // ── Memory schemas ──────────────────────────────────────────────────────

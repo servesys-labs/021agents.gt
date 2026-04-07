@@ -22,7 +22,7 @@
  *     token_type      TEXT DEFAULT 'Bearer',
  *     expires_at      TIMESTAMPTZ,
  *     scopes          TEXT DEFAULT '',
- *     metadata_json   TEXT DEFAULT '{}',
+ *     metadata   TEXT DEFAULT '{}',
  *     created_at      TIMESTAMPTZ DEFAULT NOW(),
  *     updated_at      TIMESTAMPTZ DEFAULT NOW(),
  *     UNIQUE(org_id, connector_name)

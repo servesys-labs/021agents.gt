@@ -194,8 +194,8 @@ describe("sessions route authz and input contracts", () => {
             output_tokens: 2,
             cost_total_usd: 0.01,
             latency_ms: 10,
-            tool_calls_json: "[{\"id\":\"t1\",\"name\":\"grep\"}]",
-            tool_results_json: "[{\"tool_call_id\":\"t1\",\"result\":\"ok\"}]",
+            tool_calls: "[{\"id\":\"t1\",\"name\":\"grep\"}]",
+            tool_results: "[{\"tool_call_id\":\"t1\",\"result\":\"ok\"}]",
           },
         ];
       }

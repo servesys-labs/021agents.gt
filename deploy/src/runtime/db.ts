@@ -105,13 +105,13 @@ export async function loadAgentConfig(
     const sql = await getDb(hyperdrive);
     rows = orgId
       ? await sql`
-          SELECT name, org_id, project_id, config_json, description
+          SELECT name, org_id, project_id, config, description
           FROM agents
           WHERE name = ${agentName} AND org_id = ${orgId} AND is_active = true
           LIMIT 1
         `
       : await sql`
-          SELECT name, org_id, project_id, config_json, description
+          SELECT name, org_id, project_id, config, description
           FROM agents
           WHERE name = ${agentName} AND is_active = true
           LIMIT 1
@@ -171,7 +171,7 @@ export async function loadAgentConfig(
   }
 
   const row = rows[0];
-  const cfg = parseJson(row.config_json) || {};
+  const cfg = parseJson(row.config) || {};
   const governance = parseJson(cfg.governance) || {};
   const cfgRec = cfg as Record<string, unknown>;
   const harness = parseJson(cfg.harness) as Record<string, unknown> | null;
@@ -183,7 +183,7 @@ export async function loadAgentConfig(
     );
   }
 
-  // Tools come from config_json (no top-level tools column in DB)
+  // Tools come from config (no top-level tools column in DB)
   const cfgTools = parseJsonArray(cfg.tools);
   let mergedTools = cfgTools;
 
@@ -260,7 +260,7 @@ export async function loadAgentConfig(
 // Plan routing: 3 tiers, best model per price point.
 // Single agentic loop: LLM → tools → LLM → tools → answer.
 // No per-task classification needed — the model handles everything.
-// Agent can override with config_json.model.
+// Agent can override with config.model.
 // ── MVP Mode: All plans route to self-hosted Gemma 4 models ──────────
 // Zero LLM cost. Optimized for cheaper models so when better models come,
 // they'll only perform better. Three endpoints:
@@ -322,7 +322,7 @@ const PLAN_ROUTING: Record<string, Record<string, Record<string, { model: string
 
 /**
  * Resolve an agent's plan to its routing table.
- * If the agent has explicit routing overrides in config_json, those win.
+ * If the agent has explicit routing overrides in config, those win.
  * Otherwise, look up the plan name in PLAN_ROUTING.
  */
 export function resolvePlanRouting(
@@ -405,9 +405,9 @@ export async function writeTurn(
     latency_ms: number;
     llm_content: string;
     cost_total_usd: number;
-    tool_calls_json: string;
-    tool_results_json: string;
-    errors_json: string;
+    tool_calls: string;
+    tool_results: string;
+    errors: string;
     execution_mode: string;
   },
 ): Promise<void> {
@@ -421,13 +421,13 @@ export async function writeTurn(
       INSERT INTO turns (
         session_id, turn_number, model_used, input_tokens, output_tokens,
         latency_ms, llm_content, cost_total_usd,
-        tool_calls_json, tool_results_json, errors_json,
-        execution_mode, plan_json, reflection_json
+        tool_calls, tool_results, errors,
+        execution_mode, plan, reflection
       ) VALUES (
         ${turn.session_id}, ${turn.turn_number}, ${turn.model_used},
         ${turn.input_tokens}, ${turn.output_tokens},
         ${turn.latency_ms}, ${turn.llm_content}, ${turn.cost_total_usd},
-        ${turn.tool_calls_json}, ${turn.tool_results_json}, ${turn.errors_json},
+        ${turn.tool_calls}, ${turn.tool_results}, ${turn.errors},
         ${turn.execution_mode}, '{}', '{}'
       )
     `;
@@ -454,7 +454,7 @@ export async function writeEvent(
     input_tokens: number;
     output_tokens: number;
     cost_usd: number;
-    details_json: string;
+    details: string;
     created_at?: number;
   },
 ): Promise<void> {
@@ -468,14 +468,14 @@ export async function writeEvent(
       INSERT INTO otel_events (
         session_id, turn, event_type, action, plan, tier,
         provider, model, tool_name, status, latency_ms,
-        input_tokens, output_tokens, cost_usd, details_json, created_at
+        input_tokens, output_tokens, cost_usd, details, created_at
       ) VALUES (
         ${event.session_id}, ${event.turn}, ${event.event_type},
         ${event.action}, ${event.plan}, '',
         ${event.provider}, ${event.model}, ${event.tool_name},
         ${event.status}, ${event.latency_ms},
         ${event.input_tokens}, ${event.output_tokens}, ${event.cost_usd},
-        ${event.details_json},
+        ${event.details},
         ${event.created_at ? (typeof event.created_at === "string" && String(event.created_at).includes("T") ? event.created_at : new Date(Number(event.created_at) * 1000).toISOString()) : new Date().toISOString()}
       )
     `;
@@ -698,7 +698,7 @@ export async function writeEvalRun(
 
     await sql`
       INSERT INTO eval_runs (
-        eval_run_id, org_id, agent_name, status, config_json, results_json,
+        eval_run_id, org_id, agent_name, status, config, results,
         pass_rate, total_trials, passed_trials, created_at
       ) VALUES (
         ${evalRunId}, ${orgId}, ${run.agent_name}, ${"completed"},
@@ -745,7 +745,7 @@ export async function writeEvalTrial(
     await sql`
       INSERT INTO eval_trials (
         eval_run_id, test_input, expected_output, actual_output,
-        passed, score, latency_ms, error_message, created_at
+        passed, score, latency_ms, error, created_at
       ) VALUES (
         ${evalRunId}, ${trial.input}, ${trial.expected}, ${trial.actual},
         ${trial.passed}, ${trial.score}, ${trial.latency_ms},
@@ -770,25 +770,25 @@ export async function listEvalRuns(
   try {
     const rows = agentName
       ? await sql`
-        SELECT eval_run_id, agent_name, pass_rate, total_trials, passed_trials, status, config_json, results_json, created_at
+        SELECT eval_run_id, agent_name, pass_rate, total_trials, passed_trials, status, config, results, created_at
         FROM eval_runs
         WHERE agent_name = ${agentName}
         ORDER BY created_at DESC
         LIMIT ${limit}
       `
       : await sql`
-        SELECT eval_run_id, agent_name, pass_rate, total_trials, passed_trials, status, config_json, results_json, created_at
+        SELECT eval_run_id, agent_name, pass_rate, total_trials, passed_trials, status, config, results, created_at
         FROM eval_runs
         ORDER BY created_at DESC
         LIMIT ${limit}
       `;
     return rows.map((r: any) => {
-      const cfg = typeof r.config_json === "string"
-        ? (parseJson(r.config_json) || {})
-        : (r.config_json || {});
-      const results = typeof r.results_json === "string"
-        ? (parseJson(r.results_json) || {})
-        : (r.results_json || {});
+      const cfg = typeof r.config === "string"
+        ? (parseJson(r.config) || {})
+        : (r.config || {});
+      const results = typeof r.results === "string"
+        ? (parseJson(r.results) || {})
+        : (r.results || {});
       return {
         run_id: String(r.eval_run_id || ""),
         agent_name: String(r.agent_name || ""),
@@ -830,7 +830,7 @@ export async function getEvalRun(
       ...row,
     };
     try {
-      const raw = out.config_json;
+      const raw = out.config;
       out.eval_conditions = typeof raw === "string" ? JSON.parse(raw) : (raw || {});
     } catch {
       out.eval_conditions = {};
@@ -868,7 +868,7 @@ type OtelEventRow = {
   session_id: string;
   turn_number: number;
   event_type: string;
-  details_json: string;
+  details: string;
   created_at: string | number;
   trace_id?: string;
 };
@@ -878,7 +878,7 @@ function otelRowToRuntimeEvent(
   fallbackTraceId: string,
   fallbackSessionId: string,
 ): RuntimeEvent {
-  const data = parseJson(row.details_json) || {};
+  const data = parseJson(row.details) || {};
   const eventTraceId = String(
     (data.trace_id as string | undefined) || row.trace_id || fallbackTraceId || "",
   );
@@ -995,7 +995,7 @@ export async function replayOtelEventsAtCursor(
 
       if (upToRowId > 0) {
         rows = await sql`
-          SELECT e.id, e.session_id, e.turn AS turn_number, e.event_type, e.details_json, e.created_at, s.trace_id
+          SELECT e.id, e.session_id, e.turn AS turn_number, e.event_type, e.details, e.created_at, s.trace_id
           FROM otel_events e
           LEFT JOIN sessions s ON s.session_id = e.session_id
           WHERE e.session_id = ${sessionId} AND e.id <= ${upToRowId}
@@ -1004,7 +1004,7 @@ export async function replayOtelEventsAtCursor(
       } else if (cidx >= 0) {
         const lim = Math.min(cidx + 1, safeScan);
         rows = await sql`
-          SELECT e.id, e.session_id, e.turn AS turn_number, e.event_type, e.details_json, e.created_at, s.trace_id
+          SELECT e.id, e.session_id, e.turn AS turn_number, e.event_type, e.details, e.created_at, s.trace_id
           FROM otel_events e
           LEFT JOIN sessions s ON s.session_id = e.session_id
           WHERE e.session_id = ${sessionId}
@@ -1013,7 +1013,7 @@ export async function replayOtelEventsAtCursor(
         `;
       } else {
         rows = await sql`
-          SELECT e.id, e.session_id, e.turn AS turn_number, e.event_type, e.details_json, e.created_at, s.trace_id
+          SELECT e.id, e.session_id, e.turn AS turn_number, e.event_type, e.details, e.created_at, s.trace_id
           FROM otel_events e
           LEFT JOIN sessions s ON s.session_id = e.session_id
           WHERE e.session_id = ${sessionId}
@@ -1035,7 +1035,7 @@ export async function replayOtelEventsAtCursor(
 
       if (upToRowId > 0) {
         rows = await sql`
-          SELECT e.id, e.session_id, e.turn AS turn_number, e.event_type, e.details_json, e.created_at, s.trace_id
+          SELECT e.id, e.session_id, e.turn AS turn_number, e.event_type, e.details, e.created_at, s.trace_id
           FROM otel_events e
           INNER JOIN sessions s ON s.session_id = e.session_id
           WHERE s.trace_id = ${traceId} AND e.id <= ${upToRowId}
@@ -1044,7 +1044,7 @@ export async function replayOtelEventsAtCursor(
       } else if (cidx >= 0) {
         const lim = Math.min(cidx + 1, safeScan);
         rows = await sql`
-          SELECT e.id, e.session_id, e.turn AS turn_number, e.event_type, e.details_json, e.created_at, s.trace_id
+          SELECT e.id, e.session_id, e.turn AS turn_number, e.event_type, e.details, e.created_at, s.trace_id
           FROM otel_events e
           INNER JOIN sessions s ON s.session_id = e.session_id
           WHERE s.trace_id = ${traceId}
@@ -1053,7 +1053,7 @@ export async function replayOtelEventsAtCursor(
         `;
       } else {
         rows = await sql`
-          SELECT e.id, e.session_id, e.turn AS turn_number, e.event_type, e.details_json, e.created_at, s.trace_id
+          SELECT e.id, e.session_id, e.turn AS turn_number, e.event_type, e.details, e.created_at, s.trace_id
           FROM otel_events e
           INNER JOIN sessions s ON s.session_id = e.session_id
           WHERE s.trace_id = ${traceId}
@@ -1151,7 +1151,7 @@ export async function loadRuntimeEvents(
     session_id: string;
     turn_number: number;
     event_type: string;
-    details_json: string;
+    details: string;
     created_at: string | number;
     trace_id?: string;
   };
@@ -1161,7 +1161,7 @@ export async function loadRuntimeEvents(
     rows = await sql`
       SELECT
         e.id, e.session_id, e.turn AS turn_number, e.event_type,
-        e.details_json, e.created_at, s.trace_id
+        e.details, e.created_at, s.trace_id
       FROM otel_events e
       LEFT JOIN sessions s ON s.session_id = e.session_id
       WHERE e.session_id = ${sessionId}
@@ -1177,7 +1177,7 @@ export async function loadRuntimeEvents(
     rows = await sql`
       SELECT
         e.id, e.session_id, e.turn AS turn_number, e.event_type,
-        e.details_json, e.created_at, s.trace_id
+        e.details, e.created_at, s.trace_id
       FROM otel_events e
       INNER JOIN sessions s ON s.session_id = e.session_id
       WHERE s.trace_id = ${traceId}
@@ -1194,7 +1194,7 @@ export async function loadRuntimeEvents(
   }
 
   return rows.map((row) => {
-    const data = parseJson(row.details_json) || {};
+    const data = parseJson(row.details) || {};
     const eventTraceId = String(
       (data.trace_id as string | undefined) || row.trace_id || traceId || "",
     );
@@ -1298,7 +1298,7 @@ export async function loadRuntimeEventsPage(
     session_id: string;
     turn_number: number;
     event_type: string;
-    details_json: string;
+    details: string;
     created_at: string | number;
     trace_id?: string;
   };
@@ -1329,7 +1329,7 @@ export async function loadRuntimeEventsPage(
     rows = await sql`
       SELECT
         e.id, e.session_id, e.turn AS turn_number, e.event_type,
-        e.details_json, e.created_at, s.trace_id
+        e.details, e.created_at, s.trace_id
       FROM otel_events e
       LEFT JOIN sessions s ON s.session_id = e.session_id
       WHERE e.session_id = ${sessionId}
@@ -1368,7 +1368,7 @@ export async function loadRuntimeEventsPage(
     rows = await sql`
       SELECT
         e.id, e.session_id, e.turn AS turn_number, e.event_type,
-        e.details_json, e.created_at, s.trace_id
+        e.details, e.created_at, s.trace_id
       FROM otel_events e
       INNER JOIN sessions s ON s.session_id = e.session_id
       WHERE s.trace_id = ${traceId}
@@ -1394,7 +1394,7 @@ export async function loadRuntimeEventsPage(
   const hasMore = rows.length > limit;
   const pageRows = hasMore ? rows.slice(0, limit) : rows;
   const events = pageRows.map((row) => {
-    const data = parseJson(row.details_json) || {};
+    const data = parseJson(row.details) || {};
     const eventTraceId = String(
       (data.trace_id as string | undefined) || row.trace_id || traceId || "",
     );
@@ -1699,7 +1699,7 @@ async function loadEvalTrials(
     const sessionId = String(opts.session_id || "").trim();
     if (traceId) {
       const rows = await sql`
-        SELECT id, eval_name, agent_name, trial_index, passed, score, details_json, trace_id, session_id, created_at
+        SELECT id, eval_name, agent_name, trial_index, passed, score, details, trace_id, session_id, created_at
         FROM eval_trials
         WHERE trace_id = ${traceId}
         ORDER BY created_at DESC
@@ -1709,7 +1709,7 @@ async function loadEvalTrials(
     }
     if (sessionId) {
       const rows = await sql`
-        SELECT id, eval_name, agent_name, trial_index, passed, score, details_json, trace_id, session_id, created_at
+        SELECT id, eval_name, agent_name, trial_index, passed, score, details, trace_id, session_id, created_at
         FROM eval_trials
         WHERE session_id = ${sessionId}
         ORDER BY created_at DESC

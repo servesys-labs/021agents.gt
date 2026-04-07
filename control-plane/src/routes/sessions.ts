@@ -265,8 +265,8 @@ sessionRoutes.openapi(getSessionTurnsRoute, async (c): Promise<any> => {
       let toolResults: any[] = [];
       let planArtifact: any = {};
       let reflection: any = {};
-      toolCalls = parseJsonColumn(r.tool_calls_json, []);
-      toolResults = parseJsonColumn(r.tool_results_json, []);
+      toolCalls = parseJsonColumn(r.tool_calls, []);
+      toolResults = parseJsonColumn(r.tool_results, []);
       try { planArtifact = JSON.parse(r.plan_artifact || "{}"); } catch {}
       try { reflection = JSON.parse(r.reflection || "{}"); } catch {}
 
@@ -573,7 +573,7 @@ sessionRoutes.get("/:session_id/export", requireScope("sessions:read"), async (c
 
     const turns = await sql`
       SELECT turn_number, model_used, llm_content, input_tokens, output_tokens,
-             cost_total_usd, latency_ms, tool_calls_json, tool_results_json
+             cost_total_usd, latency_ms, tool_calls, tool_results
       FROM turns WHERE session_id = ${sessionId}
         AND session_id IN (SELECT session_id FROM sessions WHERE org_id = ${user.org_id})
       ORDER BY turn_number ASC
@@ -592,8 +592,8 @@ sessionRoutes.get("/:session_id/export", requireScope("sessions:read"), async (c
     const parsedTurns = (turns as any[]).map((t) => {
       let tool_calls: unknown[] = [];
       let tool_results: unknown[] = [];
-      tool_calls = parseJsonColumn(t.tool_calls_json, []);
-      tool_results = parseJsonColumn(t.tool_results_json, []);
+      tool_calls = parseJsonColumn(t.tool_calls, []);
+      tool_results = parseJsonColumn(t.tool_results, []);
       return {
         ...t,
         content: t.llm_content,

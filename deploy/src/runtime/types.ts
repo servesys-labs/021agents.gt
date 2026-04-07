@@ -92,7 +92,7 @@ export interface AgentConfig {
   blocked_tools: string[];
   allowed_domains: string[];           // Domain allowlist for HTTP/browse tools
   blocked_domains?: string[];
-  /** Normalized deploy-time policy artifact (config_json.deploy_policy). */
+  /** Normalized deploy-time policy artifact (config.deploy_policy). */
   deploy_policy?: DeployPolicyV1;
   max_tokens_per_turn: number;         // Token cap per LLM call (0 = unlimited)
   require_confirmation_for_destructive: boolean; // Halt on delete/drop/destroy
@@ -118,7 +118,7 @@ export interface AgentConfig {
   use_code_mode?: boolean;
   // Reasoning strategy — if not set, auto-selects based on task characteristics
   reasoning_strategy?: "step-back" | "chain-of-thought" | "plan-then-execute" | "verify-then-respond" | "decompose";
-  /** Optional harness block from config_json (e.g. enable_checkpoints). */
+  /** Optional harness block from config (e.g. enable_checkpoints). */
   harness?: Record<string, unknown>;
   /** Derived: false only when harness.enable_checkpoints === false. */
   enable_workspace_checkpoints?: boolean;

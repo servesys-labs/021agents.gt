@@ -387,7 +387,7 @@ const upsertPricingRoute = createRoute({
             effective_from: z.string().nullable().optional(),
             effective_to: z.string().nullable().optional(),
             is_active: z.boolean().default(true),
-            metadata_json: z.string().default("{}"),
+            metadata: z.string().default("{}"),
           }),
         },
       },
@@ -420,7 +420,7 @@ billingRoutes.openapi(upsertPricingRoute, async (c): Promise<any> => {
   const effectiveFrom = body.effective_from ?? null;
   const effectiveTo = body.effective_to ?? null;
   const isActive = body.is_active;
-  const metadataJson = body.metadata_json;
+  const metadataJson = body.metadata;
 
   // Deactivate existing active row for same key
   await sql`
@@ -434,7 +434,7 @@ billingRoutes.openapi(upsertPricingRoute, async (c): Promise<any> => {
     INSERT INTO pricing_catalog (
       provider, model, resource_type, operation, unit, unit_price_usd,
       currency, source, pricing_version, effective_from, effective_to,
-      is_active, metadata_json
+      is_active, metadata
     ) VALUES (
       ${provider}, ${model}, ${resourceType}, ${operation}, ${unit}, ${unitPriceUsd},
       ${currency}, ${source}, ${pricingVersion}, ${effectiveFrom}, ${effectiveTo},

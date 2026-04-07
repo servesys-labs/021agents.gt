@@ -273,11 +273,11 @@ export async function scoreSession(
     let toolCalls: unknown[] = [];
     let toolResults: unknown[] = [];
     try {
-      const raw = turn.tool_calls_json;
+      const raw = turn.tool_calls;
       toolCalls = typeof raw === "string" ? JSON.parse(raw) : (raw as unknown[]) ?? [];
     } catch { /* empty */ }
     try {
-      const raw = turn.tool_results_json;
+      const raw = turn.tool_results;
       toolResults = typeof raw === "string" ? JSON.parse(raw) : (raw as unknown[]) ?? [];
     } catch { /* empty */ }
 

@@ -97,13 +97,13 @@ releaseRoutes.openapi(promoteRoute, async (c): Promise<any> => {
   if (source.length === 0) {
     // Try getting from agents table
     const agents = await sql`
-      SELECT config_json, version FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id}
+      SELECT config, version FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id}
     `;
     if (agents.length === 0) return c.json({ error: `Agent '${agentName}' not found` }, 404);
-    configJson = agents[0].config_json || "{}";
+    configJson = agents[0].config || "{}";
     version = agents[0].version || "0.1.0";
   } else {
-    configJson = source[0].config_json || "{}";
+    configJson = source[0].config || "{}";
     version = source[0].version || "0.1.0";
   }
 
@@ -111,7 +111,7 @@ releaseRoutes.openapi(promoteRoute, async (c): Promise<any> => {
   try {
     parsedPromoteConfig = JSON.parse(String(configJson || "{}")) as Record<string, unknown>;
   } catch {
-    return c.json({ error: "Invalid config_json on promotion source" }, 400);
+    return c.json({ error: "Invalid config on promotion source" }, 400);
   }
   const promotePolicy = applyDeployPolicyToConfigJson(parsedPromoteConfig);
   if (!promotePolicy.ok) {
@@ -156,13 +156,13 @@ releaseRoutes.openapi(promoteRoute, async (c): Promise<any> => {
       // Check if org requires approval for overrides (not just audit)
       try {
         const policyRows = await sql`
-          SELECT config_json FROM agent_policies
+          SELECT config FROM agent_policies
           WHERE org_id = ${user.org_id} AND policy_type = 'thresholds'
             AND (agent_name = ${agentName} OR agent_name IS NULL)
           ORDER BY agent_name DESC NULLS LAST LIMIT 1
         `;
         if (policyRows.length > 0) {
-          const policy = parseJsonColumn(policyRows[0].config_json);
+          const policy = parseJsonColumn(policyRows[0].config);
           if (policy.override_requires_approval) {
             if (!approvedBy || approvedBy === user.user_id) {
               return c.json({
@@ -210,7 +210,7 @@ releaseRoutes.openapi(promoteRoute, async (c): Promise<any> => {
     UPDATE release_channels
     SET
       version = ${version},
-      config_json = ${configJson},
+      config = ${configJson},
       promoted_by = ${user.user_id},
       promoted_at = ${now}
     WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND channel = ${toChannel}
@@ -218,7 +218,7 @@ releaseRoutes.openapi(promoteRoute, async (c): Promise<any> => {
   const touched = Number((updated as { count?: number }).count ?? 0);
   if (touched === 0) {
     await sql`
-      INSERT INTO release_channels (org_id, agent_name, channel, version, config_json, promoted_by, promoted_at)
+      INSERT INTO release_channels (org_id, agent_name, channel, version, config, promoted_by, promoted_at)
       VALUES (${user.org_id}, ${agentName}, ${toChannel}, ${version}, ${configJson}, ${user.user_id}, ${now})
     `;
   }
@@ -523,11 +523,11 @@ releaseRoutes.openapi(rollbackCanaryRoute, async (c): Promise<any> => {
 
   // Revert production channel to primary_version config
   const primaryConfig = await sql`
-    SELECT config_json FROM release_channels
+    SELECT config FROM release_channels
     WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND channel = 'production'
     LIMIT 1
   `;
-  const configJson = primaryConfig.length > 0 ? primaryConfig[0].config_json : "{}";
+  const configJson = primaryConfig.length > 0 ? primaryConfig[0].config : "{}";
 
   const now = Date.now() / 1000;
   // Ensure production channel reflects the primary version
@@ -539,7 +539,7 @@ releaseRoutes.openapi(rollbackCanaryRoute, async (c): Promise<any> => {
   const touched = Number((updated as { count?: number }).count ?? 0);
   if (touched === 0) {
     await sql`
-      INSERT INTO release_channels (org_id, agent_name, channel, version, config_json, promoted_at)
+      INSERT INTO release_channels (org_id, agent_name, channel, version, config, promoted_at)
       VALUES (${user.org_id}, ${agentName}, 'production', ${primaryVersion}, ${configJson}, ${now})
     `;
   }
@@ -707,7 +707,7 @@ releaseRoutes.post("/:agent_name/auto-promote", requireScope("releases:write"), 
     const touched = Number((updated as { count?: number }).count ?? 0);
     if (touched === 0) {
       await sql`
-        INSERT INTO release_channels (org_id, agent_name, channel, version, config_json, promoted_by, promoted_at)
+        INSERT INTO release_channels (org_id, agent_name, channel, version, config, promoted_by, promoted_at)
         VALUES (${user.org_id}, ${agentName}, 'production', ${canaryVersion}, '{}', ${user.user_id}, ${now})
       `;
     }
@@ -807,7 +807,7 @@ releaseRoutes.post("/:agent_name/auto-rollback", requireScope("releases:write"),
   const touched = Number((updated as { count?: number }).count ?? 0);
   if (touched === 0) {
     await sql`
-      INSERT INTO release_channels (org_id, agent_name, channel, version, config_json, promoted_by, promoted_at)
+      INSERT INTO release_channels (org_id, agent_name, channel, version, config, promoted_by, promoted_at)
       VALUES (${user.org_id}, ${agentName}, 'production', ${primaryVersion}, '{}', ${user.user_id}, ${now})
     `;
   }

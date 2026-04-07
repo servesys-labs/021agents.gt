@@ -344,14 +344,14 @@ dashboardRoutes.get("/stats/tool-health", requireScope("observability:read"), as
         ROUND(COUNT(*) FILTER (WHERE error IS NOT NULL AND error != '')::numeric / NULLIF(COUNT(*), 0) * 100, 1) as error_rate_pct
       FROM (
         SELECT
-          jsonb_array_elements(COALESCE(tool_results_json::jsonb, '[]'::jsonb))->>'name' as tool_name,
-          (jsonb_array_elements(COALESCE(tool_results_json::jsonb, '[]'::jsonb))->>'latency_ms')::numeric as latency_ms,
-          jsonb_array_elements(COALESCE(tool_results_json::jsonb, '[]'::jsonb))->>'error' as error
+          jsonb_array_elements(COALESCE(tool_results::jsonb, '[]'::jsonb))->>'name' as tool_name,
+          (jsonb_array_elements(COALESCE(tool_results::jsonb, '[]'::jsonb))->>'latency_ms')::numeric as latency_ms,
+          jsonb_array_elements(COALESCE(tool_results::jsonb, '[]'::jsonb))->>'error' as error
         FROM turns t
         JOIN sessions s ON t.session_id = s.session_id
         WHERE s.org_id = ${orgId}
           AND t.created_at > NOW() - INTERVAL '7 days'
-          AND t.tool_results_json IS NOT NULL AND t.tool_results_json != '[]'
+          AND t.tool_results IS NOT NULL AND t.tool_results != '[]'
       ) tool_stats
       WHERE tool_name IS NOT NULL
       GROUP BY tool_name

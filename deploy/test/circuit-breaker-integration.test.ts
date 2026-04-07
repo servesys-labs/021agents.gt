@@ -32,9 +32,9 @@ describe("db circuit breaker integration", () => {
       latency_ms: 1,
       llm_content: "x",
       cost_total_usd: 0.001,
-      tool_calls_json: "[]",
-      tool_results_json: "[]",
-      errors_json: "[]",
+      tool_calls: "[]",
+      tool_results: "[]",
+      errors: "[]",
       execution_mode: "sequential",
     };
 

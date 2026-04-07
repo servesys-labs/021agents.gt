@@ -285,7 +285,7 @@ export async function processVapiWebhook(
     try {
       const payloadJson = JSON.stringify(payload);
       await sql`
-        INSERT INTO voice_call_events (call_id, event_type, payload_json, org_id, platform)
+        INSERT INTO voice_call_events (call_id, event_type, payload, org_id, platform)
         VALUES (${call_id}, ${event_type}, ${payloadJson}, ${orgId}, 'vapi')
       `;
     } catch {
@@ -373,7 +373,7 @@ export async function processTavusWebhook(
     try {
       const payloadJson = JSON.stringify(payload);
       await sql`
-        INSERT INTO voice_call_events (call_id, event_type, payload_json, org_id, platform)
+        INSERT INTO voice_call_events (call_id, event_type, payload, org_id, platform)
         VALUES (${conversation_id}, ${event_type}, ${payloadJson}, ${orgId}, 'tavus')
       `;
     } catch {

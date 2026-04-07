@@ -82,7 +82,7 @@ async function dbQueryTool(
         case "feedback.stats": {
           const sd = Math.min(Number(p.since_days) || 30, 365);
           const since = Date.now() / 1000 - sd * 86400;
-          return await tx`SELECT rating, COUNT(*) as count FROM user_feedback WHERE org_id = ${orgId} AND created_at >= ${since} GROUP BY rating`;
+          return await tx`SELECT rating, COUNT(*) as count FROM session_feedback WHERE org_id = ${orgId} AND created_at >= ${since} GROUP BY rating`;
         }
         default:
           throw new Error(`Unknown query_id: ${queryId}. Available: sessions.stats, issues.summary, eval.latest_run, billing.usage, billing.by_agent, feedback.stats`);

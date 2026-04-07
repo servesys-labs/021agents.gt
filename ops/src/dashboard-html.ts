@@ -483,7 +483,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
     <div class="issue-feed" id="issue-feed"></div>
     <div class="card table-wrap" style="margin-top: var(--space-4);">
       <div class="card__label">Regressed turns (24h)</div>
-      <p class="card__sub" style="margin-bottom:8px">Refusals, <span class="mono">errors_json</span>, or middleware warnings</p>
+      <p class="card__sub" style="margin-bottom:8px">Refusals, <span class="mono">errors</span>, or middleware warnings</p>
       <div id="regressed-turns" class="loading">Loading…</div>
     </div>
   </section>
@@ -659,7 +659,7 @@ function renderIssueFeed(tsum, qh, overview) {
   var z24 = Number(b.zero_token_24h || 0);
 
   var html = '';
-  html += issueRow(te > 0 ? 'error' : 'ok', 'Turns with errors (24h)', 'Non-empty <span class="mono">errors_json</span> on turn rows', te, 'turns');
+  html += issueRow(te > 0 ? 'error' : 'ok', 'Turns with errors (24h)', 'Non-empty <span class="mono">errors</span> on turn rows', te, 'turns');
   html += issueRow(tr > 0 ? 'warn' : 'ok', 'Model refusals (24h)', 'Safety / policy refusals · ' + (turns24 ? Math.round((tr / turns24) * 1000) / 10 : 0) + '% of turns', tr, 'turns');
   html += issueRow(tmw > 0 ? 'warn' : 'ok', 'Middleware warnings (24h)', 'Loop or guardrail signals on turns', tmw, 'middleware');
   html += issueRow(orphan > 0 ? 'error' : 'ok', 'Orphan sessions (1h)', 'Sessions with no turns yet', orphan, 'sessions');
@@ -814,7 +814,7 @@ function renderTurnIntelBundle(tsum, sess, stops, modes, tools) {
 
   document.getElementById('turn-kpis').innerHTML = [
     overviewCard('Refusals', String(tsum.refusals_24h || 0), refPct + '% of turns · model safety signal'),
-    overviewCard('Turns w/ errors', String(tsum.turns_with_errors || 0), errPct + '% · json <span class="mono">errors_json</span> non-empty'),
+    overviewCard('Turns w/ errors', String(tsum.turns_with_errors || 0), errPct + '% · json <span class="mono">errors</span> non-empty'),
     overviewCard('Avg LLM / wall', (tsum.avg_llm_ms != null ? tsum.avg_llm_ms : '—') + ' / ' + (tsum.avg_wall_ms != null ? tsum.avg_wall_ms : '—') + ' ms', 'Mean · see Performance for percentiles'),
     overviewCard('Cache tokens (24h)', fmtK(tsum.sum_cache_read) + ' read / ' + fmtK(tsum.sum_cache_write) + ' write', 'Avg ' + (tsum.avg_tool_calls_per_turn != null ? tsum.avg_tool_calls_per_turn : '—') + ' tool calls / turn · ' + (tsum.turns_with_tools || 0) + ' turns used tools'),
   ].join('');
@@ -910,7 +910,7 @@ async function loadTable(tab) {
     el.innerHTML = '<table><thead><tr><th>Time</th><th>Session</th><th>Middleware</th><th>Action</th><th class="right">Turn</th><th>Details</th></tr></thead><tbody>' +
       dm.map(function (r) {
         var det = '';
-        try { det = JSON.stringify(r.details_json).slice(0, 140); } catch (e2) { det = String(r.details_json || ''); }
+        try { det = JSON.stringify(r.details).slice(0, 140); } catch (e2) { det = String(r.details || ''); }
         return '<tr><td class="mono">' + ago(r.created_at) + '</td><td class="mono truncate">' + escapeHtml(r.session_id || '') + '</td><td class="mono">' + escapeHtml(r.middleware_name || '') + '</td><td>' + escapeHtml(r.action || '') + '</td><td class="right">' + (r.turn_number != null ? r.turn_number : '—') + '</td><td class="mono truncate" title="' + escapeHtml(det) + '">' + escapeHtml(det) + (det.length >= 140 ? '…' : '') + '</td></tr>';
       }).join('') + '</tbody></table>';
   } else if (tab === 'audit') {

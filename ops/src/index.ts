@@ -145,10 +145,10 @@ async function handleApi(path: string, env: Env): Promise<Response> {
           latency_ms, llm_latency_ms, stop_reason, execution_mode,
           refusal,
           cache_read_tokens, cache_write_tokens, gateway_log_id,
-          COALESCE(jsonb_array_length(COALESCE(tool_calls_json, '[]'::jsonb)), 0) AS tool_call_count,
-          COALESCE(jsonb_array_length(COALESCE(tool_results_json, '[]'::jsonb)), 0) AS tool_result_count,
-          COALESCE(jsonb_array_length(COALESCE(errors_json, '[]'::jsonb)), 0) AS error_count,
-          COALESCE(jsonb_array_length(COALESCE(middleware_warnings_json, '[]'::jsonb)), 0) AS mw_warn_count,
+          COALESCE(jsonb_array_length(COALESCE(tool_calls, '[]'::jsonb)), 0) AS tool_call_count,
+          COALESCE(jsonb_array_length(COALESCE(tool_results, '[]'::jsonb)), 0) AS tool_result_count,
+          COALESCE(jsonb_array_length(COALESCE(errors, '[]'::jsonb)), 0) AS error_count,
+          COALESCE(jsonb_array_length(COALESCE(middleware_warnings, '[]'::jsonb)), 0) AS mw_warn_count,
           created_at
         FROM turns
         ORDER BY created_at DESC
@@ -163,14 +163,14 @@ async function handleApi(path: string, env: Env): Promise<Response> {
         SELECT
           COUNT(*)::int AS turns_24h,
           COUNT(*) FILTER (WHERE refusal = true)::int AS refusals_24h,
-          COUNT(*) FILTER (WHERE COALESCE(jsonb_array_length(COALESCE(errors_json, '[]'::jsonb)), 0) > 0)::int AS turns_with_errors,
-          COUNT(*) FILTER (WHERE COALESCE(jsonb_array_length(COALESCE(tool_calls_json, '[]'::jsonb)), 0) > 0)::int AS turns_with_tools,
+          COUNT(*) FILTER (WHERE COALESCE(jsonb_array_length(COALESCE(errors, '[]'::jsonb)), 0) > 0)::int AS turns_with_errors,
+          COUNT(*) FILTER (WHERE COALESCE(jsonb_array_length(COALESCE(tool_calls, '[]'::jsonb)), 0) > 0)::int AS turns_with_tools,
           ROUND(AVG(NULLIF(llm_latency_ms, 0))::numeric, 1) AS avg_llm_ms,
           ROUND(AVG(NULLIF(latency_ms, 0))::numeric, 1) AS avg_wall_ms,
           COALESCE(SUM(cache_read_tokens), 0)::bigint AS sum_cache_read,
           COALESCE(SUM(cache_write_tokens), 0)::bigint AS sum_cache_write,
-          ROUND(AVG(jsonb_array_length(COALESCE(tool_calls_json, '[]'::jsonb)))::numeric, 2) AS avg_tool_calls_per_turn,
-          COUNT(*) FILTER (WHERE COALESCE(jsonb_array_length(COALESCE(middleware_warnings_json, '[]'::jsonb)), 0) > 0)::int AS turns_with_mw_warnings
+          ROUND(AVG(jsonb_array_length(COALESCE(tool_calls, '[]'::jsonb)))::numeric, 2) AS avg_tool_calls_per_turn,
+          COUNT(*) FILTER (WHERE COALESCE(jsonb_array_length(COALESCE(middleware_warnings, '[]'::jsonb)), 0) > 0)::int AS turns_with_mw_warnings
         FROM turns
         WHERE created_at > now() - interval '24 hours'
       `;
@@ -219,7 +219,7 @@ async function handleApi(path: string, env: Env): Promise<Response> {
         const rows = await sql`
           SELECT elem->>'name' AS tool_name, COUNT(*)::int AS call_count
           FROM turns,
-            LATERAL jsonb_array_elements(COALESCE(tool_calls_json, '[]'::jsonb)) AS elem
+            LATERAL jsonb_array_elements(COALESCE(tool_calls, '[]'::jsonb)) AS elem
           WHERE created_at > now() - interval '24 hours'
             AND elem ? 'name'
             AND length(trim(elem->>'name')) > 0
@@ -237,7 +237,7 @@ async function handleApi(path: string, env: Env): Promise<Response> {
     if (path === "/api/middleware/recent") {
       const rows = await sql`
         SELECT session_id, middleware_name, action, turn_number, created_at,
-               details_json
+               details
         FROM middleware_events
         ORDER BY created_at DESC
         LIMIT 50
@@ -312,14 +312,14 @@ async function handleApi(path: string, env: Env): Promise<Response> {
     if (path === "/api/turns/regressed-recent") {
       const rows = await sql`
         SELECT session_id, turn_number, model_used, latency_ms, llm_latency_ms,
-               COALESCE(jsonb_array_length(COALESCE(errors_json, '[]'::jsonb)), 0) AS error_count,
+               COALESCE(jsonb_array_length(COALESCE(errors, '[]'::jsonb)), 0) AS error_count,
                refusal, stop_reason, execution_mode, created_at
         FROM turns
         WHERE created_at > now() - interval '24 hours'
           AND (
             refusal = true
-            OR COALESCE(jsonb_array_length(COALESCE(errors_json, '[]'::jsonb)), 0) > 0
-            OR COALESCE(jsonb_array_length(COALESCE(middleware_warnings_json, '[]'::jsonb)), 0) > 0
+            OR COALESCE(jsonb_array_length(COALESCE(errors, '[]'::jsonb)), 0) > 0
+            OR COALESCE(jsonb_array_length(COALESCE(middleware_warnings, '[]'::jsonb)), 0) > 0
           )
         ORDER BY created_at DESC
         LIMIT 40

@@ -114,49 +114,49 @@ securityRoutes.openapi(listFindingsRoute, async (c): Promise<any> => {
   let rows;
   if (scanId && agentName && severity) {
     rows = await sql`
-      SELECT * FROM security_findings
+      SELECT * FROM security_scan_findings
       WHERE org_id = ${user.org_id} AND scan_id = ${scanId} AND agent_name = ${agentName} AND severity = ${severity}
       ORDER BY aivss_score DESC LIMIT ${limit}
     `;
   } else if (scanId && agentName) {
     rows = await sql`
-      SELECT * FROM security_findings
+      SELECT * FROM security_scan_findings
       WHERE org_id = ${user.org_id} AND scan_id = ${scanId} AND agent_name = ${agentName}
       ORDER BY aivss_score DESC LIMIT ${limit}
     `;
   } else if (scanId && severity) {
     rows = await sql`
-      SELECT * FROM security_findings
+      SELECT * FROM security_scan_findings
       WHERE org_id = ${user.org_id} AND scan_id = ${scanId} AND severity = ${severity}
       ORDER BY aivss_score DESC LIMIT ${limit}
     `;
   } else if (agentName && severity) {
     rows = await sql`
-      SELECT * FROM security_findings
+      SELECT * FROM security_scan_findings
       WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND severity = ${severity}
       ORDER BY aivss_score DESC LIMIT ${limit}
     `;
   } else if (scanId) {
     rows = await sql`
-      SELECT * FROM security_findings
+      SELECT * FROM security_scan_findings
       WHERE org_id = ${user.org_id} AND scan_id = ${scanId}
       ORDER BY aivss_score DESC LIMIT ${limit}
     `;
   } else if (agentName) {
     rows = await sql`
-      SELECT * FROM security_findings
+      SELECT * FROM security_scan_findings
       WHERE org_id = ${user.org_id} AND agent_name = ${agentName}
       ORDER BY aivss_score DESC LIMIT ${limit}
     `;
   } else if (severity) {
     rows = await sql`
-      SELECT * FROM security_findings
+      SELECT * FROM security_scan_findings
       WHERE org_id = ${user.org_id} AND severity = ${severity}
       ORDER BY aivss_score DESC LIMIT ${limit}
     `;
   } else {
     rows = await sql`
-      SELECT * FROM security_findings
+      SELECT * FROM security_scan_findings
       WHERE org_id = ${user.org_id}
       ORDER BY aivss_score DESC LIMIT ${limit}
     `;
@@ -246,9 +246,9 @@ securityRoutes.openapi(scanAgentRoute, async (c): Promise<any> => {
   const { scan_type: scanType } = c.req.valid("query");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  // Load agent config from DB (config_json is canonical; same column as agents router)
+  // Load agent config from DB (config is canonical; same column as agents router)
   const agentRows = await sql`
-    SELECT config_json FROM agents
+    SELECT config FROM agents
     WHERE name = ${agentName} AND org_id = ${user.org_id}
     LIMIT 1
   `;
@@ -257,7 +257,7 @@ securityRoutes.openapi(scanAgentRoute, async (c): Promise<any> => {
   }
 
   const agentConfig = parseAgentConfigJson(
-    (agentRows[0] as Record<string, unknown>).config_json,
+    (agentRows[0] as Record<string, unknown>).config,
   );
 
   // Generate scan ID
@@ -288,7 +288,7 @@ securityRoutes.openapi(scanAgentRoute, async (c): Promise<any> => {
     // Persist findings
     for (const finding of result.findings) {
       await sql`
-        INSERT INTO security_findings (
+        INSERT INTO security_scan_findings (
           scan_id, org_id, agent_name, probe_id, probe_name,
           category, layer, severity, title, description, evidence,
           aivss_vector, aivss_score
@@ -393,7 +393,7 @@ securityRoutes.openapi(getScanReportRoute, async (c): Promise<any> => {
 
   const scan = scanRows[0] as Record<string, unknown>;
   const findingRows = await sql`
-    SELECT * FROM security_findings WHERE scan_id = ${scanId} AND org_id = ${user.org_id}
+    SELECT * FROM security_scan_findings WHERE scan_id = ${scanId} AND org_id = ${user.org_id}
     ORDER BY aivss_score DESC
   `;
 

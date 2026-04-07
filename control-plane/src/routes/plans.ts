@@ -205,9 +205,9 @@ plansRoutes.openapi(createPlanRoute, async (c): Promise<any> => {
   let existing: Record<string, unknown> = {};
   try {
     const rows = await sql`
-      SELECT config_json FROM project_configs WHERE org_id = ${user.org_id} LIMIT 1
+      SELECT config FROM project_configs WHERE org_id = ${user.org_id} LIMIT 1
     `;
-    if (rows.length > 0) existing = parseJsonColumn(rows[0].config_json);
+    if (rows.length > 0) existing = parseJsonColumn(rows[0].config);
   } catch {
     return c.json({ error: "Failed to load project config" }, 500);
   }
@@ -219,9 +219,9 @@ plansRoutes.openapi(createPlanRoute, async (c): Promise<any> => {
 
   try {
     await sql`
-      INSERT INTO project_configs (org_id, config_json, updated_at)
+      INSERT INTO project_configs (org_id, config, updated_at)
       VALUES (${user.org_id}, ${configJson}, ${now})
-      ON CONFLICT (org_id) DO UPDATE SET config_json = EXCLUDED.config_json, updated_at = EXCLUDED.updated_at
+      ON CONFLICT (org_id) DO UPDATE SET config = EXCLUDED.config, updated_at = EXCLUDED.updated_at
     `;
   } catch {
     return c.json({ error: "Failed to save project config" }, 500);

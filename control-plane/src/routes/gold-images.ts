@@ -131,7 +131,7 @@ goldImageRoutes.openapi(createGoldImageRoute, async (c): Promise<any> => {
 
   await sql`
     INSERT INTO gold_images (
-      image_id, name, config_json, config_hash, org_id,
+      image_id, name, config, config_hash, org_id,
       description, version, category, created_by, created_at
     ) VALUES (
       ${imageId}, ${req.name}, ${configJson}, ${hash}, ${user.org_id},
@@ -243,7 +243,7 @@ goldImageRoutes.openapi(fromAgentRoute, async (c): Promise<any> => {
 
   await sql`
     INSERT INTO gold_images (
-      image_id, name, config_json, config_hash, org_id,
+      image_id, name, config, config_hash, org_id,
       description, version, category, created_by, created_at
     ) VALUES (
       ${imageId}, ${goldName}, ${configJson}, ${hash}, ${user.org_id},
@@ -391,9 +391,9 @@ goldImageRoutes.openapi(complianceCheckRoute, async (c): Promise<any> => {
     const gold = goldRows[0] as Record<string, unknown>;
     let goldConfig: Record<string, unknown>;
     try {
-      goldConfig = typeof gold.config_json === "string"
-        ? JSON.parse(gold.config_json)
-        : (gold.config_json ?? {}) as Record<string, unknown>;
+      goldConfig = typeof gold.config === "string"
+        ? JSON.parse(gold.config)
+        : (gold.config ?? {}) as Record<string, unknown>;
     } catch {
       goldConfig = {};
     }
@@ -464,9 +464,9 @@ goldImageRoutes.openapi(complianceCheckRoute, async (c): Promise<any> => {
   for (const gold of relevant) {
     let goldConfig: Record<string, unknown>;
     try {
-      goldConfig = typeof gold.config_json === "string"
-        ? JSON.parse(gold.config_json)
-        : (gold.config_json ?? {}) as Record<string, unknown>;
+      goldConfig = typeof gold.config === "string"
+        ? JSON.parse(gold.config)
+        : (gold.config ?? {}) as Record<string, unknown>;
     } catch {
       goldConfig = {};
     }
@@ -570,9 +570,9 @@ goldImageRoutes.openapi(driftRoute, async (c): Promise<any> => {
   const gold = goldRows[0] as Record<string, unknown>;
   let goldConfig: Record<string, unknown>;
   try {
-    goldConfig = typeof gold.config_json === "string"
-      ? JSON.parse(gold.config_json)
-      : (gold.config_json ?? {}) as Record<string, unknown>;
+    goldConfig = typeof gold.config === "string"
+      ? JSON.parse(gold.config)
+      : (gold.config ?? {}) as Record<string, unknown>;
   } catch {
     goldConfig = {};
   }
@@ -615,10 +615,10 @@ goldImageRoutes.openapi(getGoldImageRoute, async (c): Promise<any> => {
   }
 
   const image = rows[0] as Record<string, unknown>;
-  // Parse config_json into config field
-  if (typeof image.config_json === "string") {
+  // Parse config into config field
+  if (typeof image.config === "string") {
     try {
-      image.config = JSON.parse(image.config_json);
+      image.config = JSON.parse(image.config);
     } catch {
       image.config = {};
     }
@@ -668,10 +668,10 @@ goldImageRoutes.openapi(updateGoldImageRoute, async (c): Promise<any> => {
     const configJson = JSON.stringify(req.config, Object.keys(req.config).sort());
     const hash = await configHashAsync(req.config);
     await sql`
-      UPDATE gold_images SET config_json = ${configJson}, config_hash = ${hash}
+      UPDATE gold_images SET config = ${configJson}, config_hash = ${hash}
       WHERE image_id = ${imageId}
     `;
-    changedFields.push("config_json", "config_hash");
+    changedFields.push("config", "config_hash");
   }
   if (req.name !== undefined) {
     await sql`UPDATE gold_images SET name = ${req.name} WHERE image_id = ${imageId}`;
@@ -707,8 +707,8 @@ goldImageRoutes.openapi(updateGoldImageRoute, async (c): Promise<any> => {
     SELECT * FROM gold_images WHERE image_id = ${imageId} LIMIT 1
   `;
   const updated = updatedRows[0] as Record<string, unknown>;
-  if (typeof updated.config_json === "string") {
-    try { updated.config = JSON.parse(updated.config_json); } catch { updated.config = {}; }
+  if (typeof updated.config === "string") {
+    try { updated.config = JSON.parse(updated.config); } catch { updated.config = {}; }
   }
   return c.json(updated);
 });

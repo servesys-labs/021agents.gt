@@ -49,7 +49,7 @@ describe("RLS Policies", () => {
     "security_findings",
     "billing_records",
     "billing_events",
-    "user_feedback",
+    "session_feedback",
     "episodes",
     "facts",
     "memory_facts",

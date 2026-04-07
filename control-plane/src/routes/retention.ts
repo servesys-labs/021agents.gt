@@ -165,8 +165,8 @@ retentionRoutes.openapi(applyRetentionRoute, async (c): Promise<any> => {
     },
     episodes: async (sql, cutoff, orgId) => {
       const r = orgId
-        ? await sql`DELETE FROM episodic_memories WHERE created_at < ${cutoff} AND org_id = ${orgId}`
-        : await sql`DELETE FROM episodic_memories WHERE created_at < ${cutoff}`;
+        ? await sql`DELETE FROM episodes WHERE created_at < ${cutoff} AND org_id = ${orgId}`
+        : await sql`DELETE FROM episodes WHERE created_at < ${cutoff}`;
       return r.count ?? 0;
     },
     billing_records: async (sql, cutoff, orgId) => {
@@ -180,12 +180,12 @@ retentionRoutes.openapi(applyRetentionRoute, async (c): Promise<any> => {
       if (orgId) {
         try {
           const settingsRows = await sql`
-            SELECT settings_json FROM org_settings WHERE org_id = ${orgId} LIMIT 1
+            SELECT settings FROM org_settings WHERE org_id = ${orgId} LIMIT 1
           `;
           if (settingsRows.length > 0) {
-            const settings = typeof settingsRows[0].settings_json === "string"
-              ? JSON.parse(settingsRows[0].settings_json)
-              : settingsRows[0].settings_json ?? {};
+            const settings = typeof settingsRows[0].settings === "string"
+              ? JSON.parse(settingsRows[0].settings)
+              : settingsRows[0].settings ?? {};
             if (settings.immutable_audit === true) {
               // Archive rows to R2 before deleting
               const archiveRows = await sql`
@@ -199,7 +199,7 @@ retentionRoutes.openapi(applyRetentionRoute, async (c): Promise<any> => {
                 try {
                   // R2 bucket is not directly available here; store archive data in audit_log_archive table
                   await sql`
-                    INSERT INTO audit_log_archive (archive_key, org_id, row_count, data_json, created_at)
+                    INSERT INTO audit_log_archive (archive_key, org_id, row_count, data, created_at)
                     VALUES (${archiveKey}, ${orgId}, ${archiveRows.length}, ${JSON.stringify(archiveRows)}, ${new Date().toISOString()})
                   `;
                 } catch {

@@ -40,10 +40,10 @@ configRoutes.openapi(getConfigRoute, async (c): Promise<any> => {
 
   try {
     const rows = await sql`
-      SELECT config_json FROM project_configs WHERE org_id = ${user.org_id} LIMIT 1
+      SELECT config FROM project_configs WHERE org_id = ${user.org_id} LIMIT 1
     `;
     if (rows.length === 0) return c.json({ config: {}, exists: false });
-    const config = parseJsonColumn(rows[0].config_json);
+    const config = parseJsonColumn(rows[0].config);
     return c.json({ config, exists: true });
   } catch {
     return c.json({ config: {}, exists: false });
@@ -88,9 +88,9 @@ configRoutes.openapi(updateConfigRoute, async (c): Promise<any> => {
   let existing: any = {};
   try {
     const rows = await sql`
-      SELECT config_json FROM project_configs WHERE org_id = ${user.org_id} LIMIT 1
+      SELECT config FROM project_configs WHERE org_id = ${user.org_id} LIMIT 1
     `;
-    if (rows.length > 0) existing = parseJsonColumn(rows[0].config_json);
+    if (rows.length > 0) existing = parseJsonColumn(rows[0].config);
   } catch {}
 
   // Merge updates
@@ -98,9 +98,9 @@ configRoutes.openapi(updateConfigRoute, async (c): Promise<any> => {
   const configJson = JSON.stringify(merged);
 
   await sql`
-    INSERT INTO project_configs (org_id, config_json, updated_at)
+    INSERT INTO project_configs (org_id, config, updated_at)
     VALUES (${user.org_id}, ${configJson}, ${now})
-    ON CONFLICT (org_id) DO UPDATE SET config_json = EXCLUDED.config_json, updated_at = EXCLUDED.updated_at
+    ON CONFLICT (org_id) DO UPDATE SET config = EXCLUDED.config, updated_at = EXCLUDED.updated_at
   `;
 
   return c.json({ updated: true });
@@ -127,10 +127,10 @@ configRoutes.openapi(listA2aRemotesRoute, async (c): Promise<any> => {
 
   try {
     const rows = await sql`
-      SELECT config_json FROM project_configs WHERE org_id = ${user.org_id} LIMIT 1
+      SELECT config FROM project_configs WHERE org_id = ${user.org_id} LIMIT 1
     `;
     if (rows.length === 0) return c.json({ remotes: [] });
-    const config = parseJsonColumn(rows[0].config_json);
+    const config = parseJsonColumn(rows[0].config);
     return c.json({ remotes: config.a2a_remotes || [] });
   } catch {
     return c.json({ remotes: [] });

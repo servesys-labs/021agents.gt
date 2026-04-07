@@ -110,7 +110,7 @@ mcpControlRoutes.openapi(createServerRoute, async (c): Promise<any> => {
   const now = new Date().toISOString();
 
   await sql`
-    INSERT INTO mcp_servers (server_id, org_id, name, url, transport, auth_token, metadata_json, status, created_at)
+    INSERT INTO mcp_servers (server_id, org_id, name, url, transport, auth_token, metadata, status, created_at)
     VALUES (${serverId}, ${user.org_id}, ${name}, ${url}, ${transport}, ${authToken}, ${JSON.stringify(metadata)}, 'registered', ${now})
   `;
 

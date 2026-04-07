@@ -29,21 +29,13 @@ export async function getDb(hyperdrive: Hyperdrive): Promise<Sql> {
 }
 
 /**
- * Org-scoped DB connection with RLS context.
+ * Org-scoped DB connection.
+ * RLS removed — isolation is via application-level WHERE org_id = ... clauses.
  */
 export async function getDbForOrg(
   hyperdrive: Hyperdrive,
-  orgId: string,
+  _orgId: string,
   _opts?: { userId?: string; role?: string },
 ): Promise<Sql> {
-  const sql = await getDb(hyperdrive);
-
-  // Attempt to set RLS context — non-fatal if app schema doesn't exist yet
-  try {
-    await sql`SELECT set_config('app.current_org_id', ${orgId}, false)`;
-  } catch {
-    // RLS not set up yet — queries still work via application-level org_id filtering
-  }
-
-  return sql;
+  return getDb(hyperdrive);
 }

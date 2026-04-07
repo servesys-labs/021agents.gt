@@ -26,7 +26,7 @@ export function paginated<T>(data: T[], total: number, offset: number, limit: nu
   return { data, total, offset, limit };
 }
 
-/** Parse agents.config_json (or legacy stringified blobs) — never throws. */
+/** Parse agents.config (or legacy stringified blobs) — never throws. */
 export function parseAgentConfigJson(raw: unknown): Record<string, unknown> {
   if (raw === null || raw === undefined) return {};
   if (typeof raw === "string") {

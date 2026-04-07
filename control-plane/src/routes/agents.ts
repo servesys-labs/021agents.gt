@@ -163,10 +163,10 @@ async function snapshotVersion(
 ): Promise<void> {
   try {
     await sql`
-      INSERT INTO agent_versions (agent_name, version, config_json, created_by, created_at)
+      INSERT INTO agent_versions (agent_name, version, config, created_by, created_at)
       VALUES (${agentName}, ${version}, ${JSON.stringify(configJson)}, ${createdBy}, now())
       ON CONFLICT (agent_name, version) DO UPDATE
-      SET config_json = ${JSON.stringify(configJson)}, created_by = ${createdBy}
+      SET config = ${JSON.stringify(configJson)}, created_by = ${createdBy}
     `;
   } catch {
     // Non-critical
@@ -174,7 +174,7 @@ async function snapshotVersion(
 }
 
 function agentResponse(row: Record<string, unknown>): Record<string, unknown> {
-  const config = parseConfig(row.config_json);
+  const config = parseConfig(row.config);
   return {
     agent_id: row.agent_id ?? "",
     name: row.name ?? config.name ?? "",
@@ -255,7 +255,7 @@ agentRoutes.openapi(listAgentsRoute, async (c): Promise<any> => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
-    SELECT agent_id, name, description, config_json, is_active, created_at, updated_at
+    SELECT agent_id, name, description, config, is_active, created_at, updated_at
     FROM agents
     WHERE org_id = ${user.org_id} AND is_active = true
     ORDER BY created_at DESC
@@ -287,7 +287,7 @@ agentRoutes.openapi(getAgentRoute, async (c): Promise<any> => {
   }
 
   const rows = await sql`
-    SELECT agent_id, name, description, config_json, is_active, created_at, updated_at
+    SELECT agent_id, name, description, config, is_active, created_at, updated_at
     FROM agents
     WHERE name = ${agentName} AND org_id = ${user.org_id}
     LIMIT 1
@@ -341,11 +341,11 @@ agentRoutes.openapi(createAgentRoute, async (c): Promise<any> => {
         governance: req.governance ?? { budget_limit_usd: req.budget_limit_usd },
       };
       await sql`
-        UPDATE agents SET is_active = true, config_json = ${JSON.stringify(configJson)}::jsonb,
+        UPDATE agents SET is_active = true, config = ${JSON.stringify(configJson)}::jsonb,
           description = ${req.description}, updated_at = now()
         WHERE LOWER(name) = LOWER(${req.name}) AND org_id = ${user.org_id}
       `;
-      return c.json(agentResponse({ ...existing[0], is_active: true, config_json: configJson } as any), 201);
+      return c.json(agentResponse({ ...existing[0], is_active: true, config: configJson } as any), 201);
     }
 
     // Agent creation is unlimited — agents are just config rows with zero cost.
@@ -401,7 +401,7 @@ agentRoutes.openapi(createAgentRoute, async (c): Promise<any> => {
 
     await sql.begin(async (tx: any) => {
       await tx`
-        INSERT INTO agents (agent_id, name, org_id, project_id, config_json, description, is_active, created_at, updated_at)
+        INSERT INTO agents (agent_id, name, org_id, project_id, config, description, is_active, created_at, updated_at)
         VALUES (
           ${newAgentId},
           ${req.name},
@@ -474,12 +474,12 @@ agentRoutes.openapi(updateAgentRoute, async (c): Promise<any> => {
 
     // Fetch existing
     const rows = await sql`
-      SELECT config_json FROM agents
+      SELECT config FROM agents
       WHERE name = ${name} AND org_id = ${user.org_id}
       LIMIT 1
     `;
 
-    const existingConfig = parseConfig((rows[0] as Record<string, unknown>).config_json);
+    const existingConfig = parseConfig((rows[0] as Record<string, unknown>).config);
 
     // Merge updates
     if (req.description) existingConfig.description = req.description;
@@ -533,7 +533,7 @@ agentRoutes.openapi(updateAgentRoute, async (c): Promise<any> => {
 
     await sql`
       UPDATE agents
-      SET config_json = ${JSON.stringify(existingConfig)},
+      SET config = ${JSON.stringify(existingConfig)},
           description = ${req.description || (existingConfig.description as string) || ""},
           updated_at = now()
       WHERE name = ${name} AND org_id = ${user.org_id}
@@ -545,7 +545,7 @@ agentRoutes.openapi(updateAgentRoute, async (c): Promise<any> => {
     // Log policy-relevant field changes for compliance
     const policyFields = ["deploy_policy", "tools", "model", "governance", "system_prompt"];
     for (const field of policyFields) {
-      const oldVal = rows[0] ? JSON.stringify((parseConfig((rows[0] as any).config_json) as any)[field]) : null;
+      const oldVal = rows[0] ? JSON.stringify((parseConfig((rows[0] as any).config) as any)[field]) : null;
       const newVal = JSON.stringify((existingConfig as any)[field]);
       if (oldVal !== newVal) {
         sql`
@@ -599,8 +599,8 @@ agentRoutes.openapi(deleteAgentRoute, async (c): Promise<any> => {
 
     // Block deletion of personal agents (my-assistant) — they're permanent per account
     try {
-      const configRows = await sql`SELECT config_json FROM agents WHERE name = ${name} AND org_id = ${user.org_id} LIMIT 1`;
-      const cfg = parseConfig(configRows[0]?.config_json);
+      const configRows = await sql`SELECT config FROM agents WHERE name = ${name} AND org_id = ${user.org_id} LIMIT 1`;
+      const cfg = parseConfig(configRows[0]?.config);
       if (cfg.is_personal) {
         return c.json({ error: "Cannot delete the personal assistant. This agent is permanent for your account." }, 403);
       }
@@ -692,7 +692,7 @@ agentRoutes.openapi(listVersionsRoute, async (c): Promise<any> => {
     const agentName = await resolveAgentName(sql, identifier, user.org_id) || identifier;
 
     const rows = await sql`
-      SELECT id, agent_name, version, config_json, created_by, created_at
+      SELECT id, agent_name, version, config, created_by, created_at
       FROM agent_versions
       WHERE agent_name = ${agentName}
       ORDER BY created_at DESC
@@ -733,12 +733,12 @@ agentRoutes.openapi(listToolsRoute, async (c): Promise<any> => {
   if (!name) return c.json({ error: `Agent '${identifier}' not found` }, 404);
 
   const rows = await sql`
-    SELECT config_json FROM agents
+    SELECT config FROM agents
     WHERE name = ${name} AND org_id = ${user.org_id}
     LIMIT 1
   `;
 
-  const config = parseConfig((rows[0] as Record<string, unknown>).config_json);
+  const config = parseConfig((rows[0] as Record<string, unknown>).config);
   return c.json({ tools: Array.isArray(config.tools) ? config.tools : [] });
 });
 
@@ -763,12 +763,12 @@ agentRoutes.openapi(getConfigRoute, async (c): Promise<any> => {
   if (!name) return c.json({ error: `Agent '${identifier}' not found` }, 404);
 
   const rows = await sql`
-    SELECT config_json FROM agents
+    SELECT config FROM agents
     WHERE name = ${name} AND org_id = ${user.org_id}
     LIMIT 1
   `;
 
-  return c.json(parseConfig((rows[0] as Record<string, unknown>).config_json) as any);
+  return c.json(parseConfig((rows[0] as Record<string, unknown>).config) as any);
 });
 
 // POST /agents/:name/clone — clone agent with new name
@@ -800,7 +800,7 @@ agentRoutes.openapi(cloneAgentRoute, async (c): Promise<any> => {
 
   // Fetch source agent
   const rows = await sql`
-    SELECT name, description, config_json FROM agents
+    SELECT name, description, config FROM agents
     WHERE name = ${name} AND org_id = ${user.org_id}
     LIMIT 1
   `;
@@ -813,7 +813,7 @@ agentRoutes.openapi(cloneAgentRoute, async (c): Promise<any> => {
     return c.json({ error: `Agent '${existCheck[0].name}' already exists (names are case-insensitive)` }, 409);
   }
 
-  const config = parseConfig((rows[0] as Record<string, unknown>).config_json);
+  const config = parseConfig((rows[0] as Record<string, unknown>).config);
   config.name = newNameValue;
   config.version = "0.1.0";
 
@@ -830,7 +830,7 @@ agentRoutes.openapi(cloneAgentRoute, async (c): Promise<any> => {
   }
 
   await sql`
-    INSERT INTO agents (agent_id, name, org_id, project_id, config_json, description, is_active, created_at, updated_at)
+    INSERT INTO agents (agent_id, name, org_id, project_id, config, description, is_active, created_at, updated_at)
     VALUES (
       ${crypto.randomUUID().replace(/-/g, "").slice(0, 16)},
       ${newNameValue},
@@ -891,7 +891,7 @@ agentRoutes.openapi(importAgentRoute, async (c): Promise<any> => {
     }
 
     await sql`
-      INSERT INTO agents (agent_id, name, org_id, project_id, config_json, description, is_active, created_at, updated_at)
+      INSERT INTO agents (agent_id, name, org_id, project_id, config, description, is_active, created_at, updated_at)
       VALUES (
         ${crypto.randomUUID().replace(/-/g, "").slice(0, 16)},
         ${agentName},
@@ -904,7 +904,7 @@ agentRoutes.openapi(importAgentRoute, async (c): Promise<any> => {
         now()
       )
       ON CONFLICT (name, org_id) DO UPDATE
-      SET config_json = ${JSON.stringify(importCfg)}, updated_at = now()
+      SET config = ${JSON.stringify(importCfg)}, updated_at = now()
     `;
 
     return c.json({
@@ -938,7 +938,7 @@ agentRoutes.openapi(exportAgentRoute, async (c): Promise<any> => {
   if (!name) return c.json({ error: `Agent '${identifier}' not found` }, 404);
 
   const rows = await sql`
-    SELECT config_json FROM agents
+    SELECT config FROM agents
     WHERE name = ${name} AND org_id = ${user.org_id}
     LIMIT 1
   `;
@@ -946,7 +946,7 @@ agentRoutes.openapi(exportAgentRoute, async (c): Promise<any> => {
     return c.json({ error: `Agent '${name}' not found` }, 404);
   }
 
-  return c.json({ agent: parseConfig((rows[0] as Record<string, unknown>).config_json) } as any);
+  return c.json({ agent: parseConfig((rows[0] as Record<string, unknown>).config) } as any);
 });
 
 /* ── persistAgentPackage ─────────────────────────────────────────── */
@@ -985,10 +985,10 @@ async function persistAgentPackage(
       const subName = String((sa as Record<string, unknown>).name || `${agentName}-sub`);
       const subId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
       await sql`
-        INSERT INTO agents (agent_id, name, org_id, project_id, config_json, description, is_active, created_at, updated_at)
+        INSERT INTO agents (agent_id, name, org_id, project_id, config, description, is_active, created_at, updated_at)
         VALUES (${subId}, ${subName}, ${orgId}, ${projectId}, ${JSON.stringify(subConfig)},
                 ${String((sa as Record<string, unknown>).description || "")}, 1, now(), now())
-        ON CONFLICT (name, org_id) DO UPDATE SET config_json = ${JSON.stringify(subConfig)}, updated_at = now()
+        ON CONFLICT (name, org_id) DO UPDATE SET config = ${JSON.stringify(subConfig)}, updated_at = now()
       `;
     } catch (e) {
       errors.push(`sub-agent ${(sa as Record<string, unknown>).name}: ${(e as Error).message}`);
@@ -1037,7 +1037,7 @@ async function persistAgentPackage(
       const grId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
       const policyJson = JSON.stringify({ type: g.type, rule: g.rule, action: g.action });
       await sql`
-        INSERT INTO guardrail_policies (id, org_id, name, agent_name, policy_json, created_at, updated_at)
+        INSERT INTO guardrail_policies (id, org_id, name, agent_name, policy, created_at, updated_at)
         VALUES (${grId}, ${orgId}, ${String(g.name)}, ${agentName}, ${policyJson}, ${now}, ${now})
         ON CONFLICT DO NOTHING
       `;
@@ -1052,7 +1052,7 @@ async function persistAgentPackage(
     try {
       const channel = String(release.initial_channel || "staging");
       await sql`
-        INSERT INTO release_channels (org_id, agent_name, channel, version, config_json, promoted_by, promoted_at)
+        INSERT INTO release_channels (org_id, agent_name, channel, version, config, promoted_by, promoted_at)
         VALUES (${orgId}, ${agentName}, ${channel}, ${"0.1.0"}, ${JSON.stringify(release)}, ${userId}, ${now})
         ON CONFLICT DO NOTHING
       `;
@@ -1090,10 +1090,10 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
     let orgProfile: Record<string, unknown> | undefined;
     try {
       const settingsRows = await sql`
-        SELECT settings_json FROM org_settings WHERE org_id = ${user.org_id} LIMIT 1
+        SELECT settings FROM org_settings WHERE org_id = ${user.org_id} LIMIT 1
       `;
       if (settingsRows.length > 0) {
-        orgProfile = parseJsonColumn(settingsRows[0].settings_json);
+        orgProfile = parseJsonColumn(settingsRows[0].settings);
       }
     } catch { /* ignore — preferences are optional */ }
 
@@ -1229,7 +1229,7 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
       holdOverrideApplied = true;
       // Audit the override (fire-and-forget)
       sql`
-        INSERT INTO config_audit (agent_name, action, details_json, created_at)
+        INSERT INTO config_audit (agent_name, action, details, created_at)
         VALUES (${String(config.name)}, 'hold_override', ${JSON.stringify({
           user: user.user_id,
           org: user.org_id,
@@ -1260,7 +1260,7 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
 
     await sql.begin(async (tx: any) => {
       await tx`
-        INSERT INTO agents (agent_id, name, org_id, project_id, config_json, description, is_active, created_at, updated_at)
+        INSERT INTO agents (agent_id, name, org_id, project_id, config, description, is_active, created_at, updated_at)
         VALUES (
           ${generatedAgentId},
           ${String(config.name)},
@@ -1273,7 +1273,7 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
           now()
         )
         ON CONFLICT (name, org_id) DO UPDATE
-        SET config_json = ${JSON.stringify(cfgRecord)}, updated_at = now()
+        SET config = ${JSON.stringify(cfgRecord)}, updated_at = now()
       `;
 
       // Retrieve the actual agent_id (may differ on conflict/update)
@@ -1325,8 +1325,8 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
           };
           // Update agent config with expanded eval_config
           await sql`
-            UPDATE agents SET config_json = jsonb_set(
-              config_json::jsonb,
+            UPDATE agents SET config = jsonb_set(
+              config::jsonb,
               '{eval_config}',
               ${JSON.stringify(evalConfigWithTasks)}::jsonb
             )
@@ -1335,7 +1335,7 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
             // Fallback: re-write the whole config if jsonb_set isn't available
             const updatedConfig = { ...cfgRecord, eval_config: evalConfigWithTasks };
             return sql`
-              UPDATE agents SET config_json = ${JSON.stringify(updatedConfig)}
+              UPDATE agents SET config = ${JSON.stringify(updatedConfig)}
               WHERE name = ${String(config.name)} AND org_id = ${user.org_id}
             `;
           });
@@ -1414,9 +1414,9 @@ agentRoutes.openapi(evolveRoute, async (c): Promise<any> => {
   if (!agentName) return c.json({ error: "Agent not found" }, 404);
 
   // Load agent config
-  const agentRows = await sql`SELECT config_json FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id} LIMIT 1`;
+  const agentRows = await sql`SELECT config FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id} LIMIT 1`;
   if (agentRows.length === 0) return c.json({ error: "Agent not found" }, 404);
-  const agentConfig = parseJsonColumn(agentRows[0].config_json);
+  const agentConfig = parseJsonColumn(agentRows[0].config);
 
   // Load eval results (latest run or specific run)
   let evalRows: any[];
@@ -1486,7 +1486,7 @@ agentRoutes.openapi(evolveRoute, async (c): Promise<any> => {
 
     if (appliedCount > 0) {
       await sql`
-        UPDATE agents SET config_json = ${JSON.stringify(agentConfig)}, updated_at = now()
+        UPDATE agents SET config = ${JSON.stringify(agentConfig)}, updated_at = now()
         WHERE name = ${agentName} AND org_id = ${user.org_id}
       `;
       notifyRuntimeOfConfigChange(c.env, agentName, String(agentConfig.version || "")).catch(() => {});
@@ -1643,7 +1643,7 @@ agentRoutes.openapi(restoreVersionRoute, async (c): Promise<any> => {
     const agentName = await resolveAgentName(sql, identifier, user.org_id) || identifier;
 
     const rows = await sql`
-      SELECT config_json, version FROM agent_versions
+      SELECT config, version FROM agent_versions
       WHERE id = ${commitId} AND agent_name = ${agentName}
       LIMIT 1
     `;
@@ -1651,7 +1651,7 @@ agentRoutes.openapi(restoreVersionRoute, async (c): Promise<any> => {
 
     let configJson: string;
     try {
-      const restoredCfg = parseJsonColumn<Record<string, unknown>>(rows[0].config_json);
+      const restoredCfg = parseJsonColumn<Record<string, unknown>>(rows[0].config);
       const restoredPolicy = applyDeployPolicyToConfigJson(restoredCfg, { fallbackStripOverlay: true });
       if (!restoredPolicy.ok) {
         return c.json(
@@ -1665,19 +1665,19 @@ agentRoutes.openapi(restoreVersionRoute, async (c): Promise<any> => {
       }
       configJson = JSON.stringify(restoredCfg);
     } catch {
-      return c.json({ error: "Invalid config_json on version snapshot" }, 400);
+      return c.json({ error: "Invalid config on version snapshot" }, 400);
     }
 
     // Snapshot current config before overwriting (for undo)
     const current = await sql`
-      SELECT config_json FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id} LIMIT 1
+      SELECT config FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id} LIMIT 1
     `;
     if (current.length > 0) {
       await snapshotVersion(sql, agentName, `pre-restore-${Date.now()}`,
-        parseJsonColumn(current[0].config_json), user.user_id);
+        parseJsonColumn(current[0].config), user.user_id);
     }
 
-    await sql`UPDATE agents SET config_json = ${configJson}, updated_at = now() WHERE name = ${agentName} AND org_id = ${user.org_id}`;
+    await sql`UPDATE agents SET config = ${configJson}, updated_at = now() WHERE name = ${agentName} AND org_id = ${user.org_id}`;
     await snapshotVersion(
       sql,
       agentName,
@@ -1710,7 +1710,7 @@ agentRoutes.openapi(listTrashRoute, async (c): Promise<any> => {
     const agentName = await resolveAgentName(sql, identifier, user.org_id) || identifier;
 
     const rows = await sql`
-      SELECT agent_id, name, config_json, updated_at, created_by
+      SELECT agent_id, name, config, updated_at, created_by
       FROM agents
       WHERE name LIKE ${agentName + '-deleted-%'} AND org_id = ${user.org_id} AND is_active = false
       ORDER BY updated_at DESC LIMIT 20

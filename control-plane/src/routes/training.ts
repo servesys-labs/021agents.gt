@@ -144,8 +144,8 @@ trainingRoutes.openapi(createJobRoute, async (c): Promise<any> => {
   await sql.begin(async (tx: any) => {
     await tx`
       INSERT INTO training_jobs (
-        job_id, org_id, agent_name, algorithm, status, config_json,
-        dataset_name, eval_tasks_json, max_iterations, auto_activate,
+        job_id, org_id, agent_name, algorithm, status, config,
+        dataset_name, eval_tasks, max_iterations, auto_activate,
         created_by, tags
       ) VALUES (
         ${jobId}, ${user.org_id}, ${body.agent_name}, ${body.algorithm}, 'created',
@@ -158,11 +158,11 @@ trainingRoutes.openapi(createJobRoute, async (c): Promise<any> => {
 
     // Snapshot current system prompt as initial resource (version 0)
     const agentRows = await tx`
-      SELECT config_json FROM agents WHERE name = ${body.agent_name} AND org_id = ${user.org_id}
+      SELECT config FROM agents WHERE name = ${body.agent_name} AND org_id = ${user.org_id}
     `;
     if (agentRows.length > 0) {
       let config: Record<string, unknown> = {};
-      config = parseJsonColumn(agentRows[0].config_json);
+      config = parseJsonColumn(agentRows[0].config);
       const systemPrompt = String(config.system_prompt ?? "");
 
       if (systemPrompt) {
@@ -288,24 +288,24 @@ trainingRoutes.openapi(getJobRoute, async (c): Promise<any> => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const jobs = await sql`
-    SELECT * FROM training_jobs WHERE job_id = ${job_id} AND org_id = ${user.org_id}
+    SELECT * FROM training_jobs WHERE id = ${job_id} AND org_id = ${user.org_id}
   `;
   if (jobs.length === 0) return c.json({ error: "Training job not found" }, 404);
 
   const iterations = await sql`
     SELECT * FROM training_iterations
-    WHERE job_id = ${job_id} AND org_id = ${user.org_id} ORDER BY iteration_number
+    WHERE id = ${job_id} AND org_id = ${user.org_id} ORDER BY iteration_number
   `;
 
   const resources = await sql`
     SELECT * FROM training_resources
-    WHERE job_id = ${job_id} AND org_id = ${user.org_id} ORDER BY version
+    WHERE id = ${job_id} AND org_id = ${user.org_id} ORDER BY version
   `;
 
   const job = jobs[0] as any;
   return c.json({
     ...job,
-    config: parseJsonColumn(job.config_json),
+    config: parseJsonColumn(job.config),
     iterations: iterations.map((i: any) => ({
       iteration_id: i.iteration_id,
       iteration_number: i.iteration_number,
@@ -313,9 +313,9 @@ trainingRoutes.openapi(getJobRoute, async (c): Promise<any> => {
       pass_rate: i.pass_rate,
       avg_score: i.avg_score,
       reward_score: i.reward_score,
-      reward_breakdown: parseJsonColumn(i.reward_breakdown_json),
+      reward_breakdown: parseJsonColumn(i.reward_breakdown),
       resource_version: i.resource_version,
-      algorithm_output: parseJsonColumn(i.algorithm_output_json),
+      algorithm_output: parseJsonColumn(i.algorithm_output),
       started_at: i.started_at,
       completed_at: i.completed_at,
     })),
@@ -355,7 +355,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
 
   // Load job
   const jobs = await sql`
-    SELECT * FROM training_jobs WHERE job_id = ${job_id} AND org_id = ${user.org_id}
+    SELECT * FROM training_jobs WHERE id = ${job_id} AND org_id = ${user.org_id}
   `;
   if (jobs.length === 0) return c.json({ error: "Training job not found" }, 404);
 
@@ -368,7 +368,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
   // If another request already incremented the iteration, this returns 0 rows → 409.
   const casResult = await sql`
     UPDATE training_jobs SET current_iteration = current_iteration + 1
-    WHERE job_id = ${job_id} AND org_id = ${user.org_id} AND current_iteration = ${jobRow.current_iteration}
+    WHERE id = ${job_id} AND org_id = ${user.org_id} AND current_iteration = ${jobRow.current_iteration}
     RETURNING current_iteration
   `;
   if (casResult.length === 0) {
@@ -383,7 +383,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
     org_id: jobRow.org_id,
     agent_name: jobRow.agent_name,
     algorithm: jobRow.algorithm,
-    config_json: parseJsonColumn(jobRow.config_json),
+    config: parseJsonColumn(jobRow.config),
     current_iteration: iterationNumber,
     max_iterations: jobRow.max_iterations,
     best_score: jobRow.best_score,
@@ -392,7 +392,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
 
   // Mark job as running
   if (jobRow.status === "created") {
-    await sql`UPDATE training_jobs SET status = 'running', started_at = now() WHERE job_id = ${job_id}`;
+    await sql`UPDATE 0 = ${job_id}`;
   }
 
   await emitTrainingEvent(c.env, job_id, job.agent_name, {
@@ -410,7 +410,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
       if (!preflight.passed) {
         await sql`
           UPDATE training_jobs SET status = 'failed', completed_at = now()
-          WHERE job_id = ${job_id}
+          WHERE id = ${job_id}
         `;
         return c.json({
           error: "Pre-flight checks failed",
@@ -445,7 +445,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
     resource_key: r.resource_key,
     version: r.version,
     content_text: r.content_text,
-    content_json: parseJsonColumn(r.content_json, null),
+    content: parseJsonColumn(r.content, null),
     is_active: r.is_active,
     eval_score: r.eval_score,
   }));
@@ -462,10 +462,10 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
 
   if (systemPromptOverride) {
     const agentRows = await sql`
-      SELECT config_json FROM agents WHERE name = ${job.agent_name} AND org_id = ${user.org_id}
+      SELECT config FROM agents WHERE name = ${job.agent_name} AND org_id = ${user.org_id}
     `;
     if (agentRows.length > 0) {
-      const config = parseJsonColumn(agentRows[0].config_json);
+      const config = parseJsonColumn(agentRows[0].config);
       originalPrompt = config.system_prompt ?? null;
     }
   }
@@ -482,13 +482,13 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
   const progressEvents: Record<string, unknown>[] = [];
 
   try {
-    const evalTasks = parseJsonColumn<any[]>(jobRow.eval_tasks_json, []);
+    const evalTasks = parseJsonColumn<any[]>(jobRow.eval_tasks, []);
 
     if (evalTasks.length === 0) {
       // FAIL: No eval tasks configured. Training cannot optimize without evaluation signal.
       await sql`
         UPDATE training_iterations SET status = 'failed', error = 'no_eval_tasks', completed_at = NOW()
-        WHERE job_id = ${job_id} AND iteration_number = ${iterationNumber}
+        WHERE id = ${job_id} AND iteration_number = ${iterationNumber}
       `.catch(() => {});
       await emitTrainingEvent(c.env, job_id, job.agent_name, {
         type: "eval_failed",
@@ -729,7 +729,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
   // Fix #10: Write to training_rewards so GET /rewards/{agent_name} returns data
   try {
     await sql`
-      INSERT INTO training_rewards (org_id, agent_name, source, score, raw_value, metadata_json)
+      INSERT INTO training_rewards (org_id, agent_name, source, score, raw_value, metadata)
       VALUES (
         ${user.org_id}, ${job.agent_name}, ${'training-iter-' + iterationNumber},
         ${rewardScore}, ${String(rewardScore)},
@@ -748,7 +748,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
       avg_latency_ms = ${evalResult.avg_latency_ms},
       total_cost_usd = ${evalResult.total_cost_usd},
       reward_score = ${rewardScore},
-      reward_breakdown_json = ${JSON.stringify(rewardBreakdown)},
+      reward_breakdown = ${JSON.stringify(rewardBreakdown)},
       resource_version = ${promptResource?.version ?? 0}
     WHERE iteration_id = ${iterationId}
   `;
@@ -763,9 +763,9 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
   });
 
   const historyRows = await sql`
-    SELECT iteration_number, reward_score, pass_rate, resource_version, algorithm_output_json
+    SELECT iteration_number, reward_score, pass_rate, resource_version, algorithm_output
     FROM training_iterations
-    WHERE job_id = ${job_id} AND org_id = ${user.org_id} AND status = 'completed'
+    WHERE id = ${job_id} AND org_id = ${user.org_id} AND status = 'completed'
     ORDER BY iteration_number
   `;
   const history: IterationHistory[] = historyRows.map((h: any) => ({
@@ -773,10 +773,10 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
     reward_score: h.reward_score,
     pass_rate: h.pass_rate,
     resource_version: h.resource_version,
-    algorithm_output_json: parseJsonColumn(h.algorithm_output_json),
+    algorithm_output: parseJsonColumn(h.algorithm_output),
   }));
 
-  const algorithm = getAlgorithm(job.algorithm, job.config_json);
+  const algorithm = getAlgorithm(job.algorithm, job.config);
   const ctx: OptimizationContext = {
     job: { ...job, current_iteration: iterationNumber },
     currentIteration: iterationNumber,
@@ -941,7 +941,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
       INSERT INTO training_resources (
         resource_id, org_id, agent_name, job_id,
         resource_type, resource_key, version,
-        content_text, content_json, source,
+        content_text, content, source,
         parent_version, iteration_id, eval_score, is_active
       ) VALUES (
         ${crypto.randomUUID().replace(/-/g, "").slice(0, 16)},
@@ -960,13 +960,13 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
   );
   if (newPromptResource?.contentText) {
     const agentRows = await sql`
-      SELECT config_json FROM agents WHERE name = ${job.agent_name} AND org_id = ${user.org_id}
+      SELECT config FROM agents WHERE name = ${job.agent_name} AND org_id = ${user.org_id}
     `;
     if (agentRows.length > 0) {
-      const config = parseJsonColumn(agentRows[0].config_json);
+      const config = parseJsonColumn(agentRows[0].config);
       config.system_prompt = newPromptResource.contentText;
       await sql`
-        UPDATE agents SET config_json = ${JSON.stringify(config)}, updated_at = now()
+        UPDATE agents SET config = ${JSON.stringify(config)}, updated_at = now()
         WHERE name = ${job.agent_name} AND org_id = ${user.org_id}
       `;
     }
@@ -978,17 +978,17 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
   await sql`
     UPDATE training_iterations SET
       status = 'completed',
-      algorithm_output_json = ${JSON.stringify(optimizationResult.metadata)},
-      resource_snapshot_json = ${JSON.stringify({ version: newVersion })},
+      algorithm_output = ${JSON.stringify(optimizationResult.metadata)},
+      resource_snapshot = ${JSON.stringify({ version: newVersion })},
       completed_at = now()
     WHERE iteration_id = ${iterationId}
   `;
 
   // Fix #8: Re-fetch history INCLUDING the just-completed iteration before calling shouldContinue
   const freshHistoryRows = await sql`
-    SELECT iteration_number, reward_score, pass_rate, resource_version, algorithm_output_json
+    SELECT iteration_number, reward_score, pass_rate, resource_version, algorithm_output
     FROM training_iterations
-    WHERE job_id = ${job_id} AND org_id = ${user.org_id} AND status = 'completed'
+    WHERE id = ${job_id} AND org_id = ${user.org_id} AND status = 'completed'
     ORDER BY iteration_number
   `;
   const freshHistory: IterationHistory[] = freshHistoryRows.map((h: any) => ({
@@ -996,7 +996,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
     reward_score: h.reward_score,
     pass_rate: h.pass_rate,
     resource_version: h.resource_version,
-    algorithm_output_json: parseJsonColumn(h.algorithm_output_json),
+    algorithm_output: parseJsonColumn(h.algorithm_output),
   }));
 
   const freshCtx: OptimizationContext = {
@@ -1033,7 +1033,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
       best_resource_version = ${isBest ? newVersion : jobRow.best_resource_version},
       status = ${newStatus},
       completed_at = ${newStatus === "completed" ? sql`now()` : null}
-    WHERE job_id = ${job_id}
+    WHERE id = ${job_id}
   `;
 
   // Fix #2: Auto-activate the BEST resource version when training completes,
@@ -1051,13 +1051,13 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
         `;
         if (bestResourceRows.length > 0 && bestResourceRows[0].content_text) {
           const agentRows = await sql`
-            SELECT config_json FROM agents WHERE name = ${job.agent_name} AND org_id = ${user.org_id}
+            SELECT config FROM agents WHERE name = ${job.agent_name} AND org_id = ${user.org_id}
           `;
           if (agentRows.length > 0) {
-            const config = parseJsonColumn(agentRows[0].config_json);
+            const config = parseJsonColumn(agentRows[0].config);
             config.system_prompt = bestResourceRows[0].content_text;
             await sql`
-              UPDATE agents SET config_json = ${JSON.stringify(config)}, updated_at = now()
+              UPDATE agents SET config = ${JSON.stringify(config)}, updated_at = now()
               WHERE name = ${job.agent_name} AND org_id = ${user.org_id}
             `;
           }
@@ -1065,15 +1065,15 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
       }
       // Fix #4: Use direct VALUES insert with ON CONFLICT, matching agents.ts pattern
       const agentRows = await sql`
-        SELECT config_json FROM agents WHERE name = ${job.agent_name} AND org_id = ${user.org_id}
+        SELECT config FROM agents WHERE name = ${job.agent_name} AND org_id = ${user.org_id}
       `;
       if (agentRows.length > 0) {
         const versionTag = 'training-' + job_id;
         await sql`
-          INSERT INTO agent_versions (agent_name, org_id, version, config_json, created_by, created_at)
-          VALUES (${job.agent_name}, ${user.org_id}, ${versionTag}, ${String(agentRows[0].config_json)}, ${user.user_id}, now())
+          INSERT INTO agent_versions (agent_name, org_id, version, config, created_by, created_at)
+          VALUES (${job.agent_name}, ${user.org_id}, ${versionTag}, ${String(agentRows[0].config)}, ${user.user_id}, now())
           ON CONFLICT (agent_name, org_id, version) DO UPDATE
-          SET config_json = ${String(agentRows[0].config_json)}, created_by = ${user.user_id}
+          SET config = ${String(agentRows[0].config)}, created_by = ${user.user_id}
         `;
       }
     } catch { /* Non-critical */ }
@@ -1093,7 +1093,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
     if (isBest && rewardScore > 0.5) {
       try {
         await sql`
-          INSERT INTO release_channels (org_id, agent_name, channel, version, config_json, promoted_by, promoted_at)
+          INSERT INTO release_channels (org_id, agent_name, channel, version, config, promoted_by, promoted_at)
           VALUES (
             ${user.org_id}, ${job.agent_name}, 'training-candidate',
             ${'training-' + job_id},
@@ -1167,7 +1167,7 @@ trainingRoutes.openapi(progressRoute, async (c): Promise<any> => {
 
   // Verify job exists and belongs to this org
   const jobs = await sql`
-    SELECT agent_name FROM training_jobs WHERE job_id = ${job_id} AND org_id = ${user.org_id}
+    SELECT agent_name FROM training_jobs WHERE id = ${job_id} AND org_id = ${user.org_id}
   `;
   if (jobs.length === 0) return c.json({ error: "Training job not found" }, 404);
 
@@ -1231,7 +1231,7 @@ trainingRoutes.openapi(streamRoute, async (c): Promise<any> => {
 
   // Verify job exists
   const jobs = await sql`
-    SELECT agent_name, status FROM training_jobs WHERE job_id = ${job_id} AND org_id = ${user.org_id}
+    SELECT agent_name, status FROM training_jobs WHERE id = ${job_id} AND org_id = ${user.org_id}
   `;
   if (jobs.length === 0) return c.json({ error: "Training job not found" }, 404);
 
@@ -1294,7 +1294,7 @@ trainingRoutes.openapi(streamRoute, async (c): Promise<any> => {
           consecutiveErrors = 0;
 
           // Check if job finished
-          const statusRows = await sql`SELECT status FROM training_jobs WHERE job_id = ${job_id}`;
+          const statusRows = await sql`SELECT status FROM training_jobs WHERE id = ${job_id}`;
           const status = statusRows.length > 0 ? String(statusRows[0].status) : "unknown";
 
           if (status === "completed" || status === "cancelled" || status === "failed") {
@@ -1368,7 +1368,7 @@ trainingRoutes.openapi(cancelJobRoute, async (c): Promise<any> => {
 
   const result = await sql`
     UPDATE training_jobs SET status = 'cancelled', completed_at = now()
-    WHERE job_id = ${job_id} AND org_id = ${user.org_id} AND status IN ('created', 'running', 'paused')
+    WHERE id = ${job_id} AND org_id = ${user.org_id} AND status IN ('created', 'running', 'paused')
   `;
   if (result.count === 0) return c.json({ error: "Job not found or already finished" }, 404);
 
@@ -1399,14 +1399,14 @@ trainingRoutes.openapi(deleteJobRoute, async (c): Promise<any> => {
 
   // Fix #6: Prevent deleting running jobs
   const jobCheck = await sql`
-    SELECT status FROM training_jobs WHERE job_id = ${job_id} AND org_id = ${user.org_id}
+    SELECT status FROM training_jobs WHERE id = ${job_id} AND org_id = ${user.org_id}
   `;
   if (jobCheck.length === 0) return c.json({ error: "Training job not found" }, 404);
   if (jobCheck[0].status === "running") {
     return c.json({ error: "Cannot delete a running job. Cancel it first." }, 409);
   }
 
-  await sql`DELETE FROM training_jobs WHERE job_id = ${job_id} AND org_id = ${user.org_id}`;
+  await sql`DELETE FROM training_jobs WHERE id = ${job_id} AND org_id = ${user.org_id}`;
   return c.json({ deleted: job_id });
 });
 
@@ -1432,7 +1432,7 @@ trainingRoutes.openapi(autoStepRoute, async (c): Promise<any> => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const jobs = await sql`
-    SELECT status FROM training_jobs WHERE job_id = ${job_id} AND org_id = ${user.org_id}
+    SELECT status FROM training_jobs WHERE id = ${job_id} AND org_id = ${user.org_id}
   `;
   if (jobs.length === 0) return c.json({ error: "Training job not found" }, 404);
   if (jobs[0].status === "completed" || jobs[0].status === "cancelled") {
@@ -1441,7 +1441,7 @@ trainingRoutes.openapi(autoStepRoute, async (c): Promise<any> => {
 
   // Mark as running if still created
   if (jobs[0].status === "created") {
-    await sql`UPDATE training_jobs SET status = 'running', started_at = now() WHERE job_id = ${job_id}`;
+    await sql`UPDATE 0 = ${job_id}`;
   }
 
   // Enqueue first step — queue consumer will chain subsequent steps
@@ -1474,7 +1474,7 @@ trainingRoutes.openapi(listIterationsRoute, async (c): Promise<any> => {
 
   const rows = await sql`
     SELECT * FROM training_iterations
-    WHERE job_id = ${job_id} AND org_id = ${user.org_id}
+    WHERE id = ${job_id} AND org_id = ${user.org_id}
     ORDER BY iteration_number
   `;
 
@@ -1599,13 +1599,13 @@ trainingRoutes.openapi(activateResourceRoute, async (c): Promise<any> => {
     `;
     if (resourceRows.length > 0 && resourceRows[0].content_text) {
       const agentRows = await sql`
-        SELECT config_json FROM agents WHERE name = ${agent_name} AND org_id = ${user.org_id}
+        SELECT config FROM agents WHERE name = ${agent_name} AND org_id = ${user.org_id}
       `;
       if (agentRows.length > 0) {
-        const config = parseJsonColumn(agentRows[0].config_json);
+        const config = parseJsonColumn(agentRows[0].config);
         config.system_prompt = resourceRows[0].content_text;
         await sql`
-          UPDATE agents SET config_json = ${JSON.stringify(config)}, updated_at = now()
+          UPDATE agents SET config = ${JSON.stringify(config)}, updated_at = now()
           WHERE name = ${agent_name} AND org_id = ${user.org_id}
         `;
       }

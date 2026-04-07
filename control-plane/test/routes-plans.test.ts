@@ -102,8 +102,8 @@ describe("plans routes", () => {
   it("POST / merges custom plan into project_configs", async () => {
     const mockSql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join("?");
-      if (query.includes("SELECT config_json FROM project_configs")) {
-        return [{ config_json: '{"other":1,"plans":{"old":{"_description":"x"}}}' }];
+      if (query.includes("SELECT config FROM project_configs")) {
+        return [{ config: '{"other":1,"plans":{"old":{"_description":"x"}}}' }];
       }
       if (query.includes("INSERT INTO project_configs")) {
         const orgId = values[0];
@@ -149,7 +149,7 @@ describe("plans routes", () => {
   it("POST / defaults tool_call tier to moderate when tool_call_model empty", async () => {
     const mockSql2 = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join("?");
-      if (query.includes("SELECT config_json")) return [{ config_json: "{}" }];
+      if (query.includes("SELECT config")) return [{ config: "{}" }];
       if (query.includes("INSERT INTO project_configs")) {
         const configJson = values[1] as string;
         const parsed = JSON.parse(configJson) as { plans?: Record<string, unknown> };

@@ -360,7 +360,7 @@ authRoutes.openapi(signupRoute, async (c): Promise<any> => {
       };
 
       await tx`
-        INSERT INTO agents (agent_id, name, org_id, description, config_json, version, is_active, created_by, created_at, updated_at)
+        INSERT INTO agents (agent_id, name, org_id, description, config, version, is_active, created_by, created_at, updated_at)
         VALUES (${personalAgentId}, ${personalName}, ${orgId}, ${personalDescription}, ${JSON.stringify(personalConfig)}, '1.0.0', ${true}, ${userId}, now(), now())
       `;
       console.log(`[auth/signup] Personal agent created for ${email}`);
@@ -383,14 +383,14 @@ authRoutes.openapi(signupRoute, async (c): Promise<any> => {
       };
 
       await tx`
-        INSERT INTO agents (agent_id, name, org_id, description, config_json, version, is_active, created_by, created_at, updated_at)
+        INSERT INTO agents (agent_id, name, org_id, description, config, version, is_active, created_by, created_at, updated_at)
         VALUES (${metaAgentId}, ${"meta-agent"}, ${orgId}, ${metaConfig.description}, ${JSON.stringify(metaConfig)}, '1.0.0', ${true}, ${userId}, now(), now())
       `;
       console.log(`[auth/signup] Meta-agent created for ${email}`);
 
       // Create default org_settings
       await tx`
-        INSERT INTO org_settings (org_id, plan_type, settings_json, limits_json, features_json, created_at, updated_at)
+        INSERT INTO org_settings (org_id, plan_type, settings, limits, features, created_at, updated_at)
         VALUES (
           ${orgId},
           ${"free"},
@@ -757,7 +757,7 @@ authRoutes.openapi(cfAccessExchangeRoute, async (c): Promise<any> => {
     // Create default org_settings for CF Access provisioned org
     try {
       await sql`
-        INSERT INTO org_settings (org_id, plan_type, settings_json, limits_json, features_json, created_at, updated_at)
+        INSERT INTO org_settings (org_id, plan_type, settings, limits, features, created_at, updated_at)
         VALUES (
           ${orgId},
           ${"free"},

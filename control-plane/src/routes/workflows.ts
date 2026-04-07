@@ -147,8 +147,8 @@ function decodeRunRow(row: any): any {
   delete item.steps_status_json;
   item.dag = parseJsonColumn(item.dag_json);
   delete item.dag_json;
-  item.reflection = parseJsonColumn(item.reflection_json);
-  delete item.reflection_json;
+  item.reflection = parseJsonColumn(item.reflection);
+  delete item.reflection;
   item.run_metadata = deriveRunMetadata(item.dag || {}, item.reflection || {});
   return item;
 }
@@ -462,8 +462,8 @@ workflowRoutes.openapi(listWorkflowsRoute, async (c): Promise<any> => {
   `;
   const result = rows.map((r: any) => {
     const d = { ...r };
-    d.steps = parseJsonColumn(d.steps_json, []);
-    delete d.steps_json;
+    d.steps = parseJsonColumn(d.steps, []);
+    delete d.steps;
     return d;
   });
   return c.json({ workflows: result });
@@ -513,7 +513,7 @@ workflowRoutes.openapi(createWorkflowRoute, async (c): Promise<any> => {
   const stepsJson = JSON.stringify(normalizedSteps);
 
   await sql`
-    INSERT INTO workflows (workflow_id, org_id, name, description, steps_json)
+    INSERT INTO workflows (workflow_id, org_id, name, description, steps)
     VALUES (${workflowId}, ${user.org_id}, ${name}, ${description}, ${stepsJson})
   `;
 

@@ -196,7 +196,7 @@ export async function deliverWebhook(
   if (sql && webhookId) {
     try {
       await sql`
-        INSERT INTO webhook_deliveries (webhook_id, event_type, response_status, success, response_body, created_at)
+        INSERT INTO webhook_deliveries (webhook_id, event_type, status_code, success, response_body, created_at)
         VALUES (${webhookId}, 'agent.run.completed', ${status}, ${success}, ${responseBody.slice(0, 1000)}, now())
       `;
     } catch {}

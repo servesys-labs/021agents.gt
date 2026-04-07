@@ -1909,12 +1909,12 @@ chatPlatformRoutes.openapi(emailSetupRoute, async (c): Promise<any> => {
 
   // Save config
   await sql`
-    INSERT INTO channel_configs (org_id, channel, agent_name, is_active, config_json, created_at, updated_at)
+    INSERT INTO channel_configs (org_id, channel, agent_name, is_active, config, created_at, updated_at)
     VALUES (${user.org_id}, 'email', ${agent_name}, true,
       ${JSON.stringify({ default_email: defaultEmail, custom_email: custom_email || null })}::jsonb, ${now}, ${now})
     ON CONFLICT (org_id, channel) DO UPDATE SET
       agent_name = ${agent_name}, is_active = true,
-      config_json = ${JSON.stringify({ default_email: defaultEmail, custom_email: custom_email || null })}::jsonb,
+      config = ${JSON.stringify({ default_email: defaultEmail, custom_email: custom_email || null })}::jsonb,
       updated_at = ${now}
   `.catch(() => {});
 
@@ -1960,7 +1960,7 @@ chatPlatformRoutes.openapi(emailRemoveRoute, async (c): Promise<any> => {
   const defaultEmail = `${agent_name}.${orgShort}@oneshots.co`;
   const now = new Date().toISOString();
   await sql`
-    UPDATE channel_configs SET config_json = ${JSON.stringify({ default_email: defaultEmail, custom_email: null })}::jsonb, updated_at = ${now}
+    UPDATE channel_configs SET config = ${JSON.stringify({ default_email: defaultEmail, custom_email: null })}::jsonb, updated_at = ${now}
     WHERE org_id = ${user.org_id} AND channel = 'email'
   `.catch(() => {});
 

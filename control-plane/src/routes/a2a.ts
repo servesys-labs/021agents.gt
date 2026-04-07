@@ -147,13 +147,13 @@ a2aRoutes.openapi(agentCardRoute, async (c): Promise<any> => {
 
   const rows = agentParam
     ? await sql`
-        SELECT name, description, config_json
+        SELECT name, description, config
         FROM agents
         WHERE name = ${agentParam} AND org_id = ${orgParam} AND is_active = true
         LIMIT 1
       `
     : await sql`
-        SELECT name, description, config_json
+        SELECT name, description, config
         FROM agents
         WHERE org_id = ${orgParam} AND is_active = true
         ORDER BY created_at DESC
@@ -164,8 +164,8 @@ a2aRoutes.openapi(agentCardRoute, async (c): Promise<any> => {
     return c.json({ error: "No agents available" }, 404);
   }
 
-  const row = rows[0] as { name: string; description: string; config_json: unknown };
-  const config = parseAgentConfigJson(row.config_json);
+  const row = rows[0] as { name: string; description: string; config: unknown };
+  const config = parseAgentConfigJson(row.config);
 
   const baseUrl = new URL(c.req.url).origin;
   const agentConfig = {
@@ -206,7 +206,7 @@ a2aRoutes.openapi(agentCardsRoute, async (c): Promise<any> => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, orgParam);
 
   const rows = await sql`
-    SELECT name, description, config_json
+    SELECT name, description, config
     FROM agents
     WHERE org_id = ${orgParam} AND is_active = true
     ORDER BY created_at DESC
@@ -215,8 +215,8 @@ a2aRoutes.openapi(agentCardsRoute, async (c): Promise<any> => {
   const baseUrl = new URL(c.req.url).origin;
 
   const cards = rows.map((row) => {
-    const r = row as { name: string; description: string; config_json: unknown };
-    const config = parseAgentConfigJson(r.config_json);
+    const r = row as { name: string; description: string; config: unknown };
+    const config = parseAgentConfigJson(r.config);
     const agentConfig = {
       name: r.name,
       agent_id: (config.agent_id as string) || r.name,
@@ -254,7 +254,7 @@ a2aRoutes.openapi(agentsListRoute, async (c): Promise<any> => {
   let agents: Array<Record<string, unknown>> = [];
   try {
     const rows = await sql`
-      SELECT name, description, config_json, is_active, created_at, updated_at
+      SELECT name, description, config, is_active, created_at, updated_at
       FROM agents
       WHERE org_id = ${user.org_id}
       ORDER BY created_at DESC
@@ -263,7 +263,7 @@ a2aRoutes.openapi(agentsListRoute, async (c): Promise<any> => {
     const baseUrl = new URL(c.req.url).origin;
 
     agents = rows.map((row: any) => {
-      const config = parseAgentConfigJson(row.config_json);
+      const config = parseAgentConfigJson(row.config);
       return {
         agent_id: (config.agent_id as string) || row.name,
         name: row.name,
@@ -361,7 +361,7 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
         // Resolve agent owner — use ?org= query param for cross-org discovery, or global lookup
         const targetOrgFromUrl = new URL(c.req.url).searchParams.get("org") || "";
         const agentOwnerRows = await sql`
-          SELECT org_id, config_json FROM agents
+          SELECT org_id, config FROM agents
           WHERE name = ${targetAgentName} AND is_active = true
           ${targetOrgFromUrl ? sql`AND org_id = ${targetOrgFromUrl}` : sql``}
           LIMIT 1
@@ -370,7 +370,7 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
 
         if (agentOwnerRows.length > 0) {
           const { getAgentPricing, build402Headers, verifyPaymentReceipt } = await import("../logic/agent-payments");
-          const cfg = typeof agentOwnerRows[0].config_json === "string" ? JSON.parse(agentOwnerRows[0].config_json) : agentOwnerRows[0].config_json || {};
+          const cfg = typeof agentOwnerRows[0].config === "string" ? JSON.parse(agentOwnerRows[0].config) : agentOwnerRows[0].config || {};
           const pricing = getAgentPricing(cfg);
 
           if (pricing?.requires_payment && user.org_id !== targetOrgId) {
@@ -417,9 +417,9 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
             } else if (pricingModel === "cost_plus") {
               // Cost-plus: ceiling = agent's budget_limit_usd (max possible cost)
               // The actual charge is settled post-task based on real LLM spend
-              const cfg = typeof agentOwnerRows[0]?.config_json === "string"
-                ? JSON.parse(agentOwnerRows[0].config_json)
-                : agentOwnerRows[0]?.config_json || {};
+              const cfg = typeof agentOwnerRows[0]?.config === "string"
+                ? JSON.parse(agentOwnerRows[0].config)
+                : agentOwnerRows[0]?.config || {};
               costCeiling = Number(cfg.governance?.budget_limit_usd) || 10.0;
             } else if (pricingModel === "per_token") {
               // Per-token: ceiling based on reasonable max (200k tokens)
@@ -666,7 +666,7 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
       {
         const streamTargetOrgFromUrl = new URL(c.req.url).searchParams.get("org") || "";
         const streamAgentOwnerRows = await sql`
-          SELECT org_id, config_json FROM agents
+          SELECT org_id, config FROM agents
           WHERE name = ${targetAgentName} AND is_active = true
           ${streamTargetOrgFromUrl ? sql`AND org_id = ${streamTargetOrgFromUrl}` : sql``}
           LIMIT 1
@@ -675,7 +675,7 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
 
         if (streamAgentOwnerRows.length > 0) {
           const { getAgentPricing, build402Headers, verifyPaymentReceipt } = await import("../logic/agent-payments");
-          const cfg = typeof streamAgentOwnerRows[0].config_json === "string" ? JSON.parse(streamAgentOwnerRows[0].config_json) : streamAgentOwnerRows[0].config_json || {};
+          const cfg = typeof streamAgentOwnerRows[0].config === "string" ? JSON.parse(streamAgentOwnerRows[0].config) : streamAgentOwnerRows[0].config || {};
           const pricing = getAgentPricing(cfg);
 
           if (pricing?.requires_payment && user.org_id !== streamTargetOrgId) {
@@ -890,7 +890,7 @@ a2aRoutes.openapi(taskSendRoute, async (c): Promise<any> => {
     // ── x-402 Payment Gate (REST) ──────────────────────────────
     const restTargetOrgFromUrl = new URL(c.req.url).searchParams.get("org") || "";
     const restAgentOwnerRows = await sql`
-      SELECT org_id, config_json FROM agents
+      SELECT org_id, config FROM agents
       WHERE name = ${targetAgentName} AND is_active = true
       ${restTargetOrgFromUrl ? sql`AND org_id = ${restTargetOrgFromUrl}` : sql``}
       LIMIT 1
@@ -899,7 +899,7 @@ a2aRoutes.openapi(taskSendRoute, async (c): Promise<any> => {
 
     if (restAgentOwnerRows.length > 0) {
       const { getAgentPricing, build402Headers, verifyPaymentReceipt } = await import("../logic/agent-payments");
-      const cfg = typeof restAgentOwnerRows[0].config_json === "string" ? JSON.parse(restAgentOwnerRows[0].config_json) : restAgentOwnerRows[0].config_json || {};
+      const cfg = typeof restAgentOwnerRows[0].config === "string" ? JSON.parse(restAgentOwnerRows[0].config) : restAgentOwnerRows[0].config || {};
       const pricing = getAgentPricing(cfg);
 
       if (pricing?.requires_payment && user.org_id !== restTargetOrgId) {
@@ -1039,7 +1039,7 @@ a2aRoutes.openapi(taskSendSubscribeRoute, async (c): Promise<any> => {
   {
     const subTargetOrgFromUrl = new URL(c.req.url).searchParams.get("org") || "";
     const subAgentOwnerRows = await sql`
-      SELECT org_id, config_json FROM agents
+      SELECT org_id, config FROM agents
       WHERE name = ${targetAgentName} AND is_active = true
       ${subTargetOrgFromUrl ? sql`AND org_id = ${subTargetOrgFromUrl}` : sql``}
       LIMIT 1
@@ -1048,7 +1048,7 @@ a2aRoutes.openapi(taskSendSubscribeRoute, async (c): Promise<any> => {
 
     if (subAgentOwnerRows.length > 0) {
       const { getAgentPricing, build402Headers, verifyPaymentReceipt } = await import("../logic/agent-payments");
-      const cfg = typeof subAgentOwnerRows[0].config_json === "string" ? JSON.parse(subAgentOwnerRows[0].config_json) : subAgentOwnerRows[0].config_json || {};
+      const cfg = typeof subAgentOwnerRows[0].config === "string" ? JSON.parse(subAgentOwnerRows[0].config) : subAgentOwnerRows[0].config || {};
       const pricing = getAgentPricing(cfg);
 
       if (pricing?.requires_payment && user.org_id !== subTargetOrgId) {

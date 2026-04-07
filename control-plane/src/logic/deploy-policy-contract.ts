@@ -2,7 +2,7 @@
  * Deploy-time policy contract (schema v1).
  * Mirror: `deploy/src/runtime/deploy-policy-contract.ts` — keep in sync.
  *
- * Canonical persisted field: `deploy_policy` on agent `config_json`.
+ * Canonical persisted field: `deploy_policy` on agent `config`.
  * Legacy flat fields (tools, governance.*, eval_config, release_strategy) are
  * synthesized when `deploy_policy` is absent or partially overridden.
  */

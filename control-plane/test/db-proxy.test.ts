@@ -67,7 +67,7 @@ async function simulateDbQuery(
       // ── Agent queries ──
       if (queryId === "agents.list_active_by_org") {
         return await tx`
-          SELECT name, description, config_json, is_active, created_at, updated_at
+          SELECT name, description, config, is_active, created_at, updated_at
           FROM agents
           WHERE org_id = ${orgId} AND is_active = true
           ORDER BY created_at DESC
@@ -77,7 +77,7 @@ async function simulateDbQuery(
         const agentName = String(body.params?.agent_name || "");
         if (!agentName) throw new Error("params.agent_name required");
         return await tx`
-          SELECT name, config_json, description FROM agents
+          SELECT name, config, description FROM agents
           WHERE name = ${agentName} AND org_id = ${orgId} AND is_active = true LIMIT 1
         `;
       }
@@ -152,7 +152,7 @@ async function simulateDbQuery(
       if (queryId === "feedback.stats") {
         const sinceDays = Math.min(Number(body.params?.since_days) || 30, 365);
         const since = Date.now() / 1000 - sinceDays * 86400;
-        return await tx`SELECT rating, COUNT(*) as count FROM user_feedback WHERE org_id = ${orgId} AND created_at >= ${since} GROUP BY rating`;
+        return await tx`SELECT rating, COUNT(*) as count FROM session_feedback WHERE org_id = ${orgId} AND created_at >= ${since} GROUP BY rating`;
       }
 
       // ── Security queries ──
@@ -302,7 +302,7 @@ describe("DB Proxy Query Allowlist", () => {
     const res = await simulateDbQuery(sql, { query_id: "feedback.stats", context: CTX });
     expect(res.status).toBe(200);
     const q = getDataQuery(calls);
-    expect(q!.query).toContain("user_feedback");
+    expect(q!.query).toContain("session_feedback");
     expect(q!.params).toContain(ORG);
   });
 

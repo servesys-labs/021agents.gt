@@ -70,7 +70,7 @@ describe("agents route contracts", () => {
           {
             name: "agent-a",
             description: "desc",
-            config_json: JSON.stringify({
+            config: JSON.stringify({
               model: "m1",
               tools: ["t1"],
               tags: ["tag"],

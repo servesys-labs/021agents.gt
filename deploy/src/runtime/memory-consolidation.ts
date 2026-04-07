@@ -89,7 +89,7 @@ export async function consolidateMemory(
     // ── Pass 2: Procedure Promotion ──
     // Find tool sequences that appear 3+ times in recent episodes → create procedure
     const recentSessions = await sql`
-      SELECT session_id, tool_calls_json FROM turns
+      SELECT session_id, tool_calls FROM turns
       WHERE session_id IN (
         SELECT session_id FROM sessions
         WHERE org_id = ${orgId} AND agent_name = ${agentName}
@@ -116,7 +116,7 @@ export async function consolidateMemory(
         currentTools = [];
       }
       try {
-        const calls = parseJsonColumn<Array<{ name?: string }>>(row.tool_calls_json, []);
+        const calls = parseJsonColumn<Array<{ name?: string }>>(row.tool_calls, []);
         for (const tc of calls) {
           if (tc.name) currentTools.push(tc.name);
         }
@@ -134,10 +134,10 @@ export async function consolidateMemory(
     for (const [pattern, data] of sequences) {
       if (data.count >= 3) {
         await sql`
-          INSERT INTO agent_procedures (org_id, agent_name, task_pattern, tool_sequence, success_rate, avg_turns, created_at)
+          INSERT INTO procedures (org_id, agent_name, task_pattern, tool_sequence, success_rate, avg_turns, created_at)
           VALUES (${orgId}, ${agentName}, ${pattern.slice(0, 200)}, ${JSON.stringify(data.tools)}, ${0.8}, ${data.tools.length}, NOW())
           ON CONFLICT (org_id, agent_name, task_pattern) DO UPDATE SET
-            success_rate = GREATEST(agent_procedures.success_rate, 0.8),
+            success_rate = GREATEST(procedures.success_rate, 0.8),
             updated_at = NOW()
         `.catch(() => {});
         proceduresPromoted++;

@@ -404,7 +404,7 @@ describe("observability ownership and maintenance contracts", () => {
           {
             session_id: "sess-loop",
             event_type: "loop_halt",
-            details_json: JSON.stringify({ message: "halt", turn: 2 }),
+            details: JSON.stringify({ message: "halt", turn: 2 }),
             created_at: "2026-03-27T12:05:00.000Z",
             trace_id: "trace-loop",
           },
@@ -416,7 +416,7 @@ describe("observability ownership and maintenance contracts", () => {
             trace_id: "trace-circ",
             session_id: "sess-circ",
             event_type: "turn_completed",
-            details_json: JSON.stringify({ error: "Circuit breaker OPEN for browse. Retry after 12s" }),
+            details: JSON.stringify({ error: "Circuit breaker OPEN for browse. Retry after 12s" }),
             created_at: "2026-03-27T12:06:00.000Z",
           },
         ];
@@ -482,7 +482,7 @@ describe("observability ownership and maintenance contracts", () => {
           {
             session_id: "s-h",
             event_type: "loop_halt",
-            details_json: "{}",
+            details: "{}",
             created_at: "2026-03-27T12:01:00.000Z",
             trace_id: "t-h",
           },

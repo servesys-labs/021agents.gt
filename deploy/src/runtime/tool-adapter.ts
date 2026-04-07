@@ -271,8 +271,8 @@ ${spec.code}
     return json.dumps(result)
 
 if __name__ == "__main__":
-    input_json = sys.stdin.read()
-    input_data = json.loads(input_json)
+    input = sys.stdin.read()
+    input_data = json.loads(input)
     output = run(input_data)
     print(output)
 `;

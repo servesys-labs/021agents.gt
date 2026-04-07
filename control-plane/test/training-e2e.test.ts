@@ -36,7 +36,7 @@ function resetDb() {
     {
       name: "test-agent",
       org_id: "org-a",
-      config_json: JSON.stringify({
+      config: JSON.stringify({
         name: "test-agent",
         system_prompt: "You are a helpful assistant.",
         model: "claude-sonnet-4-20250514",
@@ -57,7 +57,7 @@ function makeSql() {
     // ── INSERT ──
     if (query.includes("INSERT INTO training_jobs")) {
       const job: any = {};
-      const keys = ["job_id","org_id","agent_name","algorithm","status","config_json","dataset_name","eval_tasks_json","max_iterations","auto_activate","created_by","tags"];
+      const keys = ["job_id","org_id","agent_name","algorithm","status","config","dataset_name","eval_tasks_json","max_iterations","auto_activate","created_by","tags"];
       keys.forEach((k, i) => { if (i < values.length) job[k] = values[i]; });
       job.current_iteration = 0; job.best_score = null; job.best_iteration = null;
       job.best_resource_version = null; job.created_at = new Date().toISOString();
@@ -212,7 +212,7 @@ function makeSql() {
 
     if (query.includes("UPDATE agents")) {
       const agent = db_agents[0];
-      if (agent) agent.config_json = values[0];
+      if (agent) agent.config = values[0];
       return { count: 1 };
     }
 
@@ -577,7 +577,7 @@ describe("training algorithms", () => {
     const alg = new BaselineAlgorithm();
 
     const makeCtx = (prompt: string, iteration: number) => ({
-      job: { job_id: "j1", org_id: "o1", agent_name: "a1", algorithm: "baseline", config_json: {}, current_iteration: iteration, max_iterations: 10, best_score: null, best_iteration: null },
+      job: { job_id: "j1", org_id: "o1", agent_name: "a1", algorithm: "baseline", config: {}, current_iteration: iteration, max_iterations: 10, best_score: null, best_iteration: null },
       currentIteration: iteration,
       currentResources: [{ resource_id: "r1", resource_type: "system_prompt", resource_key: "main", version: 0, content_text: prompt, content_json: null, is_active: true, eval_score: null }],
       evalResults: { eval_run_id: 1, pass_rate: 0.5, avg_score: 0.5, avg_latency_ms: 1000, total_cost_usd: 0.01 },
@@ -601,7 +601,7 @@ describe("training algorithms", () => {
     const { BaselineAlgorithm } = await import("../src/logic/training-algorithms");
     const alg = new BaselineAlgorithm();
     const r = await alg.optimize({
-      job: { job_id: "j1", org_id: "o1", agent_name: "a1", algorithm: "baseline", config_json: {}, current_iteration: 0, max_iterations: 5, best_score: null, best_iteration: null },
+      job: { job_id: "j1", org_id: "o1", agent_name: "a1", algorithm: "baseline", config: {}, current_iteration: 0, max_iterations: 5, best_score: null, best_iteration: null },
       currentIteration: 0, currentResources: [], evalResults: { eval_run_id: null, pass_rate: null, avg_score: null, avg_latency_ms: null, total_cost_usd: null },
       rewardScore: 0, history: [],
     });
@@ -613,7 +613,7 @@ describe("training algorithms", () => {
     const { APOAlgorithm } = await import("../src/logic/training-algorithms");
     const alg = new APOAlgorithm();
     const r = await alg.optimize({
-      job: { job_id: "j1", org_id: "o1", agent_name: "a1", algorithm: "apo", config_json: {}, current_iteration: 1, max_iterations: 5, best_score: 0.3, best_iteration: 0 },
+      job: { job_id: "j1", org_id: "o1", agent_name: "a1", algorithm: "apo", config: {}, current_iteration: 1, max_iterations: 5, best_score: 0.3, best_iteration: 0 },
       currentIteration: 1,
       currentResources: [{ resource_id: "r1", resource_type: "system_prompt", resource_key: "main", version: 0, content_text: "You are helpful.", content_json: null, is_active: true, eval_score: 0.3 }],
       evalResults: { eval_run_id: 2, pass_rate: 0.4, avg_score: 0.4, avg_latency_ms: 1500, total_cost_usd: 0.02 },
@@ -628,7 +628,7 @@ describe("training algorithms", () => {
     const { APOAlgorithm } = await import("../src/logic/training-algorithms");
     const alg = new APOAlgorithm();
     const result = alg.shouldContinue({
-      job: { job_id: "j1", org_id: "o1", agent_name: "a1", algorithm: "apo", config_json: {}, current_iteration: 5, max_iterations: 10, best_score: 0.6, best_iteration: 2 },
+      job: { job_id: "j1", org_id: "o1", agent_name: "a1", algorithm: "apo", config: {}, current_iteration: 5, max_iterations: 10, best_score: 0.6, best_iteration: 2 },
       currentIteration: 5, currentResources: [],
       evalResults: { eval_run_id: 5, pass_rate: 0.55, avg_score: 0.55, avg_latency_ms: 1000, total_cost_usd: 0.01 },
       rewardScore: 0.55,
@@ -645,7 +645,7 @@ describe("training algorithms", () => {
     const { APOAlgorithm } = await import("../src/logic/training-algorithms");
     const alg = new APOAlgorithm();
     expect(alg.shouldContinue({
-      job: { job_id: "j1", org_id: "o1", agent_name: "a1", algorithm: "apo", config_json: {}, current_iteration: 2, max_iterations: 10, best_score: 0.99, best_iteration: 2 },
+      job: { job_id: "j1", org_id: "o1", agent_name: "a1", algorithm: "apo", config: {}, current_iteration: 2, max_iterations: 10, best_score: 0.99, best_iteration: 2 },
       currentIteration: 2, currentResources: [],
       evalResults: { eval_run_id: 2, pass_rate: 0.99, avg_score: 0.99, avg_latency_ms: 500, total_cost_usd: 0.005 },
       rewardScore: 0.99, history: [],
@@ -656,7 +656,7 @@ describe("training algorithms", () => {
     const { MultiDimensionAlgorithm } = await import("../src/logic/training-algorithms");
     const alg = new MultiDimensionAlgorithm();
     const makeCtx = (iteration: number) => ({
-      job: { job_id: "j1", org_id: "o1", agent_name: "a1", algorithm: "multi", config_json: {}, current_iteration: iteration, max_iterations: 10, best_score: null, best_iteration: null },
+      job: { job_id: "j1", org_id: "o1", agent_name: "a1", algorithm: "multi", config: {}, current_iteration: iteration, max_iterations: 10, best_score: null, best_iteration: null },
       currentIteration: iteration,
       currentResources: [{ resource_id: "r1", resource_type: "system_prompt", resource_key: "main", version: 0, content_text: "Be helpful.", content_json: null, is_active: true, eval_score: null }],
       evalResults: { eval_run_id: 1, pass_rate: 0.5, avg_score: 0.5, avg_latency_ms: 1000, total_cost_usd: 0.01 },
@@ -768,7 +768,7 @@ describe("training safety", () => {
   it("preflight passes for agent without system prompt", async () => {
     // Missing system prompt should NOT fail preflight (training creates prompts)
     const { runPreflightChecks } = await import("../src/logic/training-safety");
-    db_agents[0].config_json = JSON.stringify({ name: "test-agent", model: "claude-sonnet-4-20250514", tools: [] });
+    db_agents[0].config = JSON.stringify({ name: "test-agent", model: "claude-sonnet-4-20250514", tools: [] });
     const mockSql = makeSql() as any;
     const result = await runPreflightChecks(mockSql, mockEnv(), "org-a", "test-agent");
     const promptCheck = result.checks.find((c: any) => c.name === "system_prompt_set");

@@ -271,7 +271,7 @@ connectorRoutes.openapi(storeTokenRoute, async (c): Promise<any> => {
     await sql`
       INSERT INTO connector_tokens (
         org_id, connector_name, access_token, refresh_token,
-        token_type, expires_at, scopes, metadata_json, created_at, updated_at
+        token_type, expires_at, scopes, metadata, created_at, updated_at
       ) VALUES (
         ${user.org_id}, ${connectorName}, ${accessToken}, ${refreshToken},
         ${tokenType}, ${expiresAt}, ${scopes}, ${metadataJson}, ${now}, ${now}
@@ -282,7 +282,7 @@ connectorRoutes.openapi(storeTokenRoute, async (c): Promise<any> => {
         token_type = EXCLUDED.token_type,
         expires_at = EXCLUDED.expires_at,
         scopes = EXCLUDED.scopes,
-        metadata_json = EXCLUDED.metadata_json,
+        metadata = EXCLUDED.metadata,
         updated_at = EXCLUDED.updated_at
     `;
   } catch (err: any) {

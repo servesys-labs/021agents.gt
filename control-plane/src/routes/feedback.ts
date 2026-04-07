@@ -55,7 +55,7 @@ feedbackRoutes.openapi(listFeedbackRoute, async (c): Promise<any> => {
   if (agentName && rating) {
     rows = await sql`
       SELECT id, session_id, turn_number, rating, comment, message_preview, agent_name, channel, created_at
-      FROM user_feedback
+      FROM session_feedback
       WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND rating = ${rating} AND created_at >= ${since}
       ORDER BY created_at DESC
       LIMIT ${limit} OFFSET ${offset}
@@ -63,7 +63,7 @@ feedbackRoutes.openapi(listFeedbackRoute, async (c): Promise<any> => {
   } else if (agentName) {
     rows = await sql`
       SELECT id, session_id, turn_number, rating, comment, message_preview, agent_name, channel, created_at
-      FROM user_feedback
+      FROM session_feedback
       WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND created_at >= ${since}
       ORDER BY created_at DESC
       LIMIT ${limit} OFFSET ${offset}
@@ -71,7 +71,7 @@ feedbackRoutes.openapi(listFeedbackRoute, async (c): Promise<any> => {
   } else if (rating) {
     rows = await sql`
       SELECT id, session_id, turn_number, rating, comment, message_preview, agent_name, channel, created_at
-      FROM user_feedback
+      FROM session_feedback
       WHERE org_id = ${user.org_id} AND rating = ${rating} AND created_at >= ${since}
       ORDER BY created_at DESC
       LIMIT ${limit} OFFSET ${offset}
@@ -79,7 +79,7 @@ feedbackRoutes.openapi(listFeedbackRoute, async (c): Promise<any> => {
   } else {
     rows = await sql`
       SELECT id, session_id, turn_number, rating, comment, message_preview, agent_name, channel, created_at
-      FROM user_feedback
+      FROM session_feedback
       WHERE org_id = ${user.org_id} AND created_at >= ${since}
       ORDER BY created_at DESC
       LIMIT ${limit} OFFSET ${offset}
@@ -124,13 +124,13 @@ feedbackRoutes.openapi(feedbackStatsRoute, async (c): Promise<any> => {
   const countQuery = agentName
     ? sql`
         SELECT rating, COUNT(*) as cnt
-        FROM user_feedback
+        FROM session_feedback
         WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND created_at >= ${since}
         GROUP BY rating
       `
     : sql`
         SELECT rating, COUNT(*) as cnt
-        FROM user_feedback
+        FROM session_feedback
         WHERE org_id = ${user.org_id} AND created_at >= ${since}
         GROUP BY rating
       `;
@@ -141,13 +141,13 @@ feedbackRoutes.openapi(feedbackStatsRoute, async (c): Promise<any> => {
   const prevCountQuery = agentName
     ? sql`
         SELECT rating, COUNT(*) as cnt
-        FROM user_feedback
+        FROM session_feedback
         WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND created_at >= ${prevSince} AND created_at < ${since}
         GROUP BY rating
       `
     : sql`
         SELECT rating, COUNT(*) as cnt
-        FROM user_feedback
+        FROM session_feedback
         WHERE org_id = ${user.org_id} AND created_at >= ${prevSince} AND created_at < ${since}
         GROUP BY rating
       `;
@@ -159,7 +159,7 @@ feedbackRoutes.openapi(feedbackStatsRoute, async (c): Promise<any> => {
     ? []
     : await sql`
         SELECT agent_name, rating, COUNT(*) as cnt
-        FROM user_feedback
+        FROM session_feedback
         WHERE org_id = ${user.org_id} AND created_at >= ${since}
         GROUP BY agent_name, rating
         ORDER BY agent_name
@@ -237,7 +237,7 @@ feedbackRoutes.openapi(getFeedbackRoute, async (c): Promise<any> => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT id, session_id, turn_number, rating, comment, message_preview, agent_name, channel, created_at, org_id
-    FROM user_feedback
+    FROM session_feedback
     WHERE id = ${id} AND org_id = ${user.org_id}
     LIMIT 1
   `;
@@ -270,7 +270,7 @@ feedbackRoutes.openapi(deleteFeedbackRoute, async (c): Promise<any> => {
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`
-    DELETE FROM user_feedback
+    DELETE FROM session_feedback
     WHERE id = ${id} AND org_id = ${user.org_id}
   `;
 

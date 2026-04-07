@@ -54,14 +54,14 @@ function makeSqlMock(options: { hasSession: boolean }) {
         {
           turn_number: 2,
           llm_content: "second turn",
-          tool_calls_json: '[{"name":"tool-a"}]',
+          tool_calls: '[{"name":"tool-a"}]',
           reflection_json: '{"ok":true}',
           plan_json: '{"steps":[1,2]}',
         },
         {
           turn_number: 1,
           llm_content: "first turn",
-          tool_calls_json: "[]",
+          tool_calls: "[]",
           reflection_json: "{}",
           plan_json: "{}",
         },

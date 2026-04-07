@@ -192,7 +192,7 @@ describe("read_agent_config — returns all config fields", () => {
       "FROM agents WHERE name": [{
         name: "test-agent",
         description: "Test agent",
-        config_json: JSON.stringify(SAMPLE_AGENT_CONFIG),
+        config: JSON.stringify(SAMPLE_AGENT_CONFIG),
         is_active: true,
         created_at: "2025-01-01",
         updated_at: "2025-01-02",
@@ -202,11 +202,11 @@ describe("read_agent_config — returns all config fields", () => {
     vi.mocked(getDbForOrg).mockResolvedValue(sql as any);
 
     // Simulate what executeTool does for read_agent_config
-    const rows = await sql`SELECT name, description, config_json, is_active, created_at, updated_at FROM agents WHERE name = ${"test-agent"} AND org_id = ${"org-1"} LIMIT 1`;
+    const rows = await sql`SELECT name, description, config, is_active, created_at, updated_at FROM agents WHERE name = ${"test-agent"} AND org_id = ${"org-1"} LIMIT 1`;
     expect(rows.length).toBe(1);
 
     const row = rows[0] as any;
-    const config = JSON.parse(row.config_json);
+    const config = JSON.parse(row.config);
 
     // Verify the new fields are in the config
     expect(config.blocked_tools).toEqual([]);
@@ -294,7 +294,7 @@ describe("update_agent_config — supports new fields", () => {
 // ══════════════════════════════════════════════════════════════════
 
 describe("read_session_diagnostics — event extraction", () => {
-  it("detects loop_detected events from errors_json", () => {
+  it("detects loop_detected events from errors", () => {
     const errors = ["bash: Loop detected: bash failed 3 times"];
     const diagnostics: Array<{ type: string; detail: string }> = [];
 
@@ -597,7 +597,7 @@ describe("read_conversation_quality — returns real metrics", () => {
 describe("read_observability — SQL correctness", () => {
   it("error count query uses created_at not started_at", async () => {
     const { sql, calls } = createMockSql({
-      "errors_json IS NOT NULL": [{ cnt: 5 }],
+      "errors IS NOT NULL": [{ cnt: 5 }],
     });
 
     await sql`
@@ -606,7 +606,7 @@ describe("read_observability — SQL correctness", () => {
       WHERE s.agent_name = ${"test-agent"}
         AND s.org_id = ${"org-1"}
         AND t.created_at > now() - ${"24 hours"}::interval
-        AND t.errors_json IS NOT NULL AND t.errors_json != '[]'
+        AND t.errors IS NOT NULL AND t.errors != '[]'
     `;
 
     expect(calls[0].query).toContain("t.created_at");
@@ -753,7 +753,7 @@ describe("consolidated schema — feature_flags, agent_versions, skills", () => 
     const content = fs.readFileSync("src/db/migrations/001_init.sql", "utf8");
     expect(content).toContain("CREATE TABLE IF NOT EXISTS agent_versions");
     expect(content).toContain("agent_name");
-    expect(content).toContain("config_json");
+    expect(content).toContain("config");
   });
 
   it("init migration contains skills table with agent_name", async () => {

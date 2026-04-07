@@ -125,7 +125,7 @@ toolRoutes.openapi(listToolsRoute, async (c): Promise<any> => {
 
     try {
       const rows = await sql`
-        SELECT name, description, source, has_handler, schema_json, is_builtin
+        SELECT name, description, source, has_handler, schema, is_builtin
         FROM tool_registry
         WHERE org_id = ${user.org_id} OR is_builtin = true
         ORDER BY name
@@ -134,7 +134,7 @@ toolRoutes.openapi(listToolsRoute, async (c): Promise<any> => {
       dbTools = rows.map((r: any) => ({
         name: r.name,
         description: r.description || "",
-        input_schema: parseJsonColumn(r.schema_json, { type: "object" }),
+        input_schema: parseJsonColumn(r.schema, { type: "object" }),
         handler: r.has_handler ? undefined : undefined, // Handlers are loaded separately
         source_path: r.source,
       }));
@@ -464,7 +464,7 @@ toolRoutes.openapi(registerRoute, async (c): Promise<any> => {
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
     await sql`
       INSERT INTO tool_registry (
-        name, description, org_id, schema_json, has_handler,
+        name, description, org_id, schema, has_handler,
         handler_code, source, is_builtin, created_at
       ) VALUES (
         ${body.name}, ${body.description}, ${user.org_id},
@@ -534,7 +534,7 @@ toolRoutes.openapi(getToolRoute, async (c): Promise<any> => {
     try {
       const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
       const rows = await sql`
-        SELECT name, description, source, has_handler, schema_json, handler_code, is_builtin
+        SELECT name, description, source, has_handler, schema, handler_code, is_builtin
         FROM tool_registry
         WHERE name = ${name} AND (org_id = ${user.org_id} OR is_builtin = true)
         LIMIT 1
@@ -545,7 +545,7 @@ toolRoutes.openapi(getToolRoute, async (c): Promise<any> => {
         tool = {
           name: r.name,
           description: r.description || "",
-          input_schema: parseJsonColumn(r.schema_json, { type: "object" }),
+          input_schema: parseJsonColumn(r.schema, { type: "object" }),
           source_path: r.source,
         };
       }
@@ -584,7 +584,7 @@ const getToolSchemaRoute = createRoute({
             name: z.string(),
             description: z.string(),
             schema: z.record(z.unknown()),
-            schema_json: z.string(),
+            schema_text: z.string(),
           }),
         },
       },
@@ -605,7 +605,7 @@ toolRoutes.openapi(getToolSchemaRoute, async (c): Promise<any> => {
     name: tool.name,
     description: tool.description,
     schema: tool.input_schema,
-    schema_json: JSON.stringify(tool.input_schema, null, 2),
+    schema_text: JSON.stringify(tool.input_schema, null, 2),
   });
 });
 
@@ -715,7 +715,7 @@ toolRoutes.openapi(executeToolRoute, async (c): Promise<any> => {
       const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
       sql`
         INSERT INTO tool_executions (
-          tool_name, org_id, user_id, arguments_json, result_json,
+          tool_name, org_id, user_id, arguments_json, result,
           duration_ms, trace_id, session_id, created_at
         ) VALUES (
           ${name}, ${user.org_id}, ${user.user_id},
@@ -842,7 +842,7 @@ toolRoutes.openapi(executionHistoryRoute, async (c): Promise<any> => {
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
     const rows = await sql`
       SELECT
-        execution_id, arguments_json, result_json, duration_ms,
+        execution_id, arguments_json, result, duration_ms,
         trace_id, session_id, created_at, error
       FROM tool_executions
       WHERE tool_name = ${name} AND org_id = ${user.org_id}
@@ -862,7 +862,7 @@ toolRoutes.openapi(executionHistoryRoute, async (c): Promise<any> => {
       executions: rows.map((r: any) => ({
         id: r.execution_id,
         arguments: parseJsonColumn(r.arguments_json),
-        result: parseJsonColumn(r.result_json, null),
+        result: parseJsonColumn(r.result, null),
         duration_ms: r.duration_ms,
         trace_id: r.trace_id,
         session_id: r.session_id,

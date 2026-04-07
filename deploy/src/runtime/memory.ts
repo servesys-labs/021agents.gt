@@ -172,7 +172,7 @@ export async function findBestProcedures(
   let rows: any[];
   try {
     rows = await sql`
-      SELECT name, description, steps_json, success_count, failure_count, last_used
+      SELECT name, description, steps, success_count, failure_count, last_used
       FROM procedures
       WHERE success_count > 0
       ORDER BY (success_count::float / GREATEST(success_count + failure_count, 1)) DESC,
@@ -204,7 +204,7 @@ export async function findBestProcedures(
 function mapProcedure(row: any): Procedure {
   let steps: any[] = [];
   try {
-    steps = typeof row.steps_json === "string" ? JSON.parse(row.steps_json) : row.steps_json || [];
+    steps = typeof row.steps === "string" ? JSON.parse(row.steps) : row.steps || [];
   } catch { steps = []; }
   const sc = Number(row.success_count) || 0;
   const fc = Number(row.failure_count) || 0;
@@ -324,7 +324,7 @@ async function fetchCuratedSemanticFacts(
       const p0 = `%${kw[0]}%`;
       rows = await sql`
         SELECT key, value, category, created_at
-        FROM semantic_facts
+        FROM facts
         WHERE agent_name = ${agent} AND org_id = ${org}
           AND (LOWER(key) LIKE ${p0} OR LOWER(value) LIKE ${p0})
         ORDER BY created_at DESC
@@ -334,7 +334,7 @@ async function fetchCuratedSemanticFacts(
     if (rows.length === 0) {
       rows = await sql`
         SELECT key, value, category, created_at
-        FROM semantic_facts
+        FROM facts
         WHERE agent_name = ${agent} AND org_id = ${org}
         ORDER BY created_at DESC
         LIMIT ${limit}
@@ -348,7 +348,7 @@ async function fetchCuratedSemanticFacts(
         content: line,
         category: r.category || "reference",
         confidence: 0.95,
-        source: "semantic_facts",
+        source: "facts",
         created_at: ts,
       };
     });
@@ -423,7 +423,7 @@ export async function searchFacts(
   try {
     const rows = await sql`
       SELECT id, content, category, confidence, source, created_at
-      FROM memory_facts
+      FROM facts
       WHERE LOWER(content) LIKE ${`%${keywords[0]}%`}
         AND confidence >= 0.7
       ORDER BY confidence DESC, created_at DESC
@@ -483,10 +483,10 @@ export async function storeFact(
   const contentHash = await hashContent(fact.content);
   try {
     await sql`
-      INSERT INTO memory_facts (id, content, content_hash, category, confidence, source, created_at)
+      INSERT INTO facts (id, content, content_hash, category, confidence, source, created_at)
       VALUES (${id}, ${fact.content}, ${contentHash}, ${fact.category}, ${fact.confidence}, ${fact.source}, ${new Date().toISOString()})
       ON CONFLICT (content_hash) DO UPDATE SET
-        confidence = GREATEST(memory_facts.confidence, EXCLUDED.confidence),
+        confidence = GREATEST(facts.confidence, EXCLUDED.confidence),
         source = EXCLUDED.source
     `;
   } catch {
@@ -601,7 +601,7 @@ export function queueSessionEpisodicNote(
       const sql = await getDb(hyperdrive);
       const now = new Date().toISOString();
       await sql`
-        INSERT INTO episodic_memories (id, agent_name, org_id, content, source, metadata_json, created_at)
+        INSERT INTO episodes (id, agent_name, org_id, content, source, metadata, created_at)
         VALUES (${id}, ${p.agentName}, ${p.orgId || ""}, ${content}, 'session_auto', ${JSON.stringify({ session_id: p.sessionId })}, ${now})
       `;
     } catch {

@@ -165,7 +165,7 @@ batchApiRoutes.openapi(submitBatchRoute, async (c): Promise<any> => {
     // Create the batch job row
     await sql`
       INSERT INTO batch_jobs (batch_id, org_id, agent_name, status, total_tasks, completed_tasks, failed_tasks,
-        callback_url, callback_secret, metadata_json, created_at, updated_at)
+        callback_url, callback_secret, metadata, created_at, updated_at)
       VALUES (
         ${batchId}, ${orgId}, ${agentName}, 'pending', ${tasks.length}, 0, 0,
         ${callback_url || null}, ${callback_secret || null},
@@ -180,7 +180,7 @@ batchApiRoutes.openapi(submitBatchRoute, async (c): Promise<any> => {
       const task = tasks[i];
       await sql`
         INSERT INTO batch_tasks (task_id, batch_id, org_id, task_index, input, system_prompt,
-          response_format, response_schema, file_ids_json, status, created_at, updated_at)
+          response_format, response_schema, file_ids, status, created_at, updated_at)
         VALUES (
           ${taskId}, ${batchId}, ${orgId}, ${i}, ${task.input!},
           ${task.system_prompt || null}, ${task.response_format || null},
@@ -252,7 +252,7 @@ batchApiRoutes.openapi(listBatchesRoute, async (c): Promise<any> => {
   try {
     const rows = await sql`
       SELECT batch_id, status, total_tasks, completed_tasks, failed_tasks,
-             metadata_json, created_at, updated_at, completed_at
+             metadata, created_at, updated_at, completed_at
       FROM batch_jobs
       WHERE org_id = ${orgId} AND agent_name = ${agentName}
       ORDER BY created_at DESC
@@ -265,7 +265,7 @@ batchApiRoutes.openapi(listBatchesRoute, async (c): Promise<any> => {
       total_tasks: Number(r.total_tasks),
       completed_tasks: Number(r.completed_tasks),
       failed_tasks: Number(r.failed_tasks),
-      metadata: parseJsonColumn(r.metadata_json, null),
+      metadata: parseJsonColumn(r.metadata, null),
       created_at: r.created_at,
       updated_at: r.updated_at,
       completed_at: r.completed_at || null,
@@ -321,7 +321,7 @@ batchApiRoutes.openapi(getBatchRoute, async (c): Promise<any> => {
     // Fetch the batch job
     const batchRows = await sql`
       SELECT batch_id, status, total_tasks, completed_tasks, failed_tasks,
-             callback_url, metadata_json, created_at, updated_at, completed_at, error
+             callback_url, metadata, created_at, updated_at, completed_at, error
       FROM batch_jobs
       WHERE batch_id = ${batchId} AND org_id = ${orgId} AND agent_name = ${agentName}
       LIMIT 1
@@ -360,7 +360,7 @@ batchApiRoutes.openapi(getBatchRoute, async (c): Promise<any> => {
       total_tasks: Number(batch.total_tasks),
       completed_tasks: Number(batch.completed_tasks),
       failed_tasks: Number(batch.failed_tasks),
-      metadata: parseJsonColumn(batch.metadata_json, null),
+      metadata: parseJsonColumn(batch.metadata, null),
       error: batch.error || null,
       created_at: batch.created_at,
       updated_at: batch.updated_at,

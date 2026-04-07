@@ -51,14 +51,14 @@ export async function buildTeamMemoryContext(
 
     // Fetch top team facts
     const facts = await sql`
-      SELECT content, category, author_agent, score FROM team_facts
+      SELECT content, category, author_agent, score FROM facts
       WHERE org_id = ${orgId} AND score > 0.3
       ORDER BY score DESC LIMIT 10
     `.catch(() => []);
 
     // Fetch recent observations about this agent
     const observations = await sql`
-      SELECT content, author_agent FROM team_observations
+      SELECT content, author_agent FROM facts
       WHERE org_id = ${orgId} AND (target_agent = ${agentName} OR target_agent IS NULL)
       ORDER BY created_at DESC LIMIT 5
     `.catch(() => []);
@@ -111,9 +111,9 @@ export async function writeTeamFact(
     const sql = pg((env as any).HYPERDRIVE?.connectionString || "", { max: 1, prepare: false });
 
     await sql`
-      INSERT INTO team_facts (org_id, author_agent, content, category, score, created_at)
+      INSERT INTO facts (org_id, author_agent, content, category, score, created_at)
       VALUES (${orgId}, ${agentName}, ${content.slice(0, 1000)}, ${category}, ${0.5}, NOW())
-      ON CONFLICT (org_id, content) DO UPDATE SET score = team_facts.score + 0.1, updated_at = NOW()
+      ON CONFLICT (org_id, content) DO UPDATE SET score = facts.score + 0.1, updated_at = NOW()
     `.catch(() => {});
 
     await sql.end();
@@ -135,7 +135,7 @@ export async function writeTeamObservation(
     const sql = pg((env as any).HYPERDRIVE?.connectionString || "", { max: 1, prepare: false });
 
     await sql`
-      INSERT INTO team_observations (org_id, author_agent, target_agent, content, created_at)
+      INSERT INTO facts (org_id, author_agent, target_agent, content, created_at)
       VALUES (${orgId}, ${authorAgent}, ${targetAgent || null}, ${content.slice(0, 1000)}, NOW())
     `.catch(() => {});
 

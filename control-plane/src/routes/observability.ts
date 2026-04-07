@@ -264,7 +264,7 @@ observabilityRoutes.openapi(incidentsRoute, async (c): Promise<any> => {
   if (wantLoop) {
     try {
       const rows = await sql`
-        SELECT m.session_id, m.event_type, m.details_json, m.created_at, s.trace_id
+        SELECT m.session_id, m.event_type, m.details, m.created_at, s.trace_id
         FROM middleware_events m
         LEFT JOIN sessions s ON s.session_id = m.session_id AND s.org_id = m.org_id
         WHERE m.org_id = ${user.org_id}
@@ -281,7 +281,7 @@ observabilityRoutes.openapi(incidentsRoute, async (c): Promise<any> => {
           if (et === "loop_halt" && !kindFilter.has("loop_halt")) continue;
           if (et === "loop_warn" && !kindFilter.has("loop_warn")) continue;
         }
-        const details = parseJsonSafe(r.details_json);
+        const details = parseJsonSafe(r.details);
         raw.push(
           buildLoopIncident({
             eventType: et,
@@ -301,20 +301,20 @@ observabilityRoutes.openapi(incidentsRoute, async (c): Promise<any> => {
   if (wantCircuit) {
     try {
       const rows = await sql`
-        SELECT trace_id, session_id, event_type, details_json, created_at
+        SELECT trace_id, session_id, event_type, details, created_at
         FROM runtime_events
         WHERE org_id = ${user.org_id}
           AND event_type = 'turn_completed'
           AND (
-            COALESCE(details_json::jsonb->>'error', '') ILIKE '%circuit breaker%'
-            OR COALESCE(details_json::text, '') ILIKE '%circuit breaker%'
+            COALESCE(details::jsonb->>'error', '') ILIKE '%circuit breaker%'
+            OR COALESCE(details::text, '') ILIKE '%circuit breaker%'
           )
           AND created_at >= ${since}
         ORDER BY created_at DESC
         LIMIT ${limit}
       `;
       for (const r of rows as any[]) {
-        const details = parseJsonSafe(r.details_json);
+        const details = parseJsonSafe(r.details);
         raw.push(
           buildCircuitIncident({
             openedAt: String(r.created_at || evaluatedAt),
@@ -718,7 +718,7 @@ observabilityRoutes.openapi(postAnnotationsRoute, async (c): Promise<any> => {
   const now = new Date().toISOString();
 
   await sql`
-    INSERT INTO trace_annotations (annotation_id, trace_id, org_id, user_id, annotation_type, message, severity, span_id, node_id, turn, metadata_json, created_at)
+    INSERT INTO trace_annotations (annotation_id, trace_id, org_id, user_id, annotation_type, message, severity, span_id, node_id, turn, metadata, created_at)
     VALUES (${annotationId}, ${traceId}, ${user.org_id}, ${user.user_id}, ${annotationType}, ${message}, ${severity}, ${spanId}, ${nodeId}, ${turn}, ${JSON.stringify(metadata)}, ${now})
   `;
 
@@ -827,14 +827,14 @@ observabilityRoutes.openapi(postLineageRoute, async (c): Promise<any> => {
   const now = new Date().toISOString();
 
   await sql`
-    INSERT INTO trace_lineage (trace_id, org_id, session_id, agent_version, model, prompt_hash, eval_run_id, experiment_id, dataset_id, commit_sha, metadata_json, created_at)
+    INSERT INTO trace_lineage (trace_id, org_id, session_id, agent_version, model, prompt_hash, eval_run_id, experiment_id, dataset_id, commit_sha, metadata, created_at)
     VALUES (${traceId}, ${user.org_id}, ${body.session_id}, ${body.agent_version}, ${body.model}, ${body.prompt_hash}, ${body.eval_run_id}, ${body.experiment_id}, ${body.dataset_id}, ${body.commit_sha}, ${JSON.stringify(body.metadata)}, ${now})
     ON CONFLICT (trace_id) DO UPDATE SET
       session_id = EXCLUDED.session_id,
       agent_version = EXCLUDED.agent_version,
       model = EXCLUDED.model,
       prompt_hash = EXCLUDED.prompt_hash,
-      metadata_json = EXCLUDED.metadata_json
+      metadata = EXCLUDED.metadata
   `;
 
   return c.json({ trace_id: traceId, updated: true });
@@ -1143,7 +1143,7 @@ observabilityRoutes.openapi(generateMetaProposalsRoute, async (c): Promise<any> 
     for (const p of proposals) {
       try {
         await sql`
-          INSERT INTO meta_proposals (id, agent_name, org_id, title, rationale, category, priority, modification_json, evidence_json, status, created_at)
+          INSERT INTO meta_proposals (id, agent_name, org_id, title, rationale, category, priority, modification_json, evidence, status, created_at)
           VALUES (${p.id}, ${agentName}, ${user.org_id}, ${p.title}, ${p.rationale},
                   ${p.category}, ${p.priority}, ${JSON.stringify(p.modification)},
                   ${JSON.stringify(p.evidence)}, 'pending', ${p.created_at})
@@ -1323,7 +1323,7 @@ observabilityRoutes.openapi(traceReplayRoute, async (c): Promise<any> => {
 
   // Load all events for this trace ordered by id
   const events = await sql`
-    SELECT e.id, e.session_id, e.turn AS turn_number, e.event_type, e.details_json, e.created_at, s.trace_id
+    SELECT e.id, e.session_id, e.turn AS turn_number, e.event_type, e.details, e.created_at, s.trace_id
     FROM otel_events e
     INNER JOIN sessions s ON s.session_id = e.session_id
     WHERE s.trace_id = ${traceId} AND s.org_id = ${user.org_id}
@@ -1363,7 +1363,7 @@ observabilityRoutes.openapi(traceReplayRoute, async (c): Promise<any> => {
   const messages: Array<{ role: string; content: string; turn: number }> = [];
 
   for (const row of prefix) {
-    const data = parseJsonSafe(row.details_json);
+    const data = parseJsonSafe(row.details);
     const eventType = String(row.event_type || "");
     const turn = Number(row.turn_number || 0);
 
@@ -1403,7 +1403,7 @@ observabilityRoutes.openapi(traceReplayRoute, async (c): Promise<any> => {
           id: r.id,
           event_type: r.event_type,
           turn: r.turn_number,
-          details: parseJsonSafe(r.details_json),
+          details: parseJsonSafe(r.details),
           created_at: r.created_at,
         }))
       : [],
@@ -1440,7 +1440,7 @@ observabilityRoutes.openapi(runTreeRoute, async (c): Promise<any> => {
   if (Number(check[0]?.cnt) === 0) return c.json({ error: "Trace not found" }, 404);
 
   const events = await sql`
-    SELECT e.id, e.session_id, e.turn AS turn_number, e.event_type, e.details_json, e.created_at
+    SELECT e.id, e.session_id, e.turn AS turn_number, e.event_type, e.details, e.created_at
     FROM otel_events e
     INNER JOIN sessions s ON s.session_id = e.session_id
     WHERE s.trace_id = ${traceId} AND s.org_id = ${user.org_id}
@@ -1458,7 +1458,7 @@ observabilityRoutes.openapi(runTreeRoute, async (c): Promise<any> => {
     turnMap.get(turn)!.push({
       id: row.id,
       event_type: row.event_type,
-      details: parseJsonSafe(row.details_json),
+      details: parseJsonSafe(row.details),
       created_at: row.created_at,
     });
   }
@@ -1560,7 +1560,7 @@ observabilityRoutes.openapi(autonomousMaintenanceRoute, async (c): Promise<any> 
     for (const proposal of proposals) {
       try {
         await sql`
-          INSERT INTO meta_proposals (id, agent_name, org_id, title, rationale, category, priority, modification_json, evidence_json, status, created_at)
+          INSERT INTO meta_proposals (id, agent_name, org_id, title, rationale, category, priority, modification_json, evidence, status, created_at)
           VALUES (${proposal.id}, ${agentName}, ${user.org_id}, ${proposal.title}, ${proposal.rationale},
                   ${proposal.category}, ${proposal.priority}, ${JSON.stringify(proposal.modification)},
                   ${JSON.stringify(proposal.evidence)}, 'pending', ${new Date().toISOString()})
@@ -1687,7 +1687,7 @@ observabilityRoutes.get("/export/otlp", requireScope("observability:read"), asyn
   const sessionIds = sessions.map((s: any) => String(s.session_id));
   const turns = sessionIds.length > 0
     ? await sql`
-        SELECT session_id, turn_number, tool_calls_json, tool_results_json, error, created_at
+        SELECT session_id, turn_number, tool_calls, tool_results, error, created_at
         FROM turns
         WHERE session_id = ANY(${sessionIds})
         ORDER BY session_id, turn_number
@@ -1804,7 +1804,7 @@ observabilityRoutes.get("/export/otlp", requireScope("observability:read"), asyn
         }
 
         let toolCalls: any[] = [];
-        toolCalls = parseJsonColumn(turn.tool_calls_json, []);
+        toolCalls = parseJsonColumn(turn.tool_calls, []);
         if (toolCalls.length > 0) {
           turnAttrs.push({ key: "agentos.tool_call_count", value: { intValue: String(toolCalls.length) } });
           turnAttrs.push({ key: "agentos.tool_names", value: { stringValue: toolCalls.map((tc: any) => tc.name || tc.tool || "").join(",") } });
@@ -1902,7 +1902,7 @@ observabilityRoutes.openapi(delegationTreeRoute, async (c): Promise<any> => {
       cost_usd: Number(e.child_cost_usd || 0),
       input_preview: e.input_preview,
       output_preview: e.output_preview,
-      error: e.error_message,
+      error: e.error,
       created_at: e.created_at,
       completed_at: e.completed_at,
     })),

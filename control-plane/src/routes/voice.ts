@@ -170,13 +170,13 @@ voiceRoutes.openapi(getVoiceConfigRoute, async (c): Promise<any> => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
-    SELECT config_json FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id} LIMIT 1
+    SELECT config FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id} LIMIT 1
   `;
   if (rows.length === 0) {
     return c.json({ error: `Agent '${agentName}' not found` }, 404);
   }
 
-  const cfg = parseAgentConfigJson((rows[0] as Record<string, unknown>).config_json);
+  const cfg = parseAgentConfigJson((rows[0] as Record<string, unknown>).config);
   const voice = (cfg.voice && typeof cfg.voice === "object" && !Array.isArray(cfg.voice)
     ? (cfg.voice as Record<string, unknown>)
     : {}) as Record<string, unknown>;
@@ -252,13 +252,13 @@ voiceRoutes.openapi(putVoiceConfigRoute, async (c): Promise<any> => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
-    SELECT config_json FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id} LIMIT 1
+    SELECT config FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id} LIMIT 1
   `;
   if (rows.length === 0) {
     return c.json({ error: `Agent '${agentName}' not found` }, 404);
   }
 
-  const cfg = parseAgentConfigJson((rows[0] as Record<string, unknown>).config_json);
+  const cfg = parseAgentConfigJson((rows[0] as Record<string, unknown>).config);
   const prevVoice =
     cfg.voice && typeof cfg.voice === "object" && !Array.isArray(cfg.voice)
       ? (cfg.voice as Record<string, unknown>)
@@ -273,7 +273,7 @@ voiceRoutes.openapi(putVoiceConfigRoute, async (c): Promise<any> => {
   cfg.voice = nextVoice;
 
   await sql`
-    UPDATE agents SET config_json = ${JSON.stringify(cfg)}, updated_at = now()
+    UPDATE agents SET config = ${JSON.stringify(cfg)}, updated_at = now()
     WHERE name = ${agentName} AND org_id = ${user.org_id}
   `;
 
@@ -545,7 +545,7 @@ voiceRoutes.openapi(vapiServerUrlRoute, async (c): Promise<any> => {
 
   // Load agent config
   const agentRows = await sql`
-    SELECT config_json FROM agents
+    SELECT config FROM agents
     WHERE name = ${tenant.agent_name} AND org_id = ${tenant.org_id} LIMIT 1
   `;
   if (agentRows.length === 0) {
@@ -559,7 +559,7 @@ voiceRoutes.openapi(vapiServerUrlRoute, async (c): Promise<any> => {
     });
   }
 
-  const config = parseAgentConfigJson((agentRows[0] as Record<string, unknown>).config_json);
+  const config = parseAgentConfigJson((agentRows[0] as Record<string, unknown>).config);
   const voiceConfig = (config.voice && typeof config.voice === "object" && !Array.isArray(config.voice))
     ? (config.voice as Record<string, unknown>)
     : {};

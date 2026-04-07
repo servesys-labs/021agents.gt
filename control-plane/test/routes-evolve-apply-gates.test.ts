@@ -43,8 +43,8 @@ describe("evolve apply autopilot gates", () => {
           },
         ]);
       }
-      if (q.includes("FROM agents") && q.includes("config_json")) {
-        return Promise.resolve([{ config_json: "{}" }]);
+      if (q.includes("FROM agents") && q.includes("config")) {
+        return Promise.resolve([{ config: "{}" }]);
       }
       if (q.includes("FROM sessions") && q.includes("agent_name")) {
         return Promise.resolve([
@@ -60,13 +60,13 @@ describe("evolve apply autopilot gates", () => {
       if (q.includes("FROM evolution_reports") && q.includes("ORDER BY created_at DESC")) {
         return Promise.resolve([]);
       }
-      if (q.includes("UPDATE agents SET config_json")) {
+      if (q.includes("UPDATE agents SET config")) {
         return Promise.resolve([]);
       }
       if (q.includes("INSERT INTO evolution_ledger")) {
         return Promise.resolve([]);
       }
-      if (q.includes("UPDATE evolution_reports SET report_json")) {
+      if (q.includes("UPDATE evolution_reports SET report")) {
         return Promise.resolve([]);
       }
       if (q.includes("UPDATE evolution_proposals SET status = 'applied'")) {
@@ -115,8 +115,8 @@ describe("evolve apply autopilot gates", () => {
           },
         ]);
       }
-      if (q.includes("FROM agents") && q.includes("config_json")) {
-        return Promise.resolve([{ config_json: "{}" }]);
+      if (q.includes("FROM agents") && q.includes("config")) {
+        return Promise.resolve([{ config: "{}" }]);
       }
       if (q.includes("FROM sessions") && q.includes("agent_name")) {
         return Promise.resolve([]);
@@ -126,7 +126,7 @@ describe("evolve apply autopilot gates", () => {
       }
       if (q.includes("FROM evolution_reports") && q.includes("ORDER BY created_at DESC LIMIT 1")) {
         return Promise.resolve([
-          { report_json: JSON.stringify({ success_rate: 0.5 }), session_count: 3, created_at: 1 },
+          { report: JSON.stringify({ success_rate: 0.5 }), session_count: 3, created_at: 1 },
         ]);
       }
       return Promise.resolve([]);

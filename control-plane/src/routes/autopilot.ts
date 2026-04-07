@@ -87,11 +87,11 @@ autopilotRoutes.openapi(startRoute, async (c): Promise<any> => {
   const now = new Date().toISOString();
 
   const rows = await sql`
-    INSERT INTO autopilot_sessions (org_id, agent_name, channel, channel_user_id, tick_interval_seconds, system_addendum, config_json, created_at, updated_at)
+    INSERT INTO autopilot_sessions (org_id, agent_name, channel, channel_user_id, tick_interval_seconds, system_addendum, config, created_at, updated_at)
     VALUES (${user.org_id}, ${body.agent_name}, ${body.channel}, ${body.channel_user_id || ""}, ${body.tick_interval_seconds}, ${addendum}, ${JSON.stringify(body.config || {})}, ${now}, ${now})
     ON CONFLICT (org_id, agent_name, channel, channel_user_id) DO UPDATE SET
       status = 'active', tick_interval_seconds = EXCLUDED.tick_interval_seconds,
-      system_addendum = EXCLUDED.system_addendum, config_json = EXCLUDED.config_json,
+      system_addendum = EXCLUDED.system_addendum, config = EXCLUDED.config,
       updated_at = EXCLUDED.updated_at
     RETURNING *
   `;
@@ -274,7 +274,7 @@ export async function tickAutopilotSessions(env: any): Promise<{ dispatched: num
     while (hasMore) {
       const sessions = lastId
         ? await sql`
-            SELECT id, org_id, agent_name, channel, channel_user_id, tick_interval_seconds, tick_count, system_addendum, config_json
+            SELECT id, org_id, agent_name, channel, channel_user_id, tick_interval_seconds, tick_count, system_addendum, config
             FROM autopilot_sessions
             WHERE status = 'active'
               AND (last_tick_at IS NULL OR last_tick_at + make_interval(secs => tick_interval_seconds) < NOW())
@@ -283,7 +283,7 @@ export async function tickAutopilotSessions(env: any): Promise<{ dispatched: num
             LIMIT ${DISPATCH_PAGE_SIZE}
           `
         : await sql`
-            SELECT id, org_id, agent_name, channel, channel_user_id, tick_interval_seconds, tick_count, system_addendum, config_json
+            SELECT id, org_id, agent_name, channel, channel_user_id, tick_interval_seconds, tick_count, system_addendum, config
             FROM autopilot_sessions
             WHERE status = 'active'
               AND (last_tick_at IS NULL OR last_tick_at + make_interval(secs => tick_interval_seconds) < NOW())
@@ -317,7 +317,7 @@ export async function tickAutopilotSessions(env: any): Promise<{ dispatched: num
             channel_user_id: session.channel_user_id || "",
             tick_count: (session.tick_count || 0) + 1,
             system_addendum: session.system_addendum || "",
-            config_json: session.config_json,
+            config: session.config,
           },
         })
       ));
@@ -364,7 +364,7 @@ export async function processAutopilotTick(
     channel_user_id: string;
     tick_count: number;
     system_addendum: string;
-    config_json: any;
+    config: any;
   },
 ): Promise<void> {
   const tickPrompt = buildTickPrompt(payload.tick_count);
@@ -404,7 +404,7 @@ export async function processAutopilotTick(
     try {
       const { getDb: getDbFn } = await import("../db/client");
       const sql = await getDbFn(env.HYPERDRIVE);
-      await pushToChannel(env, sql, { ...payload, config_json: payload.config_json }, output);
+      await pushToChannel(env, sql, { ...payload, config: payload.config }, output);
     } catch {}
   }
 }
@@ -421,7 +421,7 @@ function buildTickPrompt(tickNum: number): string {
 }
 
 async function pushToChannel(env: any, sql: any, session: any, output: string): Promise<void> {
-  const config = typeof session.config_json === "string" ? JSON.parse(session.config_json) : (session.config_json || {});
+  const config = typeof session.config === "string" ? JSON.parse(session.config) : (session.config || {});
 
   // Write to KV for web UI polling
   const kv = env.AGENT_PROGRESS_KV;

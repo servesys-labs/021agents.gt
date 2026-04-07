@@ -162,16 +162,16 @@ marketplaceRoutes.openapi(publishRoute, async (c): Promise<any> => {
       RETURNING id
     `;
 
-    // Sync pricing to agent's config_json (the x-402 gate reads from here)
+    // Sync pricing to agent's config (the x-402 gate reads from here)
     if (body.price_per_task_usd > 0 || body.price_per_1k_tokens_usd > 0) {
       try {
-        const [agentRow] = await sql`SELECT config_json FROM agents WHERE name = ${body.agent_name} AND org_id = ${user.org_id}`;
-        const cfg = typeof agentRow.config_json === "string" ? JSON.parse(agentRow.config_json) : agentRow.config_json || {};
+        const [agentRow] = await sql`SELECT config FROM agents WHERE name = ${body.agent_name} AND org_id = ${user.org_id}`;
+        const cfg = typeof agentRow.config === "string" ? JSON.parse(agentRow.config) : agentRow.config || {};
         cfg.pricing = {
           price_per_task_usd: body.price_per_task_usd,
           price_per_1k_tokens_usd: body.price_per_1k_tokens_usd,
         };
-        await sql`UPDATE agents SET config_json = ${JSON.stringify(cfg)}, updated_at = now() WHERE name = ${body.agent_name} AND org_id = ${user.org_id}`;
+        await sql`UPDATE agents SET config = ${JSON.stringify(cfg)}, updated_at = now() WHERE name = ${body.agent_name} AND org_id = ${user.org_id}`;
       } catch {} // non-blocking — listing is still created
     }
 

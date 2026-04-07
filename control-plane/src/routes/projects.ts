@@ -144,7 +144,7 @@ projectRoutes.openapi(createProjectRoute, async (c): Promise<any> => {
       const agentId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
       const now = new Date().toISOString();
       await sql`
-        INSERT INTO agents (agent_id, name, org_id, project_id, config_json, description, version, is_active, created_by, created_at, updated_at)
+        INSERT INTO agents (agent_id, name, org_id, project_id, config, description, version, is_active, created_by, created_at, updated_at)
         VALUES (
           ${agentId}, ${agentName}, ${user.org_id}, ${projectId}, ${configJson},
           ${`Orchestrator meta-agent for ${name} — builds, tests, and continuously improves all agents`},
@@ -294,7 +294,7 @@ projectRoutes.openapi(updateEnvRoute, async (c): Promise<any> => {
   if (plan && providerConfig !== undefined) {
     const configJson = JSON.stringify(providerConfig);
     await sql`
-      UPDATE environments SET plan = ${plan}, provider_config_json = ${configJson}
+      UPDATE environments SET plan = ${plan}, provider_config = ${configJson}
       WHERE project_id = ${projectId} AND name = ${envName}
     `;
   } else if (plan) {
@@ -302,7 +302,7 @@ projectRoutes.openapi(updateEnvRoute, async (c): Promise<any> => {
   } else {
     const configJson = JSON.stringify(providerConfig);
     await sql`
-      UPDATE environments SET provider_config_json = ${configJson}
+      UPDATE environments SET provider_config = ${configJson}
       WHERE project_id = ${projectId} AND name = ${envName}
     `;
   }
