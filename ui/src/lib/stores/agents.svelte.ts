@@ -21,7 +21,9 @@ class AgentStore {
     try {
       const data = await api.get<Agent[] | { agents: Agent[] }>("/agents");
       // API returns bare array, not wrapped in { agents: [...] }
-      this.agents = Array.isArray(data) ? data : (data.agents ?? []);
+      const all = Array.isArray(data) ? data : (data.agents ?? []);
+      // meta-agent is ambient (not user-configurable) — hide from sidebar
+      this.agents = all.filter(a => a.name !== "meta-agent");
     } catch (err) {
       console.error("Failed to fetch agents:", err);
       this.agents = [];
