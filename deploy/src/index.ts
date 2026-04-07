@@ -3264,13 +3264,14 @@ export default {
 
     // Config cache invalidation endpoint (called by control-plane on agent updates)
     if (url.pathname === "/api/v1/internal/config-invalidate" && request.method === "POST") {
-      const serviceToken = env.SERVICE_TOKEN || "";
-      if (serviceToken) {
-        const authHeader = request.headers.get("Authorization") || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-        if (token !== serviceToken) {
-          return Response.json({ error: "unauthorized" }, { status: 401 });
-        }
+      const serviceToken = String(env.SERVICE_TOKEN || "").trim();
+      if (!serviceToken) {
+        return Response.json({ error: "service_token_not_configured" }, { status: 503 });
+      }
+      const authHeader = request.headers.get("Authorization") || "";
+      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      if (token !== serviceToken) {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
       }
       
       try {
@@ -3292,13 +3293,14 @@ export default {
 
     // POST /api/v1/internal/snippet-cache-invalidate — Invalidate cached codemode snippets
     if (url.pathname === "/api/v1/internal/snippet-cache-invalidate" && request.method === "POST") {
-      const serviceToken = env.SERVICE_TOKEN || "";
-      if (serviceToken) {
-        const authHeader = request.headers.get("Authorization") || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-        if (token !== serviceToken) {
-          return Response.json({ error: "unauthorized" }, { status: 401 });
-        }
+      const serviceToken = String(env.SERVICE_TOKEN || "").trim();
+      if (!serviceToken) {
+        return Response.json({ error: "service_token_not_configured" }, { status: 503 });
+      }
+      const authHeader = request.headers.get("Authorization") || "";
+      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      if (token !== serviceToken) {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
       }
 
       try {
@@ -3386,13 +3388,14 @@ export default {
 
     // ── Edge-native eval run (persists eval_runs + eval_trials) ──────────
     if (url.pathname === "/api/v1/eval/run" && request.method === "POST") {
-      const serviceToken = env.SERVICE_TOKEN || "";
-      if (serviceToken) {
-        const authHeader = request.headers.get("Authorization") || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-        if (token !== serviceToken) {
-          return Response.json({ error: "unauthorized" }, { status: 401 });
-        }
+      const serviceToken = String(env.SERVICE_TOKEN || "").trim();
+      if (!serviceToken) {
+        return Response.json({ error: "service_token_not_configured" }, { status: 503 });
+      }
+      const authHeader = request.headers.get("Authorization") || "";
+      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      if (token !== serviceToken) {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
       }
       // Contract: JSON body with `tasks` (required). Optional query overrides for
       // `agent_name` and `trials` so control-plane can mirror the portal query contract
@@ -3535,13 +3538,14 @@ export default {
 
     // ── Edge-native eval read APIs (backend parity) ───────────────────────
     if (url.pathname === "/api/v1/eval/runs" && request.method === "GET") {
-      const serviceToken = env.SERVICE_TOKEN || "";
-      if (serviceToken) {
-        const authHeader = request.headers.get("Authorization") || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-        if (token !== serviceToken) {
-          return Response.json({ error: "unauthorized" }, { status: 401 });
-        }
+      const serviceToken = String(env.SERVICE_TOKEN || "").trim();
+      if (!serviceToken) {
+        return Response.json({ error: "service_token_not_configured" }, { status: 503 });
+      }
+      const authHeader = request.headers.get("Authorization") || "";
+      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      if (token !== serviceToken) {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
       }
       try {
         const agentName = String(url.searchParams.get("agent_name") || "").trim();
@@ -3554,13 +3558,14 @@ export default {
     }
     const evalRunMatch = url.pathname.match(/^\/api\/v1\/eval\/runs\/([^/]+)$/);
     if (evalRunMatch && request.method === "GET") {
-      const serviceToken = env.SERVICE_TOKEN || "";
-      if (serviceToken) {
-        const authHeader = request.headers.get("Authorization") || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-        if (token !== serviceToken) {
-          return Response.json({ error: "unauthorized" }, { status: 401 });
-        }
+      const serviceToken = String(env.SERVICE_TOKEN || "").trim();
+      if (!serviceToken) {
+        return Response.json({ error: "service_token_not_configured" }, { status: 503 });
+      }
+      const authHeader = request.headers.get("Authorization") || "";
+      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      if (token !== serviceToken) {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
       }
       try {
         const runId = decodeURIComponent(String(evalRunMatch[1] || ""));
@@ -3574,13 +3579,14 @@ export default {
     }
     const evalTrialsMatch = url.pathname.match(/^\/api\/v1\/eval\/runs\/([^/]+)\/trials$/);
     if (evalTrialsMatch && request.method === "GET") {
-      const serviceToken = env.SERVICE_TOKEN || "";
-      if (serviceToken) {
-        const authHeader = request.headers.get("Authorization") || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-        if (token !== serviceToken) {
-          return Response.json({ error: "unauthorized" }, { status: 401 });
-        }
+      const serviceToken = String(env.SERVICE_TOKEN || "").trim();
+      if (!serviceToken) {
+        return Response.json({ error: "service_token_not_configured" }, { status: 503 });
+      }
+      const authHeader = request.headers.get("Authorization") || "";
+      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      if (token !== serviceToken) {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
       }
       try {
         const runId = decodeURIComponent(String(evalTrialsMatch[1] || ""));
@@ -3605,13 +3611,14 @@ export default {
     // REST is just a kick-start — returns 202 immediately.
     // For results: connect WebSocket or poll GET /api/v1/runs/{run_id}.
     if (url.pathname === "/api/v1/runtime-proxy/runnable/invoke" && request.method === "POST") {
-      const serviceToken = env.SERVICE_TOKEN || "";
-      if (serviceToken) {
-        const authHeader = request.headers.get("Authorization") || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-        if (token !== serviceToken) {
-          return Response.json({ error: "unauthorized" }, { status: 401 });
-        }
+      const serviceToken = String(env.SERVICE_TOKEN || "").trim();
+      if (!serviceToken) {
+        return Response.json({ error: "service_token_not_configured" }, { status: 503 });
+      }
+      const authHeader = request.headers.get("Authorization") || "";
+      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      if (token !== serviceToken) {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
       }
 
       const body = await request.json() as {
@@ -3652,13 +3659,14 @@ export default {
     }
 
     if (url.pathname === "/api/v1/runtime-proxy/runnable/stream-events" && request.method === "POST") {
-      const serviceToken = env.SERVICE_TOKEN || "";
-      if (serviceToken) {
-        const authHeader = request.headers.get("Authorization") || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-        if (token !== serviceToken) {
-          return Response.json({ error: "unauthorized" }, { status: 401 });
-        }
+      const serviceToken = String(env.SERVICE_TOKEN || "").trim();
+      if (!serviceToken) {
+        return Response.json({ error: "service_token_not_configured" }, { status: 503 });
+      }
+      const authHeader = request.headers.get("Authorization") || "";
+      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      if (token !== serviceToken) {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
       }
 
       const body = await request.json() as {
@@ -3759,13 +3767,14 @@ export default {
     // Returns text/event-stream with token, tool_start, tool_end, turn_end, done events.
     // Portal and REST clients can consume this without a WebSocket connection.
     if (url.pathname === "/api/v1/runtime-proxy/runnable/stream" && request.method === "POST") {
-      const serviceToken = env.SERVICE_TOKEN || "";
-      if (serviceToken) {
-        const authHeader = request.headers.get("Authorization") || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-        if (token !== serviceToken) {
-          return Response.json({ error: "unauthorized" }, { status: 401 });
-        }
+      const serviceToken = String(env.SERVICE_TOKEN || "").trim();
+      if (!serviceToken) {
+        return Response.json({ error: "service_token_not_configured" }, { status: 503 });
+      }
+      const authHeader = request.headers.get("Authorization") || "";
+      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      if (token !== serviceToken) {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
       }
 
       try {
@@ -3964,13 +3973,14 @@ export default {
 
     // ── JSON events replay (cursor/watermark paging) ──────────
     if (url.pathname === "/api/v1/runtime-proxy/runnable/events" && request.method === "POST") {
-      const serviceToken = env.SERVICE_TOKEN || "";
-      if (serviceToken) {
-        const authHeader = request.headers.get("Authorization") || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-        if (token !== serviceToken) {
-          return Response.json({ error: "unauthorized" }, { status: 401 });
-        }
+      const serviceToken = String(env.SERVICE_TOKEN || "").trim();
+      if (!serviceToken) {
+        return Response.json({ error: "service_token_not_configured" }, { status: 503 });
+      }
+      const authHeader = request.headers.get("Authorization") || "";
+      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      if (token !== serviceToken) {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
       }
       const body = await request.json() as {
         session_id?: string;
@@ -4008,13 +4018,14 @@ export default {
 
     // ── Time-travel replay at cursor (otel_events) ─────────────
     if (url.pathname === "/api/v1/runtime-proxy/runnable/replay" && request.method === "POST") {
-      const serviceToken = env.SERVICE_TOKEN || "";
-      if (serviceToken) {
-        const authHeader = request.headers.get("Authorization") || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-        if (token !== serviceToken) {
-          return Response.json({ error: "unauthorized" }, { status: 401 });
-        }
+      const serviceToken = String(env.SERVICE_TOKEN || "").trim();
+      if (!serviceToken) {
+        return Response.json({ error: "service_token_not_configured" }, { status: 503 });
+      }
+      const authHeader = request.headers.get("Authorization") || "";
+      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      if (token !== serviceToken) {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
       }
       const body = await request.json() as {
         session_id?: string;
@@ -4048,13 +4059,14 @@ export default {
 
     // ── LangSmith-style run tree (JSON) ───────────────────────
     if (url.pathname === "/api/v1/runtime-proxy/runnable/runs/tree" && request.method === "POST") {
-      const serviceToken = env.SERVICE_TOKEN || "";
-      if (serviceToken) {
-        const authHeader = request.headers.get("Authorization") || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-        if (token !== serviceToken) {
-          return Response.json({ error: "unauthorized" }, { status: 401 });
-        }
+      const serviceToken = String(env.SERVICE_TOKEN || "").trim();
+      if (!serviceToken) {
+        return Response.json({ error: "service_token_not_configured" }, { status: 503 });
+      }
+      const authHeader = request.headers.get("Authorization") || "";
+      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      if (token !== serviceToken) {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
       }
       const body = await request.json() as {
         trace_id?: string;
@@ -4182,13 +4194,14 @@ export default {
     // Edge-native agent/run — same contract as backend /runtime-proxy/agent/run
     // /agent/run redirects to the standard invoke endpoint (async, DO-based)
     if (url.pathname === "/api/v1/runtime-proxy/agent/run" && request.method === "POST") {
-      const serviceToken = env.SERVICE_TOKEN || "";
-      if (serviceToken) {
-        const authHeader = request.headers.get("Authorization") || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-        if (token !== serviceToken) {
-          return Response.json({ error: "unauthorized" }, { status: 401 });
-        }
+      const serviceToken = String(env.SERVICE_TOKEN || "").trim();
+      if (!serviceToken) {
+        return Response.json({ error: "service_token_not_configured" }, { status: 503 });
+      }
+      const authHeader = request.headers.get("Authorization") || "";
+      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      if (token !== serviceToken) {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
       }
 
       const body = await request.json() as {
@@ -4221,13 +4234,14 @@ export default {
 
     // ── Batch invoke ────────────────────────────────────────────
     if (url.pathname === "/api/v1/runtime-proxy/runnable/batch" && request.method === "POST") {
-      const serviceToken = env.SERVICE_TOKEN || "";
-      if (serviceToken) {
-        const authHeader = request.headers.get("Authorization") || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-        if (token !== serviceToken) {
-          return Response.json({ error: "unauthorized" }, { status: 401 });
-        }
+      const serviceToken = String(env.SERVICE_TOKEN || "").trim();
+      if (!serviceToken) {
+        return Response.json({ error: "service_token_not_configured" }, { status: 503 });
+      }
+      const authHeader = request.headers.get("Authorization") || "";
+      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      if (token !== serviceToken) {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
       }
 
       const body = await request.json() as { inputs: Array<{
@@ -4333,13 +4347,14 @@ export default {
     // Latency breakdown — query from existing session events (no execution)
     // POST with session_id to analyze, or omit to run + analyze
     if (url.pathname === "/api/v1/runtime-proxy/runnable/latency-breakdown" && request.method === "POST") {
-      const serviceToken = env.SERVICE_TOKEN || "";
-      if (serviceToken) {
-        const authHeader = request.headers.get("Authorization") || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-        if (token !== serviceToken) {
-          return Response.json({ error: "unauthorized" }, { status: 401 });
-        }
+      const serviceToken = String(env.SERVICE_TOKEN || "").trim();
+      if (!serviceToken) {
+        return Response.json({ error: "service_token_not_configured" }, { status: 503 });
+      }
+      const authHeader = request.headers.get("Authorization") || "";
+      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      if (token !== serviceToken) {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
       }
 
       const body = await request.json() as {
@@ -4398,13 +4413,14 @@ export default {
     const runStatusMatch = url.pathname.match(/^\/api\/v1\/runs\/([a-zA-Z0-9-]+)$/);
     if (runStatusMatch && request.method === "GET") {
       const runId = runStatusMatch[1];
-      const serviceToken = env.SERVICE_TOKEN || "";
-      if (serviceToken) {
-        const authHeader = request.headers.get("Authorization") || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-        if (token !== serviceToken) {
-          return Response.json({ error: "unauthorized" }, { status: 401 });
-        }
+      const serviceToken = String(env.SERVICE_TOKEN || "").trim();
+      if (!serviceToken) {
+        return Response.json({ error: "service_token_not_configured" }, { status: 503 });
+      }
+      const authHeader = request.headers.get("Authorization") || "";
+      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      if (token !== serviceToken) {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
       }
 
       // Look up session by session_id (run_id = session_id)
