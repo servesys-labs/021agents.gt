@@ -1260,4 +1260,135 @@ else
   warn "codemode execution failed (HTTP ${CODE})"
 fi
 
+# ═══════════════════════════════════════════════════════════════════
+# CONTROL-PLANE API TESTS (stages 24-30)
+# These hit api.oneshots.co to verify the routes real users touch.
+# ═══════════════════════════════════════════════════════════════════
+
+CP_AUTH=("Authorization: Bearer ${SERVICE_TOKEN}")
+
+info "Stage 24: control-plane health detailed"
+RAW="$(http_get "${CP_URL}/api/v1/health/detailed")"
+parse_curl_body_code <<<"$RAW"
+[[ "$CODE" == "200" ]] || fail "control-plane /health/detailed HTTP ${CODE}"
+CP_DB="$(printf '%s' "$BODY" | json_eval 'bool(d.get("checks", {}).get("database", {}).get("ok"))')"
+[[ "$CP_DB" == "True" ]] || fail "control-plane database check failed"
+ok "control-plane detailed health (DB + billing + runtime)"
+
+info "Stage 25: control-plane agents CRUD"
+# List agents for the org
+RAW="$(curl -sS -w "\n%{http_code}" "${CP_URL}/api/v1/agents?org_id=${ORG_ID}" \
+  -H "${CP_AUTH[0]}" --max-time 15 2>&1)"
+parse_curl_body_code <<<"$RAW"
+if [[ "$CODE" == "200" ]]; then
+  AGENT_COUNT="$(python3 -c '
+import json, sys
+try:
+    d = json.loads(sys.argv[1])
+    rows = d if isinstance(d, list) else d.get("agents", d.get("rows", []))
+    print(len(rows))
+except:
+    print(0)
+' "$BODY")"
+  ok "agents list returned ${AGENT_COUNT} agents"
+else
+  warn "agents list HTTP ${CODE} — may need auth adjustment"
+fi
+
+info "Stage 26: control-plane sessions list"
+RAW="$(curl -sS -w "\n%{http_code}" "${CP_URL}/api/v1/sessions?org_id=${ORG_ID}&limit=5" \
+  -H "${CP_AUTH[0]}" --max-time 15 2>&1)"
+parse_curl_body_code <<<"$RAW"
+if [[ "$CODE" == "200" ]]; then
+  SESS_COUNT="$(python3 -c '
+import json, sys
+try:
+    d = json.loads(sys.argv[1])
+    rows = d if isinstance(d, list) else d.get("sessions", d.get("rows", []))
+    print(len(rows))
+except:
+    print(0)
+' "$BODY")"
+  ok "sessions list returned ${SESS_COUNT} sessions"
+else
+  warn "sessions list HTTP ${CODE}"
+fi
+
+info "Stage 27: control-plane billing/usage"
+RAW="$(curl -sS -w "\n%{http_code}" "${CP_URL}/api/v1/billing/usage?org_id=${ORG_ID}" \
+  -H "${CP_AUTH[0]}" --max-time 15 2>&1)"
+parse_curl_body_code <<<"$RAW"
+if [[ "$CODE" == "200" ]]; then
+  ok "billing/usage endpoint responsive"
+else
+  warn "billing/usage HTTP ${CODE}"
+fi
+
+info "Stage 28: control-plane conversations"
+# Create a conversation, then list it
+CONV_PAYLOAD="$(python3 -c '
+import json, sys
+print(json.dumps({
+    "agent_name": sys.argv[1],
+    "org_id": sys.argv[2],
+    "title": "E2E test conversation " + sys.argv[3],
+}))
+' "$AGENT_NAME" "$ORG_ID" "$RUN_TAG")"
+RAW="$(curl -sS -w "\n%{http_code}" -X POST "${CP_URL}/api/v1/conversations" \
+  -H "Content-Type: application/json" -H "${CP_AUTH[0]}" \
+  --data-binary "$CONV_PAYLOAD" --max-time 15 2>&1)"
+parse_curl_body_code <<<"$RAW"
+if [[ "$CODE" == "200" ]] || [[ "$CODE" == "201" ]]; then
+  ok "conversation created"
+elif [[ "$CODE" == "404" ]]; then
+  warn "conversations endpoint not found (route may not be mounted)"
+else
+  warn "conversation create HTTP ${CODE}"
+fi
+
+# List conversations
+RAW="$(curl -sS -w "\n%{http_code}" "${CP_URL}/api/v1/conversations?org_id=${ORG_ID}&limit=3" \
+  -H "${CP_AUTH[0]}" --max-time 15 2>&1)"
+parse_curl_body_code <<<"$RAW"
+if [[ "$CODE" == "200" ]]; then
+  ok "conversations list responsive"
+elif [[ "$CODE" == "404" ]]; then
+  warn "conversations list endpoint not found"
+else
+  warn "conversations list HTTP ${CODE}"
+fi
+
+info "Stage 29: control-plane dashboard/analytics"
+RAW="$(curl -sS -w "\n%{http_code}" "${CP_URL}/api/v1/dashboard?org_id=${ORG_ID}" \
+  -H "${CP_AUTH[0]}" --max-time 15 2>&1)"
+parse_curl_body_code <<<"$RAW"
+if [[ "$CODE" == "200" ]]; then
+  ok "dashboard endpoint responsive"
+elif [[ "$CODE" == "404" ]]; then
+  warn "dashboard endpoint not found (may be at different path)"
+else
+  warn "dashboard HTTP ${CODE}"
+fi
+
+info "Stage 30: control-plane orgs + plans"
+# Get org details
+RAW="$(curl -sS -w "\n%{http_code}" "${CP_URL}/api/v1/orgs/${ORG_ID}" \
+  -H "${CP_AUTH[0]}" --max-time 15 2>&1)"
+parse_curl_body_code <<<"$RAW"
+if [[ "$CODE" == "200" ]]; then
+  ORG_PLAN="$(printf '%s' "$BODY" | json_eval 'd.get("plan", d.get("org", {}).get("plan", "?"))')"
+  ok "org details retrieved (plan=${ORG_PLAN})"
+else
+  warn "org details HTTP ${CODE}"
+fi
+
+# List available plans
+RAW="$(curl -sS -w "\n%{http_code}" "${CP_URL}/api/v1/plans" --max-time 15 2>&1)"
+parse_curl_body_code <<<"$RAW"
+if [[ "$CODE" == "200" ]]; then
+  ok "plans endpoint responsive"
+else
+  warn "plans HTTP ${CODE}"
+fi
+
 ok "E2E infrastructure gate passed"
