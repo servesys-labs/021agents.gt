@@ -10,6 +10,7 @@
 
   const tabs = [
     { label: "Chat", href: (n: string) => `/chat/${n}`, match: "/chat/" },
+    { label: "Canvas", href: (n: string) => `/agent/${n}/canvas`, match: "/canvas" },
     { label: "Settings", href: (n: string) => `/agent/${n}/settings`, match: "/settings" },
     { label: "Tests", href: (n: string) => `/agent/${n}/tests`, match: "/tests" },
     { label: "Activity", href: (n: string) => `/agent/${n}/activity`, match: "/activity" },
