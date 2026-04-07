@@ -5,7 +5,7 @@ variables:
     value: 'https://agentos-control-plane.servesys.workers.dev'
     enabled: true
   - key: api_token
-    value: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI2NmRjNjEzMDA3NTk0ZDE0IiwiZW1haWwiOiJpc2h3YXJAdGVzdC1hZ2VudG9zLmRldiIsIm5hbWUiOiJJc2h3YXIiLCJwcm92aWRlciI6ImxvY2FsIiwib3JnX2lkIjoiZDViOTljZTFjNDQzNDVjZCIsImlhdCI6MTc3NDczMzc2OSwiZXhwIjoxNzc1MzM4NTY5fQ.TCcL0QTcSInUU-XMJXnAFvl_rN-56gDWmpLUv4fYrcQ'
+    value: '{{ROTATE_ME — generate fresh JWT via /api/v1/auth/login}}'
     enabled: true
     secret: true
   - key: agent_name
