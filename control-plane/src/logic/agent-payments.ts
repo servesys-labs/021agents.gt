@@ -94,6 +94,11 @@ export async function transferCredits(
   if (amountUsd <= 0) return { success: false, error: "Amount must be positive" };
   if (fromOrg === toOrg) return { success: false, error: "Cannot transfer to self" };
 
+  // Rate limit check — prevent high-frequency transfer abuse
+  const { checkTransferRateLimit } = await import("./referrals");
+  const rateLimitError = await checkTransferRateLimit(sql, fromOrg, amountUsd);
+  if (rateLimitError) return { success: false, error: rateLimitError };
+
   // Platform fee: 10% of transfer amount
   const PLATFORM_FEE_RATE = 0.10;
   const platformFee = Math.round(amountUsd * PLATFORM_FEE_RATE * 1_000_000) / 1_000_000;
@@ -151,7 +156,7 @@ export async function transferCredits(
     if (platformFee > 0) {
       try {
         const { distributeReferralEarnings } = await import("./referrals");
-        const payouts = await distributeReferralEarnings(sql, toOrg, amountUsd, transferId);
+        const payouts = await distributeReferralEarnings(sql, toOrg, amountUsd, transferId, fromOrg);
         referralPayout = payouts.total_payout;
       } catch {} // non-blocking — if referral system fails, platform keeps full fee
     }
@@ -159,9 +164,13 @@ export async function transferCredits(
     // Platform retains: total fee minus referral payouts
     const platformRetained = platformFee - referralPayout;
     if (platformRetained > 0) {
+      // Fetch actual platform balance for audit accuracy
+      const [platformBal] = await sql`
+        SELECT balance_usd FROM org_credit_balance WHERE org_id = 'platform'
+      `.catch(() => [{ balance_usd: 0 }]);
       await sql`
         INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
-        VALUES ('platform', 'transfer_in', ${platformRetained}, 0, ${'Platform fee: ' + description}, ${transferId}, 'marketplace_fee', ${now})
+        VALUES ('platform', 'transfer_in', ${platformRetained}, ${Number(platformBal?.balance_usd ?? 0)}, ${'Platform fee: ' + description}, ${transferId}, 'marketplace_fee', ${now})
       `.catch(() => {});
     }
 
@@ -241,8 +250,9 @@ export async function refundTransfer(
         if (available > 0) {
           await tx`UPDATE org_credit_balance SET balance_usd = 0, updated_at = ${now} WHERE org_id = ${toOrg}`;
           await tx`UPDATE org_credit_balance SET balance_usd = balance_usd + ${available}, updated_at = ${now} WHERE org_id = ${fromOrg}`;
+          const [senderBalPartial] = await tx`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${fromOrg}`;
           await tx`INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
-            VALUES (${fromOrg}, 'refund', ${available}, 0, ${reason + ' (partial)'}, ${refundId}, 'a2a_refund', ${now})`;
+            VALUES (${fromOrg}, 'refund', ${available}, ${Number(senderBalPartial.balance_usd)}, ${reason + ' (partial)'}, ${refundId}, 'a2a_refund', ${now})`;
           console.warn(`[refund] Partial refund $${available} of $${amountUsd} — receiver ${toOrg} had insufficient balance`);
         }
         return;
