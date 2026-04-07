@@ -135,9 +135,15 @@ const agentCardRoute = createRoute({
 });
 a2aRoutes.openapi(agentCardRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const agentParam = new URL(c.req.url).searchParams.get("agent") || "";
-  const orgParam = new URL(c.req.url).searchParams.get("org") || user.org_id;
+  const orgParam = new URL(c.req.url).searchParams.get("org") || user?.org_id || "";
+
+  // Discovery must work without auth — org is required as a query param for unauthenticated callers
+  if (!orgParam) {
+    return c.json({ error: "Missing 'org' query parameter — required for public agent discovery" }, 400);
+  }
+
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, orgParam);
 
   const rows = agentParam
     ? await sql`
@@ -191,12 +197,18 @@ const agentCardsRoute = createRoute({
 });
 a2aRoutes.openapi(agentCardsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  const orgParam = new URL(c.req.url).searchParams.get("org") || user?.org_id || "";
+
+  if (!orgParam) {
+    return c.json({ error: "Missing 'org' query parameter — required for public agent discovery" }, 400);
+  }
+
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, orgParam);
 
   const rows = await sql`
     SELECT name, description, config_json
     FROM agents
-    WHERE org_id = ${user.org_id} AND is_active = true
+    WHERE org_id = ${orgParam} AND is_active = true
     ORDER BY created_at DESC
   `;
 

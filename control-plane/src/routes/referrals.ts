@@ -165,10 +165,11 @@ referralRoutes.openapi(payoutRoute, async (c): Promise<any> => {
   const payoutId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
   const now = new Date().toISOString();
 
-  // Record payout request
+  // Record payout request — fetch actual balance after deduction
+  const [payoutBal] = await sql`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${user.org_id}`.catch(() => [{ balance_usd: 0 }]);
   await sql`
     INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, amount_cents, balance_after_cents, created_at)
-    VALUES (${user.org_id}, 'burn', ${-amount_usd}, 0, ${'Payout request: $' + amount_usd.toFixed(2)}, ${payoutId}, 'payout', 0, 0, ${now})
+    VALUES (${user.org_id}, 'burn', ${-amount_usd}, ${Number(payoutBal?.balance_usd ?? 0)}, ${'Payout request: $' + amount_usd.toFixed(2)}, ${payoutId}, 'payout', 0, 0, ${now})
   `.catch(() => {});
 
   // TODO: Initiate Stripe Connect transfer when Stripe Connect is set up

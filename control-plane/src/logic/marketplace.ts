@@ -80,8 +80,8 @@ export async function searchMarketplace(
       a2a_endpoint_url, agent_card_url,
       -- Relevance score: text similarity + quality + featured boost
       (
-        CASE WHEN short_description ILIKE ${'%' + query + '%'} THEN 0.4 ELSE 0 END +
-        CASE WHEN display_name ILIKE ${'%' + query + '%'} THEN 0.3 ELSE 0 END +
+        CASE WHEN to_tsvector('english', short_description) @@ plainto_tsquery('english', ${query}) THEN 0.4 ELSE 0 END +
+        CASE WHEN to_tsvector('english', display_name) @@ plainto_tsquery('english', ${query}) THEN 0.3 ELSE 0 END +
         CASE WHEN ${query} = ANY(tags) THEN 0.2 ELSE 0 END +
         quality_score * 0.3 +
         CASE WHEN is_featured AND featured_until > now() THEN 0.15 ELSE 0 END +
@@ -240,10 +240,11 @@ export async function purchaseFeatured(
     FROM marketplace_listings WHERE id = ${listingId}
   `;
 
-  // Audit
+  // Audit — fetch actual balance after deduction
+  const [bal] = await sql`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${orgId}`;
   await sql`
     INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
-    VALUES (${orgId}, 'burn', ${-costUsd}, 0, ${'Featured placement: ' + listingId}, ${listingId}, 'marketplace_featured', now())
+    VALUES (${orgId}, 'burn', ${-costUsd}, ${Number(bal?.balance_usd ?? 0)}, ${'Featured placement: ' + listingId}, ${listingId}, 'marketplace_featured', now())
   `;
 
   return { success: true, featured_until: endsAt };
