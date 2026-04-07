@@ -409,7 +409,7 @@ agentRoutes.openapi(createAgentRoute, async (c): Promise<any> => {
           ${user.project_id || ""},
           ${JSON.stringify(configJson)},
           ${req.description},
-          1,
+          ${true},
           now(),
           now()
         )
@@ -899,7 +899,7 @@ agentRoutes.openapi(importAgentRoute, async (c): Promise<any> => {
         ${user.project_id || ""},
         ${JSON.stringify(importCfg)},
         ${String(config.description || "")},
-        1,
+        ${true},
         now(),
         now()
       )
@@ -1268,7 +1268,7 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
           ${user.project_id || ""},
           ${JSON.stringify(cfgRecord)},
           ${String(config.description || "")},
-          1,
+          ${true},
           now(),
           now()
         )
