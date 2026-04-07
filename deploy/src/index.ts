@@ -7279,7 +7279,7 @@ export default {
             // plan and reflection are NOT NULL DEFAULT '{}' — never pass null
             await sql`INSERT INTO turns (
               session_id, turn_number, model_used, input_tokens, output_tokens,
-              latency_ms, llm_latency_ms, llm_content, cost_total_usd,
+              latency_ms, llm_latency_ms, output_text, cost_usd,
               tool_calls, tool_results, errors,
               execution_mode, plan, reflection,
               stop_reason, refusal, cache_read_tokens, cache_write_tokens,
@@ -7288,7 +7288,7 @@ export default {
               ${p.session_id}, ${p.turn_number || 0}, ${p.model_used || ""},
               ${p.input_tokens || 0}, ${p.output_tokens || 0},
               ${p.latency_ms || 0}, ${p.llm_latency_ms || p.latency_ms || 0},
-              ${p.llm_content || ""}, ${p.cost_total_usd || 0},
+              ${p.llm_content || p.output_text || ""}, ${p.cost_total_usd || p.cost_usd || 0},
               ${jp(p.tool_calls, [])},
               ${jp(p.tool_results, [])},
               ${jp(p.errors, [])},
@@ -7299,7 +7299,7 @@ export default {
               ${p.cache_read_tokens || 0}, ${p.cache_write_tokens || 0},
               ${p.gateway_log_id || null}
             ) ON CONFLICT (session_id, turn_number) DO UPDATE SET
-              cost_total_usd = EXCLUDED.cost_total_usd,
+              cost_usd = EXCLUDED.cost_usd,
               input_tokens = EXCLUDED.input_tokens,
               output_tokens = EXCLUDED.output_tokens,
               tool_calls = EXCLUDED.tool_calls,
