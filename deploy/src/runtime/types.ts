@@ -203,6 +203,7 @@ export interface RuntimeEnv {
   CLOUDFLARE_API_TOKEN?: string;
   AI_GATEWAY_ID?: string;        // CF AI Gateway slug (e.g. "one-shots")
   AI_GATEWAY_TOKEN?: string;     // Gateway auth token (all providers, no BYOK needed)
+  GPU_SERVICE_KEY?: string;      // Auth key for GPU box auth proxy (X-Service-Key)
   DEFAULT_PROVIDER: string;
   DEFAULT_MODEL: string;
   /** DO SQLite tagged template — passed from DO context for hibernation-safe file persistence. */
