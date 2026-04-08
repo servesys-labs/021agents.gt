@@ -2687,3 +2687,6 @@ voiceRoutes.openapi(agentCallsRoute, async (c): Promise<any> => {
 
   return c.json({ calls: rows });
 });
+
+// ── GET /clone/list — List cloned voices for an agent ────────────────────
+

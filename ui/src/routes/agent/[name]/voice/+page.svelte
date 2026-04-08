@@ -574,7 +574,7 @@
 
       // Connect to runtime WebSocket (same origin as API, /voice/test path)
       const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const wsUrl = `${wsProtocol}//api.oneshots.co/voice/test?${params}`;
+      const wsUrl = `${wsProtocol}//runtime.oneshots.co/voice/test?${params}`;
       testWs = new WebSocket(wsUrl);
 
       testWs.onopen = () => {
