@@ -2568,16 +2568,30 @@ voiceRoutes.openapi(uploadCloneRoute, async (c): Promise<any> => {
   const cloneId = `clone-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   const r2Key = `voice-clones/${user.org_id}/${agentName}/${cloneId}.wav`;
 
+  // 1. Store in R2 for persistence
   await c.env.STORAGE.put(r2Key, bytes, {
     customMetadata: { agent_name: agentName, org_id: user.org_id, clone_id: cloneId },
   });
 
-  // Store clone metadata in DB
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  await sql`
-    INSERT INTO voice_clones (id, org_id, agent_name, name, r2_key, size_bytes, status)
-    VALUES (${cloneId}, ${user.org_id}, ${agentName}, ${cloneId}, ${r2Key}, ${bytes.byteLength}, 'active')
-  `;
+  // 2. Save to Chatterbox GPU box voices/ directory so it can be used by name
+  const gpuKey = String(c.env.GPU_SERVICE_KEY ?? c.env.SERVICE_TOKEN ?? "");
+  const gpuAuthHeaders: Record<string, string> = gpuKey ? { Authorization: `Bearer ${gpuKey}` } : {};
+  try {
+    const saveForm = new FormData();
+    saveForm.append("name", cloneId);
+    saveForm.append("reference_audio", new Blob([bytes], { type: "audio/wav" }), "ref.wav");
+    const saveResp = await fetch("https://tts-clone.oneshots.co/v1/voices/save", {
+      method: "POST",
+      headers: gpuAuthHeaders,
+      body: saveForm as any,
+    });
+    if (!saveResp.ok) {
+      console.error(`[clone] Failed to save voice to GPU box: ${saveResp.status}`);
+    }
+  } catch (err) {
+    console.error(`[clone] GPU save error: ${err}`);
+    // Non-blocking — R2 has the backup
+  }
 
   return c.json({
     clone_url: r2Key,
@@ -2641,11 +2655,18 @@ voiceRoutes.openapi(deleteCloneRoute, async (c): Promise<any> => {
     return c.json({ error: "Clone not found" }, 404);
   }
 
-  // Soft delete in DB, remove from R2
+  // Soft delete in DB, remove from R2, remove from GPU box
   await sql`UPDATE voice_clones SET status = 'deleted' WHERE id = ${clone_id}`;
+  try { await c.env.STORAGE.delete(rows[0].r2_key); } catch {}
+
+  // Also delete from Chatterbox voices/ directory
+  const gpuKey = String(c.env.GPU_SERVICE_KEY ?? c.env.SERVICE_TOKEN ?? "");
   try {
-    await c.env.STORAGE.delete(rows[0].r2_key);
-  } catch { /* R2 delete is best-effort */ }
+    await fetch(`https://tts-clone.oneshots.co/v1/voices/${encodeURIComponent(clone_id)}`, {
+      method: "DELETE",
+      headers: gpuKey ? { Authorization: `Bearer ${gpuKey}` } : {},
+    });
+  } catch {}
 
   return c.json({ deleted: clone_id });
 });
