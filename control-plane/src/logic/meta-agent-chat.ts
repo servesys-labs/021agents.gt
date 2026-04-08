@@ -2110,11 +2110,13 @@ async function executeTool(
       const query = String(args.query || "").trim();
       if (!query) return JSON.stringify({ error: "query is required" });
 
-      // Strict read-only enforcement
+      // Strict read-only enforcement — use word boundaries to avoid false positives
+      // (e.g. "created_at" should NOT match "CREATE")
       const normalized = query.replace(/--.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "").trim().toUpperCase();
-      const forbidden = ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE", "CREATE", "GRANT", "REVOKE", "EXEC", "EXECUTE", "SET ", "COPY"];
+      const forbidden = ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE", "CREATE", "GRANT", "REVOKE", "EXEC", "EXECUTE", "COPY"];
       for (const keyword of forbidden) {
-        if (normalized.includes(keyword)) {
+        const re = new RegExp(`\\b${keyword}\\b`);
+        if (re.test(normalized)) {
           return JSON.stringify({ error: `Forbidden: ${keyword} statements are not allowed. Only SELECT queries permitted.` });
         }
       }
