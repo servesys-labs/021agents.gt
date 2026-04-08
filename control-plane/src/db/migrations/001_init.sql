@@ -79,9 +79,9 @@ CREATE TABLE IF NOT EXISTS agents (
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Only one active agent per name per org
-CREATE UNIQUE INDEX IF NOT EXISTS uq_agents_name_org_active
-  ON agents (name, org_id) WHERE is_active = true;
+-- One agent per name per org (needed for ON CONFLICT (name, org_id))
+CREATE UNIQUE INDEX IF NOT EXISTS uq_agents_name_org
+  ON agents (name, org_id);
 
 CREATE TABLE IF NOT EXISTS agent_versions (
   id          BIGSERIAL PRIMARY KEY,
