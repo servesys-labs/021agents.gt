@@ -58,6 +58,30 @@
   let quickDescription = $state("");
   let quickPlan = $state("free");
   let quickLoading = $state(false);
+  let progressStep = $state(0);
+  let progressTimer = $state<ReturnType<typeof setInterval> | null>(null);
+
+  const PROGRESS_STEPS = [
+    { label: "Analyzing your description", detail: "Understanding intent, domain, and requirements" },
+    { label: "Designing system prompt", detail: "Crafting detailed instructions and persona" },
+    { label: "Selecting tools", detail: "Matching capabilities to your use case" },
+    { label: "Configuring governance", detail: "Setting budget limits and safety guardrails" },
+    { label: "Building agent package", detail: "Assembling sub-agents, skills, and integrations" },
+    { label: "Running quality checks", detail: "Validating configuration and eval criteria" },
+    { label: "Finalizing", detail: "Saving agent and preparing workspace" },
+  ];
+
+  function startProgress() {
+    progressStep = 0;
+    progressTimer = setInterval(() => {
+      if (progressStep < PROGRESS_STEPS.length - 1) progressStep++;
+    }, 8000); // advance every 8s — total ~56s before cycling through all
+  }
+
+  function stopProgress() {
+    if (progressTimer) clearInterval(progressTimer);
+    progressTimer = null;
+  }
 
   const plans = [
     { id: "free", label: "Free", description: "Gemma 4 on edge — zero cost", color: "bg-muted text-muted-foreground border-border" },
@@ -125,6 +149,7 @@
       return;
     }
     quickLoading = true;
+    startProgress();
     try {
       // Use explicit name or generate from description
       const rawName = quickName.trim() || quickDescription.trim().split(/\s+/).slice(0, 3).join("-");
@@ -148,6 +173,7 @@
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to create agent");
     } finally {
+      stopProgress();
       quickLoading = false;
     }
   }
@@ -210,16 +236,41 @@
 
       <!-- Plan selector hidden for MVP -->
 
-      <Button
-        class="w-full sm:w-auto"
-        disabled={quickLoading || !quickDescription.trim()}
-        onclick={handleQuickCreate}
-      >
-        {#if quickLoading}
-          <span class="mr-2 h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent"></span>
-        {/if}
-        Create Agent
-      </Button>
+      {#if quickLoading}
+        <!-- Progress indicator -->
+        <div class="rounded-xl border border-border bg-card p-6">
+          <div class="space-y-4">
+            {#each PROGRESS_STEPS as step, i}
+              <div class="flex items-start gap-3">
+                <div class="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full {i < progressStep ? 'bg-primary' : i === progressStep ? 'bg-primary animate-pulse' : 'bg-muted'}">
+                  {#if i < progressStep}
+                    <svg class="h-3 w-3 text-primary-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
+                    </svg>
+                  {:else if i === progressStep}
+                    <span class="h-2 w-2 rounded-full bg-primary-foreground"></span>
+                  {/if}
+                </div>
+                <div>
+                  <p class="text-sm font-medium {i <= progressStep ? 'text-foreground' : 'text-muted-foreground'}">{step.label}</p>
+                  {#if i === progressStep}
+                    <p class="text-xs text-muted-foreground">{step.detail}</p>
+                  {/if}
+                </div>
+              </div>
+            {/each}
+          </div>
+          <p class="mt-5 text-xs text-muted-foreground">This takes about a minute — the AI is designing a detailed agent configuration.</p>
+        </div>
+      {:else}
+        <Button
+          class="w-full sm:w-auto"
+          disabled={!quickDescription.trim()}
+          onclick={handleQuickCreate}
+        >
+          Create Agent
+        </Button>
+      {/if}
     </div>
   {:else if mode === "template"}
     <!-- Template Mode -->
