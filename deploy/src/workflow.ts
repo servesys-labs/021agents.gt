@@ -982,6 +982,7 @@ You are responding on a phone call (text-to-speech). Adapt your response style:
                 AGENT_RUN_WORKFLOW: this.env.AGENT_RUN_WORKFLOW,
                 AGENT_PROGRESS_KV: this.env.AGENT_PROGRESS_KV,
                 SERVICE_TOKEN: (this.env as any).SERVICE_TOKEN,
+                GPU_SERVICE_KEY: (this.env as any).GPU_SERVICE_KEY,
                 CONTROL_PLANE_URL: (this.env as any).CONTROL_PLANE_URL,
                 LOCAL_SEARCH_URL: (this.env as any).LOCAL_SEARCH_URL,
                 // MVP: No paid model API keys — Gemma only

@@ -3955,9 +3955,12 @@ async function perplexitySearch(env: RuntimeEnv, args: Record<string, any>): Pro
   }
 
   try {
+    const gpuKey = (env as any).GPU_SERVICE_KEY || "";
+    const searchHeaders: Record<string, string> = { "Content-Type": "application/json" };
+    if (gpuKey) searchHeaders["Authorization"] = `Bearer ${gpuKey}`;
     const resp = await fetchWithTimeout(`${localSearchUrl}/v1/chat/completions`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: searchHeaders,
       body: JSON.stringify({
         model: "search-gemma4",
         messages: [{ role: "user", content: query }],
@@ -4453,8 +4456,8 @@ async function refineQuery(
   currentResults: any[],
 ): Promise<string> {
   const llmUrl = "https://fast.oneshots.co";
-  const serviceToken = (env as any).SERVICE_TOKEN || "";
-  const authHeaders: Record<string, string> = serviceToken ? { Authorization: `Bearer ${serviceToken}` } : {};
+  const gpuKey = (env as any).GPU_SERVICE_KEY || (env as any).SERVICE_TOKEN || "";
+  const authHeaders: Record<string, string> = gpuKey ? { Authorization: `Bearer ${gpuKey}` } : {};
 
   const resultSummary = currentResults.slice(0, 3)
     .map((r: any) => `[${r.source}] ${(r.text || "").slice(0, 100)}`)
