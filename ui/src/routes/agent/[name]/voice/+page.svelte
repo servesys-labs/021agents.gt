@@ -88,74 +88,101 @@
     { value: "workers-ai", label: "Workers AI — Cloud fallback" },
   ];
 
-  // ── Kokoro voice groups ──────────────────────────────────────────────
+  // ── Kokoro voice groups (verified against actual model voices) ───────
   const kokoroVoiceGroups = [
     {
       label: "English (US)",
       voices: [
-        { value: "af_heart", label: "af_heart — Heart (warm)" },
-        { value: "af_bella", label: "af_bella — Bella (friendly)" },
-        { value: "af_nicole", label: "af_nicole — Nicole (clear)" },
-        { value: "af_sarah", label: "af_sarah — Sarah (bright)" },
-        { value: "af_sky", label: "af_sky — Sky (airy)" },
-        { value: "am_adam", label: "am_adam — Adam (deep)" },
-        { value: "am_michael", label: "am_michael — Michael (professional)" },
+        { value: "af_heart", label: "Heart — warm, friendly (F)" },
+        { value: "af_bella", label: "Bella — bright (F)" },
+        { value: "af_nicole", label: "Nicole — clear (F)" },
+        { value: "af_sarah", label: "Sarah — soft (F)" },
+        { value: "af_sky", label: "Sky — airy (F)" },
+        { value: "af_nova", label: "Nova — energetic (F)" },
+        { value: "af_jessica", label: "Jessica — neutral (F)" },
+        { value: "af_river", label: "River — calm (F)" },
+        { value: "am_adam", label: "Adam — deep (M)" },
+        { value: "am_michael", label: "Michael — professional (M)" },
+        { value: "am_echo", label: "Echo — resonant (M)" },
+        { value: "am_eric", label: "Eric — warm (M)" },
+        { value: "am_liam", label: "Liam — youthful (M)" },
       ],
     },
     {
       label: "English (UK)",
       voices: [
-        { value: "bf_emma", label: "bf_emma — Emma" },
-        { value: "bf_isabella", label: "bf_isabella — Isabella" },
-        { value: "bm_george", label: "bm_george — George" },
-        { value: "bm_lewis", label: "bm_lewis — Lewis" },
+        { value: "bf_emma", label: "Emma (F)" },
+        { value: "bf_isabella", label: "Isabella (F)" },
+        { value: "bf_alice", label: "Alice (F)" },
+        { value: "bf_lily", label: "Lily (F)" },
+        { value: "bm_george", label: "George (M)" },
+        { value: "bm_lewis", label: "Lewis (M)" },
+        { value: "bm_daniel", label: "Daniel (M)" },
       ],
     },
     {
       label: "French",
-      voices: [{ value: "ff_siwis", label: "ff_siwis — Siwis" }],
+      voices: [{ value: "ff_siwis", label: "Siwis (F)" }],
     },
     {
       label: "Japanese",
       voices: [
-        { value: "jf_alpha", label: "jf_alpha — Alpha" },
-        { value: "jm_gamma", label: "jm_gamma — Gamma" },
+        { value: "jf_alpha", label: "Alpha (F)" },
+        { value: "jf_gongitsune", label: "Gongitsune (F)" },
+        { value: "jf_nezumi", label: "Nezumi (F)" },
+        { value: "jm_kumo", label: "Kumo (M)" },
       ],
     },
     {
       label: "Chinese",
       voices: [
-        { value: "zf_xiaobai", label: "zf_xiaobai — Xiaobai" },
-        { value: "zf_xiaoni", label: "zf_xiaoni — Xiaoni" },
-        { value: "zm_yunjian", label: "zm_yunjian — Yunjian" },
+        { value: "zf_xiaobei", label: "Xiaobei (F)" },
+        { value: "zf_xiaoni", label: "Xiaoni (F)" },
+        { value: "zf_xiaoxiao", label: "Xiaoxiao (F)" },
+        { value: "zf_xiaoyi", label: "Xiaoyi (F)" },
+        { value: "zm_yunjian", label: "Yunjian (M)" },
+        { value: "zm_yunxi", label: "Yunxi (M)" },
+        { value: "zm_yunyang", label: "Yunyang (M)" },
       ],
-    },
-    {
-      label: "Korean",
-      voices: [{ value: "kf_soeun", label: "kf_soeun — Soeun" }],
     },
     {
       label: "Hindi",
       voices: [
-        { value: "hf_alpha", label: "hf_alpha — Alpha" },
-        { value: "hm_omega", label: "hm_omega — Omega" },
+        { value: "hf_alpha", label: "Alpha (F)" },
+        { value: "hf_beta", label: "Beta (F)" },
+        { value: "hm_omega", label: "Omega (M)" },
+        { value: "hm_psi", label: "Psi (M)" },
       ],
     },
     {
       label: "Italian",
-      voices: [{ value: "if_sara", label: "if_sara — Sara" }],
+      voices: [
+        { value: "if_sara", label: "Sara (F)" },
+        { value: "im_nicola", label: "Nicola (M)" },
+      ],
     },
     {
       label: "Portuguese",
-      voices: [{ value: "pf_dora", label: "pf_dora — Dora" }],
+      voices: [
+        { value: "pf_dora", label: "Dora (F)" },
+        { value: "pm_alex", label: "Alex (M)" },
+      ],
+    },
+    {
+      label: "Spanish",
+      voices: [
+        { value: "ef_dora", label: "Dora (F)" },
+        { value: "em_alex", label: "Alex (M)" },
+      ],
     },
   ];
 
+  // Sesame CSM expects numeric speaker IDs, not "speaker_0" prefix
   const sesameVoiceOptions = [
-    { value: "speaker_0", label: "Speaker 0" },
-    { value: "speaker_1", label: "Speaker 1" },
-    { value: "speaker_2", label: "Speaker 2" },
-    { value: "speaker_3", label: "Speaker 3" },
+    { value: "0", label: "Speaker 0 — Primary" },
+    { value: "1", label: "Speaker 1" },
+    { value: "2", label: "Speaker 2" },
+    { value: "3", label: "Speaker 3" },
   ];
 
   const workersAiVoiceOptions = [
@@ -229,7 +256,7 @@
     } else if (ttsEngine === "chatterbox") {
       voice = "default";
     } else if (ttsEngine === "sesame") {
-      voice = "speaker_0";
+      voice = "0";
     } else if (ttsEngine === "workers-ai") {
       voice = "alloy";
     }
