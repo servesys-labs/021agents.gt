@@ -127,9 +127,13 @@ export async function callLLM(
     }
   }
 
-  // Auth: Workers AI and custom providers both use CF token
+  // Auth: CF token for AI Gateway, GPU service key for custom provider origin
   const cfToken = env.AI_GATEWAY_TOKEN || env.CLOUDFLARE_API_TOKEN;
   if (cfToken) headers["cf-aig-authorization"] = `Bearer ${cfToken}`;
+  // GPU auth proxy requires X-Service-Key — gateway passes Authorization header through to origin
+  if (isCustomProvider && env.GPU_SERVICE_KEY) {
+    headers["Authorization"] = `Bearer ${env.GPU_SERVICE_KEY}`;
+  }
 
   // ── Phase 1.3: Retry logic with backoff ──
   // Retries on transient errors (429, 529, 502, 503, network errors).
