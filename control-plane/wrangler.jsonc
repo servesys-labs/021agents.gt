@@ -4,7 +4,7 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-03-01",
   "compatibility_flags": ["nodejs_compat"],
-  "usage_model": "unbound",
+  "limits": { "cpu_ms": 300000 },
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1

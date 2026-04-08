@@ -27,7 +27,7 @@ export interface LLMCallOptions {
   max_tokens?: number;
   temperature?: number;
   metadata?: Record<string, string>;
-  /** Timeout in milliseconds. Default: 120_000 (2 minutes). */
+  /** Timeout in milliseconds. Default: 180_000 (3 minutes). */
   timeout_ms?: number;
 }
 
@@ -111,6 +111,8 @@ async function callAnthropicViaGateway(
   const anthropicModel = model.replace(/^anthropic\//, "");
   const endpoint = `https://gateway.ai.cloudflare.com/v1/${cloudflareAccountId}/${aiGatewayId}/anthropic/v1/messages`;
 
+  console.log(`[llm-gateway] Anthropic call: model=${anthropicModel}, endpoint=${endpoint}, hasToken=${!!cfToken}, tokenLen=${cfToken.length}, msgs=${options.messages.length}`);
+
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "x-api-key": cfToken,
@@ -147,7 +149,7 @@ async function callAnthropicViaGateway(
     }
   }
 
-  const timeoutMs = options.timeout_ms || 120_000;
+  const timeoutMs = options.timeout_ms || 180_000;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -293,7 +295,7 @@ async function fetchWithTimeout(
   model: string,
   timeoutMs?: number,
 ): Promise<LLMCallResult> {
-  const timeout = timeoutMs || 120_000;
+  const timeout = timeoutMs || 180_000;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
 
