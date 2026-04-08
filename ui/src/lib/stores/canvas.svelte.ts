@@ -126,17 +126,24 @@ export function createCanvasStore() {
   function computeToolPositions(toolIds: string[]): Array<{ id: string; x: number; y: number }> {
     const n = toolIds.length;
     if (n === 0) return [];
-    const radius = 280;
-    const startAngle = -60 * (Math.PI / 180);
-    const endAngle = 60 * (Math.PI / 180);
-    const angleStep = n === 1 ? 0 : (endAngle - startAngle) / (n - 1);
+
+    // Grid layout: tools arranged in rows below the agent node
+    const cols = Math.min(n, 6); // max 6 per row
+    const nodeW = 180;
+    const nodeH = 70;
+    const gapX = 20;
+    const gapY = 16;
+    const totalW = cols * nodeW + (cols - 1) * gapX;
+    const startX = -totalW / 2 + nodeW / 2;
+    const startY = 280; // below agent node
 
     return toolIds.map((id, i) => {
-      const angle = n === 1 ? 0 : startAngle + angleStep * i;
+      const col = i % cols;
+      const row = Math.floor(i / cols);
       return {
         id,
-        x: radius * Math.sin(angle),
-        y: radius * Math.cos(angle) + 200,
+        x: startX + col * (nodeW + gapX),
+        y: startY + row * (nodeH + gapY),
       };
     });
   }

@@ -33,7 +33,7 @@
 
 <div
   class="flex flex-col rounded-lg border border-border bg-card/95 shadow-lg backdrop-blur-sm"
-  style="width: 240px; max-height: calc(100vh - 8rem);"
+  style="width: 220px; max-height: min(480px, calc(100vh - 12rem));"
 >
   <div class="border-b border-border p-3">
     <p class="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Tools</p>
