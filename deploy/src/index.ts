@@ -3363,65 +3363,76 @@ export default {
         }
 
         if (msg.type === "audio" && msg.data) {
-          try {
-            // 1. Decode base64 audio from browser (WebM format)
-            const audioBytes = Uint8Array.from(atob(msg.data), c => c.charCodeAt(0));
+          // Process in background with ctx.waitUntil to avoid Worker timeout
+          ctx.waitUntil((async () => {
+            try {
+              safeSend(JSON.stringify({ type: "status", step: "stt", message: "Transcribing..." }));
 
-            // 2. Send to STT (Whisper handles WebM natively)
-            const formData = new FormData();
-            formData.append("file", new Blob([audioBytes], { type: "audio/webm" }), "audio.webm");
-            formData.append("response_format", "json");
+              // 1. Decode base64 audio from browser (WebM format)
+              const audioBytes = Uint8Array.from(atob(msg.data!), (c) => c.charCodeAt(0));
 
-            const sttUrl = STT_URLS[sttEngine] || STT_URLS["whisper-gpu"];
-            const sttResp = await fetch(sttUrl, {
-              method: "POST",
-              headers: authHeaders,
-              body: formData,
-            });
+              // 2. Send to STT (Whisper handles WebM natively)
+              const formData = new FormData();
+              formData.append("file", new Blob([audioBytes], { type: "audio/webm" }), "audio.webm");
+              formData.append("response_format", "json");
 
-            if (!sttResp.ok) {
-              console.error("[voice-test] STT failed:", sttResp.status);
-              return;
+              const sttUrl = STT_URLS[sttEngine] || STT_URLS["whisper-gpu"];
+              const sttResp = await fetch(sttUrl, {
+                method: "POST",
+                headers: authHeaders,
+                body: formData,
+              });
+
+              if (!sttResp.ok) {
+                const errText = await sttResp.text().catch(() => "");
+                safeSend(JSON.stringify({ type: "error", message: `STT failed (${sttResp.status}): ${errText.slice(0, 200)}` }));
+                return;
+              }
+
+              const sttData = (await sttResp.json()) as { text?: string };
+              const transcript = (sttData.text || "").trim();
+
+              // Skip empty/noise transcripts — but tell the browser
+              if (!transcript || transcript.length < 2) {
+                safeSend(JSON.stringify({ type: "status", step: "stt", message: "No speech detected. Try speaking louder or closer to the mic." }));
+                return;
+              }
+
+              // 3. Send user transcript to browser
+              safeSend(JSON.stringify({ type: "transcript", speaker: "user", text: transcript }));
+              safeSend(JSON.stringify({ type: "status", step: "agent", message: "Agent thinking..." }));
+
+              // 4. Run through agent (full pipeline — tools, memory, conversation)
+              const agentResult = await runViaAgent(env, agentName, transcript, {
+                org_id: orgId,
+                channel: "voice-test",
+              });
+              const responseText = agentResult?.output || "I didn't catch that.";
+
+              // 5. Send agent transcript to browser
+              safeSend(JSON.stringify({ type: "transcript", speaker: "agent", text: responseText }));
+              safeSend(JSON.stringify({ type: "status", step: "tts", message: "Generating speech..." }));
+
+              // 6. Generate TTS audio
+              const ttsUrl = TTS_URLS[ttsEngine] || TTS_URLS.kokoro;
+              const ttsResp = await fetch(ttsUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", ...authHeaders },
+                body: JSON.stringify({ input: responseText, voice: ttsVoice, model: ttsEngine, speed: ttsSpeed }),
+              });
+
+              if (ttsResp.ok) {
+                const audioBuffer = await ttsResp.arrayBuffer();
+                const audioB64 = arrayBufferToBase64(audioBuffer);
+                safeSend(JSON.stringify({ type: "audio", data: audioB64 }));
+              } else {
+                const errText = await ttsResp.text().catch(() => "");
+                safeSend(JSON.stringify({ type: "error", message: `TTS failed (${ttsResp.status}): ${errText.slice(0, 200)}` }));
+              }
+            } catch (err) {
+              safeSend(JSON.stringify({ type: "error", message: `Processing error: ${String(err)}` }));
             }
-
-            const sttData = await sttResp.json() as { text?: string };
-            const transcript = (sttData.text || "").trim();
-
-            // Skip empty/noise transcripts
-            if (!transcript || transcript.length < 2) return;
-
-            // 3. Send user transcript to browser
-            safeSend(JSON.stringify({ type: "transcript", speaker: "user", text: transcript }));
-
-            // 4. Run through agent
-            const agentResult = await runViaAgent(env, agentName, transcript, {
-              org_id: orgId,
-              channel: "voice-test",
-            });
-            const responseText = agentResult?.output || "I didn't catch that.";
-
-            // 5. Send agent transcript to browser
-            safeSend(JSON.stringify({ type: "transcript", speaker: "agent", text: responseText }));
-
-            // 6. Generate TTS audio
-            const ttsUrl = TTS_URLS[ttsEngine] || TTS_URLS.kokoro;
-            const ttsResp = await fetch(ttsUrl, {
-              method: "POST",
-              headers: { "Content-Type": "application/json", ...authHeaders },
-              body: JSON.stringify({ input: responseText, voice: ttsVoice, model: ttsEngine, speed: ttsSpeed }),
-            });
-
-            if (ttsResp.ok) {
-              const audioBuffer = await ttsResp.arrayBuffer();
-              const audioB64 = arrayBufferToBase64(audioBuffer);
-              safeSend(JSON.stringify({ type: "audio", data: audioB64 }));
-            } else {
-              console.error("[voice-test] TTS failed:", ttsResp.status);
-            }
-          } catch (err) {
-            console.error("[voice-test] Processing error:", err);
-            safeSend(JSON.stringify({ type: "error", message: String(err) }));
-          }
+          })());
         }
       });
 
