@@ -54,14 +54,14 @@ function makeSqlMock(options: { hasSession: boolean }) {
         {
           turn_number: 2,
           llm_content: "second turn",
-          tool_calls: '[{"name":"tool-a"}]',
+          tool_calls_json: '[{"name":"tool-a"}]',
           reflection_json: '{"ok":true}',
           plan_json: '{"steps":[1,2]}',
         },
         {
           turn_number: 1,
           llm_content: "first turn",
-          tool_calls: "[]",
+          tool_calls_json: "[]",
           reflection_json: "{}",
           plan_json: "{}",
         },
@@ -159,12 +159,12 @@ describe("memory routes: working snapshot", () => {
     expect(payload.procedures?.[0]?.success_rate).toBe(0.75);
   });
 
-  it("facts list returns values from semantic_facts", async () => {
+  it("facts list returns parsed JSON values", async () => {
     const mockSql3 = (async (strings: TemplateStringsArray) => {
       const query = String(strings[0] || "");
       if (query.includes("FROM agents WHERE name")) return [{ "?column?": 1 }];
-      if (query.includes("SELECT key, value") || query.includes("FROM semantic_facts")) {
-        return [{ key: "k1", value: "{\"v\":1}", category: "reference" }];
+      if (query.includes("FROM semantic_facts")) {
+        return [{ key: "k1", value: "{\"v\":1}", category: null }];
       }
       return [];
     }) as any;
