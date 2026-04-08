@@ -62,6 +62,30 @@ export function getBillingUsage(): Promise<BillingUsage> {
   return api.get<BillingUsage>("/billing/usage");
 }
 
+// ── Credit Packages & Checkout ─────────────────────────────────────
+
+export interface CreditPackage {
+  id: string;
+  name: string;
+  credits_usd: number;
+  price_usd: number;
+  stripe_price_id: string;
+  is_active: boolean;
+}
+
+export function getCreditPackages(): Promise<CreditPackage[]> {
+  const result = api.get<CreditPackage[] | { packages: CreditPackage[] }>("/credits/packages");
+  return result.then(d => Array.isArray(d) ? d : (d.packages ?? []));
+}
+
+export function createCheckout(packageId: string): Promise<{ url: string }> {
+  return api.post<{ url: string }>("/credits/checkout", {
+    package_id: packageId,
+    success_url: `${window.location.origin}/settings/billing?credit_purchase=success`,
+    cancel_url: `${window.location.origin}/settings/billing?credit_purchase=canceled`,
+  });
+}
+
 // ── Account ────────────────────────────────────────────────────────
 
 export function changePassword(currentPassword: string, newPassword: string): Promise<{ updated: boolean }> {
