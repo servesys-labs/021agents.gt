@@ -124,12 +124,15 @@
           {sidebarCollapsed ? 'w-16' : 'w-60'}"
       >
         <!-- Logo -->
-        <div class="flex h-14 items-center gap-2 px-4">
-          {#if !sidebarCollapsed}
-            <span class="text-lg font-semibold tracking-tight text-sidebar-foreground">OneShots</span>
-          {:else}
-            <span class="mx-auto text-lg font-bold text-sidebar-foreground">O</span>
-          {/if}
+        <div class="flex h-14 items-center px-2.5">
+          <a href="/" class="flex items-center gap-2.5" onclick={() => (sidebarOpen = false)}>
+            <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-foreground/10 text-sm font-bold text-foreground">
+              0
+            </span>
+            {#if !sidebarCollapsed}
+              <span class="text-sm font-semibold tracking-tight text-sidebar-foreground">021agents</span>
+            {/if}
+          </a>
         </div>
 
         <!-- Navigation -->
@@ -138,12 +141,15 @@
           <a
             href="/"
             class="mb-2 flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm font-medium text-sidebar-foreground/80 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+            class:justify-center={sidebarCollapsed}
             onclick={() => (sidebarOpen = false)}
             title={sidebarCollapsed ? "Dashboard" : undefined}
           >
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25a2.25 2.25 0 01-2.25-2.25v-2.25z" />
-            </svg>
+            <span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25a2.25 2.25 0 01-2.25-2.25v-2.25z" />
+              </svg>
+            </span>
             {#if !sidebarCollapsed}
               <span>Dashboard</span>
             {/if}
@@ -177,13 +183,17 @@
 
           <a
             href="/agent/new"
-            class="mt-2 flex items-center gap-2 rounded-lg border border-dashed border-border px-2.5 py-2 text-sm text-muted-foreground transition-colors hover:border-foreground/30 hover:text-foreground"
+            class="mt-2 flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"
+            class:justify-center={sidebarCollapsed}
             onclick={() => (sidebarOpen = false)}
+            title={sidebarCollapsed ? "New Agent" : undefined}
           >
-            {#if sidebarCollapsed}
-              <span class="mx-auto">+</span>
-            {:else}
-              <span>+</span>
+            <span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-dashed border-border text-muted-foreground">
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+              </svg>
+            </span>
+            {#if !sidebarCollapsed}
               <span>New Agent</span>
             {/if}
           </a>
