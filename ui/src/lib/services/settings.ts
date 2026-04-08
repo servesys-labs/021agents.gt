@@ -166,16 +166,43 @@ export interface WorkspaceFile {
   type: string;
 }
 
-export function listWorkspaceFiles(agentName: string): Promise<WorkspaceFile[]> {
-  return api.get<WorkspaceFile[]>(`/workspace/files?agent_name=${encodeURIComponent(agentName)}`);
+/** Raw shape returned by the API (R2 manifest) */
+interface WorkspaceFileRaw {
+  path: string;
+  size: number;
+  updated_at: string;
+  hash?: string;
+  type?: string;
+}
+
+export async function listWorkspaceFiles(agentName: string): Promise<WorkspaceFile[]> {
+  const data = await api.get<{ files: WorkspaceFileRaw[] } | WorkspaceFileRaw[]>(
+    `/workspace/files?agent_name=${encodeURIComponent(agentName)}`
+  );
+  const raw: WorkspaceFileRaw[] = Array.isArray(data) ? data : (data.files ?? []);
+  return raw.map((f) => ({
+    path: f.path,
+    size_bytes: f.size ?? 0,
+    modified_at: f.updated_at ?? "",
+    type: f.type ?? extToType(f.path),
+  }));
+}
+
+function extToType(path: string): string {
+  const dot = path.lastIndexOf(".");
+  return dot >= 0 ? path.slice(dot + 1).toLowerCase() : "file";
 }
 
 export function getFileContent(agentName: string, path: string): Promise<{ content: string; mime_type: string }> {
   return api.get<{ content: string; mime_type: string }>(
-    `/workspace/files/${encodeURIComponent(path)}?agent_name=${encodeURIComponent(agentName)}`
+    `/workspace/files/read?agent_name=${encodeURIComponent(agentName)}&path=${encodeURIComponent(path)}`
   );
 }
 
 export function deleteFile(agentName: string, path: string): Promise<void> {
-  return api.del(`/workspace/files/${encodeURIComponent(path)}?agent_name=${encodeURIComponent(agentName)}`);
+  return api.del(`/workspace/files?agent_name=${encodeURIComponent(agentName)}&path=${encodeURIComponent(path)}`);
+}
+
+export function downloadFile(agentName: string, path: string): string {
+  return `${api.baseUrl}/workspace/files/read?agent_name=${encodeURIComponent(agentName)}&path=${encodeURIComponent(path)}&download=true`;
 }

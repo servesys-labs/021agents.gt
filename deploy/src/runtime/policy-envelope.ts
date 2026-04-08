@@ -36,5 +36,12 @@ export function buildToolPolicyEnvelope(config: AgentConfig): ToolPolicyEnvelope
 }
 
 export function attachToolPolicyEnvelope(env: RuntimeEnv, config: AgentConfig): void {
-  (env as any).__agentConfig = buildToolPolicyEnvelope(config);
+  (env as any).__agentConfig = {
+    ...buildToolPolicyEnvelope(config),
+    // Include identity fields so tools can resolve org_id / agent name
+    org_id: config.org_id || "",
+    orgId: config.org_id || "",
+    name: config.agent_name || "",
+    agent_name: config.agent_name || "",
+  };
 }
