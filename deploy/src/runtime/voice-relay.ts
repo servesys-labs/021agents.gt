@@ -82,12 +82,14 @@ export function createVoiceRelay(
   let audioBuffer = new Uint8Array(0);
   let isProcessing = false;
   let isSpeaking = false;
+  const pendingSpeech: string[] = [];
   const authHeaders: Record<string, string> = config.serviceToken
     ? { Authorization: `Bearer ${config.serviceToken}` }
     : {};
 
   // Send greeting on connect
   let greetingSent = false;
+  let greetingTimer: ReturnType<typeof setTimeout> | null = null;
 
   async function sendAudioToTwilio(audioBase64: string) {
     if (ws.readyState !== WebSocket.OPEN) return;
@@ -108,7 +110,11 @@ export function createVoiceRelay(
   }
 
   async function speakText(text: string) {
-    if (!text.trim() || isSpeaking) return;
+    if (!text.trim()) return;
+    if (isSpeaking) {
+      pendingSpeech.push(text);
+      return;
+    }
     isSpeaking = true;
 
     try {
@@ -140,6 +146,11 @@ export function createVoiceRelay(
       console.error("[voice-relay] TTS failed:", err);
     } finally {
       isSpeaking = false;
+      // Process next queued speech
+      const next = pendingSpeech.shift();
+      if (next) {
+        speakText(next);
+      }
     }
   }
 
@@ -209,7 +220,10 @@ export function createVoiceRelay(
           // Send greeting
           if (config.greeting && !greetingSent) {
             greetingSent = true;
-            setTimeout(() => speakText(config.greeting), 500);
+            greetingTimer = setTimeout(() => {
+              greetingTimer = null;
+              speakText(config.greeting);
+            }, 500);
           }
           break;
 
@@ -233,6 +247,7 @@ export function createVoiceRelay(
 
         case "stop":
           console.log(`[voice-relay] Stream stopped: ${callSid}`);
+          if (greetingTimer) { clearTimeout(greetingTimer); greetingTimer = null; }
           // Process any remaining audio
           if (audioBuffer.length > MULAW_BYTES_PER_MS * 500) { // at least 500ms
             processAudioBuffer();
@@ -319,15 +334,12 @@ function writeString(view: DataView, offset: number, str: string) {
   }
 }
 
-// Mulaw decode lookup
-const MULAW_BIAS = 0x84;
-const MULAW_CLIP = 32635;
-
-export function mulawDecode(mulawByte: number): number {
-  mulawByte = ~mulawByte & 0xFF;
-  const sign = (mulawByte & 0x80) !== 0 ? -1 : 1;
-  const exponent = (mulawByte >> 4) & 0x07;
-  const mantissa = mulawByte & 0x0F;
-  const sample = ((mantissa << 4) + MULAW_BIAS) << (exponent - 1);
-  return sign * (sample - MULAW_BIAS);
+// Mulaw decode (ITU G.711)
+export function mulawDecode(mulaw: number): number {
+  mulaw = ~mulaw & 0xFF;
+  const sign = (mulaw & 0x80) ? -1 : 1;
+  const exponent = (mulaw >> 4) & 0x07;
+  const mantissa = mulaw & 0x0F;
+  const sample = ((mantissa << 3) + 0x84) << exponent;
+  return sign * (sample - 0x84);
 }

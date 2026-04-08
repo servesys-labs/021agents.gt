@@ -4899,7 +4899,9 @@ export async function textToSpeech(env: RuntimeEnv, args: Record<string, any>): 
   if (style === "clone" && args.reference_audio_url) {
     // Voice cloning via Chatterbox — needs reference audio
     try {
-      const refResp = await fetch(args.reference_audio_url, { headers: authHeaders });
+      const refUrl = new URL(args.reference_audio_url);
+      const refHeaders = refUrl.hostname.endsWith(".oneshots.co") ? authHeaders : {};
+      const refResp = await fetch(args.reference_audio_url, { headers: refHeaders });
       if (!refResp.ok) return `Could not download reference audio: HTTP ${refResp.status}`;
       const refBytes = await refResp.arrayBuffer();
 
