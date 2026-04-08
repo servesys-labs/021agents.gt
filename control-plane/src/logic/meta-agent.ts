@@ -458,7 +458,24 @@ Return a JSON object with ALL of these top-level fields:
     "parallel_tool_calls": true,
     "reasoning_strategy": "",
     "tags": ["tag1", "tag2"],
-    "version": "0.1.0"
+    "version": "0.1.0",
+    "execution_profile": {
+      "execution_mode": "auto|fast-only|full",
+      "fast_tools": ["web-search", "knowledge-search", "http-request", "memory-recall", "memory-save"],
+      "max_fast_tool_calls": 3,
+      "escalation_message": "Let me look into that more deeply...",
+      "fast_temperature": 0.7,
+      "fast_max_tokens": 600
+    },
+    "channels": [
+      {
+        "channel": "telegram|whatsapp|voice|web|slack|instagram|messenger|email|widget",
+        "enabled": true,
+        "greeting": "Channel-specific greeting message",
+        "prompt_suffix": "Additional instructions for this channel",
+        "execution_profile": { "execution_mode": "auto", "max_fast_tool_calls": 2 }
+      }
+    ]
   },
 
   "sub_agents": [
@@ -587,8 +604,38 @@ The system prompt defines HOW the agent behaves. Every agent you create must be 
 - Do NOT save: trivial facts, session-specific state, information already in code/docs
 
 ### Channel awareness (MUST include):
-The agent may receive messages via different channels (web chat, email, Telegram, WhatsApp, Slack, Instagram, TikTok, voice). The runtime automatically injects channel-specific formatting guidelines, but the agent's prompt should include a general awareness note like:
+The agent may receive messages via different channels (web chat, email, Telegram, WhatsApp, Slack, Instagram, Messenger, voice). The runtime automatically injects channel-specific formatting guidelines, but the agent's prompt should include a general awareness note like:
 "You may receive messages via different channels. Adapt your response length and tone to the channel — brief for chat/DMs, thorough for email, conversational for voice. The runtime will tell you which channel you're on."
+
+### Execution Profile Guidelines (MUST include):
+Every agent gets an execution_profile that controls how the fast-path vs full-pipeline routing works:
+- **execution_mode: "auto"** (default): The LLM decides whether to handle the request on the fast path (sub-5s, limited tools) or escalate to the full pipeline (multi-turn, all tools). Best for conversational agents that sometimes need deep research.
+- **execution_mode: "fast-only"**: Never escalates — the fast path handles everything. Best for simple Q&A, greeting bots, and agents that should always respond instantly.
+- **execution_mode: "full"**: Always uses the full Workflow/DO pipeline. Best for agents doing code execution, file operations, multi-step analysis, or any heavy processing.
+
+Choose the execution_mode based on the agent's archetype (see below). Set fast_tools to the subset of tools the agent actually needs on the fast path. Set escalation_message to something natural that the user will hear/see while waiting.
+
+### Agent Archetypes
+Choose the closest archetype for the agent being designed. Each archetype has a recommended execution profile:
+
+| Archetype | execution_mode | fast_tools | Typical Channels |
+|-----------|---------------|------------|-----------------|
+| **Customer Service** | auto | knowledge-search, http-request, memory-recall, memory-save | voice, whatsapp, web, telegram |
+| **Lead Qualifier** | fast-only | knowledge-search, http-request, memory-save | instagram, messenger, whatsapp |
+| **Booking / Scheduling** | auto | http-request, knowledge-search, memory-recall, memory-save | voice, whatsapp, web |
+| **Coding Assistant** | full | (all tools via full pipeline) | web, slack |
+| **Social DM Agent** | fast-only | web-search, knowledge-search, memory-recall | instagram, messenger, telegram |
+| **Research Agent** | auto | web-search, knowledge-search, memory-recall, memory-save | web, email, slack |
+| **Personal Assistant** | auto | web-search, knowledge-search, http-request, memory-recall, memory-save | voice, telegram, whatsapp, web |
+| **E-commerce Support** | auto | knowledge-search, http-request, memory-recall | whatsapp, web, instagram |
+| **Content Creator** | full | (all tools via full pipeline) | web, slack |
+| **DevOps / Monitoring** | full | (all tools via full pipeline) | slack, web |
+
+For "channels" configuration:
+- Voice channels should have shorter escalation_messages (they're spoken aloud)
+- DM channels (Instagram, Messenger) should have max_fast_tool_calls: 2 (users expect instant replies)
+- Email channel can have higher max_fast_tool_calls: 5 (users don't expect instant replies)
+- Widget should be fast by default (users are on a website waiting)
 
 ### Error recovery chains (MUST include, adapted to agent's tools):
 - web-search returns nothing → try different keywords, broader terms, or different time range
@@ -719,6 +766,35 @@ Return ONLY valid JSON. No markdown fences, no explanation.`;
   agentConfig.max_turns = Number(agentConfig.max_turns) || 25;
   agentConfig.tags = Array.isArray(agentConfig.tags) ? agentConfig.tags : [];
   agentConfig.version = agentConfig.version || "0.1.0";
+
+  // Normalize execution_profile
+  if (agentConfig.execution_profile && typeof agentConfig.execution_profile === "object") {
+    const ep = agentConfig.execution_profile as Record<string, unknown>;
+    const validModes = ["auto", "fast-only", "full"];
+    if (!validModes.includes(String(ep.execution_mode || ""))) {
+      ep.execution_mode = "auto";
+    }
+    ep.max_fast_tool_calls = Number(ep.max_fast_tool_calls) || 3;
+    if (Array.isArray(ep.fast_tools)) {
+      ep.fast_tools = (ep.fast_tools as string[]).filter((t) => typeof t === "string");
+    }
+  } else {
+    // Default execution profile based on tools
+    const hasSlowTools = (agentConfig.tools as string[]).some((t) =>
+      ["bash", "python-exec", "write-file", "edit-file", "dynamic-exec"].includes(t),
+    );
+    agentConfig.execution_profile = {
+      execution_mode: hasSlowTools ? "full" : "auto",
+      max_fast_tool_calls: 3,
+    };
+  }
+
+  // Normalize channels array
+  if (Array.isArray(agentConfig.channels)) {
+    agentConfig.channels = (agentConfig.channels as Array<Record<string, unknown>>).filter(
+      (c) => c.channel && typeof c.channel === "string",
+    );
+  }
 
   // Attach the full package metadata alongside the flat agent config
   // The route handler decides what to persist

@@ -5,10 +5,12 @@
  * builds a short message array, calls MoE LLM directly, handles a limited
  * set of fast-path tools inline, and fires DB writes asynchronously.
  *
- * Channels: voice, telegram, whatsapp, web chat, voice-stream
+ * v2: Per-agent execution profiles, _escalate pseudo-tool (LLM decides
+ * when to escalate), channel-aware token limits from channel-prompts.ts.
  */
 
 import type { ToolDefinition } from "./types";
+import { getChannelConfig, type ChannelConfig } from "./channel-prompts";
 
 // ── Types ─────────────────────────────────────────────────────
 
@@ -19,13 +21,15 @@ export interface FastAgentResult {
   output_tokens: number;
   latency_ms: number;
   model: string;
-  escalated: boolean; // true if the task was too complex for fast path
+  escalated: boolean;
+  /** Interim message to show the user while the full pipeline runs. */
+  escalation_message: string;
 }
 
 /** Minimal env shape — callers pass their full Env; we only read what we need. */
 interface FastEnv {
-  HYPERDRIVE?: any;      // Hyperdrive binding (Postgres)
-  AI?: any;              // Workers AI binding
+  HYPERDRIVE?: any;
+  AI?: any;
   SERVICE_TOKEN?: string;
   DEFAULT_PROVIDER?: string;
   DEFAULT_MODEL?: string;
@@ -34,12 +38,28 @@ interface FastEnv {
   LOCAL_SEARCH_URL?: string;
 }
 
-interface FastAgentOpts {
+export interface FastAgentOpts {
   org_id: string;
-  channel: string; // "voice" | "telegram" | "whatsapp" | "web" | "voice-stream" etc.
-  session_id?: string; // for conversation continuity (maps to DO instance name)
-  history?: Array<{ role: string; content: string }>; // in-memory history from caller
+  channel: string;
+  session_id?: string;
+  history?: Array<{ role: string; content: string }>;
 }
+
+// ── Execution Profile ─────────────────────────────────────────
+
+export interface ExecutionProfile {
+  execution_mode: "auto" | "fast-only" | "full";
+  fast_tools?: string[];
+  max_fast_tool_calls: number;
+  escalation_message?: string;
+  fast_temperature?: number;
+  fast_max_tokens?: number;
+}
+
+const DEFAULT_EXECUTION_PROFILE: ExecutionProfile = {
+  execution_mode: "auto",
+  max_fast_tool_calls: 3,
+};
 
 // ── Agent Config Cache ────────────────────────────────────────
 
@@ -48,10 +68,18 @@ interface CachedConfig {
   tools: string[];
   model: string;
   provider: string;
+  execution_profile: ExecutionProfile;
+  channels?: Array<{
+    channel: string;
+    enabled: boolean;
+    prompt_suffix?: string;
+    greeting?: string;
+    execution_profile?: ExecutionProfile;
+  }>;
   fetched_at: number;
 }
 
-const CONFIG_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const CONFIG_TTL_MS = 5 * 60 * 1000;
 const configCache = new Map<string, CachedConfig>();
 
 async function loadCachedConfig(
@@ -65,12 +93,12 @@ async function loadCachedConfig(
     return cached;
   }
 
-  // Defaults if DB unavailable
   let config: CachedConfig = {
     system_prompt: "You are a helpful AI assistant.",
     tools: ["web-search", "knowledge-search", "http-request"],
     model: String(env.DEFAULT_MODEL || "gemma-4-26b-moe"),
     provider: String(env.DEFAULT_PROVIDER || "custom-gemma4-fast"),
+    execution_profile: { ...DEFAULT_EXECUTION_PROFILE },
     fetched_at: Date.now(),
   };
 
@@ -95,11 +123,25 @@ async function loadCachedConfig(
         if (typeof cfg === "string") {
           try { cfg = JSON.parse(cfg); } catch { cfg = {}; }
         }
+
+        // Parse execution profile from agent config
+        const ep = cfg?.execution_profile;
+        const execProfile: ExecutionProfile = {
+          execution_mode: ep?.execution_mode || "auto",
+          fast_tools: Array.isArray(ep?.fast_tools) ? ep.fast_tools : undefined,
+          max_fast_tool_calls: Number(ep?.max_fast_tool_calls) || 3,
+          escalation_message: ep?.escalation_message || undefined,
+          fast_temperature: ep?.fast_temperature ?? undefined,
+          fast_max_tokens: ep?.fast_max_tokens ?? undefined,
+        };
+
         config = {
           system_prompt: cfg?.system_prompt || config.system_prompt,
           tools: Array.isArray(cfg?.tools) ? cfg.tools : config.tools,
           model: cfg?.model || config.model,
           provider: cfg?.provider || config.provider,
+          execution_profile: execProfile,
+          channels: Array.isArray(cfg?.channels) ? cfg.channels : undefined,
           fetched_at: Date.now(),
         };
       }
@@ -112,92 +154,24 @@ async function loadCachedConfig(
   return config;
 }
 
-// ── Channel Prompts ───────────────────────────────────────────
-
-const CHANNEL_PROMPTS: Record<string, string> = {
-  voice: `## Channel: Voice Call
-CRITICAL: Your response will be read aloud by a text-to-speech engine. A human is listening on the phone.
-
-NEVER output:
-- Markdown (no #, **, *, \`, [](), ---)
-- Plans, step lists, checkboxes, or task breakdowns
-- Code blocks or technical formatting
-- Bullet points or numbered lists
-- URLs, email addresses, or file paths
-
-ALWAYS:
-- Speak in short, natural sentences like a helpful person on the phone
-- Keep responses under 75 words (30 seconds of speech)
-- Use conversational phrases: "Let me check that for you..." "Sure thing..."
-- If you need to use a tool, just do it silently — don't narrate your plan
-- Give the RESULT, not the process
-- Pause naturally between topics (use periods, not commas)
-- Spell out abbreviations: "API" → "A-P-I"`,
-
-  "voice-stream": `## Channel: Voice Call
-CRITICAL: Your response will be read aloud by a text-to-speech engine. A human is listening on the phone.
-
-NEVER output:
-- Markdown (no #, **, *, \`, [](), ---)
-- Plans, step lists, checkboxes, or task breakdowns
-- Code blocks or technical formatting
-- Bullet points or numbered lists
-- URLs, email addresses, or file paths
-
-ALWAYS:
-- Speak in short, natural sentences like a helpful person on the phone
-- Keep responses under 75 words (30 seconds of speech)
-- Use conversational phrases: "Let me check that for you..." "Sure thing..."
-- If you need to use a tool, just do it silently — don't narrate your plan
-- Give the RESULT, not the process
-- Pause naturally between topics (use periods, not commas)
-- Spell out abbreviations: "API" → "A-P-I"`,
-
-  telegram: `## Channel: Telegram
-You are responding in a Telegram chat. Adapt your response style:
-- Keep messages short and conversational — Telegram is a chat app
-- Use Telegram-compatible formatting: *bold*, _italic_, \`code\`
-- Break long responses into multiple short paragraphs (not one wall of text)
-- Use emoji sparingly for clarity when they add meaning
-- Respond quickly and directly — chat users expect fast answers`,
-
-  whatsapp: `## Channel: WhatsApp
-You are responding in WhatsApp. Adapt your response style:
-- Keep messages brief — WhatsApp users read on mobile phones
-- Maximum 1-2 short paragraphs per message
-- Use *bold* for emphasis (WhatsApp supports this)
-- Avoid long code blocks or technical formatting
-- Be conversational and friendly
-- If sharing links, put them on their own line`,
-
-  web: `## Channel: Web Chat
-You are in a web chat widget. Adapt your response style:
-- Markdown formatting is OK (bold, lists, code)
-- Be helpful and thorough but concise
-- Use short paragraphs and bullet points for readability
-- Keep responses under 200 words unless the question demands more`,
-};
-
 // ── Fast-Path Tool Definitions ────────────────────────────────
 
-/** Tools allowed on the fast path. Anything else triggers escalation. */
-const FAST_TOOLS = new Set([
+/** Default tools allowed on the fast path when no execution_profile.fast_tools is set. */
+const DEFAULT_FAST_TOOLS = new Set([
   "web-search", "knowledge-search", "http-request",
   "memory-recall", "memory-save", "memory-delete",
   "text-to-speech", "speech-to-text",
   "store-knowledge",
 ]);
 
-/** Slow tools that always trigger escalation. */
-const SLOW_TOOLS = new Set([
+/** Tools that ALWAYS require the full pipeline regardless of config. */
+const ALWAYS_SLOW_TOOLS = new Set([
   "bash", "python-exec", "write-file", "edit-file", "read-file",
   "dynamic-exec", "execute-code", "create-agent", "run-agent",
   "save-project", "load-project", "image-generate",
 ]);
 
-/** Max tool call rounds before escalating. */
-const MAX_TOOL_CALLS = 3;
-
+/** All fast-path tool definitions (full schema for LLM function calling). */
 const FAST_TOOL_DEFS: ToolDefinition[] = [
   {
     type: "function",
@@ -277,6 +251,39 @@ const FAST_TOOL_DEFS: ToolDefinition[] = [
   },
 ];
 
+/**
+ * _escalate pseudo-tool — the LLM calls this when it determines the task
+ * is too complex for the fast path (needs code execution, file ops, multi-step
+ * research, image generation, etc.). This replaces the old hardcoded SLOW_TOOLS
+ * detection with intent-based classification: the LLM decides.
+ */
+const ESCALATE_TOOL_DEF: ToolDefinition = {
+  type: "function",
+  function: {
+    name: "_escalate",
+    description:
+      "Escalate this conversation to the full agent pipeline for complex tasks. " +
+      "Call this when the user's request requires: code execution, file operations, " +
+      "multi-step research (4+ tool calls), image generation, agent creation, " +
+      "long-form content, or any capability beyond quick lookups and conversation. " +
+      "Include a brief reason and a friendly interim message for the user.",
+    parameters: {
+      type: "object",
+      properties: {
+        reason: {
+          type: "string",
+          description: "Why this task needs the full pipeline (e.g., 'needs code execution', 'requires file write')",
+        },
+        interim_message: {
+          type: "string",
+          description: "A short, friendly message to show the user while the full pipeline processes their request",
+        },
+      },
+      required: ["reason"],
+    },
+  },
+};
+
 // ── Tool Execution (inline, fast) ─────────────────────────────
 
 async function executeToolFast(
@@ -352,7 +359,6 @@ async function executeToolFast(
     }
 
     case "memory-recall": {
-      // Search memory facts via Vectorize
       try {
         const resp = await fetch("https://runtime.oneshots.co/cf/rag/query", {
           method: "POST",
@@ -375,7 +381,6 @@ async function executeToolFast(
     }
 
     case "memory-save": {
-      // Save a memory fact via RAG ingest
       try {
         const text = args.content || args.fact || args.text || "";
         if (!text) return "Nothing to save — content is empty.";
@@ -396,7 +401,7 @@ async function executeToolFast(
     }
 
     case "memory-delete": {
-      return "Memory deleted."; // Simplified — actual delete would need Vectorize mutation
+      return "Memory deleted.";
     }
 
     case "store-knowledge": {
@@ -419,7 +424,6 @@ async function executeToolFast(
 
     case "text-to-speech":
     case "speech-to-text":
-      // These are handled by the voice pipeline directly, not as inline tools
       return "Voice operation completed.";
 
     default:
@@ -440,12 +444,53 @@ function saveTurnAsync(
   },
 ): void {
   if (!env.HYPERDRIVE) return;
-  // Fire-and-forget: caller does NOT await this
   import("./db").then(({ writeConversationMessage }) => {
     writeConversationMessage(env.HYPERDRIVE, msg).catch((err: unknown) => {
       console.warn(`[fast-agent] DB write failed: ${err instanceof Error ? err.message : err}`);
     });
-  }).catch(() => { /* import failed — skip persistence */ });
+  }).catch(() => {});
+}
+
+// ── Helpers ───────────────────────────────────────────────────
+
+/** Resolve the effective execution profile for a given channel. */
+function resolveExecutionProfile(
+  config: CachedConfig,
+  channel: string,
+): ExecutionProfile {
+  // Check for per-channel override
+  if (config.channels) {
+    const channelOverride = config.channels.find(
+      (c) => c.channel.toLowerCase() === channel.toLowerCase(),
+    );
+    if (channelOverride?.execution_profile) {
+      return {
+        ...config.execution_profile,
+        ...channelOverride.execution_profile,
+      };
+    }
+  }
+  return config.execution_profile;
+}
+
+/** Build the set of fast tool names for this agent. */
+function buildFastToolSet(profile: ExecutionProfile): Set<string> {
+  if (profile.fast_tools && profile.fast_tools.length > 0) {
+    return new Set(profile.fast_tools);
+  }
+  return new Set(DEFAULT_FAST_TOOLS);
+}
+
+/** Get the escalation message — from profile, channel config, or default. */
+function getEscalationMessage(
+  profile: ExecutionProfile,
+  channelCfg: ChannelConfig,
+  llmInterim?: string,
+): string {
+  // Priority: LLM-provided > agent config > channel default
+  if (llmInterim && llmInterim.trim()) return llmInterim;
+  if (profile.escalation_message) return profile.escalation_message;
+  return channelCfg.escalationMessage;
 }
 
 // ── Main Entry Point ──────────────────────────────────────────
@@ -457,16 +502,42 @@ export async function fastAgentTurn(
   opts: FastAgentOpts,
 ): Promise<FastAgentResult> {
   const started = Date.now();
+  const channel = (opts.channel || "web").toLowerCase();
+  const channelCfg = getChannelConfig(channel);
 
   // 1. Load agent config (cached)
   const config = await loadCachedConfig(env, agentName, opts.org_id);
 
-  // 2. Build the set of tool defs — only include fast-path tools the agent actually has enabled
+  // 2. Resolve execution profile (per-channel overrides)
+  const profile = resolveExecutionProfile(config, channel);
+
+  // Short-circuit: if execution_mode is "full", always escalate immediately
+  if (profile.execution_mode === "full") {
+    return {
+      output: "",
+      tool_calls: [],
+      input_tokens: 0,
+      output_tokens: 0,
+      latency_ms: Date.now() - started,
+      model: config.model,
+      escalated: true,
+      escalation_message: getEscalationMessage(profile, channelCfg),
+    };
+  }
+
+  // 3. Build fast tool set and filter tool defs
+  const fastToolSet = buildFastToolSet(profile);
   const enabledFastTools = FAST_TOOL_DEFS.filter(
-    (t) => config.tools.includes(t.function.name),
+    (t) => fastToolSet.has(t.function.name) && config.tools.includes(t.function.name),
   );
 
-  // 3. Load conversation history (prefer caller-provided, fall back to DB)
+  // Add _escalate pseudo-tool (unless execution_mode is "fast-only")
+  const toolsForLLM: ToolDefinition[] = [...enabledFastTools];
+  if (profile.execution_mode === "auto") {
+    toolsForLLM.push(ESCALATE_TOOL_DEF);
+  }
+
+  // 4. Load conversation history
   let history: Array<{ role: string; content: string }> = [];
   if (opts.history && opts.history.length > 0) {
     history = opts.history.slice(-20);
@@ -475,44 +546,38 @@ export async function fastAgentTurn(
       const { loadConversationHistory } = await import("./db");
       const dbHistory = await loadConversationHistory(env.HYPERDRIVE, opts.session_id, 20);
       history = dbHistory.map((m) => ({ role: m.role, content: m.content }));
-    } catch {
-      // DB unavailable — proceed without history
-    }
+    } catch {}
   }
 
-  // 4. Build messages array
+  // 5. Build messages array
   type Msg = { role: string; content: string; tool_call_id?: string; tool_calls?: any[] };
   const messages: Msg[] = [];
 
-  // System prompt
   messages.push({ role: "system", content: config.system_prompt });
+  messages.push({ role: "system", content: channelCfg.prompt });
 
-  // Channel-specific instructions
-  const channel = (opts.channel || "web").toLowerCase();
-  const channelPrompt = CHANNEL_PROMPTS[channel];
-  if (channelPrompt) {
-    messages.push({ role: "system", content: channelPrompt });
+  // Per-channel prompt suffix (from agent config)
+  if (config.channels) {
+    const co = config.channels.find((c) => c.channel.toLowerCase() === channel);
+    if (co?.prompt_suffix) {
+      messages.push({ role: "system", content: co.prompt_suffix });
+    }
   }
 
-  // Conversation history
   for (const msg of history) {
     messages.push({ role: msg.role, content: msg.content });
   }
-
-  // User's new message
   messages.push({ role: "user", content: userMessage });
 
-  // 5. Determine max_tokens based on channel
-  const isVoice = channel === "voice" || channel === "voice-stream";
-  const maxTokens = isVoice ? 300 : 600;
+  // 6. Determine LLM parameters
+  const maxTokens = profile.fast_max_tokens || channelCfg.maxTokens;
+  const temperature = profile.fast_temperature ?? 0.7;
+  const maxToolRounds = profile.max_fast_tool_calls;
 
-  // 6. Call MoE LLM directly
+  // 7. Call MoE LLM
   const moeUrl = (env as any).MOE_LLM_URL || "https://fast.oneshots.co/v1/chat/completions";
   const serviceToken = env.SERVICE_TOKEN || "";
-
-  const llmHeaders: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
+  const llmHeaders: Record<string, string> = { "Content-Type": "application/json" };
   if (serviceToken) llmHeaders.Authorization = `Bearer ${serviceToken}`;
 
   let inputTokens = 0;
@@ -528,21 +593,17 @@ export async function fastAgentTurn(
       body: JSON.stringify({
         model: config.model,
         messages,
-        ...(enabledFastTools.length > 0 ? { tools: enabledFastTools } : {}),
+        ...(toolsForLLM.length > 0 ? { tools: toolsForLLM } : {}),
         max_tokens: maxTokens,
-        temperature: 0.7,
+        temperature,
         chat_template_kwargs: { enable_thinking: false },
       }),
     });
-  } catch (err) {
+  } catch {
     return {
       output: "Sorry, I'm having trouble connecting right now. Please try again.",
-      tool_calls: [],
-      input_tokens: 0,
-      output_tokens: 0,
-      latency_ms: Date.now() - started,
-      model,
-      escalated: false,
+      tool_calls: [], input_tokens: 0, output_tokens: 0,
+      latency_ms: Date.now() - started, model, escalated: false, escalation_message: "",
     };
   }
 
@@ -551,12 +612,8 @@ export async function fastAgentTurn(
     console.error(`[fast-agent] LLM call failed (${resp.status}): ${errBody.slice(0, 300)}`);
     return {
       output: "Sorry, I encountered an issue. Please try again in a moment.",
-      tool_calls: [],
-      input_tokens: 0,
-      output_tokens: 0,
-      latency_ms: Date.now() - started,
-      model,
-      escalated: false,
+      tool_calls: [], input_tokens: 0, output_tokens: 0,
+      latency_ms: Date.now() - started, model, escalated: false, escalation_message: "",
     };
   }
 
@@ -566,12 +623,8 @@ export async function fastAgentTurn(
   } catch {
     return {
       output: "Sorry, I received an unexpected response. Please try again.",
-      tool_calls: [],
-      input_tokens: 0,
-      output_tokens: 0,
-      latency_ms: Date.now() - started,
-      model,
-      escalated: false,
+      tool_calls: [], input_tokens: 0, output_tokens: 0,
+      latency_ms: Date.now() - started, model, escalated: false, escalation_message: "",
     };
   }
 
@@ -582,37 +635,70 @@ export async function fastAgentTurn(
   const firstChoice = llmData.choices?.[0];
   const assistantMsg = firstChoice?.message;
 
-  // 7. Handle tool calls
+  // 8. Handle tool calls
   if (assistantMsg?.tool_calls && assistantMsg.tool_calls.length > 0) {
     const toolCalls: any[] = assistantMsg.tool_calls;
 
-    // Check for escalation: too many tool calls or slow-path tools
-    const requestedSlowTool = toolCalls.some(
-      (tc: any) => SLOW_TOOLS.has(tc.function?.name) || !FAST_TOOLS.has(tc.function?.name),
-    );
-    if (toolCalls.length > MAX_TOOL_CALLS || requestedSlowTool) {
-      // Persist user message before escalating
+    // Check for _escalate pseudo-tool (LLM-initiated escalation)
+    const escalateCall = toolCalls.find((tc: any) => tc.function?.name === "_escalate");
+    if (escalateCall) {
+      let escalateArgs: any = {};
+      try { escalateArgs = JSON.parse(escalateCall.function?.arguments || "{}"); } catch {}
+      const reason = escalateArgs.reason || "complex task";
+      const interim = escalateArgs.interim_message || "";
+      console.log(`[fast-agent] LLM escalated: ${reason}`);
+
       const instanceId = opts.session_id || agentName;
       saveTurnAsync(env, { agent_name: agentName, instance_id: instanceId, role: "user", content: userMessage, channel });
+
       return {
         output: "",
-        tool_calls: toolCalls.map((tc: any) => ({ name: tc.function?.name || "unknown", result: "" })),
+        tool_calls: [{ name: "_escalate", result: reason }],
         input_tokens: inputTokens,
         output_tokens: outputTokens,
         latency_ms: Date.now() - started,
         model,
         escalated: true,
+        escalation_message: getEscalationMessage(profile, channelCfg, interim),
       };
     }
 
-    // Add assistant message with tool_calls to conversation
+    // Check for tools outside the fast set (hardcoded safety net)
+    const hasSlowTool = toolCalls.some(
+      (tc: any) => ALWAYS_SLOW_TOOLS.has(tc.function?.name) || !fastToolSet.has(tc.function?.name),
+    );
+    if (hasSlowTool) {
+      const instanceId = opts.session_id || agentName;
+      saveTurnAsync(env, { agent_name: agentName, instance_id: instanceId, role: "user", content: userMessage, channel });
+      return {
+        output: "",
+        tool_calls: toolCalls.map((tc: any) => ({ name: tc.function?.name || "unknown", result: "" })),
+        input_tokens: inputTokens, output_tokens: outputTokens,
+        latency_ms: Date.now() - started, model, escalated: true,
+        escalation_message: getEscalationMessage(profile, channelCfg),
+      };
+    }
+
+    // Too many tool calls → escalate (unless fast-only mode)
+    if (toolCalls.length > maxToolRounds && profile.execution_mode !== "fast-only") {
+      const instanceId = opts.session_id || agentName;
+      saveTurnAsync(env, { agent_name: agentName, instance_id: instanceId, role: "user", content: userMessage, channel });
+      return {
+        output: "",
+        tool_calls: toolCalls.map((tc: any) => ({ name: tc.function?.name || "unknown", result: "" })),
+        input_tokens: inputTokens, output_tokens: outputTokens,
+        latency_ms: Date.now() - started, model, escalated: true,
+        escalation_message: getEscalationMessage(profile, channelCfg),
+      };
+    }
+
+    // Execute fast-path tools inline
     messages.push({
       role: "assistant",
       content: assistantMsg.content || "",
       tool_calls: toolCalls,
     });
 
-    // Execute each tool call
     for (const tc of toolCalls) {
       const toolName = tc.function?.name || "";
       const toolArgs = tc.function?.arguments || "{}";
@@ -621,7 +707,7 @@ export async function fastAgentTurn(
       messages.push({ role: "tool", tool_call_id: tc.id, content: result });
     }
 
-    // Second LLM call with tool results
+    // Second LLM call with tool results (no tools — just synthesis)
     try {
       const resp2 = await fetch(moeUrl, {
         method: "POST",
@@ -630,7 +716,7 @@ export async function fastAgentTurn(
           model: config.model,
           messages,
           max_tokens: maxTokens,
-          temperature: 0.7,
+          temperature,
           chat_template_kwargs: { enable_thinking: false },
         }),
       });
@@ -642,8 +728,6 @@ export async function fastAgentTurn(
         if (data2.model) model = data2.model;
 
         const output2 = data2.choices?.[0]?.message?.content || "";
-
-        // Persist turns asynchronously
         const instanceId = opts.session_id || agentName;
         saveTurnAsync(env, { agent_name: agentName, instance_id: instanceId, role: "user", content: userMessage, channel });
         saveTurnAsync(env, { agent_name: agentName, instance_id: instanceId, role: "assistant", content: output2, channel });
@@ -656,13 +740,12 @@ export async function fastAgentTurn(
           latency_ms: Date.now() - started,
           model,
           escalated: false,
+          escalation_message: "",
         };
       }
-    } catch {
-      // Second call failed — return best-effort from tool results
-    }
+    } catch {}
 
-    // Fallback: synthesise answer from tool results
+    // Fallback: synthesize from tool results
     const fallbackOutput = toolCallResults.map((tc) => tc.result).join("\n\n");
     const instanceId = opts.session_id || agentName;
     saveTurnAsync(env, { agent_name: agentName, instance_id: instanceId, role: "user", content: userMessage, channel });
@@ -676,13 +759,12 @@ export async function fastAgentTurn(
       latency_ms: Date.now() - started,
       model,
       escalated: false,
+      escalation_message: "",
     };
   }
 
-  // 8. No tool calls — direct response
+  // 9. No tool calls — direct response
   const output = assistantMsg?.content || "I'm not sure how to help with that.";
-
-  // Persist turns asynchronously
   const instanceId = opts.session_id || agentName;
   saveTurnAsync(env, { agent_name: agentName, instance_id: instanceId, role: "user", content: userMessage, channel });
   saveTurnAsync(env, { agent_name: agentName, instance_id: instanceId, role: "assistant", content: output, channel });
@@ -695,5 +777,6 @@ export async function fastAgentTurn(
     latency_ms: Date.now() - started,
     model,
     escalated: false,
+    escalation_message: "",
   };
 }
