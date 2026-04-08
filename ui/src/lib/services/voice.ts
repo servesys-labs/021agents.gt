@@ -1,10 +1,28 @@
 import { api } from "./api";
 
 export interface VoiceConfig {
-  voice?: string;
-  greeting?: string;
-  language?: string;
-  max_duration?: number;
+  tts_engine: "kokoro" | "chatterbox" | "sesame" | "workers-ai";
+  voice: string;
+  voice_clone_url?: string;
+  stt_engine: "whisper-gpu" | "groq" | "workers-ai";
+  greeting: string;
+  language: string;
+  max_duration: number;
+  speed?: number;
+}
+
+export interface VoiceOption {
+  id: string;
+  name: string;
+  language: string;
+  preview_url?: string;
+}
+
+export interface CloneVoice {
+  clone_id: string;
+  clone_url: string;
+  name: string;
+  created_at: string;
 }
 
 export interface PhoneNumber {
@@ -36,6 +54,8 @@ export interface CallLog {
   cost_usd?: number;
 }
 
+// ── Voice config ──────────────────────────────────────────────────────
+
 export function getVoiceConfig(agentName: string): Promise<VoiceConfig> {
   return api.get<VoiceConfig>(
     `/voice/config?agent_name=${encodeURIComponent(agentName)}`
@@ -44,10 +64,59 @@ export function getVoiceConfig(agentName: string): Promise<VoiceConfig> {
 
 export function updateVoiceConfig(
   agentName: string,
-  config: VoiceConfig
+  config: Partial<VoiceConfig>
 ): Promise<VoiceConfig> {
   return api.put<VoiceConfig>("/voice/config", { agent_name: agentName, ...config });
 }
+
+// ── Voices & cloning ──────────────────────────────────────────────────
+
+export function listVoices(
+  engine: string
+): Promise<{ voices: VoiceOption[] }> {
+  return api.get<{ voices: VoiceOption[] }>(
+    `/voice/voices?engine=${encodeURIComponent(engine)}`
+  );
+}
+
+export function uploadVoiceClone(
+  agentName: string,
+  audioFile: File
+): Promise<{ clone_url: string; clone_id: string }> {
+  const formData = new FormData();
+  formData.append("file", audioFile);
+  formData.append("agent_name", agentName);
+  return api.postForm<{ clone_url: string; clone_id: string }>(
+    "/voice/clone/upload",
+    formData
+  );
+}
+
+export function listCloneVoices(
+  agentName: string
+): Promise<{ clones: CloneVoice[] }> {
+  return api.get<{ clones: CloneVoice[] }>(
+    `/voice/clone/list?agent_name=${encodeURIComponent(agentName)}`
+  );
+}
+
+export function deleteCloneVoice(cloneId: string): Promise<void> {
+  return api.del(`/voice/clone/${encodeURIComponent(cloneId)}`);
+}
+
+export function previewVoice(
+  engine: string,
+  voice: string,
+  text?: string
+): Promise<Blob> {
+  return api.postBlob("/voice/preview", {
+    engine,
+    voice,
+    text: text || "Hello! This is a preview of how I sound.",
+  });
+}
+
+// ── Twilio phone numbers ──────────────────────────────────────────────
 
 export function listPhoneNumbers(agentName: string): Promise<{ numbers: PhoneNumber[] }> {
   return api.get<{ numbers: PhoneNumber[] }>(
@@ -79,6 +148,8 @@ export function buyPhoneNumber(
 export function releasePhoneNumber(providerSid: string): Promise<void> {
   return api.del(`/voice/twilio/numbers/${encodeURIComponent(providerSid)}`);
 }
+
+// ── Call log ──────────────────────────────────────────────────────────
 
 export function listCalls(
   agentName: string,
