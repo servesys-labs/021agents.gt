@@ -58,6 +58,7 @@ export function createCanvasStore() {
   /** Produce the EXACT same API payload as settings page handleSave() */
   function toApiPayload(): Record<string, unknown> {
     return {
+      name: agentName,
       description,
       is_active: isActive,
       system_prompt: systemPrompt,
@@ -65,7 +66,7 @@ export function createCanvasStore() {
       model_override: modelOverride || undefined,
       temperature,
       max_tokens: maxTokens,
-      reasoning_strategy: reasoningStrategy,
+      reasoning_strategy: reasoningStrategy || undefined,
       max_turns: maxTurns,
       tools,
       budget_limit_usd: budgetEnabled ? budgetLimit : 0,
