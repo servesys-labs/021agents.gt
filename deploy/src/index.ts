@@ -3594,14 +3594,26 @@ export default {
                 response = fastResult.output || "I didn't catch that. Could you say that again?";
               }
 
-              // Strip any markdown that slipped through
+              // Strip tool call tokens, thinking tags, markdown — everything non-spoken
               response = response
+                .replace(/<\|?tool_call\|?>[\s\S]*?<\|?\/?tool_call\|?>/g, "")
+                .replace(/<\|?tool\|?>[\s\S]*?<\|?\/?tool\|?>/g, "")
+                .replace(/<\|?tool_response\|?>[\s\S]*?<\|?\/?tool_response\|?>/g, "")
+                .replace(/<\|channel>thought[\s\S]*?<channel\|>/g, "")
+                .replace(/<\|think\|>[\s\S]*?<\|\/think\|>/g, "")
+                .replace(/call:[a-z_-]+\{[^}]*\}/g, "")
+                .replace(/<[^>]+>/g, "")  // strip any remaining HTML/XML tags
                 .replace(/#{1,6}\s*/g, "")
                 .replace(/\*{1,3}([^*]+)\*{1,3}/g, "$1")
                 .replace(/`{1,3}[^`]*`{1,3}/g, "")
                 .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-                .replace(/^[-*•]\s*/gm, "")
+                .replace(/^[-*•]\s*(\[[ x]\]\s*)?/gm, "")
+                .replace(/^\d+\.\s*/gm, "")
+                .replace(/^>\s*/gm, "")
+                .replace(/---+/g, "")
+                .replace(/\n{2,}/g, ". ")
                 .replace(/\n/g, " ")
+                .replace(/\s{2,}/g, " ")
                 .trim();
 
               // Send full response as one piece — Twilio renders smooth TTS
