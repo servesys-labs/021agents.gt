@@ -157,6 +157,7 @@
         nodesDraggable
         nodesConnectable={false}
         elementsSelectable
+        proOptions={{ hideAttribution: true }}
         onnodeclick={handleNodeClick}
         onpaneclick={handlePaneClick}
       >
@@ -184,20 +185,60 @@
     --xy-node-border-radius: 0.5rem;
     --xy-edge-stroke: var(--muted-foreground);
     --xy-minimap-background: var(--card);
+    --xy-minimap-mask-background: hsl(var(--background) / 0.7);
+    --xy-minimap-node-background: hsl(var(--muted-foreground));
     --xy-controls-button-background: var(--card);
+    --xy-controls-button-background-hover: var(--muted);
     --xy-controls-button-color: var(--foreground);
+    --xy-controls-button-color-hover: var(--foreground);
     --xy-controls-button-border-color: var(--border);
   }
 
   :global(.svelte-flow__minimap) {
+    background: var(--card) !important;
     border: 1px solid var(--border);
     border-radius: 0.5rem;
     overflow: hidden;
   }
 
+  :global(.svelte-flow__minimap svg) {
+    background: var(--card) !important;
+  }
+
+  :global(.svelte-flow__minimap-mask) {
+    fill: hsl(0 0% 0% / 0.3) !important;
+  }
+
+  :global(.svelte-flow__minimap-node) {
+    fill: var(--muted-foreground) !important;
+  }
+
   :global(.svelte-flow__controls) {
+    background: var(--card) !important;
     border: 1px solid var(--border);
     border-radius: 0.5rem;
     overflow: hidden;
+  }
+
+  :global(.svelte-flow__controls button) {
+    background: var(--card) !important;
+    color: var(--foreground) !important;
+    border-color: var(--border) !important;
+  }
+
+  :global(.svelte-flow__controls button:hover) {
+    background: var(--muted) !important;
+  }
+
+  :global(.svelte-flow__controls button svg) {
+    fill: var(--foreground) !important;
+  }
+
+  :global(.svelte-flow__attribution) {
+    display: none !important;
+  }
+
+  :global(.svelte-flow__panel.attribution) {
+    display: none !important;
   }
 </style>
