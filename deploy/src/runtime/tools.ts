@@ -4880,7 +4880,7 @@ async function memoryDelete(env: RuntimeEnv, args: Record<string, any>): Promise
 
 // ── TTS (Workers AI Deepgram) ─────────────────────────────────
 
-async function textToSpeech(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
+export async function textToSpeech(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
   const text = args.text || "";
   const style = String(args.style || args.provider || "fast").toLowerCase();
   const voice = args.voice || "af_heart";
@@ -4984,7 +4984,7 @@ async function textToSpeech(env: RuntimeEnv, args: Record<string, any>): Promise
 
 // ── Speech-to-Text (GPU Box Whisper V3 Turbo → Groq → Workers AI fallback) ──
 
-async function speechToText(env: RuntimeEnv, args: Record<string, any>, sessionId: string): Promise<string> {
+export async function speechToText(env: RuntimeEnv, args: Record<string, any>, sessionId: string): Promise<string> {
   const audioPath = args.audio_path || args.path || "";
   const audioUrl = args.audio_url || args.url || "";
   const provider = String(args.provider || "auto").toLowerCase();
