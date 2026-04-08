@@ -61,7 +61,7 @@ referralRoutes.openapi(createCodeRoute, async (c): Promise<any> => {
     return c.json({
       created: true, ...result,
       max_uses: maxUses,
-      share_url: `https://app.oneshots.co/login?ref=${encodeURIComponent(result.code)}`,
+      share_url: `https://app.021agents.ai/login?ref=${encodeURIComponent(result.code)}`,
     });
   } catch (err: any) {
     return c.json({ error: err.message?.includes("duplicate") ? "Code already exists" : err.message }, 400);

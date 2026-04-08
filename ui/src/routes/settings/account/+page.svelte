@@ -80,7 +80,7 @@
   }
 
   async function copyCode(code: string) {
-    await navigator.clipboard.writeText(`https://app.oneshots.co/login?ref=${code}`);
+    await navigator.clipboard.writeText(`https://app.021agents.ai/login?ref=${code}`);
     copied = code;
     toast.success("Invite link copied");
     setTimeout(() => (copied = ""), 2000);

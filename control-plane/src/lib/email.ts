@@ -12,7 +12,7 @@
 
 const FROM_EMAIL = "noreply@oneshots.co";
 const FROM_NAME = "OneShots";
-const APP_URL = "https://app.oneshots.co";
+const APP_URL = "https://app.021agents.ai";
 
 interface SendEmailOptions {
   to: string;
