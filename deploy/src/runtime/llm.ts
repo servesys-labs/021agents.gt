@@ -229,8 +229,10 @@ export async function callLLM(
   const cacheReadTokens = data.usage?.cache_read_input_tokens || data.usage?.prompt_tokens_details?.cached_tokens || 0;
   const cacheWriteTokens = data.usage?.cache_creation_input_tokens || 0;
 
-  // If provider didn't return tokens, query AI Gateway Logs API for exact data
-  if ((inputTokens === 0 || outputTokens === 0) && gatewayLogId && accountId && gatewayId) {
+  // If provider didn't return tokens, query AI Gateway Logs API for exact data.
+  // Skip for self-hosted/custom providers — we know the cost from MODEL_PRICING.
+  // The gateway may report inflated costs for custom providers.
+  if ((inputTokens === 0 || outputTokens === 0) && gatewayLogId && accountId && gatewayId && !isCustomProvider) {
     try {
       const logHeaders: Record<string, string> = {
         Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN || env.AI_GATEWAY_TOKEN || ""}`,
@@ -253,7 +255,9 @@ export async function callLLM(
   }
 
   const { calculateCustomerCost } = await import("./pricing");
-  const costUsd = calculateCustomerCost(data.model || model, inputTokens, outputTokens, providerCost);
+  // Self-hosted models: always use token-based pricing, never gateway-reported cost
+  const effectiveCost = isCustomProvider ? 0 : providerCost;
+  const costUsd = calculateCustomerCost(data.model || model, inputTokens, outputTokens, effectiveCost);
 
   // Phase 9.3: Detect model refusal (stop_reason=refusal or content_filter)
   const stopReason = choice.finish_reason || data.stop_reason || "";
