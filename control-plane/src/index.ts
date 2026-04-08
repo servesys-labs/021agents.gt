@@ -108,6 +108,9 @@ app.use("*", cors({
     if (origin && /^https:\/\/[a-z0-9-]+\.agentos\.dev$/.test(origin)) return origin;
     // Allow any *.servesys.workers.dev subdomain (internal services)
     if (origin && /^https:\/\/[a-z0-9-]+\.servesys\.workers\.dev$/.test(origin)) return origin;
+    // Allow any *.021agents.ai subdomain (new brand domain)
+    if (origin && /^https:\/\/[a-z0-9-]+\.021agents\.ai$/.test(origin)) return origin;
+    if (origin === "https://021agents.ai") return origin;
     // Allow CF Pages preview/production domains
     if (origin && /^https:\/\/[a-z0-9-]+\.oneshots-portal\.pages\.dev$/.test(origin)) return origin;
     if (origin === "https://oneshots-portal.pages.dev") return origin;
