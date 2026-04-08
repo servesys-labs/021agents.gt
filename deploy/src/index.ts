@@ -3167,6 +3167,55 @@ export default {
       }
     }
 
+    // ── Voice: Twilio Media Stream — raw audio via GPU STT/TTS ──────────
+    if (url.pathname === "/voice/stream") {
+      const upgradeHeader = request.headers.get("Upgrade") || "";
+      if (upgradeHeader.toLowerCase() !== "websocket") {
+        return new Response("Expected WebSocket upgrade", { status: 426 });
+      }
+
+      const agentName = url.searchParams.get("agent") || "agentos";
+      const orgId = url.searchParams.get("org_id") || "";
+      const serviceToken = String(env.SERVICE_TOKEN || "");
+
+      const pair = new WebSocketPair();
+      const [client, server] = Object.values(pair);
+      server.accept();
+
+      const { createVoiceRelay } = await import("./runtime/voice-relay");
+
+      const relay = createVoiceRelay(server, {
+        ttsEngine: "kokoro",  // TODO: load from agent config
+        ttsVoice: "af_heart",
+        sttEngine: "whisper-gpu",
+        greeting: "",  // greeting already played via TwiML <Say>
+        agentName,
+        serviceToken,
+        speed: 1.0,
+      }, async (transcript: string) => {
+        // Agent callback: transcribed text → agent response
+        try {
+          const result = await runViaAgent(env, agentName, transcript, {
+            org_id: orgId,
+            channel: "voice-stream",
+          });
+          return result?.output || "I didn't catch that.";
+        } catch {
+          return "Sorry, I encountered an error.";
+        }
+      });
+
+      server.addEventListener("message", (event) => {
+        relay.handleMessage(event.data as string);
+      });
+
+      server.addEventListener("close", () => {
+        console.log(`[voice-stream] WebSocket closed for ${agentName}`);
+      });
+
+      return new Response(null, { status: 101, webSocket: client });
+    }
+
     // ── Voice: ConversationRelay WebSocket with ctx.waitUntil for async ──
     if (url.pathname === "/voice/relay") {
       const upgradeHeader = request.headers.get("Upgrade") || "";
