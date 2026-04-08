@@ -25,7 +25,7 @@ export async function embed(
   if (texts.length === 0) return { vectors: [], model: "none", dimensions: 0 };
 
   const embeddingUrl = ((env as any).EMBEDDING_URL || "").trim();
-  const serviceToken = (env as any).SERVICE_TOKEN || "";
+  const gpuKey = (env as any).GPU_SERVICE_KEY || (env as any).SERVICE_TOKEN || "";
 
   // Primary: Qwen3-Embedding via GPU box — batch in groups of 8 to avoid timeouts
   if (embeddingUrl) {
@@ -46,7 +46,7 @@ export async function embed(
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              ...(serviceToken ? { Authorization: `Bearer ${serviceToken}` } : {}),
+              ...(gpuKey ? { Authorization: `Bearer ${gpuKey}` } : {}),
             },
             body: JSON.stringify({
               input: truncated,

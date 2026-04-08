@@ -6091,7 +6091,7 @@ export default {
                 method: "POST",
                 headers: {
                   "Content-Type": "application/json",
-                  ...(env.SERVICE_TOKEN ? { Authorization: `Bearer ${env.SERVICE_TOKEN}` } : {}),
+                  ...((env as any).GPU_SERVICE_KEY || env.SERVICE_TOKEN ? { Authorization: `Bearer ${(env as any).GPU_SERVICE_KEY || env.SERVICE_TOKEN}` } : {}),
                 },
                 body: JSON.stringify({ pdf_base64: pdfB64, dpi: 150 }),
               });

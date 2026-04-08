@@ -25,7 +25,7 @@ export async function rerank(
   if (documents.length === 1) return [{ index: 0, score: 1.0 }];
 
   const rerankerUrl = ((env as any).RERANKER_URL || "").trim();
-  const serviceToken = (env as any).SERVICE_TOKEN || "";
+  const gpuKey = (env as any).GPU_SERVICE_KEY || (env as any).SERVICE_TOKEN || "";
 
   // Primary: GPU box reranker (Jina ColBERT v2 via /rerank)
   if (rerankerUrl) {
@@ -34,7 +34,7 @@ export async function rerank(
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...(serviceToken ? { Authorization: `Bearer ${serviceToken}` } : {}),
+          ...(gpuKey ? { Authorization: `Bearer ${gpuKey}` } : {}),
         },
         body: JSON.stringify({
           query,
