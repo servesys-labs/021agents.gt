@@ -1305,7 +1305,12 @@ const platformCallsListRoute = createRoute({
 voiceRoutes.openapi(platformCallsListRoute, async (c): Promise<any> => {
   const { platform } = c.req.valid("param");
   if (!isVoiceGenericPlatform(platform)) {
-    return c.json({ error: `Unknown platform: ${platform}` }, 404);
+    // Not a known platform — treat as agent_name and return call history
+    const user = c.get("user");
+    const limit = Number(c.req.query("limit") || 50);
+    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+    const rows = await sql`SELECT * FROM voice_calls WHERE org_id = ${user.org_id} AND agent_name = ${platform} ORDER BY created_at DESC LIMIT ${limit}`;
+    return c.json({ calls: rows, platform: "all" });
   }
   const user = c.get("user");
   const { agent_name: agentName, status, limit } = c.req.valid("query");
@@ -2563,9 +2568,118 @@ voiceRoutes.openapi(uploadCloneRoute, async (c): Promise<any> => {
     customMetadata: { agent_name: agentName, org_id: user.org_id, clone_id: cloneId },
   });
 
+  // Store clone metadata in DB
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  await sql`
+    INSERT INTO voice_clones (id, org_id, agent_name, name, r2_key, size_bytes, status)
+    VALUES (${cloneId}, ${user.org_id}, ${agentName}, ${cloneId}, ${r2Key}, ${bytes.byteLength}, 'active')
+  `;
+
   return c.json({
     clone_url: r2Key,
     clone_id: cloneId,
     size_bytes: bytes.byteLength,
   });
+});
+
+// ── GET /clone/list — List voice clones for an agent ──────────────────
+
+const listClonesRoute = createRoute({
+  method: "get",
+  path: "/clone/list",
+  tags: ["Voice"],
+  summary: "List voice clones for an agent",
+  middleware: [requireScope("agents:read")],
+  request: {
+    query: z.object({
+      agent_name: z.string().optional(),
+    }),
+  },
+  responses: {
+    200: { description: "Clone list", content: { "application/json": { schema: z.record(z.unknown()) } } },
+  },
+});
+voiceRoutes.openapi(listClonesRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const agentName = c.req.query("agent_name") || "";
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  const rows = agentName
+    ? await sql`SELECT id, agent_name, name, r2_key, size_bytes, status, created_at FROM voice_clones WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND status != 'deleted' ORDER BY created_at DESC`
+    : await sql`SELECT id, agent_name, name, r2_key, size_bytes, status, created_at FROM voice_clones WHERE org_id = ${user.org_id} AND status != 'deleted' ORDER BY created_at DESC`;
+
+  return c.json({ clones: rows });
+});
+
+// ── DELETE /clone/:clone_id — Delete a voice clone ────────────────────
+
+const deleteCloneRoute = createRoute({
+  method: "delete",
+  path: "/clone/{clone_id}",
+  tags: ["Voice"],
+  summary: "Delete a voice clone",
+  middleware: [requireScope("agents:write")],
+  request: {
+    params: z.object({ clone_id: z.string().min(1) }),
+  },
+  responses: {
+    200: { description: "Clone deleted", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(404),
+  },
+});
+voiceRoutes.openapi(deleteCloneRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const { clone_id } = c.req.valid("param");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  const rows = await sql`SELECT r2_key FROM voice_clones WHERE id = ${clone_id} AND org_id = ${user.org_id}`;
+  if (rows.length === 0) {
+    return c.json({ error: "Clone not found" }, 404);
+  }
+
+  // Soft delete in DB, remove from R2
+  await sql`UPDATE voice_clones SET status = 'deleted' WHERE id = ${clone_id}`;
+  try {
+    await c.env.STORAGE.delete(rows[0].r2_key);
+  } catch { /* R2 delete is best-effort */ }
+
+  return c.json({ deleted: clone_id });
+});
+
+// ── GET /calls — Agent-scoped call history (all platforms) ────────────
+
+const agentCallsRoute = createRoute({
+  method: "get",
+  path: "/calls",
+  tags: ["Voice"],
+  summary: "List call history for an agent (all platforms)",
+  middleware: [requireScope("integrations:read")],
+  request: {
+    query: z.object({
+      agent_name: z.string().optional(),
+      status: z.string().optional(),
+      limit: z.coerce.number().int().min(1).max(200).default(50),
+    }),
+  },
+  responses: {
+    200: { description: "Call history", content: { "application/json": { schema: z.record(z.unknown()) } } },
+  },
+});
+voiceRoutes.openapi(agentCallsRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const agentName = c.req.query("agent_name") || "";
+  const status = c.req.query("status") || "";
+  const limit = Number(c.req.query("limit") || 50);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  let rows;
+  if (agentName && status) {
+    rows = await sql`SELECT * FROM voice_calls WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND status = ${status} ORDER BY created_at DESC LIMIT ${limit}`;
+  } else if (agentName) {
+    rows = await sql`SELECT * FROM voice_calls WHERE org_id = ${user.org_id} AND agent_name = ${agentName} ORDER BY created_at DESC LIMIT ${limit}`;
+  } else {
+    rows = await sql`SELECT * FROM voice_calls WHERE org_id = ${user.org_id} ORDER BY created_at DESC LIMIT ${limit}`;
+  }
+
+  return c.json({ calls: rows });
 });

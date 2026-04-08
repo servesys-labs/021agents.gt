@@ -1269,6 +1269,22 @@ CREATE TABLE IF NOT EXISTS voice_numbers (
 
 CREATE INDEX IF NOT EXISTS idx_voice_numbers_org_agent ON voice_numbers(org_id, agent_name);
 
+CREATE TABLE IF NOT EXISTS voice_clones (
+  id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  org_id       TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+  agent_name   TEXT NOT NULL DEFAULT '',
+  name         TEXT NOT NULL DEFAULT '',
+  r2_key       TEXT NOT NULL,
+  size_bytes   INT NOT NULL DEFAULT 0,
+  status       TEXT NOT NULL DEFAULT 'active'
+               CHECK (status IN ('active', 'processing', 'failed', 'deleted')),
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_voice_clones_org_agent ON voice_clones(org_id, agent_name);
+CREATE INDEX IF NOT EXISTS idx_voice_calls_org_agent ON voice_calls(org_id, agent_name);
+CREATE INDEX IF NOT EXISTS idx_voice_calls_created ON voice_calls(created_at DESC);
+
 -- ============================================================================
 -- SECTION 15: Evolution & Governance
 -- ============================================================================
