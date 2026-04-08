@@ -155,23 +155,28 @@
               Agents
             </p>
           {/if}
-          {#each agentStore.agents as agent}
+          {#each agentStore.agents as agent, i}
+            {@const colors = ['bg-blue-500/20 text-blue-400', 'bg-emerald-500/20 text-emerald-400', 'bg-amber-500/20 text-amber-400', 'bg-purple-500/20 text-purple-400', 'bg-rose-500/20 text-rose-400', 'bg-cyan-500/20 text-cyan-400']}
+            {@const color = colors[i % colors.length]}
             <a
               href="/chat/{agent.name}"
               class="group flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm font-medium text-sidebar-foreground/80 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+              class:justify-center={sidebarCollapsed}
               onclick={() => (sidebarOpen = false)}
               title={sidebarCollapsed ? agent.name : undefined}
             >
-              <span class="h-2 w-2 shrink-0 rounded-full {agent.is_active ? 'bg-success' : 'bg-muted-foreground/40'}"></span>
+              <span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-xs font-bold {color}">
+                {agent.name.charAt(0).toUpperCase()}
+              </span>
               {#if !sidebarCollapsed}
                 <span class="truncate">{agent.name}</span>
-                <!-- Plan badges hidden for MVP -->
+                <span class="ml-auto h-2 w-2 shrink-0 rounded-full {agent.is_active ? 'bg-success' : 'bg-muted-foreground/40'}"></span>
               {/if}
             </a>
           {/each}
 
           <a
-            href="/"
+            href="/agent/new"
             class="mt-2 flex items-center gap-2 rounded-lg border border-dashed border-border px-2.5 py-2 text-sm text-muted-foreground transition-colors hover:border-foreground/30 hover:text-foreground"
             onclick={() => (sidebarOpen = false)}
           >
