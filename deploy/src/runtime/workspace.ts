@@ -153,19 +153,18 @@ export async function hydrateWorkspace(
   for (const entry of manifest.files) {
     const localPath = `/workspace/${entry.path}`;
 
-    // Check if file exists locally with same content
-    const localResult = await sandbox.exec(`sha256sum "${localPath}" 2>/dev/null | cut -d' ' -f1`, { timeout: 5 }).catch(() => ({ stdout: "", stderr: "", exitCode: 1 }));
-    const localHash = localResult.stdout?.trim() || "";
-
-    if (localHash === entry.hash) {
-      skipped++;
-      continue;
-    }
+    // Always re-download — hash comparison is unreliable across sandbox restarts.
+    // The sha256sum shell command had quoting issues and the hash encoding could
+    // diverge from the JS quickHash. The overhead is acceptable: files are cached
+    // in R2 and reads are fast.
 
     // Download from R2 and write to sandbox
     const key = fileKey(org, agent, localPath, userId);
     const obj = await storage.get(key);
-    if (!obj) continue;
+    if (!obj) {
+      console.warn(`[workspace] Manifest lists ${entry.path} but R2 object not found — skipping (possible partial delete)`);
+      continue;
+    }
 
     const content = await obj.text();
     const dir = localPath.substring(0, localPath.lastIndexOf("/"));
@@ -268,6 +267,17 @@ export async function loadFolderToContext(
   }
 
   return parts.join("\n\n");
+}
+
+/**
+ * Validate a workspace path for safety. Rejects path traversal attempts,
+ * double slashes, and empty paths. Used by HTTP endpoints; exported for testing.
+ */
+export function validateWorkspacePath(path: string): { valid: boolean; error?: string } {
+  if (!path) return { valid: false, error: "Path must not be empty" };
+  if (path.includes("..")) return { valid: false, error: "Path traversal not allowed" };
+  if (path.includes("//")) return { valid: false, error: "Invalid path" };
+  return { valid: true };
 }
 
 // ── Helpers ───────────────────────────────────────────────────

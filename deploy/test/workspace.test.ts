@@ -9,6 +9,7 @@ import {
   listWorkspaceFiles,
   readFileFromR2,
   deleteFileFromR2,
+  validateWorkspacePath,
 } from "../src/runtime/workspace";
 
 // ── Mock R2Bucket ──────────────────────────────────────────────────
@@ -89,20 +90,35 @@ describe("Workspace R2 persistence", () => {
     expect(fileKey).toBe("workspaces/acme/bot1/u/user42/files/readme.md");
   });
 
-  // 2. Path traversal prevention (tested at the module level via fileKey normalization)
-  it("rejects paths with '..' at the endpoint level", () => {
-    // The runtime endpoint validates this before calling workspace functions.
-    // Here we verify the fileKey function strips leading / correctly.
-    // Paths with ".." should be rejected by the caller (index.ts endpoint).
-    const malicious = "../../../etc/passwd";
-    // The workspace module itself normalizes but doesn't reject —
-    // validation happens at the HTTP layer. We verify the key doesn't escape the scope.
-    // fileKey strips /workspace/ prefix and leading slashes.
-    // We test that calling with a ".." path still stays within scope prefix.
-    const expectedPrefix = "workspaces/acme/bot1/u/shared/files/";
-    // Even if ".." somehow gets through, the R2 key will contain it literally (not escape)
-    // because R2 keys are flat strings, not filesystem paths.
-    expect(true).toBe(true); // placeholder — real validation is at HTTP layer
+  // 2. Path traversal prevention via validateWorkspacePath
+  it("rejects path traversal with '..'", () => {
+    const result = validateWorkspacePath("../../../etc/passwd");
+    expect(result.valid).toBe(false);
+    expect(result.error).toMatch(/traversal/i);
+  });
+
+  it("rejects path traversal with embedded '..'", () => {
+    const result = validateWorkspacePath("foo/../bar");
+    expect(result.valid).toBe(false);
+    expect(result.error).toMatch(/traversal/i);
+  });
+
+  it("accepts a valid relative path", () => {
+    const result = validateWorkspacePath("src/app.ts");
+    expect(result.valid).toBe(true);
+    expect(result.error).toBeUndefined();
+  });
+
+  it("rejects double-slash paths", () => {
+    const result = validateWorkspacePath("//etc/passwd");
+    expect(result.valid).toBe(false);
+    expect(result.error).toMatch(/invalid path/i);
+  });
+
+  it("rejects empty path", () => {
+    const result = validateWorkspacePath("");
+    expect(result.valid).toBe(false);
+    expect(result.error).toMatch(/empty/i);
   });
 
   // 3. Path sanitization — leading / stripped, double // collapsed

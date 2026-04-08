@@ -66,7 +66,7 @@ const readFileRoute = createRoute({
     }),
   },
   responses: {
-    200: { description: "File content", content: { "application/json": { schema: z.object({ path: z.string(), content: z.string(), size: z.number() }) } } },
+    200: { description: "File content", content: { "application/json": { schema: z.object({ path: z.string(), content: z.string(), size: z.number(), mime_type: z.string().optional() }) } } },
     ...errorResponses(404, 500),
   },
 });
