@@ -3148,7 +3148,17 @@ export default {
           filePath, body.user_id,
         );
         if (content === null) return Response.json({ error: "File not found" }, { status: 404 });
-        return Response.json({ path: body.path, content, size: content.length });
+        const ext = filePath.split(".").pop()?.toLowerCase() || "";
+        const mimeMap: Record<string, string> = {
+          ts: "text/typescript", js: "application/javascript", json: "application/json",
+          md: "text/markdown", txt: "text/plain", html: "text/html", css: "text/css",
+          py: "text/x-python", rs: "text/x-rust", go: "text/x-go",
+          png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
+          svg: "image/svg+xml", webp: "image/webp", pdf: "application/pdf",
+          wav: "audio/wav", mp3: "audio/mpeg", csv: "text/csv", xml: "text/xml",
+        };
+        const mimeType = mimeMap[ext] || "application/octet-stream";
+        return Response.json({ path: body.path, content, size: content.length, mime_type: mimeType });
       } catch (err: any) {
         return Response.json({ error: err.message }, { status: 500 });
       }
@@ -6428,7 +6438,7 @@ export default {
       if (url.pathname.startsWith("/cf/storage/")) {
         const authHeader = request.headers.get("Authorization") || "";
         const serviceToken = String(env.SERVICE_TOKEN || "");
-        if (serviceToken && !authHeader.includes(serviceToken)) {
+        if (!serviceToken || !authHeader.includes(serviceToken)) {
           return Response.json({ error: "Unauthorized" }, { status: 401 });
         }
         // Validate that the key contains an org scope (prevent unscoped access)
