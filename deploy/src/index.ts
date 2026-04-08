@@ -3243,12 +3243,17 @@ export default {
       const [client, server] = Object.values(pair);
       server.accept();
 
+      // Load agent voice config for TTS engine/voice preferences
+      const ttsEngine = url.searchParams.get("tts_engine") || "kokoro";
+      const ttsVoice = url.searchParams.get("voice") || "af_heart";
+      const sttEngine = url.searchParams.get("stt_engine") || "whisper-gpu";
+
       const { createVoiceRelay } = await import("./runtime/voice-relay");
 
       const relay = createVoiceRelay(server, {
-        ttsEngine: "kokoro",  // TODO: load from agent config
-        ttsVoice: "af_heart",
-        sttEngine: "whisper-gpu",
+        ttsEngine,
+        ttsVoice,
+        sttEngine,
         greeting: "",  // greeting already played via TwiML <Say>
         agentName,
         serviceToken,
@@ -3259,7 +3264,7 @@ export default {
           const { fastAgentTurn } = await import("./runtime/fast-agent");
           const fastResult = await fastAgentTurn(env, agentName, transcript, {
             org_id: orgId,
-            channel: "voice-stream",
+            channel: "voice",
           });
           if (fastResult.escalated) {
             const fullResult = await runViaAgent(env, agentName, transcript, {
