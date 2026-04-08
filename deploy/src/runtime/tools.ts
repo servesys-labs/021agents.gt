@@ -4748,11 +4748,21 @@ async function memorySave(env: RuntimeEnv, args: Record<string, any>): Promise<s
       return JSON.stringify({ saved: true, type: "episodic", id });
     } else {
       const factKey = key || content.slice(0, 50);
-      await sql`
-        INSERT INTO facts (id, agent_name, org_id, key, value, category, created_at)
-        VALUES (${id}, ${agentName}, ${orgId}, ${factKey}, ${content}, ${category}, ${now})
-        ON CONFLICT (agent_name, org_id, key) DO UPDATE SET value = ${content}, category = ${category}
+      // Upsert: check if fact with same key exists for this agent, update if so
+      const existing = await sql`
+        SELECT id FROM facts WHERE agent_name = ${agentName} AND org_id = ${orgId} AND key = ${factKey} AND scope = 'agent' LIMIT 1
       `;
+      if (existing.length > 0) {
+        await sql`
+          UPDATE facts SET value = ${content}, category = ${category}, updated_at = ${now}
+          WHERE id = ${existing[0].id}
+        `;
+      } else {
+        await sql`
+          INSERT INTO facts (id, agent_name, org_id, scope, key, value, category, created_at)
+          VALUES (${id}, ${agentName}, ${orgId}, 'agent', ${factKey}, ${content}, ${category}, ${now})
+        `;
+      }
       return JSON.stringify({ saved: true, type: "semantic", id, key: factKey, category });
     }
   } catch (err: any) {
