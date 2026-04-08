@@ -718,7 +718,7 @@ Return ONLY valid JSON. No markdown fences, no explanation.`;
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ],
-      max_tokens: 4096,
+      max_tokens: 16384,
       temperature: 0.3,
       timeout_ms: 180_000,
       metadata: { agent: "meta-agent-build", org_id: opts.orgId || "" },
