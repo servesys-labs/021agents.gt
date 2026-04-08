@@ -714,7 +714,6 @@ Return ONLY valid JSON. No markdown fences, no explanation.`;
     },
     {
       model: "anthropic/claude-sonnet-4-6",
-      max_tokens: 8192,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
