@@ -1733,8 +1733,10 @@ voiceRoutes.openapi(twilioIncomingRoute, async (c): Promise<any> => {
 
   let twiml: string;
 
-  if (ttsEngine === "workers-ai") {
-    // ConversationRelay mode — Twilio handles STT/TTS (cloud-based, lower latency)
+  // For phone calls: ALWAYS use ConversationRelay — Twilio handles audio format
+  // conversion (mulaw/PCM) reliably. Our fast-agent handles the conversation logic.
+  // The agent's voice preferences are passed for future use.
+  {
     const relayUrl = `${runtimeWsUrl}/voice/relay?agent=${encodeURIComponent(agentName)}&amp;org_id=${encodeURIComponent(orgId)}`;
     twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -1752,16 +1754,10 @@ voiceRoutes.openapi(twilioIncomingRoute, async (c): Promise<any> => {
     />
   </Connect>
 </Response>`;
-  } else {
-    // Media Stream mode — OUR GPU box handles STT/TTS (self-hosted, zero cloud cost)
-    const streamUrl = `${runtimeWsUrl}/voice/stream?agent=${encodeURIComponent(agentName)}&amp;org_id=${encodeURIComponent(orgId)}`;
-    twiml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Say>${greeting.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</Say>
-  <Connect>
-    <Stream url="${streamUrl}" />
-  </Connect>
-</Response>`;
+  /* Media Stream mode disabled for phone calls — Twilio mulaw format handling
+     is unreliable with custom TTS. ConversationRelay is the production-grade
+     path for phone calls. Media Stream will be re-enabled when we add proper
+     PCM-to-mulaw conversion on the GPU box TTS endpoints. */
   }
 
   return c.text(twiml, 200, { "Content-Type": "text/xml" });
