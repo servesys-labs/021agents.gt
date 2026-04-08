@@ -19,6 +19,7 @@
   import ToolNode from "./nodes/ToolNode.svelte";
   import PromptNode from "./nodes/PromptNode.svelte";
   import GuardrailNode from "./nodes/GuardrailNode.svelte";
+  import CategoryNode from "./nodes/CategoryNode.svelte";
 
   import { toast } from "svelte-sonner";
   import { onMount } from "svelte";
@@ -36,6 +37,7 @@
     tool: ToolNode as any,
     prompt: PromptNode as any,
     guardrail: GuardrailNode as any,
+    category: CategoryNode as any,
   };
 
   let nodes = $state<Node[]>([]);

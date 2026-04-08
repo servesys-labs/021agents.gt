@@ -123,87 +123,117 @@ export function createCanvasStore() {
 
   // --- Layout helpers ---
 
-  function computeToolPositions(toolIds: string[]): Array<{ id: string; x: number; y: number }> {
-    const n = toolIds.length;
-    if (n === 0) return [];
+  // ── Hub-and-spoke layout: agent at center, 5 category satellites ──
 
-    // Grid layout: tools arranged in rows below the agent node
-    const cols = Math.min(n, 6); // max 6 per row
-    const nodeW = 180;
-    const nodeH = 70;
-    const gapX = 20;
-    const gapY = 16;
-    const totalW = cols * nodeW + (cols - 1) * gapX;
-    const startX = -totalW / 2 + nodeW / 2;
-    const startY = 280; // below agent node
-
-    return toolIds.map((id, i) => {
-      const col = i % cols;
-      const row = Math.floor(i / cols);
-      return {
-        id,
-        x: startX + col * (nodeW + gapX),
-        y: startY + row * (nodeH + gapY),
-      };
-    });
+  // Categorize tools for display
+  function categorizeTools(toolIds: string[]): Record<string, string[]> {
+    const cats: Record<string, string[]> = {
+      "Web & Data": [], "Code & Files": [], "Memory & Knowledge": [],
+      "Media": [], "Agents & Automation": [], "Other": [],
+    };
+    const catMap: Record<string, string> = {
+      "web-search": "Web & Data", "browse": "Web & Data", "http-request": "Web & Data", "web-crawl": "Web & Data",
+      "python-exec": "Code & Files", "bash": "Code & Files", "read-file": "Code & Files", "write-file": "Code & Files", "edit-file": "Code & Files",
+      "memory-save": "Memory & Knowledge", "memory-recall": "Memory & Knowledge", "knowledge-search": "Memory & Knowledge", "store-knowledge": "Memory & Knowledge", "ingest-document": "Memory & Knowledge",
+      "image-generate": "Media", "vision-analyze": "Media", "text-to-speech": "Media", "speech-to-text": "Media",
+      "create-agent": "Agents & Automation", "run-agent": "Agents & Automation", "list-agents": "Agents & Automation",
+      "a2a-send": "Agents & Automation", "marketplace-search": "Agents & Automation",
+      "create-schedule": "Agents & Automation", "list-schedules": "Agents & Automation", "delete-schedule": "Agents & Automation",
+      "mcp-call": "Agents & Automation",
+    };
+    for (const id of toolIds) {
+      const name = getToolById(id)?.name ?? id;
+      const cat = catMap[id] || "Other";
+      cats[cat].push(name);
+    }
+    return cats;
   }
 
   function buildNodes(): Node[] {
     const nodes: Node[] = [];
 
-    // Core agent node at center
+    // ── Core agent node at center ──
     nodes.push({
       id: "core",
       type: "agentCore",
       position: { x: 0, y: 0 },
-      data: {
-        agentName,
-        plan,
-        modelOverride,
-        budgetLimit: budgetEnabled ? budgetLimit : 0,
-        maxTurns,
-        isActive,
-      },
+      data: { agentName, plan, modelOverride, budgetLimit: budgetEnabled ? budgetLimit : 0, maxTurns, isActive },
       draggable: true,
     });
 
-    // Prompt node above
+    // ── System prompt — above ──
     nodes.push({
       id: "prompt",
       type: "prompt",
-      position: { x: 0, y: -250 },
-      data: {
-        systemPrompt,
-      },
+      position: { x: 0, y: -220 },
+      data: { systemPrompt },
       draggable: true,
     });
 
-    // Guardrail node to the right
+    // ── Guardrails — top right ──
     nodes.push({
       id: "guardrail",
       type: "guardrail",
-      position: { x: 350, y: 0 },
+      position: { x: 320, y: -100 },
+      data: { budgetEnabled, budgetLimit, timeoutSeconds },
+      draggable: true,
+    });
+
+    // ── Category satellite nodes — hub and spoke below/around ──
+    const toolCats = categorizeTools(tools);
+    const activeToolCats = Object.entries(toolCats).filter(([, items]) => items.length > 0);
+
+    // Satellite positions: semicircle below the agent
+    const satellites: Array<{ id: string; label: string; icon: string; color: string; accent: string; items: string[]; x: number; y: number }> = [];
+
+    // Fixed category definitions with colors
+    const categoryDefs: Record<string, { icon: string; color: string; accent: string }> = {
+      "Web & Data": { icon: "M21 21l-5.2-5.2M17 10a7 7 0 11-14 0 7 7 0 0114 0z", color: "bg-blue-500/20 text-blue-400", accent: "border-blue-500/30" },
+      "Code & Files": { icon: "M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5", color: "bg-emerald-500/20 text-emerald-400", accent: "border-emerald-500/30" },
+      "Memory & Knowledge": { icon: "M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25", color: "bg-purple-500/20 text-purple-400", accent: "border-purple-500/30" },
+      "Media": { icon: "M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.41a2.25 2.25 0 013.182 0l2.909 2.91m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5z", color: "bg-amber-500/20 text-amber-400", accent: "border-amber-500/30" },
+      "Agents & Automation": { icon: "M18 18.72a9.094 9.094 0 003.741-.479 3 3 0 00-4.682-2.72m.94 3.198l.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0112 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 016 18.719m12 0a5.971 5.971 0 00-.941-3.197m0 0A5.995 5.995 0 0012 12.75a5.995 5.995 0 00-5.058 2.772m0 0a3 3 0 00-4.681 2.72 8.986 8.986 0 003.74.477m.94-3.197a5.971 5.971 0 00-.94 3.197", color: "bg-cyan-500/20 text-cyan-400", accent: "border-cyan-500/30" },
+      "Other": { icon: "M11.42 15.17l-5.648-3.177a1.144 1.144 0 01-.002-2.01L11.42 6.83a2.25 2.25 0 012.16 0l5.648 3.177a1.144 1.144 0 01.002 2.01l-5.648 3.177a2.25 2.25 0 01-2.16-.001z", color: "bg-rose-500/20 text-rose-400", accent: "border-rose-500/30" },
+    };
+
+    // Position satellites in a row below (spaced evenly)
+    const count = activeToolCats.length;
+    const spacing = 200;
+    const startX = -((count - 1) * spacing) / 2;
+
+    activeToolCats.forEach(([cat, items], i) => {
+      const def = categoryDefs[cat] || categoryDefs["Other"];
+      satellites.push({
+        id: `cat-${cat.toLowerCase().replace(/\s+/g, "-")}`,
+        label: cat, icon: def.icon, color: def.color, accent: def.accent,
+        items, x: startX + i * spacing, y: 220,
+      });
+    });
+
+    // Add voice node (left side) — always visible
+    nodes.push({
+      id: "cat-voice",
+      type: "category",
+      position: { x: -320, y: -100 },
       data: {
-        budgetEnabled,
-        budgetLimit,
-        timeoutSeconds,
+        label: "Voice", count: 0,
+        icon: "M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z",
+        color: "bg-pink-500/20 text-pink-400", accent: "border-pink-500/30",
+        items: ["STT: Whisper V3", "TTS: Kokoro / Chatterbox", "Phone: Twilio"],
       },
       draggable: true,
     });
 
-    // Tool nodes in semicircle below
-    const toolPositions = computeToolPositions(tools);
-    for (const tp of toolPositions) {
-      const toolDef = getToolById(tp.id);
+    // Add category satellite nodes
+    for (const sat of satellites) {
       nodes.push({
-        id: `tool-${tp.id}`,
-        type: "tool",
-        position: { x: tp.x, y: tp.y },
+        id: sat.id,
+        type: "category",
+        position: { x: sat.x, y: sat.y },
         data: {
-          toolId: tp.id,
-          name: toolDef?.name ?? tp.id,
-          description: toolDef?.description ?? "",
-          icon: toolDef?.icon ?? "",
+          label: sat.label, count: sat.items.length,
+          icon: sat.icon, color: sat.color, accent: sat.accent,
+          items: sat.items,
         },
         draggable: true,
       });
@@ -215,35 +245,36 @@ export function createCanvasStore() {
   function buildEdges(): Edge[] {
     const edges: Edge[] = [];
 
-    // Prompt -> Core
+    // Prompt → Core
     edges.push({
-      id: "edge-prompt-core",
-      source: "prompt",
-      target: "core",
+      id: "edge-prompt-core", source: "prompt", target: "core",
       type: "smoothstep",
       style: "stroke: var(--muted-foreground); stroke-dasharray: 4 4; opacity: 0.5;",
-      animated: false,
     });
 
-    // Guardrail -> Core
+    // Guardrail → Core
     edges.push({
-      id: "edge-guardrail-core",
-      source: "guardrail",
-      target: "core",
+      id: "edge-guardrail-core", source: "guardrail", target: "core",
       type: "smoothstep",
       style: "stroke: var(--destructive); stroke-dasharray: 6 3; opacity: 0.6;",
-      animated: false,
     });
 
-    // Tool -> Core
-    for (const toolId of tools) {
+    // Voice → Core
+    edges.push({
+      id: "edge-voice-core", source: "cat-voice", target: "core",
+      type: "smoothstep",
+      style: "stroke: var(--muted-foreground); stroke-dasharray: 4 4; opacity: 0.4;",
+    });
+
+    // Category satellites → Core
+    const toolCats = categorizeTools(tools);
+    for (const [cat, items] of Object.entries(toolCats)) {
+      if (items.length === 0) continue;
+      const id = `cat-${cat.toLowerCase().replace(/\s+/g, "-")}`;
       edges.push({
-        id: `edge-tool-${toolId}`,
-        source: `tool-${toolId}`,
-        target: "core",
+        id: `edge-${id}-core`, source: id, target: "core",
         type: "smoothstep",
         style: "stroke: var(--muted-foreground); stroke-dasharray: 4 4; opacity: 0.4;",
-        animated: false,
       });
     }
 
