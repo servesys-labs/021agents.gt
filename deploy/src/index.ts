@@ -3413,9 +3413,25 @@ export default {
               // 4. Run through agent (full pipeline — tools, memory, conversation)
               const agentResult = await runViaAgent(env, agentName, transcript, {
                 org_id: orgId,
-                channel: "voice-test",
+                channel: "voice",
               });
-              const responseText = agentResult?.output || "I didn't catch that.";
+              let responseText = agentResult?.output || "I didn't catch that.";
+
+              // Strip markdown, plan steps, and formatting — voice should be plain spoken text
+              responseText = responseText
+                .replace(/#{1,6}\s*/g, "")                    // headers
+                .replace(/\*{1,3}([^*]+)\*{1,3}/g, "$1")      // bold/italic
+                .replace(/`{1,3}[^`]*`{1,3}/g, "")            // code
+                .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")       // links
+                .replace(/^[-*•]\s*\[[ x]\]\s*/gm, "")         // checkboxes
+                .replace(/^[-*•]\s*/gm, "")                    // bullet points
+                .replace(/^\d+\.\s*/gm, "")                    // numbered lists
+                .replace(/^>\s*/gm, "")                        // blockquotes
+                .replace(/---+/g, "")                           // horizontal rules
+                .replace(/\n{2,}/g, ". ")                       // double newlines → period
+                .replace(/\n/g, " ")                            // single newlines → space
+                .replace(/\s{2,}/g, " ")                        // collapse whitespace
+                .trim();
 
               // 5. Send agent transcript to browser
               safeSend(JSON.stringify({ type: "transcript", speaker: "agent", text: responseText }));
