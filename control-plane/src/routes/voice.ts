@@ -1710,18 +1710,33 @@ voiceRoutes.openapi(twilioIncomingRoute, async (c): Promise<any> => {
 
   const { org_id: orgId, agent_name: agentName } = rows[0] as { org_id: string; agent_name: string };
 
-  // Return TwiML that uses ConversationRelay — Twilio handles STT/TTS/VAD
-  // We just receive text and send text back over WebSocket
+  // Load agent's voice config to determine STT/TTS mode
+  const agentRows = await sql`
+    SELECT config FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1
+  `;
+  const agentCfg = agentRows.length > 0
+    ? (typeof (agentRows[0] as any).config === "string"
+        ? JSON.parse((agentRows[0] as any).config)
+        : (agentRows[0] as any).config) || {}
+    : {};
+  const voiceCfg = (agentCfg.voice && typeof agentCfg.voice === "object") ? agentCfg.voice : {};
+  const ttsEngine = String(voiceCfg.tts_engine || "kokoro");
+  const greeting = String(voiceCfg.greeting || "Hello! How can I help you today?");
+
   const runtimeWsUrl = String(c.env.RUNTIME_WORKER_URL || "https://runtime.oneshots.co")
     .replace(/^http/, "ws");
-  const relayUrl = `${runtimeWsUrl}/voice/relay?agent=${encodeURIComponent(agentName)}&amp;org_id=${encodeURIComponent(orgId)}`;
 
-  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+  let twiml: string;
+
+  if (ttsEngine === "workers-ai") {
+    // ConversationRelay mode — Twilio handles STT/TTS (cloud-based, lower latency)
+    const relayUrl = `${runtimeWsUrl}/voice/relay?agent=${encodeURIComponent(agentName)}&amp;org_id=${encodeURIComponent(orgId)}`;
+    twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
     <ConversationRelay
       url="${relayUrl}"
-      welcomeGreeting="Hello! How can I help you today?"
+      welcomeGreeting="${greeting.replace(/"/g, "&quot;")}"
       voice="Google.en-US-Journey-F"
       transcriptionProvider="Deepgram"
       ttsProvider="Google"
@@ -1732,6 +1747,17 @@ voiceRoutes.openapi(twilioIncomingRoute, async (c): Promise<any> => {
     />
   </Connect>
 </Response>`;
+  } else {
+    // Media Stream mode — OUR GPU box handles STT/TTS (self-hosted, zero cloud cost)
+    const streamUrl = `${runtimeWsUrl}/voice/stream?agent=${encodeURIComponent(agentName)}&amp;org_id=${encodeURIComponent(orgId)}`;
+    twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>${greeting.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</Say>
+  <Connect>
+    <Stream url="${streamUrl}" />
+  </Connect>
+</Response>`;
+  }
 
   return c.text(twiml, 200, { "Content-Type": "text/xml" });
 });
