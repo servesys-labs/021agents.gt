@@ -1256,12 +1256,18 @@ CREATE TABLE IF NOT EXISTS voice_calls (
 CREATE TABLE IF NOT EXISTS voice_numbers (
   id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
   org_id       TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+  agent_name   TEXT NOT NULL DEFAULT '',
   phone_number TEXT NOT NULL UNIQUE,
-  provider     TEXT NOT NULL DEFAULT '',
+  provider     TEXT NOT NULL DEFAULT 'twilio',
+  provider_sid TEXT,
+  status       TEXT NOT NULL DEFAULT 'active',
   capabilities JSONB NOT NULL DEFAULT '[]',
+  config       JSONB NOT NULL DEFAULT '{}',
   is_active    BOOLEAN NOT NULL DEFAULT true,
   created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE INDEX IF NOT EXISTS idx_voice_numbers_org_agent ON voice_numbers(org_id, agent_name);
 
 -- ============================================================================
 -- SECTION 15: Evolution & Governance
