@@ -24,6 +24,8 @@ export interface LLMCallOptions {
   max_tokens?: number;
   temperature?: number;
   metadata?: Record<string, string>;
+  /** Timeout in milliseconds for the LLM call. Default: 120_000 (2 minutes). */
+  timeout_ms?: number;
 }
 
 export interface LLMCallResult {
@@ -83,11 +85,28 @@ export async function callLLMGateway(
   if (options.max_tokens) body.max_tokens = options.max_tokens;
   if (options.temperature !== undefined) body.temperature = options.temperature;
 
-  const resp = await fetch(endpoint, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-  });
+  // Timeout: Sonnet 4.6 via AI Gateway can take 30-90s for large prompts.
+  // Default 120s (2 min) — enough for complex agent generation.
+  const timeoutMs = options.timeout_ms || 120_000;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  let resp: Response;
+  try {
+    resp = await fetch(endpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    if (err?.name === "AbortError") {
+      throw new Error(`LLM call timed out after ${timeoutMs / 1000}s. Model: ${model}`);
+    }
+    throw err;
+  }
+  clearTimeout(timeoutId);
 
   if (!resp.ok) {
     const errText = await resp.text().catch(() => "Unknown error");

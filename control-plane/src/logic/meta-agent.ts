@@ -719,8 +719,9 @@ Return ONLY valid JSON. No markdown fences, no explanation.`;
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ],
-
+      max_tokens: 8192,
       temperature: 0.3,
+      timeout_ms: 120_000,
       metadata: { agent: "meta-agent-build", org_id: opts.orgId || "" },
     },
   );
@@ -933,7 +934,9 @@ Return ONLY valid JSON.`,
           },
         ],
 
+        max_tokens: 4096,
         temperature: 0.3,
+        timeout_ms: 60_000,
         metadata: { agent: "meta-agent-eval" },
       },
     );
@@ -1072,7 +1075,9 @@ ${failureSummary || "None"}`,
           },
         ],
 
+        max_tokens: 4096,
         temperature: 0.3,
+        timeout_ms: 60_000,
         metadata: { agent: "meta-agent-evolution" },
       },
     );
