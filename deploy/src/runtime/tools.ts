@@ -2034,7 +2034,7 @@ async function dispatch(
       }
       try {
         await sql`
-          INSERT INTO schedules (schedule_id, agent_name, org_id, task, cron, enabled, run_count, created_at)
+          INSERT INTO schedules (id, agent_name, org_id, task, cron, is_active, run_count, created_at)
           VALUES (${scheduleId}, ${agentName}, ${orgId}, ${taskDesc}, ${cronExpr}, true, 0, ${new Date().toISOString()})
         `;
         return JSON.stringify({ created: true, schedule_id: scheduleId, agent_name: agentName, cron: cronExpr, task: taskDesc });
@@ -2052,8 +2052,8 @@ async function dispatch(
       const orgId = args.org_id || "";
       try {
         const rows = agentName
-          ? await sql`SELECT schedule_id, agent_name, task, cron, is_enabled, run_count, last_run_at FROM schedules WHERE agent_name = ${agentName} AND org_id = ${orgId} ORDER BY created_at DESC LIMIT 20`
-          : await sql`SELECT schedule_id, agent_name, task, cron, is_enabled, run_count, last_run_at FROM schedules WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 20`;
+          ? await sql`SELECT id as schedule_id, agent_name, task, cron, is_active, run_count, last_run_at FROM schedules WHERE agent_name = ${agentName} AND org_id = ${orgId} ORDER BY created_at DESC LIMIT 20`
+          : await sql`SELECT id as schedule_id, agent_name, task, cron, is_active, run_count, last_run_at FROM schedules WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 20`;
         return JSON.stringify(rows);
       } catch {
         return "[]";
@@ -2069,7 +2069,7 @@ async function dispatch(
       const orgId = args.org_id || "";
       if (!scheduleId) return "delete-schedule requires schedule_id";
       try {
-        await sql`DELETE FROM schedules WHERE schedule_id = ${scheduleId} AND org_id = ${orgId}`;
+        await sql`DELETE FROM schedules WHERE id = ${scheduleId} AND org_id = ${orgId}`;
         return JSON.stringify({ deleted: true, schedule_id: scheduleId });
       } catch (err: any) {
         return `Failed to delete schedule: ${err.message || err}`;
