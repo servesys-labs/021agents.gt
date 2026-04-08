@@ -440,7 +440,7 @@
           onSend={handleSend}
         />
       {:else}
-        <div class="mx-auto max-w-4xl space-y-6 px-4 py-6 sm:px-6">
+        <div class="w-full max-w-5xl mx-auto space-y-6 px-4 py-6 sm:px-6">
           {#each messages as msg, i}
             <ChatMessage
               message={msg}
