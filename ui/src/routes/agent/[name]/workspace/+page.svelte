@@ -5,11 +5,15 @@
   import Badge from "$lib/components/ui/badge.svelte";
   import Dialog from "$lib/components/ui/dialog.svelte";
   import AgentNav from "$lib/components/agent/AgentNav.svelte";
+  import Input from "$lib/components/ui/input.svelte";
+  import Textarea from "$lib/components/ui/textarea.svelte";
   import {
     listWorkspaceFiles,
     getFileContent,
     deleteFile,
     downloadFile as downloadFileUrl,
+    createWorkspaceFile,
+    uploadWorkspaceFile,
     type WorkspaceFile,
   } from "$lib/services/settings";
   import { timeAgo } from "$lib/utils/time";
@@ -137,6 +141,89 @@
     window.open(url, "_blank");
   }
 
+  // Upload
+  let dragActive = $state(false);
+  let uploading = $state(false);
+  let uploadProgress = $state("");
+  let fileInput: HTMLInputElement;
+
+  // Create new file
+  let createOpen = $state(false);
+  let newFilePath = $state("");
+  let newFileContent = $state("");
+  let creating = $state(false);
+
+  async function handleUploadFiles(fileList: FileList | File[]) {
+    const files_to_upload = Array.from(fileList);
+    if (files_to_upload.length === 0) return;
+
+    const MAX_SIZE = 10 * 1024 * 1024; // 10 MB
+    const oversized = files_to_upload.filter((f) => f.size > MAX_SIZE);
+    if (oversized.length > 0) {
+      toast.error(`${oversized.map((f) => f.name).join(", ")} exceed${oversized.length === 1 ? "s" : ""} the 10 MB limit`);
+      return;
+    }
+
+    uploading = true;
+    let uploaded = 0;
+    let failed = 0;
+
+    for (const file of files_to_upload) {
+      uploadProgress = `Uploading ${uploaded + failed + 1}/${files_to_upload.length}: ${file.name}`;
+      try {
+        await uploadWorkspaceFile(agentName, file);
+        uploaded++;
+      } catch (err) {
+        failed++;
+        toast.error(`Failed to upload "${file.name}": ${err instanceof Error ? err.message : "Unknown error"}`);
+      }
+    }
+
+    uploading = false;
+    uploadProgress = "";
+    if (uploaded > 0) {
+      toast.success(`Uploaded ${uploaded} file${uploaded !== 1 ? "s" : ""}${failed > 0 ? ` (${failed} failed)` : ""}`);
+      await load();
+    }
+  }
+
+  function handleDrop(e: DragEvent) {
+    e.preventDefault();
+    dragActive = false;
+    if (e.dataTransfer?.files) {
+      handleUploadFiles(e.dataTransfer.files);
+    }
+  }
+
+  function handleFileSelect(e: Event) {
+    const input = e.target as HTMLInputElement;
+    if (input.files) {
+      handleUploadFiles(input.files);
+      input.value = ""; // reset so same file can be re-selected
+    }
+  }
+
+  async function handleCreateFile() {
+    const trimmedPath = newFilePath.trim();
+    if (!trimmedPath) {
+      toast.error("Please enter a file path");
+      return;
+    }
+    creating = true;
+    try {
+      await createWorkspaceFile(agentName, trimmedPath, newFileContent);
+      toast.success(`Created "${trimmedPath}"`);
+      createOpen = false;
+      newFilePath = "";
+      newFileContent = "";
+      await load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to create file");
+    } finally {
+      creating = false;
+    }
+  }
+
   $effect(() => {
     if (agentName) load();
   });
@@ -150,6 +237,44 @@
   variant="destructive"
   onConfirm={handleDelete}
 />
+
+<!-- Create File dialog -->
+{#if createOpen}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="fixed inset-0 z-[100] flex items-center justify-center bg-black/60"
+    onclick={(e) => { if (e.target === e.currentTarget) createOpen = false; }}
+    onkeydown={(e) => { if (e.key === "Escape") createOpen = false; }}
+  >
+    <div
+      class="mx-4 w-full max-w-lg rounded-lg border border-border bg-background p-6 shadow-lg"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="create-dialog-title"
+    >
+      <h3 id="create-dialog-title" class="font-semibold text-foreground">Create New File</h3>
+      <p class="mt-1 text-sm text-muted-foreground">Add a new file to your agent's workspace.</p>
+
+      <div class="mt-4 space-y-4">
+        <div>
+          <label for="new-file-path" class="mb-1.5 block text-sm font-medium text-foreground">File path</label>
+          <Input id="new-file-path" bind:value={newFilePath} placeholder="e.g. data/config.json" />
+        </div>
+        <div>
+          <label for="new-file-content" class="mb-1.5 block text-sm font-medium text-foreground">Content <span class="font-normal text-muted-foreground">(optional)</span></label>
+          <Textarea id="new-file-content" bind:value={newFileContent} placeholder="File contents..." rows={8} class="font-mono text-xs" />
+        </div>
+      </div>
+
+      <div class="mt-6 flex justify-end gap-3">
+        <Button variant="outline" onclick={() => (createOpen = false)}>Cancel</Button>
+        <Button disabled={creating || !newFilePath.trim()} onclick={handleCreateFile}>
+          {creating ? "Creating..." : "Create File"}
+        </Button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <div class="flex h-full flex-col">
   <AgentNav {agentName} activePath={$page.url.pathname} />
@@ -165,6 +290,12 @@
           </p>
         </div>
         <div class="flex gap-2">
+          <Button size="sm" onclick={() => (createOpen = true)}>
+            <svg xmlns="http://www.w3.org/2000/svg" class="mr-1.5 h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" />
+            </svg>
+            New File
+          </Button>
           <Button
             variant={viewMode === "list" ? "secondary" : "ghost"}
             size="sm"
@@ -184,6 +315,34 @@
             </svg>
           </Button>
         </div>
+      </div>
+
+      <!-- Upload area -->
+      <div
+        class="mb-6 rounded-lg border-2 border-dashed p-8 text-center transition-colors {dragActive ? 'border-primary bg-primary/5' : 'border-border hover:border-primary/50'}"
+        ondragover={(e) => { e.preventDefault(); dragActive = true; }}
+        ondragleave={() => (dragActive = false)}
+        ondrop={handleDrop}
+        role="button"
+        tabindex="0"
+        onkeydown={(e) => { if (e.key === "Enter" || e.key === " ") fileInput?.click(); }}
+      >
+        <input type="file" multiple class="hidden" bind:this={fileInput} onchange={handleFileSelect} />
+        {#if uploading}
+          <div class="flex flex-col items-center gap-2">
+            <div class="h-6 w-6 animate-spin rounded-full border-2 border-primary border-t-transparent"></div>
+            <p class="text-sm text-muted-foreground">{uploadProgress}</p>
+          </div>
+        {:else}
+          <svg xmlns="http://www.w3.org/2000/svg" class="mx-auto h-10 w-10 text-muted-foreground/40" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+          </svg>
+          <p class="mt-3 text-sm text-muted-foreground">
+            Drag files here or
+            <button class="font-medium text-primary underline-offset-4 hover:underline" onclick={() => fileInput?.click()}>browse</button>
+          </p>
+          <p class="mt-1 text-xs text-muted-foreground">Max 10 MB per file</p>
+        {/if}
       </div>
 
       {#if loading}

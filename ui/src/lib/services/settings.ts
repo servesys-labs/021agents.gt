@@ -206,3 +206,42 @@ export function deleteFile(agentName: string, path: string): Promise<void> {
 export function downloadFile(agentName: string, path: string): string {
   return `${api.baseUrl}/workspace/files/read?agent_name=${encodeURIComponent(agentName)}&path=${encodeURIComponent(path)}&download=true`;
 }
+
+export function createWorkspaceFile(
+  agentName: string,
+  path: string,
+  content: string,
+): Promise<{ ok: boolean; key: string; size_bytes: number }> {
+  return api.post("/workspace/files/create", { agent_name: agentName, path, content });
+}
+
+const TEXT_FILE_RE = /\.(ts|tsx|js|jsx|json|md|py|rs|go|html|css|csv|xml|yaml|yml|toml|sh|bash|sql|txt|log|env|svelte|vue|rb|java|c|cpp|h|hpp|swift|kt|r|m|pl|lua|zig|asm|ini|cfg|conf|makefile|dockerfile)$/i;
+
+export function uploadWorkspaceFile(
+  agentName: string,
+  file: File,
+): Promise<{ ok: boolean; key: string; size_bytes: number }> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const content = reader.result as string;
+      try {
+        resolve(
+          await api.post("/workspace/files/create", {
+            agent_name: agentName,
+            path: file.name,
+            content,
+          }),
+        );
+      } catch (e) {
+        reject(e);
+      }
+    };
+    reader.onerror = () => reject(reader.error);
+    if (file.type.startsWith("text/") || TEXT_FILE_RE.test(file.name)) {
+      reader.readAsText(file);
+    } else {
+      reader.readAsDataURL(file); // base64 data-url for binary files
+    }
+  });
+}
