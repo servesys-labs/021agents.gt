@@ -536,6 +536,7 @@
   let testCallInterval: ReturnType<typeof setInterval> | null = null;
   let testTranscript = $state<Array<{ speaker: "user" | "agent"; text: string }>>([]);
   let testProcessing = $state(false);
+  let testStatusMessage = $state("");
   let testListening = $state(false);
   let testMuted = $state(false);
   let testWs: WebSocket | null = null;
@@ -665,9 +666,25 @@
           }
         }
 
+        if (msg.type === "status") {
+          // Show pipeline progress to the user
+          testStatusMessage = msg.message || "";
+          if (msg.step === "stt" && msg.message?.includes("No speech")) {
+            // No speech detected — resume recording
+            testProcessing = false;
+            testListening = true;
+            testStatusMessage = "";
+            startTestRecordingChunk();
+          }
+        }
+
         if (msg.type === "error") {
           toast.error(msg.message || "Voice test error");
           testProcessing = false;
+          testListening = true;
+          testStatusMessage = "";
+          // Resume recording after error so the user can try again
+          if (testCallActive) startTestRecordingChunk();
         }
       };
 
@@ -1261,7 +1278,7 @@
                       <span class="text-xs text-muted-foreground">Listening...</span>
                     {:else if testProcessing}
                       <span class="h-2.5 w-2.5 rounded-full bg-amber-500 animate-pulse"></span>
-                      <span class="text-xs text-muted-foreground">Processing...</span>
+                      <span class="text-xs text-muted-foreground">{testStatusMessage || "Processing..."}</span>
                     {:else if testMuted}
                       <span class="h-2.5 w-2.5 rounded-full bg-gray-400"></span>
                       <span class="text-xs text-muted-foreground">Muted</span>
