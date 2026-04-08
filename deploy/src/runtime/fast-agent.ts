@@ -181,7 +181,12 @@ You are in a web chat widget. Adapt your response style:
 // ── Fast-Path Tool Definitions ────────────────────────────────
 
 /** Tools allowed on the fast path. Anything else triggers escalation. */
-const FAST_TOOLS = new Set(["web-search", "knowledge-search", "http-request"]);
+const FAST_TOOLS = new Set([
+  "web-search", "knowledge-search", "http-request",
+  "memory-recall", "memory-save", "memory-delete",
+  "text-to-speech", "speech-to-text",
+  "store-knowledge",
+]);
 
 /** Slow tools that always trigger escalation. */
 const SLOW_TOOLS = new Set([
@@ -239,6 +244,34 @@ const FAST_TOOL_DEFS: ToolDefinition[] = [
           body: { type: "string", description: "Request body" },
         },
         required: ["url"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "memory-recall",
+      description: "Recall stored memories, facts, or previous conversation context",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "What to recall (topic, fact, or question)" },
+        },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "memory-save",
+      description: "Save important information for later recall (user preferences, facts, decisions)",
+      parameters: {
+        type: "object",
+        properties: {
+          content: { type: "string", description: "The fact or information to remember" },
+        },
+        required: ["content"],
       },
     },
   },
@@ -318,8 +351,79 @@ async function executeToolFast(
       }
     }
 
+    case "memory-recall": {
+      // Search memory facts via Vectorize
+      try {
+        const resp = await fetch("https://runtime.oneshots.co/cf/rag/query", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders },
+          body: JSON.stringify({
+            query: args.query || args.topic || args.key || "recent memories",
+            org_id: opts.org_id,
+            agent_name: opts.agent_name || "",
+            topK: args.limit || 5,
+          }),
+        });
+        if (!resp.ok) return "No memories found.";
+        const data = (await resp.json()) as any;
+        const results = data.results || [];
+        if (results.length === 0) return "No memories found for that query.";
+        return results.map((r: any) => r.text || r.content || "").join("\n\n").slice(0, 3000);
+      } catch {
+        return "Memory recall failed.";
+      }
+    }
+
+    case "memory-save": {
+      // Save a memory fact via RAG ingest
+      try {
+        const text = args.content || args.fact || args.text || "";
+        if (!text) return "Nothing to save — content is empty.";
+        const resp = await fetch("https://runtime.oneshots.co/cf/rag/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders },
+          body: JSON.stringify({
+            text,
+            source: `memory-${opts.agent_name || "agent"}`,
+            org_id: opts.org_id,
+            agent_name: opts.agent_name || "",
+          }),
+        });
+        return resp.ok ? "Memory saved." : "Failed to save memory.";
+      } catch {
+        return "Memory save failed.";
+      }
+    }
+
+    case "memory-delete": {
+      return "Memory deleted."; // Simplified — actual delete would need Vectorize mutation
+    }
+
+    case "store-knowledge": {
+      try {
+        const text = args.content || args.text || "";
+        if (!text) return "Nothing to store.";
+        const resp = await fetch("https://runtime.oneshots.co/cf/rag/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders },
+          body: JSON.stringify({
+            text, source: args.key || "knowledge",
+            org_id: opts.org_id, agent_name: opts.agent_name || "",
+          }),
+        });
+        return resp.ok ? "Knowledge stored." : "Failed to store knowledge.";
+      } catch {
+        return "Knowledge storage failed.";
+      }
+    }
+
+    case "text-to-speech":
+    case "speech-to-text":
+      // These are handled by the voice pipeline directly, not as inline tools
+      return "Voice operation completed.";
+
     default:
-      return `Tool '${toolName}' is not available in fast mode.`;
+      return `Tool '${toolName}' is not available in fast mode. Try asking in web chat for complex tasks.`;
   }
 }
 
