@@ -198,30 +198,7 @@
             {/if}
           </a>
 
-          <!-- Conversation history for current agent -->
-          {#if currentAgent && !sidebarCollapsed && conversationGroups.length > 0}
-            <div class="mt-4 border-t border-border pt-3">
-              <p class="mb-1.5 px-2 text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
-                Conversations
-              </p>
-              {#each conversationGroups as group}
-                <p class="mt-2 px-2 text-[10px] font-medium text-muted-foreground/60">
-                  {group.label}
-                </p>
-                {#each group.items as conv}
-                  <a
-                    href="/chat/{currentAgent}?c={conv.id}"
-                    class="group flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs text-sidebar-foreground/70 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground
-                      {conversationStore.activeConversationId === conv.id ? 'bg-sidebar-accent/50 text-sidebar-accent-foreground' : ''}"
-                    onclick={() => (sidebarOpen = false)}
-                    title={conv.title}
-                  >
-                    <span class="truncate">{conv.title}</span>
-                  </a>
-                {/each}
-              {/each}
-            </div>
-          {/if}
+          <!-- Conversations moved to chat page session picker (top-right) -->
         </nav>
 
         <!-- Platform links -->
