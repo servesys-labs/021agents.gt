@@ -165,7 +165,7 @@ publicAgentRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
     const hasEnough = await hasCredits(creditSql, orgId, 1);
     if (!hasEnough) {
       return c.json({
-        error: "Insufficient credits. Purchase credits at https://app.oneshots.co/settings?tab=billing",
+        error: "Insufficient credits. Purchase credits at https://app.021agents.ai/settings?tab=billing",
         code: "insufficient_credits",
         balance_cents: 0,
       }, 402);
@@ -384,7 +384,7 @@ publicAgentRoutes.openapi(agentRunStreamRoute, async (c): Promise<any> => {
     const hasEnough = await hasCredits(creditSql, orgId, 1);
     if (!hasEnough) {
       return c.json({
-        error: "Insufficient credits. Purchase credits at https://app.oneshots.co/settings?tab=billing",
+        error: "Insufficient credits. Purchase credits at https://app.021agents.ai/settings?tab=billing",
         code: "insufficient_credits",
         balance_cents: 0,
       }, 402);
@@ -555,7 +555,7 @@ publicAgentRoutes.openapi(agentRunUploadRoute, async (c): Promise<any> => {
     const hasEnough = await hasCredits(creditSql, orgId, 1);
     if (!hasEnough) {
       return c.json({
-        error: "Insufficient credits. Purchase credits at https://app.oneshots.co/settings?tab=billing",
+        error: "Insufficient credits. Purchase credits at https://app.021agents.ai/settings?tab=billing",
         code: "insufficient_credits",
         balance_cents: 0,
       }, 402);

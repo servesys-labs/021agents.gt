@@ -236,7 +236,7 @@ runtimeProxyRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
       const hasEnough = await hasCredits(creditSql, orgId, 1);
       if (!hasEnough) {
         return c.json({
-          error: "Insufficient credits. Purchase credits at https://app.oneshots.co/settings?tab=billing",
+          error: "Insufficient credits. Purchase credits at https://app.021agents.ai/settings?tab=billing",
           code: "insufficient_credits",
           balance_cents: 0,
         }, 402);
@@ -339,7 +339,7 @@ runtimeProxyRoutes.openapi(batchRoute, async (c): Promise<any> => {
     const hasEnough = await hasCredits(creditSql, batchOrgId, Math.max(1, estimatedBatchCost));
     if (!hasEnough) {
       return c.json({
-        error: `Insufficient credits for batch of ${inputs.length} items (estimated ~$${estimatedBatchCost.toFixed(2)}). Purchase credits at https://app.oneshots.co/settings?tab=billing`,
+        error: `Insufficient credits for batch of ${inputs.length} items (estimated ~$${estimatedBatchCost.toFixed(2)}). Purchase credits at https://app.021agents.ai/settings?tab=billing`,
         code: "insufficient_credits",
       }, 402);
     }
@@ -566,7 +566,7 @@ runtimeProxyRoutes.openapi(streamRoute, async (c): Promise<any> => {
       const hasEnough = await hasCredits(creditSql, streamOrgId, 1);
       if (!hasEnough) {
         return c.json({
-          error: "Insufficient credits. Purchase credits at https://app.oneshots.co/settings?tab=billing",
+          error: "Insufficient credits. Purchase credits at https://app.021agents.ai/settings?tab=billing",
           code: "insufficient_credits",
           balance_cents: 0,
         }, 402);

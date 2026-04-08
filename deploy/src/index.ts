@@ -1297,7 +1297,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           if (!bal || Number(bal.balance_usd) <= 0) {
             connection.send(JSON.stringify({
               type: "error",
-              message: "Insufficient credits. Purchase credits at https://app.oneshots.co/settings?tab=billing",
+              message: "Insufficient credits. Purchase credits at https://app.021agents.ai/settings?tab=billing",
               code: "insufficient_credits",
             }));
             this._activeRun = false;
@@ -1842,7 +1842,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           const [bal] = await sql`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${runOrgId}`;
           if (!bal || Number(bal.balance_usd) <= 0) {
             return Response.json({
-              error: "Insufficient credits. Purchase credits at https://app.oneshots.co/settings?tab=billing",
+              error: "Insufficient credits. Purchase credits at https://app.021agents.ai/settings?tab=billing",
               code: "insufficient_credits",
             }, { status: 402 });
           }

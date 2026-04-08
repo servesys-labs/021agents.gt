@@ -173,8 +173,8 @@ const checkoutRoute = createRoute({
 creditRoutes.openapi(checkoutRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const body = c.req.valid("json");
-  const successUrl = String(body.success_url || "https://app.oneshots.co/settings?tab=billing&credit_purchase=success");
-  const cancelUrl = String(body.cancel_url || "https://app.oneshots.co/settings?tab=billing&credit_purchase=canceled");
+  const successUrl = String(body.success_url || "https://app.021agents.ai/settings?tab=billing&credit_purchase=success");
+  const cancelUrl = String(body.cancel_url || "https://app.021agents.ai/settings?tab=billing&credit_purchase=canceled");
 
   // Look up the package
   const sql = await getDb(c.env.HYPERDRIVE);

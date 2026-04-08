@@ -6,7 +6,6 @@
     "not_found_handling": "single-page-application"
   },
   "routes": [
-    { "pattern": "app.oneshots.co/*", "zone_name": "oneshots.co" },
     { "pattern": "app.021agents.ai/*", "zone_name": "021agents.ai" }
   ]
 }

@@ -100,7 +100,7 @@ const app = createApp();
 app.use("*", securityHeadersMiddleware);
 app.use("*", cors({
   origin: (origin) => {
-    const allowed = (process.env.ALLOWED_ORIGINS || "http://localhost:3000,http://localhost:5173,https://app.oneshots.co").split(",");
+    const allowed = (process.env.ALLOWED_ORIGINS || "http://localhost:3000,http://localhost:5173,https://app.021agents.ai").split(",");
     if (!origin || allowed.includes(origin) || allowed.includes("*")) return origin;
     // Allow any *.oneshots.co subdomain
     if (origin && /^https:\/\/[a-z0-9-]+\.oneshots\.co$/.test(origin)) return origin;
