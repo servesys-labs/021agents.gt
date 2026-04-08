@@ -36,7 +36,7 @@
   });
 </script>
 
-<div class="mx-auto w-full max-w-5xl px-6 py-8 lg:px-8">
+<div class="w-full px-6 py-8 lg:px-8">
   <div class="mb-8">
     <h1>Observability</h1>
     <p class="mt-1.5 text-sm text-muted-foreground">

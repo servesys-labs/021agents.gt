@@ -275,7 +275,7 @@
   <AgentNav {agentName} activePath={$page.url.pathname} />
 
   <div class="flex-1 overflow-y-auto">
-    <div class="mx-auto w-full max-w-5xl px-6 py-8 lg:px-8">
+    <div class="w-full px-6 py-8 lg:px-8">
       {#if loading}
         <div class="flex items-center justify-center py-24">
           <div class="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent"></div>
