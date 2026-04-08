@@ -438,129 +438,38 @@ Use this context to tailor the agent's system prompt, governance, guardrails, an
 ` : ""}
 Include a "mcp_connectors" array in your output with the apps you recommend, why each is needed, and suggested tool names.
 
-## Output Format — Complete Agent Package
+## Output Format
 
-Return a JSON object with ALL of these top-level fields:
+Return a JSON object. Keep the response COMPACT — no unnecessary whitespace in the system_prompt.
 
 {
   "agent": {
     "name": "snake_case_name",
     "description": "1-2 sentence summary",
-    "system_prompt": "DETAILED 200+ word prompt (see guidelines)",
+    "system_prompt": "200+ word prompt following the guidelines below. Use \\n for newlines, not actual line breaks.",
     "model": "${agentModel}",
     "tools": ["tool-name-1", "tool-name-2"],
-    "blocked_tools": ["tools-to-deny"],
-    "allowed_domains": ["api.example.com"],
-    "blocked_domains": ["internal.corp.net"],
     "max_turns": 50,
     "temperature": 0.7,
-    "timeout_seconds": 300,
-    "parallel_tool_calls": true,
-    "reasoning_strategy": "",
+    "reasoning_strategy": "auto",
     "tags": ["tag1", "tag2"],
     "version": "0.1.0",
     "execution_profile": {
-      "execution_mode": "auto|fast-only|full",
-      "fast_tools": ["web-search", "knowledge-search", "http-request", "memory-recall", "memory-save"],
+      "execution_mode": "auto",
+      "fast_tools": ["web-search", "knowledge-search"],
       "max_fast_tool_calls": 3,
-      "escalation_message": "Let me look into that more deeply...",
-      "fast_temperature": 0.7,
-      "fast_max_tokens": 600
-    },
-    "channels": [
-      {
-        "channel": "telegram|whatsapp|voice|web|slack|instagram|messenger|email|widget",
-        "enabled": true,
-        "greeting": "Channel-specific greeting message",
-        "prompt_suffix": "Additional instructions for this channel",
-        "execution_profile": { "execution_mode": "auto", "max_fast_tool_calls": 2 }
-      }
-    ]
+      "escalation_message": "Let me look into that..."
+    }
   },
-
-  "sub_agents": [
-    {
-      "name": "specialist-name",
-      "description": "What this specialist does",
-      "system_prompt": "Detailed prompt for the specialist",
-      "model": "${agentModel}",
-      "tools": ["relevant-tools"],
-      "max_turns": 15
-    }
-  ],
-
-  "skills": [
-    {
-      "name": "skill-name",
-      "description": "What this skill does",
-      "category": "prompt|tool-chain|workflow",
-      "content": "The full skill content (markdown prompt template, tool chain definition, or workflow steps)"
-    }
-  ],
-
-  "codemode_snippets": [
-    {
-      "name": "snippet-name",
-      "description": "What this custom tool does",
-      "scope": "agent",
-      "code": "// JavaScript code that runs in sandboxed V8\\nexport default async function(input, ctx) { ... }"
-    }
-  ],
-
-  "governance": {
-    "budget_limit_usd": 50,
-    "require_confirmation_for": ["bulk email sends", "CRM writes"],
-    "blocked_tools": ["delete-agent", "manage-secrets"]
-  },
-
-  "guardrails": [
-    {
-      "name": "guardrail-name",
-      "type": "rate_limit|content_policy|compliance",
-      "rule": "Description of the rule",
-      "action": "block|warn|log"
-    }
-  ],
-
+  "governance": { "budget_limit_usd": 10 },
   "eval_config": {
     "test_cases": [
-      {
-        "name": "short_test_name",
-        "input": "Realistic user message that tests a specific capability",
-        "expected": "What a correct response should contain or accomplish",
-        "grader": "llm_rubric",
-        "rubric": "Score 1 if the response [specific criteria]. Score 0 otherwise.",
-        "tags": ["capability-being-tested"]
-      }
-    ],
-    "rubric": {
-      "criteria": [
-        { "name": "accuracy", "description": "Response is factually correct and addresses the user's question", "weight": 0.3 },
-        { "name": "helpfulness", "description": "Response provides actionable, useful information", "weight": 0.3 },
-        { "name": "safety", "description": "Response avoids harmful, misleading, or off-topic content", "weight": 0.2 },
-        { "name": "tone", "description": "Response matches the configured persona and tone", "weight": 0.2 }
-      ],
-      "pass_threshold": 0.7
-    },
-    "scenarios": ["scenario description 1", "scenario description 2"],
-    "metrics": ["accuracy", "latency_ms", "cost_usd"],
-    "thresholds": { "accuracy": 0.8, "latency_ms": 5000 }
-  },
-
-  "release_strategy": {
-    "initial_channel": "staging",
-    "canary_percent": 10,
-    "promote_after": "eval pass + 24h soak"
-  },
-
-  "mcp_connectors": [
-    {
-      "app": "hubspot",
-      "reason": "Why this agent needs this external app",
-      "recommended_tools": ["create-contact", "update-deal"]
-    }
-  ]
+      { "name": "test_name", "input": "user message", "expected": "correct behavior", "grader": "llm_rubric" }
+    ]
+  }
 }
+
+IMPORTANT: Keep system_prompt under 800 words. Use \\n for line breaks inside JSON strings. Generate 3-5 test_cases max. Do NOT include sub_agents, skills, codemode_snippets, release_strategy, or mcp_connectors — those are generated separately.
 
 ## System Prompt Guidelines — CRITICAL
 The system prompt defines HOW the agent behaves. Every agent you create must be PROACTIVE like a personal computer, not a chatbot that asks permission.
@@ -761,6 +670,12 @@ Return ONLY valid JSON. No markdown fences, no explanation.`;
     }
   } else {
     agentConfig.tools = recommendTools(description);
+  }
+
+  // Remove blocked_tools that overlap with enabled tools (LLM sometimes generates both)
+  if (Array.isArray(agentConfig.blocked_tools) && Array.isArray(agentConfig.tools)) {
+    const enabledSet = new Set(agentConfig.tools as string[]);
+    agentConfig.blocked_tools = (agentConfig.blocked_tools as string[]).filter((t) => !enabledSet.has(t));
   }
 
   // Ensure defaults
