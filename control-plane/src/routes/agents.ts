@@ -454,7 +454,7 @@ const updateAgentRoute = createRoute({
   middleware: [requireScope("agents:write")],
   request: {
     params: z.object({ name: z.string() }),
-    body: { content: { "application/json": { schema: AgentCreateBody } } },
+    body: { content: { "application/json": { schema: AgentCreateBody.partial() } } },
   },
   responses: {
     200: { description: "Agent updated", content: { "application/json": { schema: AgentSummary } } },
@@ -489,9 +489,9 @@ agentRoutes.openapi(updateAgentRoute, async (c): Promise<any> => {
     if (req.plan) existingConfig.plan = req.plan;
     if (req.max_tokens != null) existingConfig.max_tokens = req.max_tokens;
     if (req.temperature != null) existingConfig.temperature = req.temperature;
-    if (req.tools.length > 0) existingConfig.tools = req.tools;
-    if (req.tags.length > 0) existingConfig.tags = req.tags;
-    existingConfig.max_turns = req.max_turns;
+    if (req.tools && req.tools.length > 0) existingConfig.tools = req.tools;
+    if (req.tags && req.tags.length > 0) existingConfig.tags = req.tags;
+    if (req.max_turns != null) existingConfig.max_turns = req.max_turns;
     if (req.timeout_seconds != null) existingConfig.timeout_seconds = req.timeout_seconds;
     if (req.deploy_policy) {
       existingConfig.deploy_policy = req.deploy_policy;

@@ -59,6 +59,7 @@ export const TokenVerifyResponse = z.object({
 // ── Agent schemas ───────────────────────────────────────────────────────
 
 export const VALID_REASONING_STRATEGIES = [
+  "auto",
   "step-back",
   "chain-of-thought",
   "plan-then-execute",
