@@ -7,7 +7,7 @@
 # ────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
-SERVICE_TOKEN="03a4506ca3ee13ec68dbc83cb61be97402a6eda6f0aca4b95cc037c0cf64e4f2"
+SERVICE_TOKEN="${GPU_SERVICE_KEY:?Missing GPU_SERVICE_KEY env var}"
 AUTH_HEADER="Authorization: Bearer ${SERVICE_TOKEN}"
 
 PASS=0

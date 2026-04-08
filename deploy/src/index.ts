@@ -1794,6 +1794,9 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
 
     // Voice relay — WebSocket upgrade for Twilio ConversationRelay
     if (url.pathname === "/voice/relay") {
+      if (!(await this._isAuthorized(request))) {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
+      }
       const upgradeHeader = request.headers.get("Upgrade") || "";
       if (upgradeHeader.toLowerCase() === "websocket") {
         return this._handleVoiceRelay(request);

@@ -38,7 +38,7 @@ async function main() {
   const sql = postgres(dbUrl);
 
   const rows = await sql`
-    SELECT config_json FROM agents
+    SELECT config FROM agents
     WHERE org_id = ${orgId} AND name = ${agentName}
   `;
 
@@ -48,9 +48,9 @@ async function main() {
     process.exit(1);
   }
 
-  const cfg = typeof rows[0].config_json === "string"
-    ? JSON.parse(rows[0].config_json)
-    : rows[0].config_json;
+  const cfg = typeof rows[0].config === "string"
+    ? JSON.parse(rows[0].config)
+    : rows[0].config;
 
   // Update system prompt
   cfg.system_prompt = prompt;
@@ -65,7 +65,7 @@ async function main() {
 
   await sql`
     UPDATE agents
-    SET config_json = ${JSON.stringify(cfg)}
+    SET config = ${JSON.stringify(cfg)}
     WHERE org_id = ${orgId} AND name = ${agentName}
   `;
 

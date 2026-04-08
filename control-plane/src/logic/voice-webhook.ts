@@ -24,7 +24,10 @@ export async function verifyWebhookHmac(
   body: ArrayBuffer,
   signature: string,
 ): Promise<boolean> {
-  if (!secret) return true;
+  if (!secret) {
+    console.warn("[voice-webhook] verifyWebhookHmac called with empty secret — rejecting");
+    return false;
+  }
   if (!signature) return false;
   const key = await crypto.subtle.importKey(
     "raw",
