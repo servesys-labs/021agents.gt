@@ -3277,6 +3277,166 @@ export default {
       return new Response(null, { status: 101, webSocket: client });
     }
 
+    // ── Voice: Browser Test Call — simpler WebSocket for in-browser voice testing ──
+    if (url.pathname === "/voice/test") {
+      const upgradeHeader = request.headers.get("Upgrade") || "";
+      if (upgradeHeader.toLowerCase() !== "websocket") {
+        return new Response("Expected WebSocket upgrade", { status: 426 });
+      }
+
+      const agentName = url.searchParams.get("agent") || "agentos";
+      const orgId = url.searchParams.get("org_id") || "";
+      const serviceToken = String(env.SERVICE_TOKEN || "");
+      const authHeaders: Record<string, string> = serviceToken
+        ? { Authorization: `Bearer ${serviceToken}` }
+        : {};
+
+      // Voice config from query params (set by the UI from current settings)
+      const ttsEngine = url.searchParams.get("tts_engine") || "kokoro";
+      const ttsVoice = url.searchParams.get("voice") || "af_heart";
+      const sttEngine = url.searchParams.get("stt_engine") || "whisper-gpu";
+      const greetingText = url.searchParams.get("greeting") || "";
+      const ttsSpeed = parseFloat(url.searchParams.get("speed") || "1.0") || 1.0;
+
+      const TTS_URLS: Record<string, string> = {
+        kokoro: "https://tts.oneshots.co/v1/audio/speech",
+        chatterbox: "https://tts-clone.oneshots.co/v1/audio/speech",
+        sesame: "https://tts-voice.oneshots.co/v1/audio/speech",
+      };
+
+      const STT_URLS: Record<string, string> = {
+        "whisper-gpu": "https://stt.oneshots.co/v1/audio/transcriptions",
+        groq: "https://stt.oneshots.co/v1/audio/transcriptions",
+      };
+
+      const pair = new WebSocketPair();
+      const [client, server] = Object.values(pair);
+      server.accept();
+
+      let closed = false;
+
+      function safeSend(data: string) {
+        if (!closed && server.readyState === WebSocket.OPEN) {
+          try { server.send(data); } catch { /* ignore */ }
+        }
+      }
+
+      // Chunked base64 encoding to avoid call stack overflow with large audio buffers
+      function arrayBufferToBase64(buffer: ArrayBuffer): string {
+        const bytes = new Uint8Array(buffer);
+        let binary = "";
+        const chunkSize = 8192;
+        for (let i = 0; i < bytes.length; i += chunkSize) {
+          binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+        }
+        return btoa(binary);
+      }
+
+      // Send greeting TTS on connect if configured
+      if (greetingText.trim()) {
+        (async () => {
+          try {
+            safeSend(JSON.stringify({ type: "transcript", speaker: "agent", text: greetingText }));
+            const ttsUrl = TTS_URLS[ttsEngine] || TTS_URLS.kokoro;
+            const ttsResp = await fetch(ttsUrl, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", ...authHeaders },
+              body: JSON.stringify({ input: greetingText, voice: ttsVoice, model: ttsEngine, speed: ttsSpeed }),
+            });
+            if (ttsResp.ok) {
+              const audioBuffer = await ttsResp.arrayBuffer();
+              const audioB64 = arrayBufferToBase64(audioBuffer);
+              safeSend(JSON.stringify({ type: "audio", data: audioB64 }));
+            }
+          } catch (err) {
+            console.error("[voice-test] Greeting TTS failed:", err);
+          }
+        })();
+      }
+
+      server.addEventListener("message", async (event) => {
+        let msg: { type: string; data?: string };
+        try {
+          msg = JSON.parse(event.data as string);
+        } catch {
+          return;
+        }
+
+        if (msg.type === "audio" && msg.data) {
+          try {
+            // 1. Decode base64 audio from browser (WebM format)
+            const audioBytes = Uint8Array.from(atob(msg.data), c => c.charCodeAt(0));
+
+            // 2. Send to STT (Whisper handles WebM natively)
+            const formData = new FormData();
+            formData.append("file", new Blob([audioBytes], { type: "audio/webm" }), "audio.webm");
+            formData.append("response_format", "json");
+
+            const sttUrl = STT_URLS[sttEngine] || STT_URLS["whisper-gpu"];
+            const sttResp = await fetch(sttUrl, {
+              method: "POST",
+              headers: authHeaders,
+              body: formData,
+            });
+
+            if (!sttResp.ok) {
+              console.error("[voice-test] STT failed:", sttResp.status);
+              return;
+            }
+
+            const sttData = await sttResp.json() as { text?: string };
+            const transcript = (sttData.text || "").trim();
+
+            // Skip empty/noise transcripts
+            if (!transcript || transcript.length < 2) return;
+
+            // 3. Send user transcript to browser
+            safeSend(JSON.stringify({ type: "transcript", speaker: "user", text: transcript }));
+
+            // 4. Run through agent
+            const agentResult = await runViaAgent(env, agentName, transcript, {
+              org_id: orgId,
+              channel: "voice-test",
+            });
+            const responseText = agentResult?.output || "I didn't catch that.";
+
+            // 5. Send agent transcript to browser
+            safeSend(JSON.stringify({ type: "transcript", speaker: "agent", text: responseText }));
+
+            // 6. Generate TTS audio
+            const ttsUrl = TTS_URLS[ttsEngine] || TTS_URLS.kokoro;
+            const ttsResp = await fetch(ttsUrl, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", ...authHeaders },
+              body: JSON.stringify({ input: responseText, voice: ttsVoice, model: ttsEngine, speed: ttsSpeed }),
+            });
+
+            if (ttsResp.ok) {
+              const audioBuffer = await ttsResp.arrayBuffer();
+              const audioB64 = arrayBufferToBase64(audioBuffer);
+              safeSend(JSON.stringify({ type: "audio", data: audioB64 }));
+            } else {
+              console.error("[voice-test] TTS failed:", ttsResp.status);
+            }
+          } catch (err) {
+            console.error("[voice-test] Processing error:", err);
+            safeSend(JSON.stringify({ type: "error", message: String(err) }));
+          }
+        }
+      });
+
+      server.addEventListener("close", () => {
+        closed = true;
+        console.log(`[voice-test] WebSocket closed for ${agentName}`);
+      });
+
+      server.addEventListener("error", () => {
+        closed = true;
+      });
+
+      return new Response(null, { status: 101, webSocket: client });
+    }
+
     // ── Voice: ConversationRelay WebSocket with ctx.waitUntil for async ──
     if (url.pathname === "/voice/relay") {
       const upgradeHeader = request.headers.get("Upgrade") || "";

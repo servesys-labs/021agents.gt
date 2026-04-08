@@ -1,6 +1,7 @@
 <script lang="ts">
   import { page } from "$app/stores";
   import { toast } from "svelte-sonner";
+  import { authStore } from "$lib/stores/auth.svelte";
   import AgentNav from "$lib/components/agent/AgentNav.svelte";
   import Button from "$lib/components/ui/button.svelte";
   import Badge from "$lib/components/ui/badge.svelte";
@@ -529,6 +530,273 @@
     }
   }
 
+  // ── Test call state ───────────────────────────────────────────────
+  let testCallActive = $state(false);
+  let testCallDuration = $state(0);
+  let testCallInterval: ReturnType<typeof setInterval> | null = null;
+  let testTranscript = $state<Array<{ speaker: "user" | "agent"; text: string }>>([]);
+  let testProcessing = $state(false);
+  let testListening = $state(false);
+  let testMuted = $state(false);
+  let testWs: WebSocket | null = null;
+  let testMediaRecorder: MediaRecorder | null = null;
+  let testStream: MediaStream | null = null;
+  let testAudioCtx: AudioContext | null = null;
+  let testScrollContainer = $state<HTMLDivElement | null>(null);
+
+  function formatTestDuration(seconds: number): string {
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return `${m}:${s.toString().padStart(2, "0")}`;
+  }
+
+  async function startTestCall() {
+    try {
+      // Request microphone access
+      testStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {
+      toast.error("Microphone access denied. Please allow microphone access and try again.");
+      return;
+    }
+
+    try {
+      // Build WebSocket URL with current voice settings
+      const orgId = authStore.user?.org_id || "";
+      const params = new URLSearchParams({
+        agent: agentName,
+        org_id: orgId,
+        tts_engine: ttsEngine,
+        voice: voice,
+        stt_engine: sttEngine,
+        greeting: greeting || "",
+        speed: String(speed),
+      });
+
+      // Connect to runtime WebSocket (same origin as API, /voice/test path)
+      const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const wsUrl = `${wsProtocol}//api.oneshots.co/voice/test?${params}`;
+      testWs = new WebSocket(wsUrl);
+
+      testWs.onopen = () => {
+        testCallActive = true;
+        testCallDuration = 0;
+        testTranscript = [];
+        testProcessing = false;
+        testMuted = false;
+        testCallInterval = setInterval(() => testCallDuration++, 1000);
+        testListening = true;
+
+        // Create AudioContext for playback
+        testAudioCtx = new AudioContext();
+
+        // Start recording after a brief delay (let greeting arrive first)
+        setTimeout(() => startTestRecordingChunk(), 500);
+      };
+
+      testWs.onmessage = (event) => {
+        let msg: { type: string; speaker?: string; text?: string; data?: string; message?: string };
+        try {
+          msg = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+
+        if (msg.type === "transcript") {
+          testTranscript = [
+            ...testTranscript,
+            { speaker: (msg.speaker as "user" | "agent") || "agent", text: msg.text || "" },
+          ];
+          if (msg.speaker === "agent") {
+            testProcessing = false;
+          }
+          // Auto-scroll transcript
+          requestAnimationFrame(() => {
+            if (testScrollContainer) {
+              testScrollContainer.scrollTop = testScrollContainer.scrollHeight;
+            }
+          });
+        }
+
+        if (msg.type === "audio" && msg.data) {
+          // Decode and play audio response
+          testListening = false;
+
+          // Stop any ongoing recording while agent speaks
+          if (testMediaRecorder?.state === "recording") {
+            testMediaRecorder.stop();
+          }
+
+          try {
+            const raw = atob(msg.data);
+            const audioBytes = new Uint8Array(raw.length);
+            for (let i = 0; i < raw.length; i++) {
+              audioBytes[i] = raw.charCodeAt(i);
+            }
+            const blob = new Blob([audioBytes], { type: "audio/wav" });
+            const audioUrl = URL.createObjectURL(blob);
+            const audio = new Audio(audioUrl);
+            audio.onended = () => {
+              URL.revokeObjectURL(audioUrl);
+              if (testCallActive) {
+                testListening = true;
+                startTestRecordingChunk();
+              }
+            };
+            audio.onerror = () => {
+              URL.revokeObjectURL(audioUrl);
+              if (testCallActive) {
+                testListening = true;
+                startTestRecordingChunk();
+              }
+            };
+            audio.play().catch(() => {
+              // Autoplay blocked — resume anyway
+              if (testCallActive) {
+                testListening = true;
+                startTestRecordingChunk();
+              }
+            });
+          } catch {
+            // Audio decode failed — resume recording
+            if (testCallActive) {
+              testListening = true;
+              startTestRecordingChunk();
+            }
+          }
+        }
+
+        if (msg.type === "error") {
+          toast.error(msg.message || "Voice test error");
+          testProcessing = false;
+        }
+      };
+
+      testWs.onclose = () => {
+        if (testCallActive) endTestCall();
+      };
+
+      testWs.onerror = () => {
+        toast.error("Connection to voice server failed");
+        endTestCall();
+      };
+    } catch (err) {
+      toast.error("Failed to start test call");
+      if (testStream) {
+        testStream.getTracks().forEach((t) => t.stop());
+        testStream = null;
+      }
+    }
+  }
+
+  function startTestRecordingChunk() {
+    if (!testStream || testMuted || !testCallActive || !testWs) return;
+    if (testWs.readyState !== WebSocket.OPEN) return;
+
+    try {
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : "audio/webm";
+      const recorder = new MediaRecorder(testStream, { mimeType });
+      const chunks: Blob[] = [];
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunks.push(e.data);
+      };
+
+      recorder.onstop = async () => {
+        if (chunks.length === 0 || !testWs || testWs.readyState !== WebSocket.OPEN) return;
+
+        const blob = new Blob(chunks, { type: mimeType });
+        // Only send if we have meaningful audio (> 1KB likely has speech)
+        if (blob.size < 500) {
+          // Too small — probably silence, record again
+          if (testCallActive && testListening) startTestRecordingChunk();
+          return;
+        }
+
+        testProcessing = true;
+        testListening = false;
+
+        try {
+          const buffer = await blob.arrayBuffer();
+          const bytes = new Uint8Array(buffer);
+          // Base64 encode in chunks to avoid call stack issues
+          let b64 = "";
+          const CHUNK = 8192;
+          for (let i = 0; i < bytes.length; i += CHUNK) {
+            b64 += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+          }
+          b64 = btoa(b64);
+          testWs.send(JSON.stringify({ type: "audio", data: b64 }));
+        } catch {
+          testProcessing = false;
+          if (testCallActive && testListening) startTestRecordingChunk();
+        }
+      };
+
+      recorder.start();
+      testMediaRecorder = recorder;
+
+      // Record for 3 seconds, then send chunk
+      setTimeout(() => {
+        if (recorder.state === "recording") {
+          recorder.stop();
+        }
+      }, 3000);
+    } catch {
+      // MediaRecorder failed
+      if (testCallActive && testListening) {
+        setTimeout(() => startTestRecordingChunk(), 1000);
+      }
+    }
+  }
+
+  function toggleTestMute() {
+    testMuted = !testMuted;
+    if (testStream) {
+      testStream.getAudioTracks().forEach((t) => (t.enabled = !testMuted));
+    }
+    if (testMuted) {
+      // Stop active recording
+      if (testMediaRecorder?.state === "recording") {
+        testMediaRecorder.stop();
+      }
+    } else if (testCallActive && testListening) {
+      startTestRecordingChunk();
+    }
+  }
+
+  function endTestCall() {
+    testCallActive = false;
+    testListening = false;
+    testProcessing = false;
+
+    if (testCallInterval) {
+      clearInterval(testCallInterval);
+      testCallInterval = null;
+    }
+
+    if (testMediaRecorder?.state === "recording") {
+      try { testMediaRecorder.stop(); } catch { /* ignore */ }
+    }
+    testMediaRecorder = null;
+
+    if (testStream) {
+      testStream.getTracks().forEach((t) => t.stop());
+      testStream = null;
+    }
+
+    if (testWs) {
+      try { testWs.close(); } catch { /* ignore */ }
+      testWs = null;
+    }
+
+    if (testAudioCtx) {
+      try { testAudioCtx.close(); } catch { /* ignore */ }
+      testAudioCtx = null;
+    }
+  }
+
   $effect(() => {
     if (agentName) loadVoicePage();
   });
@@ -891,6 +1159,147 @@
               Save Voice Settings
             </Button>
           </div>
+
+          <!-- Test Call -->
+          <section>
+            <div class="mb-4">
+              <h2>Test Your Voice Agent</h2>
+              <p class="mt-1 text-sm text-muted-foreground">
+                Talk to your agent directly from the browser — no phone needed
+              </p>
+            </div>
+
+            <div class="rounded-lg border border-border bg-card/50 p-6">
+              {#if !testCallActive}
+                <!-- Idle state -->
+                <div class="flex flex-col items-center py-6">
+                  <div class="mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-primary/10">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8 text-primary" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 6.75c0 8.284 6.716 15 15 15h2.25a2.25 2.25 0 002.25-2.25v-1.372c0-.516-.351-.966-.852-1.091l-4.423-1.106c-.44-.11-.902.055-1.173.417l-.97 1.293c-.282.376-.769.542-1.21.38a12.035 12.035 0 01-7.143-7.143c-.162-.441.004-.928.38-1.21l1.293-.97c.363-.271.527-.734.417-1.173L6.963 3.102a1.125 1.125 0 00-1.091-.852H4.5A2.25 2.25 0 002.25 4.5v2.25z" />
+                    </svg>
+                  </div>
+                  <p class="mb-1 text-sm font-medium text-foreground">Browser Voice Test</p>
+                  <p class="mb-5 max-w-sm text-center text-xs text-muted-foreground">
+                    Test your agent's voice, personality, and response quality with a live conversation using your microphone and speakers.
+                  </p>
+                  <Button size="lg" onclick={startTestCall}>
+                    <svg xmlns="http://www.w3.org/2000/svg" class="mr-2 h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 6.75c0 8.284 6.716 15 15 15h2.25a2.25 2.25 0 002.25-2.25v-1.372c0-.516-.351-.966-.852-1.091l-4.423-1.106c-.44-.11-.902.055-1.173.417l-.97 1.293c-.282.376-.769.542-1.21.38a12.035 12.035 0 01-7.143-7.143c-.162-.441.004-.928.38-1.21l1.293-.97c.363-.271.527-.734.417-1.173L6.963 3.102a1.125 1.125 0 00-1.091-.852H4.5A2.25 2.25 0 002.25 4.5v2.25z" />
+                    </svg>
+                    Start Test Call
+                  </Button>
+                </div>
+              {:else}
+                <!-- Active call state -->
+                <div class="flex flex-col items-center">
+                  <!-- Call status indicator -->
+                  <div class="mb-3">
+                    <div class="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-green-500/10">
+                      <div class="h-10 w-10 rounded-full bg-green-500/20 flex items-center justify-center animate-pulse">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-green-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 6.75c0 8.284 6.716 15 15 15h2.25a2.25 2.25 0 002.25-2.25v-1.372c0-.516-.351-.966-.852-1.091l-4.423-1.106c-.44-.11-.902.055-1.173.417l-.97 1.293c-.282.376-.769.542-1.21.38a12.035 12.035 0 01-7.143-7.143c-.162-.441.004-.928.38-1.21l1.293-.97c.363-.271.527-.734.417-1.173L6.963 3.102a1.125 1.125 0 00-1.091-.852H4.5A2.25 2.25 0 002.25 4.5v2.25z" />
+                        </svg>
+                      </div>
+                    </div>
+                  </div>
+                  <p class="mb-1 text-sm font-semibold text-green-600 dark:text-green-400">Call Active</p>
+                  <p class="mb-4 text-xs tabular-nums text-muted-foreground">{formatTestDuration(testCallDuration)}</p>
+
+                  <!-- Conversation transcript -->
+                  <div
+                    bind:this={testScrollContainer}
+                    class="mb-4 w-full max-w-lg rounded-lg border border-border bg-background p-4 text-left"
+                    style="max-height: 280px; overflow-y: auto;"
+                  >
+                    {#if testTranscript.length === 0 && !testProcessing}
+                      <p class="py-4 text-center text-xs text-muted-foreground">
+                        {#if testListening}
+                          Listening... start speaking.
+                        {:else}
+                          Connecting...
+                        {/if}
+                      </p>
+                    {/if}
+
+                    {#each testTranscript as msg, i}
+                      <div class="mb-2 flex {msg.speaker === 'user' ? 'justify-end' : 'justify-start'}">
+                        <div class="max-w-[85%]">
+                          <p class="mb-0.5 text-[10px] font-medium uppercase tracking-wider {msg.speaker === 'user' ? 'text-right text-muted-foreground' : 'text-muted-foreground'}">
+                            {msg.speaker === "user" ? "You" : agentName}
+                          </p>
+                          <span
+                            class="inline-block rounded-2xl px-3.5 py-2 text-sm leading-relaxed {msg.speaker === 'user'
+                              ? 'rounded-br-md bg-primary text-primary-foreground'
+                              : 'rounded-bl-md bg-muted text-foreground'}"
+                          >
+                            {msg.text}
+                          </span>
+                        </div>
+                      </div>
+                    {/each}
+
+                    {#if testProcessing}
+                      <div class="flex justify-start">
+                        <div>
+                          <p class="mb-0.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">{agentName}</p>
+                          <span class="inline-block rounded-2xl rounded-bl-md bg-muted px-3.5 py-2 text-sm text-muted-foreground">
+                            <span class="inline-flex items-center gap-1">
+                              <span class="h-1.5 w-1.5 rounded-full bg-current animate-bounce" style="animation-delay: 0ms"></span>
+                              <span class="h-1.5 w-1.5 rounded-full bg-current animate-bounce" style="animation-delay: 150ms"></span>
+                              <span class="h-1.5 w-1.5 rounded-full bg-current animate-bounce" style="animation-delay: 300ms"></span>
+                            </span>
+                          </span>
+                        </div>
+                      </div>
+                    {/if}
+                  </div>
+
+                  <!-- Recording / speaking indicator -->
+                  <div class="mb-4 flex items-center gap-2">
+                    {#if testListening && !testMuted}
+                      <span class="h-2.5 w-2.5 rounded-full bg-red-500 animate-pulse"></span>
+                      <span class="text-xs text-muted-foreground">Listening...</span>
+                    {:else if testProcessing}
+                      <span class="h-2.5 w-2.5 rounded-full bg-amber-500 animate-pulse"></span>
+                      <span class="text-xs text-muted-foreground">Processing...</span>
+                    {:else if testMuted}
+                      <span class="h-2.5 w-2.5 rounded-full bg-gray-400"></span>
+                      <span class="text-xs text-muted-foreground">Muted</span>
+                    {:else}
+                      <span class="h-2.5 w-2.5 rounded-full bg-blue-500 animate-pulse"></span>
+                      <span class="text-xs text-muted-foreground">Agent speaking...</span>
+                    {/if}
+                  </div>
+
+                  <!-- Controls -->
+                  <div class="flex items-center gap-3">
+                    <Button variant="outline" size="sm" onclick={toggleTestMute}>
+                      {#if testMuted}
+                        <svg xmlns="http://www.w3.org/2000/svg" class="mr-1.5 h-4 w-4 text-red-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M19 19L5 5m14 0l-3.5 3.5M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v4m-4 1v1a7 7 0 0011.46 5.38M5 10v1a7 7 0 001.54 4.38" />
+                        </svg>
+                        Unmute
+                      {:else}
+                        <svg xmlns="http://www.w3.org/2000/svg" class="mr-1.5 h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z" />
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M19 10v1a7 7 0 01-14 0v-1" />
+                          <line x1="12" y1="18" x2="12" y2="22" />
+                          <line x1="8" y1="22" x2="16" y2="22" />
+                        </svg>
+                        Mute
+                      {/if}
+                    </Button>
+                    <Button variant="destructive" size="sm" onclick={endTestCall}>
+                      <svg xmlns="http://www.w3.org/2000/svg" class="mr-1.5 h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M16.5 4.478v.227a48.816 48.816 0 013.878.512.75.75 0 01.572.894l-.372 1.86a.75.75 0 01-.94.554 47.383 47.383 0 00-12.28 0 .75.75 0 01-.94-.554l-.372-1.86a.75.75 0 01.572-.894 48.816 48.816 0 013.878-.512v-.227a2.25 2.25 0 014.5 0z" />
+                      </svg>
+                      End Call
+                    </Button>
+                  </div>
+                </div>
+              {/if}
+            </div>
+          </section>
 
           <!-- Phone Numbers -->
           <section>
