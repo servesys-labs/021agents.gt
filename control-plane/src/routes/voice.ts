@@ -2499,8 +2499,8 @@ const previewVoiceRoute = createRoute({
 });
 voiceRoutes.openapi(previewVoiceRoute, async (c): Promise<any> => {
   const body = c.req.valid("json");
-  const serviceToken = String(c.env.SERVICE_TOKEN ?? "");
-  const authHeaders: Record<string, string> = serviceToken ? { Authorization: `Bearer ${serviceToken}` } : {};
+  const gpuKey = String(c.env.GPU_SERVICE_KEY ?? c.env.SERVICE_TOKEN ?? "");
+  const authHeaders: Record<string, string> = gpuKey ? { Authorization: `Bearer ${gpuKey}` } : {};
 
   const engineUrls: Record<string, string> = {
     kokoro: "https://tts.oneshots.co/v1/audio/speech",
