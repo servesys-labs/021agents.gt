@@ -100,6 +100,51 @@ export class ApiClient {
     return this.request<void>("DELETE", path);
   }
 
+  async postForm<T>(path: string, formData: FormData): Promise<T> {
+    const h: HeadersInit = {};
+    if (this.token) h["Authorization"] = `Bearer ${this.token}`;
+    // Don't set Content-Type — browser sets multipart boundary automatically
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      method: "POST",
+      headers: h,
+      body: formData,
+    });
+
+    if (res.status === 401) {
+      this.token = null;
+      if (typeof window !== "undefined") window.location.href = "/login";
+      throw new Error("Unauthorized");
+    }
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new Error(`API ${res.status}: ${text}`);
+    }
+
+    return res.json() as Promise<T>;
+  }
+
+  async postBlob(path: string, body: unknown): Promise<Blob> {
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify(body),
+    });
+
+    if (res.status === 401) {
+      this.token = null;
+      if (typeof window !== "undefined") window.location.href = "/login";
+      throw new Error("Unauthorized");
+    }
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new Error(`API ${res.status}: ${text}`);
+    }
+
+    return res.blob();
+  }
+
   createAgentFromDescription(description: string, plan: string) {
     return this.post<{ agent: { name: string } }>("/agents/create-from-description", { description, plan });
   }

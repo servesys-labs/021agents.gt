@@ -206,7 +206,11 @@ voiceRoutes.openapi(getVoiceConfigRoute, async (c): Promise<any> => {
   const vapiConfigured = Boolean(String(c.env.VAPI_API_KEY ?? "").trim());
 
   return c.json({
-    voice: String(voice.voice ?? "alloy"),
+    voice: String(voice.voice ?? "af_heart"),
+    tts_engine: String(voice.tts_engine ?? "kokoro"),
+    stt_engine: String(voice.stt_engine ?? "whisper-gpu"),
+    voice_clone_url: String(voice.voice_clone_url ?? ""),
+    speed: Number(voice.speed ?? 1.0),
     greeting: String(voice.greeting ?? ""),
     language: String(voice.language ?? "en"),
     max_duration: Number(voice.max_duration ?? 600),
@@ -230,6 +234,10 @@ const putVoiceConfigRoute = createRoute({
           schema: z.object({
             agent_name: z.string().min(1),
             voice: z.string().optional(),
+            tts_engine: z.enum(["kokoro", "chatterbox", "sesame", "workers-ai"]).optional(),
+            stt_engine: z.enum(["whisper-gpu", "groq", "workers-ai"]).optional(),
+            voice_clone_url: z.string().optional(),
+            speed: z.coerce.number().min(0.5).max(2.0).optional(),
             greeting: z.string().optional(),
             language: z.string().optional(),
             max_duration: z.coerce.number().int().min(60).max(7200).optional(),
@@ -265,6 +273,10 @@ voiceRoutes.openapi(putVoiceConfigRoute, async (c): Promise<any> => {
       : {};
   const nextVoice: Record<string, unknown> = { ...prevVoice };
   if (body.voice !== undefined) nextVoice.voice = body.voice;
+  if (body.tts_engine !== undefined) nextVoice.tts_engine = body.tts_engine;
+  if (body.stt_engine !== undefined) nextVoice.stt_engine = body.stt_engine;
+  if (body.voice_clone_url !== undefined) nextVoice.voice_clone_url = body.voice_clone_url;
+  if (body.speed !== undefined) nextVoice.speed = body.speed;
   if (body.greeting !== undefined) nextVoice.greeting = body.greeting;
   if (body.language !== undefined) nextVoice.language = body.language;
   if (body.max_duration !== undefined) nextVoice.max_duration = body.max_duration;
@@ -2361,4 +2373,173 @@ voiceRoutes.openapi(twilioReassignNumberRoute, async (c): Promise<any> => {
   `;
 
   return c.json({ updated: true, agent_name: agentName });
+});
+
+// ── GET /voices — List available voices for a TTS engine ─────────────────
+
+const listVoicesRoute = createRoute({
+  method: "get",
+  path: "/voices",
+  tags: ["Voice"],
+  summary: "List available voices for a TTS engine",
+  request: {
+    query: z.object({
+      engine: z.enum(["kokoro", "chatterbox", "sesame", "workers-ai"]).default("kokoro"),
+    }),
+  },
+  responses: {
+    200: { description: "Voice list", content: { "application/json": { schema: z.record(z.unknown()) } } },
+  },
+});
+voiceRoutes.openapi(listVoicesRoute, async (c): Promise<any> => {
+  const { engine } = c.req.valid("query");
+
+  const voices: Record<string, { id: string; name: string; language: string }[]> = {
+    kokoro: [
+      { id: "af_heart", name: "Heart (Female)", language: "en-US" },
+      { id: "af_bella", name: "Bella (Female)", language: "en-US" },
+      { id: "af_nicole", name: "Nicole (Female)", language: "en-US" },
+      { id: "af_sarah", name: "Sarah (Female)", language: "en-US" },
+      { id: "af_sky", name: "Sky (Female)", language: "en-US" },
+      { id: "am_adam", name: "Adam (Male)", language: "en-US" },
+      { id: "am_michael", name: "Michael (Male)", language: "en-US" },
+      { id: "bf_emma", name: "Emma (Female)", language: "en-GB" },
+      { id: "bf_isabella", name: "Isabella (Female)", language: "en-GB" },
+      { id: "bm_george", name: "George (Male)", language: "en-GB" },
+      { id: "bm_lewis", name: "Lewis (Male)", language: "en-GB" },
+      { id: "ff_siwis", name: "Siwis (Female)", language: "fr" },
+      { id: "jf_alpha", name: "Alpha (Female)", language: "ja" },
+      { id: "jm_gamma", name: "Gamma (Male)", language: "ja" },
+      { id: "zf_xiaobai", name: "Xiaobai (Female)", language: "zh" },
+      { id: "zf_xiaoni", name: "Xiaoni (Female)", language: "zh" },
+      { id: "zm_yunjian", name: "Yunjian (Male)", language: "zh" },
+      { id: "kf_soeun", name: "Soeun (Female)", language: "ko" },
+      { id: "hf_alpha", name: "Alpha (Female)", language: "hi" },
+      { id: "hm_omega", name: "Omega (Male)", language: "hi" },
+      { id: "if_sara", name: "Sara (Female)", language: "it" },
+      { id: "pf_dora", name: "Dora (Female)", language: "pt" },
+    ],
+    chatterbox: [
+      { id: "default", name: "Default Voice", language: "en" },
+    ],
+    sesame: [
+      { id: "0", name: "Speaker 0 (Primary)", language: "en" },
+      { id: "1", name: "Speaker 1", language: "en" },
+      { id: "2", name: "Speaker 2", language: "en" },
+      { id: "3", name: "Speaker 3", language: "en" },
+    ],
+    "workers-ai": [
+      { id: "alloy", name: "Alloy — Warm & friendly", language: "en" },
+      { id: "echo", name: "Echo — Clear & professional", language: "en" },
+      { id: "nova", name: "Nova — Bright & energetic", language: "en" },
+      { id: "onyx", name: "Onyx — Deep & authoritative", language: "en" },
+      { id: "shimmer", name: "Shimmer — Soft & approachable", language: "en" },
+      { id: "fable", name: "Fable — Expressive & storytelling", language: "en" },
+    ],
+  };
+
+  return c.json({ voices: voices[engine] || [] });
+});
+
+// ── POST /preview — Generate voice preview audio ─────────────────────────
+
+const previewVoiceRoute = createRoute({
+  method: "post",
+  path: "/preview",
+  tags: ["Voice"],
+  summary: "Generate a voice preview audio sample",
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            engine: z.enum(["kokoro", "chatterbox", "sesame", "workers-ai"]).default("kokoro"),
+            voice: z.string().default("af_heart"),
+            text: z.string().max(500).default("Hello! This is a preview of how I sound."),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Audio WAV", content: { "audio/wav": { schema: z.any() } } },
+    ...errorResponses(500),
+  },
+});
+voiceRoutes.openapi(previewVoiceRoute, async (c): Promise<any> => {
+  const body = c.req.valid("json");
+  const serviceToken = String(c.env.SERVICE_TOKEN ?? "");
+  const authHeaders: Record<string, string> = serviceToken ? { Authorization: `Bearer ${serviceToken}` } : {};
+
+  const engineUrls: Record<string, string> = {
+    kokoro: "https://tts.oneshots.co/v1/audio/speech",
+    chatterbox: "https://tts-clone.oneshots.co/v1/audio/speech",
+    sesame: "https://tts-voice.oneshots.co/v1/audio/speech",
+  };
+
+  const url = engineUrls[body.engine];
+  if (!url) {
+    // Workers AI fallback — generate and return
+    try {
+      const audio = await c.env.AI.run("@cf/deepgram/aura-2-en", { text: body.text });
+      return new Response(audio as any, { headers: { "Content-Type": "audio/wav" } });
+    } catch {
+      return c.json({ error: "Workers AI TTS failed" }, 502);
+    }
+  }
+
+  try {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders },
+      body: JSON.stringify({ input: body.text, voice: body.voice, model: body.engine }),
+    });
+    if (!resp.ok) return c.json({ error: `TTS engine returned ${resp.status}` }, 502);
+    const audioData = await resp.arrayBuffer();
+    return new Response(audioData, { headers: { "Content-Type": "audio/wav" } });
+  } catch (err: any) {
+    return c.json({ error: `TTS preview failed: ${err.message}` }, 502);
+  }
+});
+
+// ── POST /clone/upload — Upload voice clone reference audio ──────────────
+
+const uploadCloneRoute = createRoute({
+  method: "post",
+  path: "/clone/upload",
+  tags: ["Voice"],
+  summary: "Upload reference audio for voice cloning",
+  middleware: [requireScope("agents:write")],
+  responses: {
+    200: { description: "Clone created", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 413),
+  },
+});
+voiceRoutes.openapi(uploadCloneRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const formData = await c.req.formData();
+  const rawFile = formData.get("file");
+  const agentName = String(formData.get("agent_name") || "");
+
+  if (!rawFile || typeof rawFile === "string") {
+    return c.json({ error: "file is required (WAV or MP3, 5-30 seconds)" }, 400);
+  }
+  const file = rawFile as unknown as { size: number; arrayBuffer: () => Promise<ArrayBuffer> };
+  if (file.size > 10 * 1024 * 1024) {
+    return c.json({ error: "File too large (max 10MB)" }, 413);
+  }
+
+  const bytes = await file.arrayBuffer();
+  const cloneId = `clone-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  const r2Key = `voice-clones/${user.org_id}/${agentName}/${cloneId}.wav`;
+
+  await c.env.STORAGE.put(r2Key, bytes, {
+    customMetadata: { agent_name: agentName, org_id: user.org_id, clone_id: cloneId },
+  });
+
+  return c.json({
+    clone_url: r2Key,
+    clone_id: cloneId,
+    size_bytes: bytes.byteLength,
+  });
 });
