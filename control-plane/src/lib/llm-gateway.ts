@@ -111,7 +111,7 @@ async function callAnthropicViaGateway(
   const anthropicModel = model.replace(/^anthropic\//, "");
   const endpoint = `https://gateway.ai.cloudflare.com/v1/${cloudflareAccountId}/${aiGatewayId}/anthropic/v1/messages`;
 
-  console.log(`[llm-gateway] Anthropic call: model=${anthropicModel}, endpoint=${endpoint}, hasToken=${!!cfToken}, tokenLen=${cfToken.length}, msgs=${options.messages.length}`);
+  console.log(`[llm-gateway] Anthropic call: model=${anthropicModel}, max_tokens=${options.max_tokens}, hasToken=${!!cfToken}, msgs=${options.messages.length}`);
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
