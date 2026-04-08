@@ -8,28 +8,36 @@
     getCreditBalance,
     getCreditTransactions,
     getBillingUsage,
+    getCreditPackages,
+    createCheckout,
     type CreditBalance,
     type CreditTransaction,
     type BillingUsage,
+    type CreditPackage,
   } from "$lib/services/settings";
   import { timeAgo, formatCost } from "$lib/utils/time";
 
   let balance = $state<CreditBalance | null>(null);
   let usage = $state<BillingUsage | null>(null);
   let transactions = $state<CreditTransaction[]>([]);
+  let packages = $state<CreditPackage[]>([]);
   let loading = $state(true);
+  let showPackages = $state(false);
+  let purchasing = $state<string | null>(null);
 
   async function load() {
     loading = true;
     try {
-      const [b, u, t] = await Promise.all([
+      const [b, u, t, p] = await Promise.all([
         getCreditBalance(),
         getBillingUsage(),
         getCreditTransactions(50),
+        getCreditPackages().catch(() => []),
       ]);
       balance = b;
       usage = u;
       transactions = t;
+      packages = p.filter(pkg => pkg.is_active);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to load billing data");
     } finally {
@@ -37,8 +45,34 @@
     }
   }
 
-  function handleAddCredits() {
-    toast.info("Contact support@oneshots.co to add credits.");
+  // Check URL for purchase result
+  $effect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const result = params.get("credit_purchase");
+    if (result === "success") {
+      toast.success("Credits added successfully!");
+      window.history.replaceState({}, "", window.location.pathname);
+      load(); // Refresh balance
+    } else if (result === "canceled") {
+      toast.info("Purchase canceled.");
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  });
+
+  async function handlePurchase(pkg: CreditPackage) {
+    purchasing = pkg.id;
+    try {
+      const { url } = await createCheckout(pkg.id);
+      if (url) {
+        window.location.href = url;
+      } else {
+        toast.error("Failed to create checkout session");
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to start checkout");
+    } finally {
+      purchasing = null;
+    }
   }
 
   type TxType = CreditTransaction["type"];
@@ -68,7 +102,7 @@
         Credit balance, usage, and transaction history.
       </p>
     </div>
-    <Button onclick={handleAddCredits}>
+    <Button onclick={() => (showPackages = !showPackages)}>
       <svg xmlns="http://www.w3.org/2000/svg" class="mr-1.5 h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
         <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" />
       </svg>
@@ -81,6 +115,45 @@
       <div class="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent"></div>
     </div>
   {:else}
+    <!-- Credit packages -->
+    {#if showPackages}
+      <div class="mb-8">
+        <h2 class="mb-4">Choose a Credit Package</h2>
+        {#if packages.length === 0}
+          <div class="rounded-lg border border-dashed border-border py-12 text-center">
+            <p class="text-sm text-muted-foreground">No credit packages available yet.</p>
+            <p class="mt-1 text-xs text-muted-foreground">Contact support@021agents.ai to add credits.</p>
+          </div>
+        {:else}
+          <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {#each packages as pkg}
+              <div class="rounded-xl border border-border bg-card p-6 transition-all hover:border-primary/50 hover:shadow-sm">
+                <h3 class="text-lg font-semibold text-foreground">{pkg.name}</h3>
+                <div class="mt-2">
+                  <span class="text-3xl font-bold text-foreground">${pkg.price_usd.toFixed(2)}</span>
+                </div>
+                <p class="mt-1 text-sm text-muted-foreground">
+                  {formatCost(pkg.credits_usd)} in credits
+                  {#if pkg.credits_usd > pkg.price_usd}
+                    <Badge variant="free" class="ml-2">
+                      {Math.round(((pkg.credits_usd - pkg.price_usd) / pkg.price_usd) * 100)}% bonus
+                    </Badge>
+                  {/if}
+                </p>
+                <Button
+                  class="mt-4 w-full"
+                  disabled={purchasing === pkg.id}
+                  onclick={() => handlePurchase(pkg)}
+                >
+                  {purchasing === pkg.id ? "Redirecting to Stripe..." : "Purchase"}
+                </Button>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {/if}
+
     <!-- Stat cards -->
     <div class="mb-8 grid gap-4 sm:grid-cols-3">
       <StatCard
