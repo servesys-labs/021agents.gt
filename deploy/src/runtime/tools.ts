@@ -581,19 +581,20 @@ const TOOL_COSTS: Record<string, ToolCostModel> = {
   // Search & web — $0 when LOCAL_SEARCH_URL is set (self-hosted SearXNG + Gemma 4),
   // otherwise Brave/Perplexity rates apply. Cost is set to 0 here since the local
   // pipeline is the primary path; paid fallbacks are charged at the provider level.
-  "web-search":        { flat_usd: 0,        per_ms_usd: 0 },          // Local SearXNG (free) or Brave fallback
-  "web-crawl":         { flat_usd: 0,        per_ms_usd: 0 },          // Local Playwright or CF Browser Rendering
-  "browser-render":    { flat_usd: 0,        per_ms_usd: 0 },          // Local Playwright or CF Browser Rendering
+  "web-search":        { flat_usd: 0.0005,   per_ms_usd: 0 },          // Serper API ($0.30/1K) + GPU synthesis
+  "web-crawl":         { flat_usd: 0.0001,   per_ms_usd: 0 },          // Playwright + extraction
+  "browser-render":    { flat_usd: 0.0001,   per_ms_usd: 0 },          // CF Browser Rendering
 
-  // Multimodal (Workers AI per-request)
-  "image-generate":    { flat_usd: 0.001,    per_ms_usd: 0 },
-  "text-to-speech":    { flat_usd: 0.001,    per_ms_usd: 0 },
-  "speech-to-text":    { flat_usd: 0.001,    per_ms_usd: 0 },
+  // Voice / Audio (GPU-powered, priced per unit — see VOICE_PRICING in pricing.ts)
+  "image-generate":    { flat_usd: 0.002,    per_ms_usd: 0 },          // GPU compute
+  "text-to-speech":    { flat_usd: 0.005,    per_ms_usd: 0 },          // Kokoro default: ~$5/1K calls
+  "speech-to-text":    { flat_usd: 0.002,    per_ms_usd: 0 },          // Whisper GPU: ~$2/1K calls
+  "make-voice-call":   { flat_usd: 0.01,     per_ms_usd: 0.00025 },    // Twilio SIP + GPU per minute
 
-  // Knowledge (embedding + vector ops)
-  "knowledge-search":  { flat_usd: 0.0002,   per_ms_usd: 0 },          // Embedding + query
-  "store-knowledge":   { flat_usd: 0.0002,   per_ms_usd: 0 },          // Embedding + upsert
-  "ingest-document":   { flat_usd: 0,        per_ms_usd: 0 },          // Self-hosted OCR + embedding (GPU cost only)
+  // Knowledge (embedding + vector + reranking)
+  "knowledge-search":  { flat_usd: 0.0003,   per_ms_usd: 0 },          // Embed + Vectorize + ColBERT rerank
+  "store-knowledge":   { flat_usd: 0.0003,   per_ms_usd: 0 },          // Embed + upsert
+  "ingest-document":   { flat_usd: 0.005,    per_ms_usd: 0 },          // OCR ($0.002/page) + embed + chunk
 
   // R2 persistence
   "save-project":      { flat_usd: 0.001,    per_ms_usd: 0 },          // R2 PUTs

@@ -63,11 +63,53 @@ const MODEL_PRICING: Record<string, { input: number; output: number }> = {
   "@cf/meta/llama-3.3-70b-instruct-fp8-fast":  { input: 0.10, output: 0.20 },
   "@cf/mistral/mistral-7b-instruct-v0.2-lora": { input: 0.01, output: 0.03 },
 
-  // ── Self-hosted (free — runs on local GPU via CF Tunnel) ─────
-  "gemma-4-31b":                               { input: 0.00, output: 0.00 },
-  "gemma-4-31B-it-Q8_0.gguf":                  { input: 0.00, output: 0.00 },
-  "gemma-4-26b-moe":                           { input: 0.00, output: 0.00 },
-  "gemma-4-26B-A4B-it-Q4_K_M.gguf":            { input: 0.00, output: 0.00 },
+  // ── Self-hosted GPU (priced to recoup hardware + electricity) ──
+  // Dual RTX PRO 6000: ~$0.50/hr amortized. At 155 tok/s MoE = 558K tok/hr.
+  // Priced 5-10x below OpenRouter equivalents, comparable to Workers AI.
+  "gemma-4-31b":                               { input: 0.13, output: 0.40 },   // Dense: slower, premium
+  "gemma-4-31B-it-Q8_0.gguf":                  { input: 0.13, output: 0.40 },
+  "gemma-4-26b-moe":                           { input: 0.05, output: 0.15 },   // MoE: fast, default
+  "gemma-4-26B-A4B-it-Q8_0.gguf":               { input: 0.05, output: 0.15 },
+  "gemma-4-26B-A4B-it-Q4_K_M.gguf":             { input: 0.05, output: 0.15 },
+  "search-gemma4":                               { input: 0.05, output: 0.15 },
+};
+
+// ── Voice / Audio Service Pricing ──────────────────────────────────
+// Per-unit costs for STT, TTS, OCR, and other GPU services.
+// These are added to tool costs in the billing pipeline.
+
+export const VOICE_PRICING = {
+  // STT: per second of audio processed
+  "whisper-v3-turbo-gpu":  0.00004,   // $0.04 per 1000 seconds (~$2.40/hr) — Groq charges $0.03-0.06/hr
+  "groq":                  0.00003,   // Groq API pricing
+  "workers-ai-whisper":    0.00000,   // Workers AI free tier
+
+  // TTS: per 1000 characters of text
+  "kokoro":                0.005,     // $0.005/1K chars — ElevenLabs charges $0.30/1K chars
+  "chatterbox":            0.008,     // $0.008/1K chars (voice cloning is heavier)
+  "sesame-csm":            0.010,     // $0.010/1K chars (most compute-intensive)
+  "workers-ai-deepgram":   0.000,     // Workers AI free tier
+
+  // OCR: per page
+  "glm-ocr":               0.002,     // $0.002/page — cloud OCR charges $0.01-0.05/page
+  "gemma4-vision-ocr":     0.005,     // $0.005/page (31B Dense is slower)
+
+  // Embedding: per 1K tokens
+  "qwen3-embedding":       0.00002,   // $0.02/Mtok — OpenAI charges $0.02-0.13/Mtok
+
+  // Reranking: per query (batch of documents)
+  "colbert-rerank":        0.0001,    // $0.10/1K queries
+
+  // Search: per query (includes Serper API + GPU synthesis)
+  "web-search":            0.0005,    // $0.50/1K queries (Serper: $0.30 + GPU: $0.20)
+
+  // PDF rendering: per page
+  "pdf-render":            0.0005,    // $0.50/1K pages
+
+  // Voice calls: per minute (Twilio SIP passthrough)
+  "twilio-sip-inbound":   0.0085,    // Twilio's actual rate: $0.0085/min
+  "twilio-sip-outbound":  0.014,     // Twilio outbound: ~$0.014/min
+  "voice-gpu-compute":    0.005,     // GPU STT+TTS compute per call-minute
 };
 
 /**
