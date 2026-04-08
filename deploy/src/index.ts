@@ -348,6 +348,7 @@ export interface Env extends Cloudflare.Env {
   CLOUDFLARE_API_TOKEN?: string;
   AI_GATEWAY_ID?: string;        // CF AI Gateway slug (e.g. "one-shots")
   AI_GATEWAY_TOKEN?: string;     // Dedicated gateway token (least-privilege)
+  GPU_SERVICE_KEY?: string;      // Auth key for GPU box auth proxy
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_AGENT_NAME?: string;
   WHATSAPP_APP_SECRET?: string;   // Meta HMAC verification for WhatsApp webhooks
