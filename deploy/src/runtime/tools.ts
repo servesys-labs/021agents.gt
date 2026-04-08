@@ -4882,52 +4882,114 @@ async function memoryDelete(env: RuntimeEnv, args: Record<string, any>): Promise
 
 async function textToSpeech(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
   const text = args.text || "";
-  const provider = String(args.provider || "deepgram").toLowerCase();
+  const style = String(args.style || args.provider || "fast").toLowerCase();
+  const voice = args.voice || "af_heart";
+  const serviceToken = (env as any).SERVICE_TOKEN || "";
+  const authHeaders: Record<string, string> = serviceToken ? { Authorization: `Bearer ${serviceToken}` } : {};
+
   let audioBuffer: ArrayBuffer;
   let modelUsed = "";
 
-  if (provider === "edge" || provider === "edge-tts") {
-    // Edge TTS — free, uses Microsoft Cognitive Services via edge-tts proxy
-    // Voice list: https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/voices/list
-    const voice = args.voice || "en-US-AriaNeural";
+  // Route to the appropriate TTS model based on style
+  // "fast" → Kokoro (82M, 96x realtime, 54 voices)
+  // "clone" → Chatterbox (350M, voice cloning from reference audio)
+  // "conversational" → Sesame CSM (1B, most natural, uses dialogue context)
+  // "workers-ai" → Cloudflare Workers AI Deepgram (fallback)
+
+  if (style === "clone" && args.reference_audio_url) {
+    // Voice cloning via Chatterbox — needs reference audio
     try {
-      // Use the CF Workers AI TTS as primary, Edge TTS as concept
-      // Edge TTS requires a server-side library; fall through to Deepgram on Workers
+      const refResp = await fetch(args.reference_audio_url, { headers: authHeaders });
+      if (!refResp.ok) return `Could not download reference audio: HTTP ${refResp.status}`;
+      const refBytes = await refResp.arrayBuffer();
+
+      const formData = new FormData();
+      formData.append("input", text);
+      formData.append("reference_audio", new Blob([refBytes], { type: "audio/wav" }), "ref.wav");
+
+      const resp = await fetch("https://tts-clone.oneshots.co/v1/audio/speech/clone", {
+        method: "POST",
+        headers: authHeaders,
+        body: formData,
+      });
+      if (!resp.ok) return `Chatterbox TTS failed: ${resp.status}`;
+      audioBuffer = await resp.arrayBuffer();
+      modelUsed = "chatterbox-turbo (cloned voice)";
+    } catch (err: any) {
+      return `Voice cloning failed: ${err.message}`;
+    }
+  } else if (style === "conversational" || style === "sesame") {
+    // Sesame CSM — most natural, supports conversation context
+    try {
+      const body: any = { input: text, voice: voice === "af_heart" ? "0" : voice };
+      if (args.context) body.context = args.context; // previous conversation turns
+      const resp = await fetch("https://tts-voice.oneshots.co/v1/audio/speech", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) return `Sesame CSM TTS failed: ${resp.status}`;
+      audioBuffer = await resp.arrayBuffer();
+      modelUsed = "sesame-csm-1b (conversational)";
+    } catch (err: any) {
+      return `Sesame TTS failed: ${err.message}`;
+    }
+  } else if (style === "workers-ai" || style === "deepgram") {
+    // Fallback: Workers AI Deepgram
+    try {
       const audioRaw = await env.AI.run("@cf/deepgram/aura-2-en" as keyof AiModels, { text }) as any;
       audioBuffer = audioRaw instanceof ArrayBuffer ? audioRaw
         : audioRaw instanceof Uint8Array ? (audioRaw.buffer as ArrayBuffer).slice(audioRaw.byteOffset, audioRaw.byteOffset + audioRaw.byteLength)
         : await new Response(audioRaw as BodyInit).arrayBuffer();
-      modelUsed = "@cf/deepgram/aura-2-en (edge fallback)";
+      modelUsed = "@cf/deepgram/aura-2-en";
     } catch {
-      return "Edge TTS failed — falling back unavailable in serverless environment";
+      return "Workers AI TTS failed";
     }
   } else {
-    // Default: Deepgram Aura via Workers AI (free)
-    const audioRaw = await env.AI.run("@cf/deepgram/aura-2-en" as keyof AiModels, { text }) as any;
-    audioBuffer = audioRaw instanceof ArrayBuffer ? audioRaw
-      : audioRaw instanceof Uint8Array ? (audioRaw.buffer as ArrayBuffer).slice(audioRaw.byteOffset, audioRaw.byteOffset + audioRaw.byteLength)
-      : await new Response(audioRaw as BodyInit).arrayBuffer();
-    modelUsed = "@cf/deepgram/aura-2-en";
+    // Default: Kokoro (fast, 54 voices, <1GB, 96x realtime)
+    try {
+      const resp = await fetch("https://tts.oneshots.co/v1/audio/speech", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders },
+        body: JSON.stringify({ input: text, voice, model: "kokoro-v1" }),
+      });
+      if (!resp.ok) {
+        // Fallback to Workers AI
+        const audioRaw = await env.AI.run("@cf/deepgram/aura-2-en" as keyof AiModels, { text }) as any;
+        audioBuffer = audioRaw instanceof ArrayBuffer ? audioRaw
+          : audioRaw instanceof Uint8Array ? (audioRaw.buffer as ArrayBuffer).slice(audioRaw.byteOffset, audioRaw.byteOffset + audioRaw.byteLength)
+          : await new Response(audioRaw as BodyInit).arrayBuffer();
+        modelUsed = "@cf/deepgram/aura-2-en (kokoro fallback)";
+      } else {
+        audioBuffer = await resp.arrayBuffer();
+        modelUsed = `kokoro-v1 (voice: ${voice})`;
+      }
+    } catch {
+      return "TTS failed — both Kokoro and Workers AI unavailable";
+    }
   }
 
   const audioResult = new Uint8Array(audioBuffer);
-  const key = `audio/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.mp3`;
+  const key = `audio/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.wav`;
   await env.STORAGE.put(key, audioResult, {
-    customMetadata: { text: text.slice(0, 200), provider: modelUsed },
+    customMetadata: { text: text.slice(0, 200), provider: modelUsed, voice },
   });
   return JSON.stringify({
     audio_key: key,
     size_bytes: audioResult.byteLength,
     model: modelUsed,
+    voice,
   });
 }
 
-// ── Speech-to-Text (Workers AI Whisper) ───────────────────────
+// ── Speech-to-Text (GPU Box Whisper V3 Turbo → Groq → Workers AI fallback) ──
 
 async function speechToText(env: RuntimeEnv, args: Record<string, any>, sessionId: string): Promise<string> {
   const audioPath = args.audio_path || args.path || "";
   const audioUrl = args.audio_url || args.url || "";
-  const provider = String(args.provider || "whisper").toLowerCase();
+  const provider = String(args.provider || "auto").toLowerCase();
+  const serviceToken = (env as any).SERVICE_TOKEN || "";
+  const authHeaders: Record<string, string> = serviceToken ? { Authorization: `Bearer ${serviceToken}` } : {};
 
   if (!audioPath && !audioUrl) return "speech-to-text requires audio_path or audio_url";
 
@@ -4942,15 +5004,38 @@ async function speechToText(env: RuntimeEnv, args: Record<string, any>, sessionI
       return `Audio download failed: ${err.message}`;
     }
   } else {
-    const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
-    const catResult = await sandbox.exec(`base64 "${audioPath}"`, { timeout: 10 });
-    if (catResult.exitCode !== 0) return `Could not read audio file: ${catResult.stderr}`;
-    audioBytes = Uint8Array.from(atob((catResult.stdout ?? "").trim()), (c) => c.charCodeAt(0));
+    try {
+      const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
+      const catResult = await sandbox.exec(`base64 "${audioPath}"`, { timeout: 10 });
+      if (catResult.exitCode !== 0) return `Could not read audio file: ${catResult.stderr}`;
+      audioBytes = Uint8Array.from(atob((catResult.stdout ?? "").trim()), (c) => c.charCodeAt(0));
+    } catch (err: any) {
+      return `Could not read audio from sandbox: ${err.message}`;
+    }
   }
 
-  // Groq STT — fast, high quality (requires GROQ_API_KEY)
+  // Primary: GPU box Whisper V3 Turbo (99 languages, 170ms for 11s audio)
+  if (provider === "auto" || provider === "whisper" || provider === "gpu") {
+    try {
+      const formData = new FormData();
+      formData.append("file", new Blob([audioBytes], { type: "audio/wav" }), "audio.wav");
+      formData.append("response_format", "json");
+
+      const resp = await fetch("https://stt.oneshots.co/v1/audio/transcriptions", {
+        method: "POST",
+        headers: authHeaders,
+        body: formData,
+      });
+      if (resp.ok) {
+        const data = await resp.json() as any;
+        return JSON.stringify({ text: data.text || "", language: data.language || "", provider: "whisper-v3-turbo-gpu" });
+      }
+    } catch { /* GPU box unreachable — fall through */ }
+  }
+
+  // Fallback 1: Groq STT (requires GROQ_API_KEY)
   const groqKey = (env as any).GROQ_API_KEY || "";
-  if ((provider === "groq" || (provider === "auto" && groqKey)) && groqKey) {
+  if ((provider === "groq" || provider === "auto") && groqKey) {
     try {
       const formData = new FormData();
       formData.append("file", new Blob([audioBytes], { type: "audio/ogg" }), "audio.ogg");
@@ -4966,15 +5051,18 @@ async function speechToText(env: RuntimeEnv, args: Record<string, any>, sessionI
         const data = await resp.json() as any;
         return JSON.stringify({ text: data.text || "", language: data.language || "", provider: "groq" });
       }
-      // Fall through to Whisper on failure
     } catch {}
   }
 
-  // Default: OpenAI Whisper via Workers AI (free)
-  const whisperResult = (await env.AI.run("@cf/openai/whisper" as keyof AiModels, {
-    audio: [...audioBytes],
-  })) as any;
-  return JSON.stringify({ text: whisperResult.text || "", language: whisperResult.language || "", provider: "whisper" });
+  // Fallback 2: Workers AI Whisper (free, lower quality)
+  try {
+    const whisperResult = (await env.AI.run("@cf/openai/whisper" as keyof AiModels, {
+      audio: [...audioBytes],
+    })) as any;
+    return JSON.stringify({ text: whisperResult.text || "", language: whisperResult.language || "", provider: "workers-ai-whisper" });
+  } catch {
+    return "All STT providers failed";
+  }
 }
 
 // ── Dynamic Exec (JS in sandboxed V8 isolate) ────────────────
