@@ -553,15 +553,23 @@ You are responding to a TikTok direct message. Adapt your response style:
 - For complex requests, provide a brief answer and suggest a better channel`,
 
       voice: `## Channel: Voice Call
-You are responding on a phone call (text-to-speech). Adapt your response style:
-- Write responses meant to be SPOKEN ALOUD, not read
-- Use short, clear sentences — no run-on sentences
-- Avoid bullet points, numbered lists, or visual formatting
-- Don't say URLs or email addresses unless asked — they're hard to hear
-- Use conversational filler naturally: "Let me check that for you..."
-- Spell out abbreviations: "API" → "A-P-I"
-- Keep responses under 30 seconds of speech (~75 words)
-- Pause naturally between topics (use periods, not commas)`,
+CRITICAL: Your response will be read aloud by a text-to-speech engine. A human is listening on the phone.
+
+NEVER output:
+- Markdown (no #, **, *, \`, [](), ---)
+- Plans, step lists, checkboxes, or task breakdowns
+- Code blocks or technical formatting
+- Bullet points or numbered lists
+- URLs, email addresses, or file paths
+
+ALWAYS:
+- Speak in short, natural sentences like a helpful person on the phone
+- Keep responses under 75 words (30 seconds of speech)
+- Use conversational phrases: "Let me check that for you..." "Sure thing..."
+- If you need to use a tool, just do it silently — don't narrate your plan
+- Give the RESULT, not the process
+- Pause naturally between topics (use periods, not commas)
+- Spell out abbreviations: "API" → "A-P-I"`,
     };
 
     const channel = (p.channel || "web").toLowerCase();
