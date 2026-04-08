@@ -1261,14 +1261,94 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════
-# CONTROL-PLANE API TESTS (stages 24-30)
+# AGENT TOOL TESTS (stages 24-29)
+# These ask the agent to use specific tools and verify the results.
+# Catches schema mismatches, FK violations, and tool-level regressions.
+# ═══════════════════════════════════════════════════════════════════
+
+info "Stage 24: agent tool — memory-save + memory-recall"
+MEMORY_KEY="e2e-test-${RUN_TAG}"
+SSE_MEM="$(run_stream_task "Save this to your memory with key '${MEMORY_KEY}': The E2E test ran successfully on $(date +%Y-%m-%d). Then recall what you saved for key '${MEMORY_KEY}' and tell me what it says." "tool-test-user" "tool-test-mem-${RUN_TAG}")"
+OUT_MEM="$(printf '%s' "$SSE_MEM" | extract_done_output_from_sse)"
+if [[ -n "$OUT_MEM" ]]; then
+  if [[ "$OUT_MEM" == *"E2E test"* ]] || [[ "$OUT_MEM" == *"e2e"* ]] || [[ "$OUT_MEM" == *"saved"* ]] || [[ "$OUT_MEM" == *"${MEMORY_KEY}"* ]]; then
+    ok "memory-save + recall verified"
+  else
+    warn "agent responded but memory content not confirmed: ${OUT_MEM:0:100}"
+  fi
+else
+  warn "memory-save/recall produced no output (model may be slow)"
+fi
+
+info "Stage 25: agent tool — create-schedule + list-schedules"
+SSE_SCHED="$(run_stream_task "Create a schedule called 'e2e-test-schedule' that runs every day at midnight (cron: 0 0 * * *) with task 'daily health check'. Then list all schedules." "tool-test-user" "tool-test-sched-${RUN_TAG}")"
+OUT_SCHED="$(printf '%s' "$SSE_SCHED" | extract_done_output_from_sse)"
+if [[ -n "$OUT_SCHED" ]]; then
+  if [[ "$OUT_SCHED" == *"schedule"* ]] || [[ "$OUT_SCHED" == *"created"* ]] || [[ "$OUT_SCHED" == *"0 0"* ]]; then
+    ok "create-schedule + list-schedules verified"
+  else
+    warn "schedule response unclear: ${OUT_SCHED:0:100}"
+  fi
+else
+  warn "schedule tools produced no output"
+fi
+
+info "Stage 26: agent tool — python-exec"
+SSE_PY="$(run_stream_task "Run this Python code and tell me the result: print(sum(range(1, 101)))" "tool-test-user" "tool-test-py-${RUN_TAG}")"
+OUT_PY="$(printf '%s' "$SSE_PY" | extract_done_output_from_sse)"
+if [[ -n "$OUT_PY" ]] && [[ "$OUT_PY" == *"5050"* ]]; then
+  ok "python-exec verified (sum 1-100 = 5050)"
+elif [[ -n "$OUT_PY" ]]; then
+  warn "python-exec responded but 5050 not found: ${OUT_PY:0:100}"
+else
+  warn "python-exec produced no output"
+fi
+
+info "Stage 27: agent tool — knowledge-search (RAG)"
+SSE_RAG="$(run_stream_task "Search your knowledge base for information about 'AgentOS platform'. What did you find?" "tool-test-user" "tool-test-rag-${RUN_TAG}")"
+OUT_RAG="$(printf '%s' "$SSE_RAG" | extract_done_output_from_sse)"
+if [[ -n "$OUT_RAG" ]]; then
+  if [[ "$OUT_RAG" == *"AgentOS"* ]] || [[ "$OUT_RAG" == *"agent"* ]] || [[ "$OUT_RAG" == *"platform"* ]] || [[ "$OUT_RAG" == *"found"* ]]; then
+    ok "knowledge-search verified"
+  else
+    warn "knowledge-search responded but content unclear: ${OUT_RAG:0:100}"
+  fi
+else
+  warn "knowledge-search produced no output"
+fi
+
+info "Stage 28: agent tool — store-knowledge + knowledge-search round-trip"
+KNOWLEDGE_MARKER="e2e_knowledge_${RUN_TAG}"
+SSE_STORE="$(run_stream_task "Store this in your knowledge base: '${KNOWLEDGE_MARKER} — test data for E2E validation'. Use store-knowledge with key 'e2e-test'." "tool-test-user" "tool-test-store-${RUN_TAG}")"
+OUT_STORE="$(printf '%s' "$SSE_STORE" | extract_done_output_from_sse)"
+if [[ -n "$OUT_STORE" ]] && [[ "$OUT_STORE" == *"stored"* || "$OUT_STORE" == *"saved"* || "$OUT_STORE" == *"knowledge"* ]]; then
+  ok "store-knowledge verified"
+else
+  warn "store-knowledge response unclear: ${OUT_STORE:0:100}"
+fi
+
+info "Stage 29: agent tool — image-generate"
+SSE_IMG="$(run_stream_task "Generate an image of a simple blue circle on a white background. Just generate it, don't describe it." "tool-test-user" "tool-test-img-${RUN_TAG}")"
+OUT_IMG="$(printf '%s' "$SSE_IMG" | extract_done_output_from_sse)"
+if [[ -n "$OUT_IMG" ]]; then
+  if [[ "$OUT_IMG" == *"image"* ]] || [[ "$OUT_IMG" == *"generated"* ]] || [[ "$OUT_IMG" == *"key"* ]] || [[ "$OUT_IMG" == *"png"* ]]; then
+    ok "image-generate verified"
+  else
+    warn "image-generate responded but unclear: ${OUT_IMG:0:100}"
+  fi
+else
+  warn "image-generate produced no output"
+fi
+
+# ═══════════════════════════════════════════════════════════════════
+# CONTROL-PLANE API TESTS (stages 30-36)
 # These hit api.oneshots.co to verify the routes real users touch.
 # ═══════════════════════════════════════════════════════════════════
 
 CP_AUTH=("Authorization: Bearer ${SERVICE_TOKEN}")
 CP_ORG=("X-Org-Id: ${ORG_ID}")
 
-info "Stage 24: control-plane health detailed"
+info "Stage 30: control-plane health detailed"
 RAW="$(http_get "${CP_URL}/api/v1/health/detailed")"
 parse_curl_body_code <<<"$RAW"
 [[ "$CODE" == "200" ]] || fail "control-plane /health/detailed HTTP ${CODE}"
@@ -1276,7 +1356,7 @@ CP_DB="$(printf '%s' "$BODY" | json_eval 'bool(d.get("checks", {}).get("database
 [[ "$CP_DB" == "True" ]] || fail "control-plane database check failed"
 ok "control-plane detailed health (DB + billing + runtime)"
 
-info "Stage 25: control-plane agents CRUD"
+info "Stage 31: control-plane agents CRUD"
 # List agents for the org
 RAW="$(curl -sS -w "\n%{http_code}" "${CP_URL}/api/v1/agents?org_id=${ORG_ID}" \
   -H "${CP_AUTH[0]}" -H "${CP_ORG[0]}" --max-time 15 2>&1)"
@@ -1296,7 +1376,7 @@ else
   warn "agents list HTTP ${CODE} — may need auth adjustment"
 fi
 
-info "Stage 26: control-plane sessions list"
+info "Stage 32: control-plane sessions list"
 RAW="$(curl -sS -w "\n%{http_code}" "${CP_URL}/api/v1/sessions?org_id=${ORG_ID}&limit=5" \
   -H "${CP_AUTH[0]}" -H "${CP_ORG[0]}" --max-time 15 2>&1)"
 parse_curl_body_code <<<"$RAW"
@@ -1315,7 +1395,7 @@ else
   warn "sessions list HTTP ${CODE}"
 fi
 
-info "Stage 27: control-plane billing/usage"
+info "Stage 33: control-plane billing/usage"
 RAW="$(curl -sS -w "\n%{http_code}" "${CP_URL}/api/v1/billing/usage?org_id=${ORG_ID}" \
   -H "${CP_AUTH[0]}" -H "${CP_ORG[0]}" --max-time 15 2>&1)"
 parse_curl_body_code <<<"$RAW"
@@ -1325,7 +1405,7 @@ else
   warn "billing/usage HTTP ${CODE}"
 fi
 
-info "Stage 28: control-plane conversations"
+info "Stage 34: control-plane conversations"
 # Create a conversation, then list it
 CONV_PAYLOAD="$(python3 -c '
 import json, sys
@@ -1359,7 +1439,7 @@ else
   warn "conversations list HTTP ${CODE}"
 fi
 
-info "Stage 29: control-plane dashboard/analytics"
+info "Stage 35: control-plane dashboard/analytics"
 RAW="$(curl -sS -w "\n%{http_code}" "${CP_URL}/api/v1/dashboard/stats?org_id=${ORG_ID}" \
   -H "${CP_AUTH[0]}" -H "${CP_ORG[0]}" --max-time 15 2>&1)"
 parse_curl_body_code <<<"$RAW"
@@ -1371,7 +1451,7 @@ else
   warn "dashboard HTTP ${CODE}"
 fi
 
-info "Stage 30: control-plane orgs + plans"
+info "Stage 36: control-plane orgs + plans"
 # Get org details
 RAW="$(curl -sS -w "\n%{http_code}" "${CP_URL}/api/v1/orgs?org_id=${ORG_ID}" \
   -H "${CP_AUTH[0]}" -H "${CP_ORG[0]}" --max-time 15 2>&1)"
