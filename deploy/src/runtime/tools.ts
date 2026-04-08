@@ -601,12 +601,13 @@ const TOOL_COSTS: Record<string, ToolCostModel> = {
   "load-project":      { flat_usd: 0.0005,   per_ms_usd: 0 },          // R2 GET
 
   // Sandbox containers (duration-based compute)
-  "bash":              { flat_usd: 0,         per_ms_usd: 0.0000125 },  // ~$0.0125/s container
-  "python-exec":       { flat_usd: 0,         per_ms_usd: 0.0000125 },  // ~$0.0125/s container
+  // CF Containers basic (0.25 vCPU, 1 GiB): ~$0.002/s actual cost
+  "bash":              { flat_usd: 0,         per_ms_usd: 0.000002 },   // ~$0.002/s → $0.12/min
+  "python-exec":       { flat_usd: 0,         per_ms_usd: 0.000002 },   // ~$0.002/s → $0.12/min
 
-  // V8 isolates (lighter compute)
-  "dynamic-exec":      { flat_usd: 0,         per_ms_usd: 0.000012 },   // ~$0.012/s isolate
-  "execute-code":      { flat_usd: 0,         per_ms_usd: 0.000012 },   // Codemode isolate
+  // V8 isolates (lighter compute — no container overhead)
+  "dynamic-exec":      { flat_usd: 0,         per_ms_usd: 0.000001 },   // ~$0.001/s isolate
+  "execute-code":      { flat_usd: 0,         per_ms_usd: 0.000001 },   // Codemode isolate
 
   // File ops (sandbox exec + R2 sync)
   "write-file":        { flat_usd: 0.0000045, per_ms_usd: 0 },          // R2 Class A PUT ($4.50/M)
