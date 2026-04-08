@@ -190,9 +190,10 @@ async function callOpenAIViaGateway(
   const openaiModel = model.replace(/^openai\//, "");
   const endpoint = `https://gateway.ai.cloudflare.com/v1/${cloudflareAccountId}/${aiGatewayId}/openai/chat/completions`;
 
+  // OpenAI SDK sends apiKey as Authorization: Bearer — match that for unified billing
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    "cf-aig-authorization": `Bearer ${cfToken}`,
+    "Authorization": `Bearer ${cfToken}`,
   };
   if (options.metadata) headers["cf-aig-metadata"] = JSON.stringify(options.metadata);
 
