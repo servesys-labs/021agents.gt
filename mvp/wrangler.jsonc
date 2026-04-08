@@ -1,12 +1,13 @@
 // SPA: without not_found_handling, deep links and refresh 404 (Chrome error page → console frame warnings).
 {
-  "name": "agentos-mvp",
+  "name": "oneshots-ui",
   "compatibility_date": "2026-03-01",
   "assets": {
     "directory": "./dist",
     "not_found_handling": "single-page-application"
   },
   "routes": [
-    { "pattern": "app.oneshots.co/*", "zone_name": "oneshots.co" }
+    { "pattern": "app.oneshots.co/*", "zone_name": "oneshots.co" },
+    { "pattern": "app.021agents.ai/*", "zone_name": "021agents.ai" }
   ]
 }
