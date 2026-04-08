@@ -69,24 +69,64 @@ observabilityRoutes.openapi(summaryRoute, async (c): Promise<any> => {
   const [sessions] = await sql`
     SELECT COUNT(*) as total, COALESCE(SUM(cost_total_usd), 0) as cost,
            COALESCE(AVG(wall_clock_seconds), 0) as avg_latency,
-           COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END)::float / NULLIF(COUNT(*), 0), 0) as success_rate
+           COALESCE(SUM(step_count), 0) as total_steps,
+           COALESCE(SUM(action_count), 0) as total_actions,
+           COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END)::float / NULLIF(COUNT(*), 0), 0) as success_rate,
+           COALESCE(SUM(CASE WHEN status NOT IN ('success', 'pending') THEN 1 ELSE 0 END), 0) as error_count
     FROM sessions WHERE org_id = ${user.org_id} AND created_at >= ${since}
   `;
 
-  const [billing] = await sql`
-    SELECT COALESCE(SUM(total_cost_usd), 0) as total_cost,
-           COALESCE(SUM(input_tokens), 0) as input_tokens,
-           COALESCE(SUM(output_tokens), 0) as output_tokens
-    FROM billing_records WHERE org_id = ${user.org_id} AND created_at >= ${since}
+  // Pull tokens from turns (primary source) — billing_records may be empty for free-tier
+  const [tokens] = await sql`
+    SELECT COALESCE(SUM(t.input_tokens), 0) as input_tokens,
+           COALESCE(SUM(t.output_tokens), 0) as output_tokens,
+           COALESCE(SUM(t.cost_usd), 0) as turn_cost,
+           COALESCE(AVG(t.latency_ms), 0) as avg_turn_latency_ms,
+           COUNT(DISTINCT t.model_used) as models_used
+    FROM turns t
+    JOIN sessions s ON s.session_id = t.session_id
+    WHERE s.org_id = ${user.org_id} AND t.created_at >= ${since}
+  `;
+
+  // Top models by usage
+  const topModels = await sql`
+    SELECT t.model_used as model, COUNT(*) as turns, SUM(t.input_tokens) as input_tokens, SUM(t.output_tokens) as output_tokens
+    FROM turns t
+    JOIN sessions s ON s.session_id = t.session_id
+    WHERE s.org_id = ${user.org_id} AND t.created_at >= ${since} AND t.model_used != ''
+    GROUP BY t.model_used ORDER BY turns DESC LIMIT 5
+  `;
+
+  // Top agents by sessions
+  const topAgents = await sql`
+    SELECT agent_name, COUNT(*) as sessions, SUM(step_count) as total_steps,
+           COALESCE(AVG(wall_clock_seconds), 0) as avg_latency
+    FROM sessions WHERE org_id = ${user.org_id} AND created_at >= ${since} AND agent_name != ''
+    GROUP BY agent_name ORDER BY sessions DESC LIMIT 5
+  `;
+
+  // Daily session counts (last N days)
+  const dailySessions = await sql`
+    SELECT date_trunc('day', created_at)::date as day, COUNT(*) as sessions,
+           SUM(step_count) as steps, COALESCE(SUM(cost_total_usd), 0) as cost
+    FROM sessions WHERE org_id = ${user.org_id} AND created_at >= ${since}
+    GROUP BY day ORDER BY day DESC LIMIT ${sinceDays}
   `;
 
   return c.json({
     total_sessions: Number(sessions.total),
-    total_cost_usd: Number(billing.total_cost),
+    total_cost_usd: Number(sessions.cost),
     avg_latency_seconds: Number(sessions.avg_latency),
+    avg_turn_latency_ms: Number(tokens.avg_turn_latency_ms),
     success_rate: Number(sessions.success_rate),
-    total_input_tokens: Number(billing.input_tokens),
-    total_output_tokens: Number(billing.output_tokens),
+    error_count: Number(sessions.error_count),
+    total_steps: Number(sessions.total_steps),
+    total_input_tokens: Number(tokens.input_tokens),
+    total_output_tokens: Number(tokens.output_tokens),
+    models_used: Number(tokens.models_used),
+    top_models: topModels.map((m: any) => ({ model: m.model, turns: Number(m.turns), input_tokens: Number(m.input_tokens), output_tokens: Number(m.output_tokens) })),
+    top_agents: topAgents.map((a: any) => ({ agent: a.agent_name, sessions: Number(a.sessions), steps: Number(a.total_steps), avg_latency: Number(a.avg_latency) })),
+    daily: dailySessions.map((d: any) => ({ day: d.day, sessions: Number(d.sessions), steps: Number(d.steps), cost: Number(d.cost) })),
     since_days: sinceDays,
   });
 });
