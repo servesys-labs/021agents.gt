@@ -67,6 +67,44 @@ export const VALID_REASONING_STRATEGIES = [
   "decompose",
 ] as const;
 
+export const VALID_EXECUTION_MODES = ["auto", "fast-only", "full"] as const;
+
+export const ExecutionProfileSchema = z.object({
+  /** How the agent decides between fast-path and full pipeline. */
+  execution_mode: z.enum(VALID_EXECUTION_MODES).default("auto").openapi({
+    example: "auto",
+    description: "auto = LLM decides, fast-only = never escalate, full = always full pipeline",
+  }),
+  /** Tools allowed on the fast path (overrides default FAST_TOOLS set). */
+  fast_tools: z.array(z.string()).optional().openapi({
+    example: ["web-search", "knowledge-search", "http-request", "memory-recall", "memory-save"],
+    description: "Tools available on the fast path. If omitted, uses platform defaults.",
+  }),
+  /** Max tool call rounds before auto-escalation. */
+  max_fast_tool_calls: z.number().int().min(1).max(10).default(3),
+  /** Message spoken/sent while escalating to full pipeline. */
+  escalation_message: z.string().max(500).optional().openapi({
+    example: "Let me look into that more deeply for you...",
+  }),
+  /** LLM temperature override for fast path. */
+  fast_temperature: z.number().min(0).max(2).optional(),
+  /** Max output tokens override for fast path. */
+  fast_max_tokens: z.number().int().min(50).max(2000).optional(),
+}).openapi("ExecutionProfile");
+
+export const ChannelOverrideSchema = z.object({
+  /** Channel identifier. */
+  channel: z.string().openapi({ example: "telegram" }),
+  /** Whether this channel is enabled. */
+  enabled: z.boolean().default(true),
+  /** Override system prompt suffix for this channel. */
+  prompt_suffix: z.string().max(2000).optional(),
+  /** Override greeting for this channel. */
+  greeting: z.string().max(500).optional(),
+  /** Override execution profile for this channel. */
+  execution_profile: ExecutionProfileSchema.optional(),
+}).openapi("ChannelOverride");
+
 export const AgentCreateBody = z.object({
   name: z.string().min(1).max(128).openapi({ example: "support-agent" }),
   description: z.string().max(2000).default("").openapi({ example: "Customer support agent" }),
@@ -82,6 +120,10 @@ export const AgentCreateBody = z.object({
   budget_limit_usd: z.number().min(0).max(10000).default(10),
   tags: z.array(z.string()).default([]),
   reasoning_strategy: z.enum(VALID_REASONING_STRATEGIES).optional(),
+  /** Execution profile — controls fast-path vs full pipeline behavior. */
+  execution_profile: ExecutionProfileSchema.optional(),
+  /** Per-channel overrides (greeting, prompt suffix, execution profile). */
+  channels: z.array(ChannelOverrideSchema).optional(),
   sub_agents: z.array(z.record(z.unknown())).optional(),
   skills: z.array(z.record(z.unknown())).optional(),
   codemode_snippets: z.array(z.record(z.unknown())).optional(),

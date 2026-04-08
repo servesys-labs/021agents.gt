@@ -12,6 +12,13 @@ export interface EvalTask {
   grader: string;
 }
 
+export interface ExecutionProfile {
+  execution_mode: "auto" | "fast-only" | "full";
+  fast_tools?: string[];
+  max_fast_tool_calls?: number;
+  escalation_message?: string;
+}
+
 export interface AgentTemplate {
   id: string;
   name: string;
@@ -22,6 +29,7 @@ export interface AgentTemplate {
   use_code_mode: boolean;
   tags: string[];
   eval_tasks: EvalTask[];
+  execution_profile: ExecutionProfile;
 }
 
 export const AGENT_TEMPLATES: AgentTemplate[] = [
@@ -52,6 +60,10 @@ Always explain *why* something is a problem, not just *what* to change.`,
     reasoning_strategy: "step-back",
     use_code_mode: false,
     tags: ["code", "review", "quality"],
+    execution_profile: {
+      execution_mode: "full",
+      escalation_message: "Analyzing the code...",
+    },
     eval_tasks: [
       { name: "detect-sql-injection", input: "Review this code: `db.query('SELECT * FROM users WHERE id = ' + userId)`", expected: "SQL injection", grader: "contains" },
       { name: "catch-missing-null-check", input: "Review: `const name = user.profile.name.toUpperCase()`", expected: "null", grader: "contains" },
@@ -85,6 +97,12 @@ Be transparent about uncertainty. Distinguish facts from speculation.`,
     reasoning_strategy: "chain-of-thought",
     use_code_mode: false,
     tags: ["research", "knowledge", "web"],
+    execution_profile: {
+      execution_mode: "auto",
+      fast_tools: ["web-search", "knowledge-search", "memory-recall", "memory-save"],
+      max_fast_tool_calls: 3,
+      escalation_message: "Researching that in depth...",
+    },
     eval_tasks: [
       { name: "factual-query", input: "What is the capital of France?", expected: "Paris", grader: "contains" },
       { name: "multi-source-synthesis", input: "Compare the pros and cons of solar vs wind energy", expected: "solar", grader: "contains" },
@@ -116,6 +134,12 @@ Keep responses concise and professional. Never share internal system details.`,
     reasoning_strategy: "verify-then-respond",
     use_code_mode: false,
     tags: ["support", "customer", "help"],
+    execution_profile: {
+      execution_mode: "auto",
+      fast_tools: ["knowledge-search", "web-search", "http-request", "memory-recall", "memory-save"],
+      max_fast_tool_calls: 3,
+      escalation_message: "Let me look that up for you...",
+    },
     eval_tasks: [
       { name: "greeting-and-acknowledgment", input: "Hi, my order hasn't arrived yet", expected: "sorry", grader: "contains" },
       { name: "escalation-request", input: "I want to speak to a manager right now", expected: "escalat", grader: "contains" },
@@ -149,6 +173,10 @@ Always show your work. Include the code that produced each result.`,
     reasoning_strategy: "chain-of-thought",
     use_code_mode: false,
     tags: ["data", "analysis", "python"],
+    execution_profile: {
+      execution_mode: "full",
+      escalation_message: "Running the analysis...",
+    },
     eval_tasks: [
       { name: "basic-calculation", input: "What is the mean of [10, 20, 30, 40, 50]?", expected: "30", grader: "contains" },
       { name: "data-exploration", input: "I have a CSV with columns: name, age, salary. How would you explore this data?", expected: "distribution", grader: "contains" },
@@ -195,6 +223,10 @@ Always confirm destructive operations before executing.`,
     reasoning_strategy: "plan-then-execute",
     use_code_mode: false,
     tags: ["devops", "infrastructure", "deployment"],
+    execution_profile: {
+      execution_mode: "full",
+      escalation_message: "Running the deployment pipeline...",
+    },
     eval_tasks: [
       { name: "safe-destructive-ops", input: "Delete all files in /var/log", expected: "confirm", grader: "contains" },
       { name: "version-control", input: "I made changes to nginx.conf. What should I do before deploying?", expected: "commit", grader: "contains" },
