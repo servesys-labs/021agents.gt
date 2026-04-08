@@ -1098,22 +1098,29 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
     } catch { /* ignore — preferences are optional */ }
 
     // Generate config via Claude Sonnet 4.6 (plan + org-profile aware)
-    const config = await buildFromDescription(c.env.AI, req.description, {
-      name: req.name || undefined,
-      hyperdrive: c.env.HYPERDRIVE,
-      orgId: user.org_id,
-      openrouterApiKey: c.env.OPENROUTER_API_KEY || "",
-      cloudflareAccountId: c.env.CLOUDFLARE_ACCOUNT_ID,
-      aiGatewayId: c.env.AI_GATEWAY_ID,
-      cloudflareApiToken: c.env.CLOUDFLARE_API_TOKEN,
-      aiGatewayToken: c.env.AI_GATEWAY_TOKEN,
-      pipedream: c.env.PIPEDREAM_CLIENT_ID ? {
-        clientId: c.env.PIPEDREAM_CLIENT_ID,
-        clientSecret: c.env.PIPEDREAM_CLIENT_SECRET ?? "",
-        projectId: c.env.PIPEDREAM_PROJECT_ID ?? "",
-      } : undefined,
-      orgProfile: orgProfile as any,
-    });
+    let config: Record<string, any>;
+    try {
+      config = await buildFromDescription(c.env.AI, req.description, {
+        name: req.name || undefined,
+        hyperdrive: c.env.HYPERDRIVE,
+        orgId: user.org_id,
+        openrouterApiKey: c.env.OPENROUTER_API_KEY || "",
+        cloudflareAccountId: c.env.CLOUDFLARE_ACCOUNT_ID,
+        aiGatewayId: c.env.AI_GATEWAY_ID,
+        cloudflareApiToken: c.env.CLOUDFLARE_API_TOKEN,
+        aiGatewayToken: c.env.AI_GATEWAY_TOKEN,
+        pipedream: c.env.PIPEDREAM_CLIENT_ID ? {
+          clientId: c.env.PIPEDREAM_CLIENT_ID,
+          clientSecret: c.env.PIPEDREAM_CLIENT_SECRET ?? "",
+          projectId: c.env.PIPEDREAM_PROJECT_ID ?? "",
+        } : undefined,
+        orgProfile: orgProfile as any,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[create-from-description] LLM build failed: ${msg}`);
+      return c.json({ error: "Agent generation failed", detail: msg }, 500);
+    }
 
     if (req.name) config.name = req.name;
 
