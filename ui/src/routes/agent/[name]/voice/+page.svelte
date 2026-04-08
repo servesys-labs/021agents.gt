@@ -754,12 +754,43 @@
       recorder.start();
       testMediaRecorder = recorder;
 
-      // Record for 3 seconds, then send chunk
-      setTimeout(() => {
-        if (recorder.state === "recording") {
-          recorder.stop();
+      // VAD-inspired recording: record for up to 5 seconds but use AudioAnalyser
+      // to detect when speech ends (volume drops below threshold for 1 second)
+      const audioCtx = new AudioContext();
+      const source = audioCtx.createMediaStreamSource(testStream!);
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 512;
+      source.connect(analyser);
+      const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+      let silenceStart = 0;
+      let hasSpeech = false;
+      const SILENCE_THRESHOLD = 15; // volume level below this = silence
+      const SILENCE_DURATION = 1200; // ms of silence before stopping
+      const MAX_DURATION = 8000; // max recording length
+      const startTime = Date.now();
+
+      const vadCheck = setInterval(() => {
+        if (recorder.state !== "recording") { clearInterval(vadCheck); audioCtx.close(); return; }
+
+        analyser.getByteFrequencyData(dataArray);
+        const avg = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+
+        if (avg > SILENCE_THRESHOLD) {
+          hasSpeech = true;
+          silenceStart = 0;
+        } else if (hasSpeech && silenceStart === 0) {
+          silenceStart = Date.now();
         }
-      }, 3000);
+
+        // Stop when: speech detected + silence for 1.2s, OR max duration reached
+        const elapsed = Date.now() - startTime;
+        if ((hasSpeech && silenceStart > 0 && Date.now() - silenceStart > SILENCE_DURATION) || elapsed > MAX_DURATION) {
+          clearInterval(vadCheck);
+          audioCtx.close();
+          if (recorder.state === "recording") recorder.stop();
+        }
+      }, 100);
     } catch {
       // MediaRecorder failed
       if (testCallActive && testListening) {

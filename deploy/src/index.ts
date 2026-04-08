@@ -3392,9 +3392,17 @@ export default {
               const sttData = (await sttResp.json()) as { text?: string };
               const transcript = (sttData.text || "").trim();
 
-              // Skip empty/noise transcripts — but tell the browser
-              if (!transcript || transcript.length < 2) {
-                safeSend(JSON.stringify({ type: "status", step: "stt", message: "No speech detected. Try speaking louder or closer to the mic." }));
+              // Filter Whisper hallucinations on silence/noise
+              const isHallucination = /^\W+$/.test(transcript)
+                || /^(\*+|\.\.\.|…|\.+)$/.test(transcript)
+                || /thank you|thanks for watching|please subscribe/i.test(transcript)
+                || /\[BLANK_AUDIO\]|\(silence\)|\(music\)/i.test(transcript)
+                || /subtitles by|amara\.org/i.test(transcript)
+                || transcript === "you" || transcript === ".";
+
+              // Skip empty/noise/hallucinated transcripts
+              if (!transcript || transcript.length < 3 || isHallucination) {
+                safeSend(JSON.stringify({ type: "status", step: "stt", message: "No speech detected. Try again." }));
                 return;
               }
 
