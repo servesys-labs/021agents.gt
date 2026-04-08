@@ -3314,6 +3314,8 @@ export default {
       server.accept();
 
       let closed = false;
+      let processing = false;  // Lock: only one audio chunk processed at a time
+      let lastTranscript = ""; // Dedup: skip if same text as last
 
       function safeSend(data: string) {
         if (!closed && server.readyState === WebSocket.OPEN) {
@@ -3365,11 +3367,24 @@ export default {
         if (msg.type === "audio" && msg.data) {
           // Process in background with ctx.waitUntil to avoid Worker timeout
           ctx.waitUntil((async () => {
+            // Lock: skip if already processing another chunk
+            if (processing) {
+              safeSend(JSON.stringify({ type: "status", step: "stt", message: "Still processing previous message..." }));
+              return;
+            }
+            processing = true;
+
             try {
               safeSend(JSON.stringify({ type: "status", step: "stt", message: "Transcribing..." }));
 
               // 1. Decode base64 audio from browser (WebM format)
               const audioBytes = Uint8Array.from(atob(msg.data!), (c) => c.charCodeAt(0));
+
+              // Server-side silence check: skip tiny audio (< 2KB likely silence)
+              if (audioBytes.length < 2000) {
+                processing = false;
+                return;
+              }
 
               // 2. Send to STT (Whisper handles WebM natively)
               const formData = new FormData();
@@ -3403,8 +3418,17 @@ export default {
               // Skip empty/noise/hallucinated transcripts
               if (!transcript || transcript.length < 3 || isHallucination) {
                 safeSend(JSON.stringify({ type: "status", step: "stt", message: "No speech detected. Try again." }));
+                processing = false;
                 return;
               }
+
+              // Dedup: skip if same text as the last transcript
+              if (transcript === lastTranscript) {
+                safeSend(JSON.stringify({ type: "status", step: "stt", message: "Duplicate detected, skipping." }));
+                processing = false;
+                return;
+              }
+              lastTranscript = transcript;
 
               // 3. Send user transcript to browser
               safeSend(JSON.stringify({ type: "transcript", speaker: "user", text: transcript }));
@@ -3455,6 +3479,8 @@ export default {
               }
             } catch (err) {
               safeSend(JSON.stringify({ type: "error", message: `Processing error: ${String(err)}` }));
+            } finally {
+              processing = false;
             }
           })());
         }

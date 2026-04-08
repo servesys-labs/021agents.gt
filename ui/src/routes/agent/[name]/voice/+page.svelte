@@ -724,10 +724,12 @@
         if (chunks.length === 0 || !testWs || testWs.readyState !== WebSocket.OPEN) return;
 
         const blob = new Blob(chunks, { type: mimeType });
-        // Only send if we have meaningful audio (> 1KB likely has speech)
-        if (blob.size < 500) {
-          // Too small — probably silence, record again
-          if (testCallActive && testListening) startTestRecordingChunk();
+        // Only send if VAD detected actual speech (not just ambient noise)
+        if (!hasSpeech || speechDuration < SPEECH_MIN_DURATION || blob.size < 1000) {
+          // No meaningful speech — restart recording silently
+          if (testCallActive && testListening) {
+            setTimeout(() => startTestRecordingChunk(), 300);
+          }
           return;
         }
 
@@ -765,9 +767,12 @@
 
       let silenceStart = 0;
       let hasSpeech = false;
-      const SILENCE_THRESHOLD = 15; // volume level below this = silence
-      const SILENCE_DURATION = 1200; // ms of silence before stopping
+      let speechDuration = 0; // ms of actual speech detected
+      const SILENCE_THRESHOLD = 25; // volume level below this = silence (raised from 15)
+      const SPEECH_MIN_DURATION = 500; // must have at least 500ms of speech to send
+      const SILENCE_DURATION = 1500; // ms of silence before stopping (raised from 1200)
       const MAX_DURATION = 8000; // max recording length
+      const NO_SPEECH_TIMEOUT = 6000; // stop recording if no speech after 6s
       const startTime = Date.now();
 
       const vadCheck = setInterval(() => {
@@ -778,14 +783,25 @@
 
         if (avg > SILENCE_THRESHOLD) {
           hasSpeech = true;
+          speechDuration += 100; // each check is ~100ms
           silenceStart = 0;
         } else if (hasSpeech && silenceStart === 0) {
           silenceStart = Date.now();
         }
 
-        // Stop when: speech detected + silence for 1.2s, OR max duration reached
         const elapsed = Date.now() - startTime;
-        if ((hasSpeech && silenceStart > 0 && Date.now() - silenceStart > SILENCE_DURATION) || elapsed > MAX_DURATION) {
+
+        // Auto-stop on prolonged silence (no speech detected at all)
+        if (!hasSpeech && elapsed > NO_SPEECH_TIMEOUT) {
+          clearInterval(vadCheck);
+          audioCtx.close();
+          if (recorder.state === "recording") recorder.stop();
+          return;
+        }
+
+        // Stop when: enough speech + silence pause, OR max duration
+        const speechComplete = hasSpeech && speechDuration >= SPEECH_MIN_DURATION && silenceStart > 0 && Date.now() - silenceStart > SILENCE_DURATION;
+        if (speechComplete || elapsed > MAX_DURATION) {
           clearInterval(vadCheck);
           audioCtx.close();
           if (recorder.state === "recording") recorder.stop();
