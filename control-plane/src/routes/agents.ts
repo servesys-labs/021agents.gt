@@ -1506,6 +1506,116 @@ agentRoutes.openapi(evolveRoute, async (c): Promise<any> => {
   });
 });
 
+// ── Contextual suggestions ──────────────────────────────────────────
+
+const suggestionsRoute = createRoute({
+  method: "get",
+  path: "/{name}/suggestions",
+  tags: ["Agents"],
+  summary: "Get contextual chat suggestions for this agent",
+  request: { params: z.object({ name: z.string() }) },
+  responses: {
+    200: { description: "Suggestions", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(404),
+  },
+});
+
+agentRoutes.openapi(suggestionsRoute, async (c): Promise<any> => {
+  const { name: identifier } = c.req.valid("param");
+  const user = c.get("user");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  const agentName = await resolveAgentName(sql, identifier, user.org_id);
+  if (!agentName) return c.json({ error: "Agent not found" }, 404);
+
+  // Get agent config
+  const [agent] = await sql`SELECT config, description FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id} LIMIT 1`;
+  if (!agent) return c.json({ suggestions: [] });
+  const config = parseConfig(agent.config);
+  const description = String(agent.description || config.description || "");
+  const tools = Array.isArray(config.tools) ? config.tools : [];
+  const isPersonal = !!(config as any).is_personal;
+
+  // Get recent session topics (last 5 sessions)
+  const recentSessions = await sql`
+    SELECT agent_name, status, step_count, created_at FROM sessions
+    WHERE org_id = ${user.org_id} AND agent_name = ${agentName}
+    ORDER BY created_at DESC LIMIT 5
+  `.catch(() => []);
+
+  // Get recent turn inputs (last 10 user messages)
+  const recentInputs = await sql`
+    SELECT t.input_text FROM turns t
+    JOIN sessions s ON s.session_id = t.session_id
+    WHERE s.org_id = ${user.org_id} AND s.agent_name = ${agentName} AND t.input_text != ''
+    ORDER BY t.created_at DESC LIMIT 10
+  `.catch(() => []);
+
+  // Get saved memories for this agent
+  const memories = await sql`
+    SELECT content FROM facts
+    WHERE org_id = ${user.org_id} AND (agent_name = ${agentName} OR agent_name = '' OR agent_name IS NULL)
+    ORDER BY created_at DESC LIMIT 5
+  `.catch(() => []);
+
+  // Build context for LLM
+  const hour = new Date().getHours();
+  const timeOfDay = hour < 12 ? "morning" : hour < 17 ? "afternoon" : "evening";
+  const sessionCount = recentSessions.length;
+  const recentTopics = recentInputs.map((r: any) => String(r.input_text).slice(0, 100)).slice(0, 5);
+  const memorySnippets = memories.map((m: any) => String(m.content).slice(0, 80)).slice(0, 3);
+
+  try {
+    const { callLLMGateway } = await import("../lib/llm-gateway");
+    const result = await callLLMGateway(
+      {
+        cloudflareAccountId: c.env.CLOUDFLARE_ACCOUNT_ID,
+        aiGatewayId: c.env.AI_GATEWAY_ID,
+        aiGatewayToken: c.env.AI_GATEWAY_TOKEN,
+        cloudflareApiToken: c.env.CLOUDFLARE_API_TOKEN,
+      },
+      {
+        model: "anthropic/claude-sonnet-4-6",
+        max_tokens: 300,
+        temperature: 0.8,
+        messages: [{
+          role: "user",
+          content: `Generate 4 contextual chat suggestions for an AI agent. Return a JSON array of 4 objects with "icon" (one of: search, code, terminal, file, sparkle, lightbulb, pencil, globe, calendar, chart) and "text" (the suggestion, 4-10 words, actionable).
+
+Agent: "${agentName}"
+Description: "${description.slice(0, 200)}"
+Tools: ${tools.slice(0, 10).join(", ")}
+Is personal assistant: ${isPersonal}
+Time of day: ${timeOfDay}
+Recent sessions: ${sessionCount}
+${recentTopics.length ? `Recent topics: ${recentTopics.join("; ")}` : "No recent activity"}
+${memorySnippets.length ? `User context: ${memorySnippets.join("; ")}` : ""}
+
+Rules:
+- Make suggestions specific to this agent's purpose and tools, not generic
+- If there's recent activity, suggest follow-ups or continuations
+- For personal assistants: vary by time of day (morning briefing, afternoon tasks, evening review)
+- For business agents: focus on the agent's domain
+- Never repeat the same suggestion twice — be creative
+- Return ONLY the JSON array, no explanation`,
+        }],
+      },
+    );
+
+    const text = result.content || "[]";
+    const match = text.match(/\[[\s\S]*\]/);
+    if (match) {
+      const parsed = JSON.parse(match[0]);
+      return c.json({ suggestions: parsed.slice(0, 4) });
+    }
+  } catch (err: any) {
+    console.warn(`[suggestions] LLM failed for ${agentName}: ${err.message}`);
+  }
+
+  // Fallback: tool-based static suggestions
+  return c.json({ suggestions: [] });
+});
+
 // ── Meta-agent conversational chat ──────────────────────────────────
 
 const metaChatRoute = createRoute({

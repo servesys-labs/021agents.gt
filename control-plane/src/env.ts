@@ -30,6 +30,7 @@ export interface Env {
   OPENROUTER_API_KEY?: string;  // Not used in MVP — Gemma only
   AI_GATEWAY_ID: string;
   AI_GATEWAY_TOKEN: string;
+  GPU_SERVICE_KEY?: string;
   CLOUDFLARE_ACCOUNT_ID: string;
   CLOUDFLARE_API_TOKEN?: string;
   STRIPE_SECRET_KEY: string;
