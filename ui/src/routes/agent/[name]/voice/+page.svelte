@@ -48,6 +48,14 @@
   let cloneFile = $state<File | null>(null);
   let uploading = $state(false);
 
+  // Recording state
+  let isRecording = $state(false);
+  let recordingDuration = $state(0);
+  let recordedBlob = $state<Blob | null>(null);
+  let mediaRecorder = $state<MediaRecorder | null>(null);
+  let recordingInterval = $state<ReturnType<typeof setInterval> | null>(null);
+  let cloneFileInput = $state<HTMLInputElement | null>(null);
+
   // Preview
   let previewing = $state(false);
   let previewAudioUrl = $state<string | null>(null);
@@ -317,20 +325,32 @@
 
   // ── Upload clone voice ─────────────────────────────────────────────
   async function handleUploadClone() {
-    if (!cloneFile) {
-      toast.error("Select an audio file first");
+    let fileToUpload: File | null = null;
+
+    if (recordedBlob) {
+      // Convert recorded blob to a File object for the upload API
+      fileToUpload = new File([recordedBlob], "recording.webm", { type: "audio/webm" });
+    } else if (cloneFile) {
+      fileToUpload = cloneFile;
+    }
+
+    if (!fileToUpload) {
+      toast.error("Record or upload audio first");
       return;
     }
+
     uploading = true;
     try {
-      const result = await uploadVoiceClone(agentName, cloneFile);
+      const result = await uploadVoiceClone(agentName, fileToUpload);
       voiceCloneUrl = result.clone_url;
       voice = result.clone_id;
       cloneFile = null;
+      recordedBlob = null;
+      recordingDuration = 0;
       // Refresh clone list
       const resp = await listCloneVoices(agentName);
       cloneVoices = resp.clones ?? [];
-      toast.success("Voice clone uploaded successfully");
+      toast.success("Voice cloned successfully");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Upload failed");
     } finally {
@@ -408,6 +428,80 @@
     }
   }
 
+  // ── Recording functions ─────────────────────────────────────────────
+  async function startRecording() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+      const chunks: Blob[] = [];
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunks.push(e.data);
+      };
+      recorder.onstop = () => {
+        recordedBlob = new Blob(chunks, { type: "audio/webm" });
+        stream.getTracks().forEach((t) => t.stop());
+      };
+
+      recorder.start();
+      mediaRecorder = recorder;
+      isRecording = true;
+      recordingDuration = 0;
+      recordingInterval = setInterval(() => {
+        recordingDuration++;
+        if (recordingDuration >= 30) stopRecording();
+      }, 1000);
+    } catch {
+      toast.error("Microphone access denied");
+    }
+  }
+
+  function stopRecording() {
+    if (mediaRecorder && mediaRecorder.state !== "inactive") {
+      mediaRecorder.stop();
+    }
+    isRecording = false;
+    if (recordingInterval) {
+      clearInterval(recordingInterval);
+      recordingInterval = null;
+    }
+  }
+
+  function clearRecording() {
+    recordedBlob = null;
+    recordingDuration = 0;
+  }
+
+  function playRecording() {
+    if (recordedBlob) {
+      const url = URL.createObjectURL(recordedBlob);
+      const audio = new Audio(url);
+      audio.onended = () => URL.revokeObjectURL(url);
+      audio.play();
+    }
+  }
+
+  function playUploadedFile() {
+    if (cloneFile) {
+      const url = URL.createObjectURL(cloneFile);
+      const audio = new Audio(url);
+      audio.onended = () => URL.revokeObjectURL(url);
+      audio.play();
+    }
+  }
+
+  async function previewCloneVoice(clone: CloneVoice) {
+    try {
+      const blob = await previewVoice("chatterbox", clone.clone_id, greeting || undefined);
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audio.onended = () => URL.revokeObjectURL(url);
+      await audio.play();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Preview failed");
+    }
+  }
+
   $effect(() => {
     if (agentName) loadVoicePage();
   });
@@ -439,130 +533,260 @@
         </div>
 
         <div class="space-y-10">
-          <!-- Voice Settings -->
+          <!-- 1. Text-to-Speech -->
           <section>
-            <h2 class="mb-4">Voice Settings</h2>
+            <div class="mb-4">
+              <h2>Text-to-Speech</h2>
+              <p class="mt-1 text-sm text-muted-foreground">How your agent sounds when speaking</p>
+            </div>
             <div class="space-y-6 rounded-lg border border-border p-6">
 
-              <!-- TTS Engine -->
+              <!-- Engine selector as visual cards -->
               <div>
-                <label for="tts-engine" class="mb-2 block text-sm font-medium text-foreground">TTS Engine</label>
-                <div class="flex items-start gap-3">
-                  <div class="flex-1">
-                    <Select
-                      id="tts-engine"
-                      options={ttsEngineOptions}
-                      bind:value={ttsEngine}
-                      onchange={handleEngineChange}
-                    />
-                  </div>
-                  <Badge variant="secondary">
-                    {#if ttsEngine === "kokoro"}GPU{:else if ttsEngine === "chatterbox"}GPU{:else if ttsEngine === "sesame"}GPU{:else}Cloud{/if}
-                  </Badge>
-                </div>
-              </div>
-
-              <!-- Voice Selector (dynamic by engine) -->
-              <div>
-                <label for="voice-select" class="mb-2 block text-sm font-medium text-foreground">Voice</label>
-                <div class="flex items-center gap-3">
-                  <div class="flex-1">
-                    {#if ttsEngine === "kokoro"}
-                      <!-- Kokoro: grouped native select for optgroup support -->
-                      <select
-                        id="voice-select"
-                        class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                        bind:value={voice}
-                      >
-                        {#each kokoroVoiceGroups as group}
-                          <optgroup label={group.label}>
-                            {#each group.voices as v}
-                              <option value={v.value}>{v.label}</option>
-                            {/each}
-                          </optgroup>
-                        {/each}
-                      </select>
-                    {:else if ttsEngine === "chatterbox"}
-                      <Select id="voice-select" options={chatterboxVoiceOptions} bind:value={voice} />
-                    {:else if ttsEngine === "sesame"}
-                      <Select id="voice-select" options={sesameVoiceOptions} bind:value={voice} />
-                    {:else}
-                      <Select id="voice-select" options={workersAiVoiceOptions} bind:value={voice} />
-                    {/if}
-                  </div>
-                  <!-- Preview button -->
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={previewing}
-                    onclick={handlePreview}
+                <p class="mb-3 text-sm font-medium text-foreground">Engine</p>
+                <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                  <!-- Kokoro -->
+                  <button
+                    type="button"
+                    class="relative flex flex-col items-start rounded-lg border p-4 text-left transition-colors hover:bg-muted/50 {ttsEngine === 'kokoro' ? 'ring-2 ring-primary border-primary' : 'border-border'}"
+                    onclick={() => { ttsEngine = 'kokoro'; handleEngineChange(); }}
                   >
-                    {#if previewing}
-                      <span class="mr-1.5 h-3.5 w-3.5 animate-spin rounded-full border-2 border-foreground border-t-transparent"></span>
-                    {:else}
-                      <svg xmlns="http://www.w3.org/2000/svg" class="mr-1.5 h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3" /></svg>
-                    {/if}
-                    Preview
-                  </Button>
+                    <div class="mb-2 flex h-8 w-8 items-center justify-center rounded-md bg-amber-500/10 text-lg">
+                      <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-amber-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+                    </div>
+                    <p class="text-sm font-semibold text-foreground">Kokoro</p>
+                    <p class="mt-0.5 text-xs text-muted-foreground">Fast · 54 voices · 9 languages</p>
+                    <Badge variant="secondary" class="mt-2 text-[10px]">GPU · Free</Badge>
+                  </button>
+
+                  <!-- Chatterbox -->
+                  <button
+                    type="button"
+                    class="relative flex flex-col items-start rounded-lg border p-4 text-left transition-colors hover:bg-muted/50 {ttsEngine === 'chatterbox' ? 'ring-2 ring-primary border-primary' : 'border-border'}"
+                    onclick={() => { ttsEngine = 'chatterbox'; handleEngineChange(); }}
+                  >
+                    <div class="mb-2 flex h-8 w-8 items-center justify-center rounded-md bg-violet-500/10 text-lg">
+                      <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-violet-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z" /><path stroke-linecap="round" stroke-linejoin="round" d="M19 10v1a7 7 0 01-14 0v-1" /><line x1="12" y1="18" x2="12" y2="22" /><line x1="8" y1="22" x2="16" y2="22" /></svg>
+                    </div>
+                    <p class="text-sm font-semibold text-foreground">Chatterbox</p>
+                    <p class="mt-0.5 text-xs text-muted-foreground">Voice cloning · 23 languages</p>
+                    <Badge variant="secondary" class="mt-2 text-[10px]">GPU</Badge>
+                  </button>
+
+                  <!-- Sesame CSM -->
+                  <button
+                    type="button"
+                    class="relative flex flex-col items-start rounded-lg border p-4 text-left transition-colors hover:bg-muted/50 {ttsEngine === 'sesame' ? 'ring-2 ring-primary border-primary' : 'border-border'}"
+                    onclick={() => { ttsEngine = 'sesame'; handleEngineChange(); }}
+                  >
+                    <div class="mb-2 flex h-8 w-8 items-center justify-center rounded-md bg-emerald-500/10 text-lg">
+                      <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-emerald-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
+                    </div>
+                    <p class="text-sm font-semibold text-foreground">Sesame CSM</p>
+                    <p class="mt-0.5 text-xs text-muted-foreground">Most natural · Conversational</p>
+                    <Badge variant="secondary" class="mt-2 text-[10px]">GPU · Premium</Badge>
+                  </button>
+
+                  <!-- Workers AI (Cloud) -->
+                  <button
+                    type="button"
+                    class="relative flex flex-col items-start rounded-lg border p-4 text-left transition-colors hover:bg-muted/50 {ttsEngine === 'workers-ai' ? 'ring-2 ring-primary border-primary' : 'border-border'}"
+                    onclick={() => { ttsEngine = 'workers-ai'; handleEngineChange(); }}
+                  >
+                    <div class="mb-2 flex h-8 w-8 items-center justify-center rounded-md bg-sky-500/10 text-lg">
+                      <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-sky-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M8 17.929H6.862c-2.13 0-3.862-1.591-3.862-3.571 0-1.98 1.731-3.572 3.862-3.572h.286C7.631 8.07 10.054 6 13 6c3.314 0 6 2.686 6 6v.286c1.727.444 3 2.01 3 3.857 0 1.98-1.731 3.571-3.862 3.571H16" /></svg>
+                    </div>
+                    <p class="text-sm font-semibold text-foreground">Cloud</p>
+                    <p class="mt-0.5 text-xs text-muted-foreground">Deepgram Aura · Fallback</p>
+                    <Badge variant="secondary" class="mt-2 text-[10px]">Cloud</Badge>
+                  </button>
                 </div>
               </div>
 
-              <!-- Voice Clone Section (Chatterbox only) -->
-              {#if ttsEngine === "chatterbox"}
-                <div class="rounded-lg border border-dashed border-border p-5">
-                  <h3 class="mb-3 text-sm font-semibold text-foreground">Voice Cloning</h3>
-                  <p class="mb-4 text-xs text-muted-foreground">
-                    Upload reference audio (WAV or MP3, 5-30 seconds) to clone a voice.
-                  </p>
+              <!-- Voice + Speed + Preview row -->
+              <div class="grid grid-cols-1 items-end gap-3 sm:grid-cols-[1fr_auto_auto]">
+                <!-- Voice selector -->
+                <div>
+                  <label for="voice-select" class="mb-2 block text-sm font-medium text-foreground">Voice</label>
+                  {#if ttsEngine === "kokoro"}
+                    <select
+                      id="voice-select"
+                      class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                      bind:value={voice}
+                    >
+                      {#each kokoroVoiceGroups as group}
+                        <optgroup label={group.label}>
+                          {#each group.voices as v}
+                            <option value={v.value}>{v.label}</option>
+                          {/each}
+                        </optgroup>
+                      {/each}
+                    </select>
+                  {:else if ttsEngine === "chatterbox"}
+                    <Select id="voice-select" options={chatterboxVoiceOptions} bind:value={voice} />
+                  {:else if ttsEngine === "sesame"}
+                    <Select id="voice-select" options={sesameVoiceOptions} bind:value={voice} />
+                  {:else}
+                    <Select id="voice-select" options={workersAiVoiceOptions} bind:value={voice} />
+                  {/if}
+                </div>
 
-                  <div class="flex flex-col gap-3 sm:flex-row sm:items-end">
-                    <div class="flex-1">
-                      <label for="clone-upload" class="mb-2 block text-xs font-medium text-muted-foreground">Reference Audio</label>
+                <!-- Speed (compact) -->
+                <div class="w-28">
+                  <label for="speed-slider" class="mb-2 block text-sm font-medium text-foreground">Speed</label>
+                  <div class="flex items-center gap-2">
+                    <input
+                      id="speed-slider"
+                      type="range"
+                      min="0.5"
+                      max="2.0"
+                      step="0.1"
+                      class="h-2 w-full cursor-pointer appearance-none rounded-lg bg-muted accent-primary"
+                      bind:value={speed}
+                    />
+                    <span class="w-8 text-xs text-muted-foreground">{speed.toFixed(1)}x</span>
+                  </div>
+                </div>
+
+                <!-- Preview button -->
+                <Button
+                  variant="outline"
+                  disabled={previewing}
+                  onclick={handlePreview}
+                >
+                  {#if previewing}
+                    <span class="mr-1.5 h-3.5 w-3.5 animate-spin rounded-full border-2 border-foreground border-t-transparent"></span>
+                  {:else}
+                    <svg xmlns="http://www.w3.org/2000/svg" class="mr-1.5 h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3" /></svg>
+                  {/if}
+                  Preview
+                </Button>
+              </div>
+
+              <!-- Voice Clone panel (Chatterbox only) -->
+              {#if ttsEngine === "chatterbox"}
+                <div class="mt-6 rounded-lg border border-border bg-card/50 p-6">
+                  <div class="mb-4 flex items-center gap-3">
+                    <div class="flex h-10 w-10 items-center justify-center rounded-full bg-violet-500/10">
+                      <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-violet-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z" /><path stroke-linecap="round" stroke-linejoin="round" d="M19 10v1a7 7 0 01-14 0v-1" /><line x1="12" y1="18" x2="12" y2="22" /><line x1="8" y1="22" x2="16" y2="22" /></svg>
+                    </div>
+                    <div>
+                      <h3 class="text-sm font-semibold">Voice Cloning</h3>
+                      <p class="text-xs text-muted-foreground">Record or upload 5-30 seconds of clear speech to clone a voice</p>
+                    </div>
+                  </div>
+
+                  <!-- Two options: Record or Upload -->
+                  <div class="mb-4 grid gap-4 sm:grid-cols-2">
+
+                    <!-- Option 1: Record from microphone -->
+                    <div class="rounded-lg border border-dashed border-border p-4 text-center">
+                      <svg xmlns="http://www.w3.org/2000/svg" class="mx-auto h-8 w-8 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z" /><path stroke-linecap="round" stroke-linejoin="round" d="M19 10v1a7 7 0 01-14 0v-1" /><line x1="12" y1="18" x2="12" y2="22" /><line x1="8" y1="22" x2="16" y2="22" /></svg>
+                      <p class="mt-2 text-sm font-medium">Record Voice</p>
+                      <p class="mb-3 text-xs text-muted-foreground">Use your microphone</p>
+
+                      {#if !isRecording}
+                        <Button variant="outline" size="sm" onclick={startRecording}>
+                          <svg xmlns="http://www.w3.org/2000/svg" class="mr-1.5 h-3 w-3 text-red-500" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10" /></svg>
+                          Start Recording
+                        </Button>
+                      {:else}
+                        <div class="space-y-2">
+                          <div class="flex items-center justify-center gap-2">
+                            <span class="h-2 w-2 rounded-full bg-red-500 animate-pulse"></span>
+                            <span class="text-sm font-medium text-red-500">Recording... {recordingDuration}s</span>
+                          </div>
+                          <Button variant="destructive" size="sm" onclick={stopRecording}>
+                            <svg xmlns="http://www.w3.org/2000/svg" class="mr-1.5 h-3 w-3" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2" /></svg>
+                            Stop Recording
+                          </Button>
+                        </div>
+                      {/if}
+
+                      {#if recordedBlob}
+                        <div class="mt-3 flex items-center justify-center gap-2">
+                          <Button variant="ghost" size="sm" onclick={playRecording}>
+                            <svg xmlns="http://www.w3.org/2000/svg" class="mr-1 h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3" /></svg>
+                            Play
+                          </Button>
+                          <Button variant="ghost" size="sm" onclick={clearRecording}>
+                            <svg xmlns="http://www.w3.org/2000/svg" class="mr-1 h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" /></svg>
+                            Clear
+                          </Button>
+                        </div>
+                        <p class="mt-1 text-xs text-muted-foreground">{recordingDuration}s recorded</p>
+                      {/if}
+                    </div>
+
+                    <!-- Option 2: Upload file -->
+                    <div class="rounded-lg border border-dashed border-border p-4 text-center">
+                      <svg xmlns="http://www.w3.org/2000/svg" class="mx-auto h-8 w-8 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>
+                      <p class="mt-2 text-sm font-medium">Upload Audio</p>
+                      <p class="mb-3 text-xs text-muted-foreground">WAV or MP3 file</p>
                       <input
-                        id="clone-upload"
                         type="file"
-                        accept="audio/wav,audio/mp3,audio/mpeg,audio/x-wav"
-                        class="block w-full text-sm text-muted-foreground file:mr-3 file:rounded-md file:border file:border-input file:bg-background file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-foreground hover:file:bg-muted"
+                        accept="audio/wav,audio/mp3,audio/mpeg,audio/x-wav,audio/*"
+                        class="hidden"
+                        bind:this={cloneFileInput}
                         onchange={handleFileInput}
                       />
-                    </div>
-                    <Button
-                      variant="secondary"
-                      disabled={uploading || !cloneFile}
-                      onclick={handleUploadClone}
-                    >
-                      {#if uploading}
-                        <span class="mr-2 h-4 w-4 animate-spin rounded-full border-2 border-foreground border-t-transparent"></span>
-                      {:else}
-                        <svg xmlns="http://www.w3.org/2000/svg" class="mr-1.5 h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>
+                      <Button variant="outline" size="sm" onclick={() => cloneFileInput?.click()}>
+                        <svg xmlns="http://www.w3.org/2000/svg" class="mr-1.5 h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>
+                        Choose File
+                      </Button>
+                      {#if cloneFile}
+                        <p class="mt-2 text-xs text-muted-foreground truncate max-w-[200px] mx-auto">
+                          {cloneFile.name} ({(cloneFile.size / 1024).toFixed(0)} KB)
+                        </p>
+                        <div class="mt-1 flex items-center justify-center gap-2">
+                          <Button variant="ghost" size="sm" onclick={playUploadedFile}>
+                            <svg xmlns="http://www.w3.org/2000/svg" class="mr-1 h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3" /></svg>
+                            Play
+                          </Button>
+                          <Button variant="ghost" size="sm" onclick={() => { cloneFile = null; }}>
+                            <svg xmlns="http://www.w3.org/2000/svg" class="mr-1 h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+                            Remove
+                          </Button>
+                        </div>
                       {/if}
-                      Upload & Clone
-                    </Button>
+                    </div>
                   </div>
 
-                  <!-- Existing clone voices -->
+                  <!-- Clone button (shown when we have audio from either source) -->
+                  {#if recordedBlob || cloneFile}
+                    <Button class="w-full" disabled={uploading} onclick={handleUploadClone}>
+                      {#if uploading}
+                        <span class="mr-2 h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent"></span>
+                        Cloning Voice...
+                      {:else}
+                        <svg xmlns="http://www.w3.org/2000/svg" class="mr-1.5 h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z" /><path stroke-linecap="round" stroke-linejoin="round" d="M19 10v1a7 7 0 01-14 0v-1" /><line x1="12" y1="18" x2="12" y2="22" /><line x1="8" y1="22" x2="16" y2="22" /></svg>
+                        Clone This Voice
+                      {/if}
+                    </Button>
+                  {/if}
+
+                  <!-- Existing cloned voices -->
                   {#if cloneVoices.length > 0}
-                    <div class="mt-4 space-y-2">
-                      <p class="text-xs font-medium text-muted-foreground">Cloned Voices</p>
+                    <div class="mt-6">
+                      <p class="mb-2 text-xs font-semibold text-muted-foreground">Your Cloned Voices</p>
                       {#each cloneVoices as clone}
-                        <div class="flex items-center justify-between rounded-md border border-border bg-card px-3 py-2">
+                        <div class="mb-2 flex items-center justify-between rounded-md border border-border px-3 py-2">
                           <div class="flex items-center gap-3">
-                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z" /><path stroke-linecap="round" stroke-linejoin="round" d="M19 10v1a7 7 0 01-14 0v-1" /><line x1="12" y1="18" x2="12" y2="22" /><line x1="8" y1="22" x2="16" y2="22" /></svg>
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-violet-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z" /><path stroke-linecap="round" stroke-linejoin="round" d="M19 10v1a7 7 0 01-14 0v-1" /><line x1="12" y1="18" x2="12" y2="22" /><line x1="8" y1="22" x2="16" y2="22" /></svg>
                             <div>
                               <p class="text-sm font-medium text-foreground">{clone.name}</p>
                               <p class="text-xs text-muted-foreground">{new Date(clone.created_at).toLocaleDateString()}</p>
                             </div>
                           </div>
-                          <div class="flex items-center gap-2">
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              onclick={() => { voice = clone.clone_id; voiceCloneUrl = clone.clone_url; }}
-                            >
+                          <div class="flex items-center gap-1">
+                            <Button size="icon" variant="ghost" onclick={() => previewCloneVoice(clone)}>
+                              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3" /></svg>
+                            </Button>
+                            <Button size="sm" variant="ghost" onclick={() => { voice = clone.clone_id; voiceCloneUrl = clone.clone_url; }}>
                               Use
                             </Button>
                             <Button
-                              size="sm"
+                              size="icon"
                               variant="ghost"
                               class="text-destructive hover:text-destructive"
                               onclick={() => handleDeleteClone(clone)}
@@ -576,70 +800,70 @@
                   {/if}
                 </div>
               {/if}
+            </div>
+          </section>
 
-              <!-- STT Engine -->
-              <div>
-                <label for="stt-engine" class="mb-2 block text-sm font-medium text-foreground">STT Engine</label>
-                <div class="flex items-start gap-3">
-                  <div class="flex-1">
-                    <Select id="stt-engine" options={sttEngineOptions} bind:value={sttEngine} />
-                  </div>
-                  <Badge variant="secondary">
-                    {#if sttEngine === "whisper-gpu"}GPU{:else}Cloud{/if}
-                  </Badge>
-                </div>
-              </div>
-
+          <!-- 2. Speech Recognition -->
+          <section>
+            <div class="mb-4">
+              <h2>Speech Recognition</h2>
+              <p class="mt-1 text-sm text-muted-foreground">How your agent understands speech</p>
+            </div>
+            <div class="space-y-6 rounded-lg border border-border p-6">
               <div class="grid gap-6 sm:grid-cols-2">
+                <!-- STT Engine -->
+                <div>
+                  <label for="stt-engine" class="mb-2 block text-sm font-medium text-foreground">Engine</label>
+                  <Select id="stt-engine" options={sttEngineOptions} bind:value={sttEngine} />
+                  <p class="mt-1.5 text-xs text-muted-foreground">
+                    {#if sttEngine === "whisper-gpu"}
+                      Whisper V3 Turbo on GPU · 99 languages · ~170ms latency
+                    {:else if sttEngine === "groq"}
+                      Groq Cloud API · Fast · Requires API key
+                    {:else}
+                      Cloudflare Workers AI · Free fallback
+                    {/if}
+                  </p>
+                </div>
+
                 <!-- Language -->
                 <div>
                   <label for="lang-select" class="mb-2 block text-sm font-medium text-foreground">Language</label>
                   <Select id="lang-select" options={languageOptions} bind:value={language} />
                 </div>
-
-                <!-- Max Duration -->
-                <div>
-                  <label for="max-dur" class="mb-2 block text-sm font-medium text-foreground">Max Call Duration</label>
-                  <Select id="max-dur" options={durationOptions} bind:value={maxDuration} />
-                </div>
-              </div>
-
-              <!-- Greeting -->
-              <div>
-                <label for="voice-greeting" class="mb-2 block text-sm font-medium text-foreground">Greeting Message</label>
-                <Textarea id="voice-greeting" rows={3} placeholder="Hello! How can I help you today?" bind:value={greeting} />
-              </div>
-
-              <!-- Speed Slider -->
-              <div>
-                <label for="speed-slider" class="mb-2 block text-sm font-medium text-foreground">
-                  Speech Speed
-                  <span class="ml-2 text-xs font-normal text-muted-foreground">{speed.toFixed(1)}x</span>
-                </label>
-                <div class="flex items-center gap-3">
-                  <span class="text-xs text-muted-foreground">0.5x</span>
-                  <input
-                    id="speed-slider"
-                    type="range"
-                    min="0.5"
-                    max="2.0"
-                    step="0.1"
-                    class="h-2 w-full cursor-pointer appearance-none rounded-lg bg-muted accent-primary"
-                    bind:value={speed}
-                  />
-                  <span class="text-xs text-muted-foreground">2.0x</span>
-                </div>
-              </div>
-
-              <!-- Save Button -->
-              <div class="flex justify-end">
-                <Button disabled={savingConfig} onclick={saveVoiceSettings}>
-                  {#if savingConfig}<span class="mr-2 h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent"></span>{/if}
-                  Save Voice Settings
-                </Button>
               </div>
             </div>
           </section>
+
+          <!-- 3. Call Settings -->
+          <section>
+            <div class="mb-4">
+              <h2>Call Settings</h2>
+              <p class="mt-1 text-sm text-muted-foreground">Configure how phone calls work</p>
+            </div>
+            <div class="space-y-6 rounded-lg border border-border p-6">
+              <!-- Greeting -->
+              <div>
+                <label for="voice-greeting" class="mb-2 block text-sm font-medium text-foreground">Greeting Message</label>
+                <p class="mb-2 text-xs text-muted-foreground">What callers hear when they connect</p>
+                <Textarea id="voice-greeting" rows={3} placeholder="Hello! How can I help you today?" bind:value={greeting} />
+              </div>
+
+              <!-- Max Duration -->
+              <div class="max-w-xs">
+                <label for="max-dur" class="mb-2 block text-sm font-medium text-foreground">Max Call Duration</label>
+                <Select id="max-dur" options={durationOptions} bind:value={maxDuration} />
+              </div>
+            </div>
+          </section>
+
+          <!-- Save button for all sections -->
+          <div class="flex justify-end pt-4">
+            <Button disabled={savingConfig} onclick={saveVoiceSettings}>
+              {#if savingConfig}<span class="mr-2 h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent"></span>{/if}
+              Save Voice Settings
+            </Button>
+          </div>
 
           <!-- Phone Numbers -->
           <section>
