@@ -5,25 +5,17 @@
   import Badge from "$lib/components/ui/badge.svelte";
   import {
     getObservabilitySummary,
-    getDailyUsage,
     type ObservabilitySummary,
-    type DailyUsageDay,
   } from "$lib/services/observability";
   import { formatCost } from "$lib/utils/time";
 
   let summary = $state<ObservabilitySummary | null>(null);
-  let dailyUsage = $state<DailyUsageDay[]>([]);
   let loading = $state(true);
 
   async function load() {
     loading = true;
     try {
-      const [s, d] = await Promise.all([
-        getObservabilitySummary(30),
-        getDailyUsage(14),
-      ]);
-      summary = s;
-      dailyUsage = d.days;
+      summary = await getObservabilitySummary(30);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to load observability data");
     } finally {
@@ -35,17 +27,20 @@
     summary ? ((1 - summary.success_rate) * 100).toFixed(1) + "%" : "0%"
   );
 
+  let totalTokens = $derived(
+    summary ? (summary.total_input_tokens + summary.total_output_tokens).toLocaleString() : "0"
+  );
+
   $effect(() => {
     load();
   });
 </script>
 
 <div class="mx-auto w-full max-w-5xl px-6 py-8 lg:px-8">
-  <!-- Header -->
   <div class="mb-8">
     <h1>Observability</h1>
     <p class="mt-1.5 text-sm text-muted-foreground">
-      Platform health, cost overview, and usage trends.
+      Platform health, usage, and performance — last 30 days.
     </p>
   </div>
 
@@ -53,83 +48,155 @@
     <div class="flex items-center justify-center py-24">
       <div class="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent"></div>
     </div>
-  {:else}
-    <!-- Stat cards -->
-    <div class="mb-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+  {:else if summary}
+    <!-- Stat cards row 1 -->
+    <div class="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
       <StatCard
-        value={summary ? String(summary.total_sessions) : "0"}
-        label="Total Sessions"
-        subtitle="Last 30 days"
+        value={String(summary.total_sessions)}
+        label="Sessions"
         accentColor="chart-1"
       />
       <StatCard
-        value={errorRate}
-        label="Error Rate"
-        subtitle="Last 30 days"
-        accentColor="chart-1"
+        value={String(summary.total_steps)}
+        label="Total Steps"
+        accentColor="chart-2"
       />
       <StatCard
-        value={summary ? `${summary.avg_latency_seconds.toFixed(1)}s` : "0s"}
-        label="Avg Latency"
-        subtitle="Last 30 days"
+        value={totalTokens}
+        label="Total Tokens"
         accentColor="chart-3"
       />
       <StatCard
-        value={summary ? formatCost(summary.total_cost_usd) : "$0.00"}
-        label="Total Cost"
-        subtitle="Last 30 days"
-        accentColor="chart-2"
+        value={`${summary.avg_latency_seconds.toFixed(1)}s`}
+        label="Avg Session Duration"
+        accentColor="chart-4"
       />
     </div>
 
-    <!-- Token usage summary -->
-    {#if summary}
-      <div class="mb-8 rounded-lg border border-border bg-card p-6">
-        <h3 class="mb-3 text-sm font-medium text-foreground">Token Usage (30 days)</h3>
-        <div class="grid gap-4 sm:grid-cols-2">
-          <div>
-            <p class="text-2xl font-bold text-foreground">{summary.total_input_tokens.toLocaleString()}</p>
-            <p class="text-xs text-muted-foreground">Input Tokens</p>
-          </div>
-          <div>
-            <p class="text-2xl font-bold text-foreground">{summary.total_output_tokens.toLocaleString()}</p>
-            <p class="text-xs text-muted-foreground">Output Tokens</p>
-          </div>
+    <!-- Stat cards row 2 -->
+    <div class="mb-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <StatCard
+        value={`${(summary.success_rate * 100).toFixed(0)}%`}
+        label="Success Rate"
+        accentColor="chart-1"
+      />
+      <StatCard
+        value={String(summary.error_count)}
+        label="Errors"
+        accentColor="chart-5"
+      />
+      <StatCard
+        value={`${summary.avg_turn_latency_ms.toFixed(0)}ms`}
+        label="Avg Turn Latency"
+        accentColor="chart-3"
+      />
+      <StatCard
+        value={String(summary.models_used)}
+        label="Models Used"
+        accentColor="chart-4"
+      />
+    </div>
+
+    <!-- Token breakdown -->
+    <div class="mb-8 rounded-lg border border-border bg-card p-6">
+      <h3 class="mb-4 text-sm font-medium text-foreground">Token Usage</h3>
+      <div class="grid gap-6 sm:grid-cols-3">
+        <div>
+          <p class="text-2xl font-bold text-foreground">{summary.total_input_tokens.toLocaleString()}</p>
+          <p class="text-xs text-muted-foreground">Input Tokens</p>
+        </div>
+        <div>
+          <p class="text-2xl font-bold text-foreground">{summary.total_output_tokens.toLocaleString()}</p>
+          <p class="text-xs text-muted-foreground">Output Tokens</p>
+        </div>
+        <div>
+          <p class="text-2xl font-bold text-foreground">{formatCost(summary.total_cost_usd)}</p>
+          <p class="text-xs text-muted-foreground">Total Cost</p>
         </div>
       </div>
-    {/if}
+    </div>
 
-    <!-- Daily usage table -->
-    <div>
-      <h2 class="mb-4">Daily Usage (14 days)</h2>
-      {#if dailyUsage.length === 0}
-        <div class="rounded-lg border border-dashed border-border py-12 text-center">
-          <p class="text-sm text-muted-foreground">No usage data available yet.</p>
-        </div>
-      {:else}
+    <!-- Top Models -->
+    {#if summary.top_models.length > 0}
+      <div class="mb-8">
+        <h2 class="mb-4">Models</h2>
         <Table>
           {#snippet thead()}
             <tr>
-              <th class="px-4 py-3">Date</th>
-              <th class="px-4 py-3">Cost</th>
-              <th class="px-4 py-3">Calls</th>
-              <th class="px-4 py-3">Input Tokens</th>
-              <th class="px-4 py-3">Output Tokens</th>
+              <th class="px-4 py-3">Model</th>
+              <th class="px-4 py-3 text-right">Turns</th>
+              <th class="px-4 py-3 text-right">Input Tokens</th>
+              <th class="px-4 py-3 text-right">Output Tokens</th>
             </tr>
           {/snippet}
           {#snippet tbody()}
-            {#each dailyUsage as day}
+            {#each summary.top_models as m}
               <tr class="hover:bg-muted/30">
-                <td class="px-4 py-3 font-medium text-foreground">{day.day}</td>
-                <td class="px-4 py-3 text-muted-foreground">{formatCost(day.cost)}</td>
-                <td class="px-4 py-3 text-muted-foreground">{day.call_count}</td>
-                <td class="px-4 py-3 text-muted-foreground">{day.input_tokens.toLocaleString()}</td>
-                <td class="px-4 py-3 text-muted-foreground">{day.output_tokens.toLocaleString()}</td>
+                <td class="px-4 py-3">
+                  <Badge variant="secondary">{m.model}</Badge>
+                </td>
+                <td class="px-4 py-3 text-right text-muted-foreground">{m.turns}</td>
+                <td class="px-4 py-3 text-right text-muted-foreground">{m.input_tokens.toLocaleString()}</td>
+                <td class="px-4 py-3 text-right text-muted-foreground">{m.output_tokens.toLocaleString()}</td>
               </tr>
             {/each}
           {/snippet}
         </Table>
-      {/if}
-    </div>
+      </div>
+    {/if}
+
+    <!-- Top Agents -->
+    {#if summary.top_agents.length > 0}
+      <div class="mb-8">
+        <h2 class="mb-4">Agents</h2>
+        <Table>
+          {#snippet thead()}
+            <tr>
+              <th class="px-4 py-3">Agent</th>
+              <th class="px-4 py-3 text-right">Sessions</th>
+              <th class="px-4 py-3 text-right">Steps</th>
+              <th class="px-4 py-3 text-right">Avg Duration</th>
+            </tr>
+          {/snippet}
+          {#snippet tbody()}
+            {#each summary.top_agents as a}
+              <tr class="hover:bg-muted/30">
+                <td class="px-4 py-3 font-medium">{a.agent}</td>
+                <td class="px-4 py-3 text-right text-muted-foreground">{a.sessions}</td>
+                <td class="px-4 py-3 text-right text-muted-foreground">{a.steps}</td>
+                <td class="px-4 py-3 text-right text-muted-foreground">{a.avg_latency.toFixed(1)}s</td>
+              </tr>
+            {/each}
+          {/snippet}
+        </Table>
+      </div>
+    {/if}
+
+    <!-- Daily Activity -->
+    {#if summary.daily.length > 0}
+      <div>
+        <h2 class="mb-4">Daily Activity</h2>
+        <Table>
+          {#snippet thead()}
+            <tr>
+              <th class="px-4 py-3">Date</th>
+              <th class="px-4 py-3 text-right">Sessions</th>
+              <th class="px-4 py-3 text-right">Steps</th>
+              <th class="px-4 py-3 text-right">Cost</th>
+            </tr>
+          {/snippet}
+          {#snippet tbody()}
+            {#each summary.daily as d}
+              <tr class="hover:bg-muted/30">
+                <td class="px-4 py-3 font-medium text-foreground">{d.day}</td>
+                <td class="px-4 py-3 text-right text-muted-foreground">{d.sessions}</td>
+                <td class="px-4 py-3 text-right text-muted-foreground">{d.steps}</td>
+                <td class="px-4 py-3 text-right text-muted-foreground">{formatCost(d.cost)}</td>
+              </tr>
+            {/each}
+          {/snippet}
+        </Table>
+      </div>
+    {/if}
   {/if}
 </div>
