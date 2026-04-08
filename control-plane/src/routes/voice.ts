@@ -2618,11 +2618,28 @@ voiceRoutes.openapi(listClonesRoute, async (c): Promise<any> => {
   const agentName = c.req.query("agent_name") || "";
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  const rows = agentName
-    ? await sql`SELECT id, agent_name, name, r2_key, size_bytes, status, created_at FROM voice_clones WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND status != 'deleted' ORDER BY created_at DESC`
-    : await sql`SELECT id, agent_name, name, r2_key, size_bytes, status, created_at FROM voice_clones WHERE org_id = ${user.org_id} AND status != 'deleted' ORDER BY created_at DESC`;
+  // Try DB first
+  let clones: any[] = [];
+  try {
+    const rows = agentName
+      ? await sql`SELECT id, agent_name, name, r2_key, size_bytes, status, created_at FROM voice_clones WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND status != 'deleted' ORDER BY created_at DESC`
+      : await sql`SELECT id, agent_name, name, r2_key, size_bytes, status, created_at FROM voice_clones WHERE org_id = ${user.org_id} AND status != 'deleted' ORDER BY created_at DESC`;
+    clones = rows.map((r: any) => ({
+      clone_id: r.id, name: r.name || r.id, clone_url: r.r2_key,
+      size_bytes: r.size_bytes || 0, created_at: r.created_at || "",
+    }));
+  } catch {
+    // DB table might not exist yet — fall back to R2 listing
+    const prefix = `voice-clones/${user.org_id}/${agentName ? agentName + "/" : ""}`;
+    const listed = await c.env.STORAGE.list({ prefix, limit: 50 });
+    clones = (listed.objects || []).map((obj: any) => ({
+      clone_id: obj.customMetadata?.clone_id || obj.key.split("/").pop()?.replace(".wav", "") || "",
+      name: obj.customMetadata?.clone_id || obj.key.split("/").pop()?.replace(".wav", "") || "Clone",
+      clone_url: obj.key, size_bytes: obj.size || 0, created_at: obj.uploaded || "",
+    }));
+  }
 
-  return c.json({ clones: rows });
+  return c.json({ clones });
 });
 
 // ── DELETE /clone/:clone_id — Delete a voice clone ────────────────────
@@ -2646,14 +2663,22 @@ voiceRoutes.openapi(deleteCloneRoute, async (c): Promise<any> => {
   const { clone_id } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  const rows = await sql`SELECT r2_key FROM voice_clones WHERE id = ${clone_id} AND org_id = ${user.org_id}`;
-  if (rows.length === 0) {
-    return c.json({ error: "Clone not found" }, 404);
-  }
+  // Try DB first
+  const rows = await sql`SELECT r2_key FROM voice_clones WHERE id = ${clone_id} AND org_id = ${user.org_id}`.catch(() => []);
 
-  // Soft delete in DB, remove from R2, remove from GPU box
-  await sql`UPDATE voice_clones SET status = 'deleted' WHERE id = ${clone_id}`;
-  try { await c.env.STORAGE.delete(rows[0].r2_key); } catch {}
+  if (rows.length > 0) {
+    await sql`UPDATE voice_clones SET status = 'deleted' WHERE id = ${clone_id}`.catch(() => {});
+    try { await c.env.STORAGE.delete((rows[0] as any).r2_key); } catch {}
+  } else {
+    // Fallback: try R2 directly (for clones created before DB tracking)
+    const prefix = `voice-clones/${user.org_id}/`;
+    const listed = await c.env.STORAGE.list({ prefix, limit: 100 });
+    const obj = (listed.objects || []).find((o: any) => o.key.includes(clone_id));
+    if (obj) {
+      await c.env.STORAGE.delete(obj.key);
+    }
+    // If neither DB nor R2 has it, still succeed (idempotent delete)
+  }
 
   // Also delete from Chatterbox voices/ directory
   const gpuKey = String(c.env.GPU_SERVICE_KEY ?? c.env.SERVICE_TOKEN ?? "");
