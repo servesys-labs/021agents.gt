@@ -75,7 +75,7 @@
     progressStep = 0;
     progressTimer = setInterval(() => {
       if (progressStep < PROGRESS_STEPS.length - 1) progressStep++;
-    }, 8000); // advance every 8s — total ~56s before cycling through all
+    }, 5000); // advance every 5s — total ~35s through all steps
   }
 
   function stopProgress() {
@@ -237,30 +237,35 @@
       <!-- Plan selector hidden for MVP -->
 
       {#if quickLoading}
-        <!-- Progress indicator -->
-        <div class="rounded-xl border border-border bg-card p-6">
-          <div class="space-y-4">
-            {#each PROGRESS_STEPS as step, i}
-              <div class="flex items-start gap-3">
-                <div class="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full {i < progressStep ? 'bg-primary' : i === progressStep ? 'bg-primary animate-pulse' : 'bg-muted'}">
-                  {#if i < progressStep}
-                    <svg class="h-3 w-3 text-primary-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3">
-                      <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
-                    </svg>
-                  {:else if i === progressStep}
-                    <span class="h-2 w-2 rounded-full bg-primary-foreground"></span>
-                  {/if}
-                </div>
-                <div>
-                  <p class="text-sm font-medium {i <= progressStep ? 'text-foreground' : 'text-muted-foreground'}">{step.label}</p>
-                  {#if i === progressStep}
-                    <p class="text-xs text-muted-foreground">{step.detail}</p>
-                  {/if}
-                </div>
-              </div>
-            {/each}
+        <!-- Inline progress indicator -->
+        <div class="flex flex-col items-center gap-4 py-8">
+          <!-- Spinner + current step -->
+          <div class="flex items-center gap-3">
+            <svg class="h-5 w-5 animate-spin text-primary" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            {#key progressStep}
+              <span class="text-sm font-medium text-foreground animate-fade-in">
+                {PROGRESS_STEPS[progressStep]?.label ?? "Finalizing"}
+              </span>
+            {/key}
           </div>
-          <p class="mt-5 text-xs text-muted-foreground">This takes about a minute — the AI is designing a detailed agent configuration.</p>
+
+          <!-- Thin progress bar -->
+          <div class="h-1 w-64 overflow-hidden rounded-full bg-muted">
+            <div
+              class="h-full rounded-full bg-primary transition-all duration-700 ease-out"
+              style="width: {((progressStep + 1) / PROGRESS_STEPS.length) * 100}%"
+            ></div>
+          </div>
+
+          <!-- Step detail (subtle) -->
+          {#key progressStep}
+            <p class="text-xs text-muted-foreground animate-fade-in">
+              {PROGRESS_STEPS[progressStep]?.detail ?? "Almost done"}
+            </p>
+          {/key}
         </div>
       {:else}
         <Button
