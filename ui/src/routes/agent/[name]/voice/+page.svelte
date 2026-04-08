@@ -537,6 +537,36 @@
   let testTranscript = $state<Array<{ speaker: "user" | "agent"; text: string }>>([]);
   let testProcessing = $state(false);
   let testStatusMessage = $state("");
+  let testAudioQueue: string[] = [];  // URLs queued for sequential playback
+  let testAudioPlaying = false;
+
+  function playNextAudioChunk() {
+    if (testAudioQueue.length === 0) {
+      testAudioPlaying = false;
+      // All audio played — resume listening
+      if (testCallActive) {
+        testListening = true;
+        startTestRecordingChunk();
+      }
+      return;
+    }
+
+    testAudioPlaying = true;
+    const audioUrl = testAudioQueue.shift()!;
+    const audio = new Audio(audioUrl);
+    audio.onended = () => {
+      URL.revokeObjectURL(audioUrl);
+      playNextAudioChunk(); // Play next chunk
+    };
+    audio.onerror = () => {
+      URL.revokeObjectURL(audioUrl);
+      playNextAudioChunk(); // Skip failed chunk
+    };
+    audio.play().catch(() => {
+      URL.revokeObjectURL(audioUrl);
+      playNextAudioChunk();
+    });
+  }
   let testListening = $state(false);
   let testMuted = $state(false);
   let testWs: WebSocket | null = null;
@@ -619,8 +649,9 @@
         }
 
         if (msg.type === "audio" && msg.data) {
-          // Decode and play audio response
+          // Queue audio chunks and play them in sequence (sentence-by-sentence streaming)
           testListening = false;
+          testProcessing = false;
 
           // Stop any ongoing recording while agent speaks
           if (testMediaRecorder?.state === "recording") {
@@ -635,30 +666,15 @@
             }
             const blob = new Blob([audioBytes], { type: "audio/wav" });
             const audioUrl = URL.createObjectURL(blob);
-            const audio = new Audio(audioUrl);
-            audio.onended = () => {
-              URL.revokeObjectURL(audioUrl);
-              if (testCallActive) {
-                testListening = true;
-                startTestRecordingChunk();
-              }
-            };
-            audio.onerror = () => {
-              URL.revokeObjectURL(audioUrl);
-              if (testCallActive) {
-                testListening = true;
-                startTestRecordingChunk();
-              }
-            };
-            audio.play().catch(() => {
-              // Autoplay blocked — resume anyway
-              if (testCallActive) {
-                testListening = true;
-                startTestRecordingChunk();
-              }
-            });
+
+            // Add to audio queue
+            testAudioQueue.push(audioUrl);
+
+            // Start playing if not already
+            if (!testAudioPlaying) {
+              playNextAudioChunk();
+            }
           } catch {
-            // Audio decode failed — resume recording
             if (testCallActive) {
               testListening = true;
               startTestRecordingChunk();
