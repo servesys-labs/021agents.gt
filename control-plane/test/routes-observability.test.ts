@@ -197,11 +197,11 @@ describe("observability ownership and maintenance contracts", () => {
       if (query.includes("FROM sessions") && query.includes("trace_id")) {
         return [{ session_id: "sess-1", status: "success", created_at: oldTs }];
       }
-      if (query.includes("COUNT(*) as cnt FROM turns")) return [{ cnt: 1 }];
-      if (query.includes("COUNT(*) as cnt FROM runtime_events")) return [{ cnt: 2 }];
-      if (query.includes("COUNT(*) as cnt FROM billing_records")) return [{ cnt: 0 }];
+      if (query.includes("COUNT(*) as cnt FROM turns") && query.includes("GROUP BY")) return [{ session_id: "sess-1", cnt: 1 }];
+      if (query.includes("COUNT(*) as cnt FROM runtime_events") && query.includes("GROUP BY")) return [{ session_id: "sess-1", cnt: 2 }];
+      if (query.includes("COUNT(*) as cnt FROM billing_records") && query.includes("GROUP BY")) return [];
       if (query.includes("SUM(CASE WHEN event_type = 'turn_start'")) {
-        return [{ turn_start: 2, turn_end: 1, session_end: 0 }];
+        return [{ session_id: "sess-1", turn_start: 2, turn_end: 1, session_end: 0 }];
       }
       if (query.includes("INSERT INTO audit_log")) return [];
       void values;
@@ -232,11 +232,11 @@ describe("observability ownership and maintenance contracts", () => {
       if (query.includes("FROM sessions") && query.includes("trace_id")) {
         return [{ session_id: "sess-1", status: "success", created_at: oldTs }];
       }
-      if (query.includes("COUNT(*) as cnt FROM turns")) return [{ cnt: 0 }];
-      if (query.includes("COUNT(*) as cnt FROM runtime_events")) return [{ cnt: 0 }];
-      if (query.includes("COUNT(*) as cnt FROM billing_records")) return [{ cnt: 0 }];
+      if (query.includes("COUNT(*) as cnt FROM turns") && query.includes("GROUP BY")) return [];
+      if (query.includes("COUNT(*) as cnt FROM runtime_events") && query.includes("GROUP BY")) return [];
+      if (query.includes("COUNT(*) as cnt FROM billing_records") && query.includes("GROUP BY")) return [];
       if (query.includes("SUM(CASE WHEN event_type = 'turn_start'")) {
-        return [{ turn_start: 0, turn_end: 0, session_end: 0 }];
+        return [];
       }
       if (query.includes("INSERT INTO audit_log")) {
         auditLogged = true;
@@ -264,9 +264,9 @@ describe("observability ownership and maintenance contracts", () => {
       if (query.includes("FROM sessions") && query.includes("trace_id")) {
         return [{ session_id: "sess-1", status: "success", created_at: recentTs }];
       }
-      if (query.includes("COUNT(*) as cnt FROM turns")) return [{ session_id: "sess-1", cnt: 1 }];
-      if (query.includes("COUNT(*) as cnt FROM runtime_events")) return [{ session_id: "sess-1", cnt: 2 }];
-      if (query.includes("COUNT(*) as cnt FROM billing_records")) return [{ session_id: "sess-1", cnt: 0 }];
+      if (query.includes("COUNT(*) as cnt FROM turns") && query.includes("GROUP BY")) return [{ session_id: "sess-1", cnt: 1 }];
+      if (query.includes("COUNT(*) as cnt FROM runtime_events") && query.includes("GROUP BY")) return [{ session_id: "sess-1", cnt: 2 }];
+      if (query.includes("COUNT(*) as cnt FROM billing_records") && query.includes("GROUP BY")) return [];
       if (query.includes("SUM(CASE WHEN event_type = 'turn_start'")) {
         return [{ session_id: "sess-1", turn_start: 1, turn_end: 1, session_end: 1 }];
       }
@@ -404,7 +404,7 @@ describe("observability ownership and maintenance contracts", () => {
           {
             session_id: "sess-loop",
             event_type: "loop_halt",
-            details: JSON.stringify({ message: "halt", turn: 2 }),
+            details_json: JSON.stringify({ message: "halt", turn: 2 }),
             created_at: "2026-03-27T12:05:00.000Z",
             trace_id: "trace-loop",
           },
@@ -416,7 +416,7 @@ describe("observability ownership and maintenance contracts", () => {
             trace_id: "trace-circ",
             session_id: "sess-circ",
             event_type: "turn_completed",
-            details: JSON.stringify({ error: "Circuit breaker OPEN for browse. Retry after 12s" }),
+            details_json: JSON.stringify({ error: "Circuit breaker OPEN for browse. Retry after 12s" }),
             created_at: "2026-03-27T12:06:00.000Z",
           },
         ];
@@ -482,7 +482,7 @@ describe("observability ownership and maintenance contracts", () => {
           {
             session_id: "s-h",
             event_type: "loop_halt",
-            details: "{}",
+            details_json: "{}",
             created_at: "2026-03-27T12:01:00.000Z",
             trace_id: "t-h",
           },
