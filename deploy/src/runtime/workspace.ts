@@ -207,6 +207,32 @@ export async function readFileFromR2(
 }
 
 /**
+ * Delete a file from R2 and remove it from the manifest.
+ */
+export async function deleteFileFromR2(
+  storage: R2Bucket,
+  org: string,
+  agent: string,
+  filePath: string,
+  userId?: string,
+): Promise<void> {
+  const key = fileKey(org, agent, filePath, userId);
+  await storage.delete(key);
+
+  // Update manifest — remove the entry
+  const mKey = manifestKey(org, agent, userId);
+  const manifest = await loadManifest(storage, org, agent, userId);
+  if (manifest) {
+    const relative = filePath.replace(/^\/workspace\//, "").replace(/^\/+/, "");
+    manifest.files = manifest.files.filter((f) => f.path !== relative);
+    manifest.last_sync = new Date().toISOString();
+    await storage.put(mKey, JSON.stringify(manifest, null, 2), {
+      customMetadata: { updated_at: manifest.last_sync },
+    });
+  }
+}
+
+/**
  * Load an R2 folder (project or user workspace) into a text summary for agent context.
  * Returns file contents formatted for injection into the conversation.
  */

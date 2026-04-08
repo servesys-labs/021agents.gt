@@ -9,6 +9,7 @@
     listWorkspaceFiles,
     getFileContent,
     deleteFile,
+    downloadFile as downloadFileUrl,
     type WorkspaceFile,
   } from "$lib/services/settings";
   import { timeAgo } from "$lib/utils/time";
@@ -131,8 +132,8 @@
     }
   }
 
-  function downloadFile(file: WorkspaceFile) {
-    const url = `${import.meta.env.VITE_API_URL ?? "https://api.oneshots.co/api/v1"}/workspace/files/${encodeURIComponent(file.path)}?agent_name=${encodeURIComponent(agentName)}&download=true`;
+  function downloadFileAction(file: WorkspaceFile) {
+    const url = downloadFileUrl(agentName, file.path);
     window.open(url, "_blank");
   }
 
@@ -217,7 +218,7 @@
                       <p class="text-xs text-muted-foreground">{formatSize(file.size_bytes)} &middot; {timeAgo(file.modified_at)}</p>
                     </div>
                     <div class="flex shrink-0 items-center gap-1">
-                      <Button variant="ghost" size="icon" onclick={(e: MouseEvent) => { e.stopPropagation(); downloadFile(file); }}>
+                      <Button variant="ghost" size="icon" onclick={(e: MouseEvent) => { e.stopPropagation(); downloadFileAction(file); }}>
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                           <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                         </svg>
@@ -254,7 +255,7 @@
                         <span class="min-w-0 flex-1 truncate text-sm text-foreground">{file.path.split("/").pop()}</span>
                         <span class="shrink-0 text-xs text-muted-foreground">{formatSize(file.size_bytes)}</span>
                         <div class="flex shrink-0 items-center gap-1">
-                          <Button variant="ghost" size="icon" onclick={(e: MouseEvent) => { e.stopPropagation(); downloadFile(file); }}>
+                          <Button variant="ghost" size="icon" onclick={(e: MouseEvent) => { e.stopPropagation(); downloadFileAction(file); }}>
                             <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                               <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                             </svg>

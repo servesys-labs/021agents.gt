@@ -3117,6 +3117,11 @@ export default {
     }
 
     // ── Workspace file browser (R2-backed) ────────────────────
+    // SECURITY NOTE: These runtime endpoints are called by the control-plane
+    // service binding, which ALWAYS injects org_id from the authenticated session.
+    // The runtime trusts org_id/agent_name as pre-validated by the control-plane.
+    // Direct external access to the runtime worker should be blocked by Cloudflare
+    // Access policies or service-binding-only routing.
     if (url.pathname === "/workspace/list" && request.method === "POST") {
       try {
         const body = await request.json() as Record<string, string>;
@@ -3133,13 +3138,56 @@ export default {
     if (url.pathname === "/workspace/read" && request.method === "POST") {
       try {
         const body = await request.json() as Record<string, string>;
+        const filePath = (body.path || "").replace(/^\/+/, "").replace(/\/\//g, "/");
+        if (filePath.includes("..")) {
+          return Response.json({ error: "Invalid path: no '..' allowed" }, { status: 400 });
+        }
         const { readFileFromR2 } = await import("./runtime/workspace");
         const content = await readFileFromR2(
           env.STORAGE, body.org_id || "default", body.agent_name || "agent",
-          body.path || "", body.user_id,
+          filePath, body.user_id,
         );
         if (content === null) return Response.json({ error: "File not found" }, { status: 404 });
         return Response.json({ path: body.path, content, size: content.length });
+      } catch (err: any) {
+        return Response.json({ error: err.message }, { status: 500 });
+      }
+    }
+
+    // ── Workspace file write (R2-backed) ──────────────────────
+    if (url.pathname === "/workspace/files/write" && request.method === "POST") {
+      try {
+        const body = await request.json() as { org_id: string; agent_name: string; path: string; content: string; user_id?: string };
+        const filePath = (body.path || "").replace(/^\/+/, "").replace(/\/\//g, "/");
+        if (!filePath || filePath.includes("..")) {
+          return Response.json({ error: "Invalid path: must be relative, no '..' allowed" }, { status: 400 });
+        }
+        const orgId = body.org_id || "default";
+        const agentName = body.agent_name || "agent";
+        const userId = body.user_id || undefined;
+        const { syncFileToR2 } = await import("./runtime/workspace");
+        await syncFileToR2(env.STORAGE, orgId, agentName, filePath, body.content, "api", userId);
+        const key = `workspaces/${orgId}/${agentName}/u/${userId || "shared"}/files/${filePath}`;
+        return Response.json({ ok: true, key, size_bytes: body.content.length });
+      } catch (err: any) {
+        return Response.json({ error: err.message }, { status: 500 });
+      }
+    }
+
+    // ── Workspace file delete (R2-backed) ────────────────────
+    if (url.pathname === "/workspace/files/delete" && request.method === "POST") {
+      try {
+        const body = await request.json() as { org_id: string; agent_name: string; path: string; user_id?: string };
+        const filePath = (body.path || "").replace(/^\/+/, "").replace(/\/\//g, "/");
+        if (!filePath || filePath.includes("..")) {
+          return Response.json({ error: "Invalid path: must be relative, no '..' allowed" }, { status: 400 });
+        }
+        const orgId = body.org_id || "default";
+        const agentName = body.agent_name || "agent";
+        const userId = body.user_id || undefined;
+        const { deleteFileFromR2 } = await import("./runtime/workspace");
+        await deleteFileFromR2(env.STORAGE, orgId, agentName, filePath, userId);
+        return Response.json({ ok: true });
       } catch (err: any) {
         return Response.json({ error: err.message }, { status: 500 });
       }
@@ -6373,6 +6421,20 @@ export default {
           });
         } catch (err: any) {
           return Response.json({ error: err.message }, { status: 500 });
+        }
+      }
+
+      // ── Auth gate for /cf/storage/* — require SERVICE_TOKEN ──────────
+      if (url.pathname.startsWith("/cf/storage/")) {
+        const authHeader = request.headers.get("Authorization") || "";
+        const serviceToken = String(env.SERVICE_TOKEN || "");
+        if (serviceToken && !authHeader.includes(serviceToken)) {
+          return Response.json({ error: "Unauthorized" }, { status: 401 });
+        }
+        // Validate that the key contains an org scope (prevent unscoped access)
+        const key = url.searchParams.get("key") || "";
+        if (key && !key.includes("/")) {
+          return Response.json({ error: "Key must be scoped (contain at least one /)" }, { status: 400 });
         }
       }
 
