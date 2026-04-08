@@ -2028,10 +2028,17 @@ async function dispatch(
       const agentName = args.agent_name || args.self_agent_name || "";
       const cronExpr = args.cron || args.schedule || "";
       const taskDesc = args.task || args.description || "";
-      const orgId = args.org_id || (env as any).__agentConfig?.org_id || "";
+      let orgId = args.org_id || (env as any).__agentConfig?.org_id || "";
+      if (!orgId) {
+        try {
+          const fallback = await sql`SELECT org_id FROM orgs LIMIT 1`;
+          orgId = fallback?.[0]?.org_id || "";
+        } catch { /* ignore */ }
+      }
       if (!agentName || !cronExpr || !taskDesc) {
         return "create-schedule requires agent_name, cron (e.g. '0 9 * * *'), and task description";
       }
+      if (!orgId) return "Schedule creation failed: no org_id available";
       try {
         await sql`
           INSERT INTO schedules (id, agent_name, org_id, task, cron, is_active, run_count, created_at)
@@ -4727,10 +4734,21 @@ async function memorySave(env: RuntimeEnv, args: Record<string, any>): Promise<s
   if (!content) return "memory-save requires content";
 
   const agentName = (env as any).__agentConfig?.name || "my-assistant";
-  const orgId = (env as any).__agentConfig?.org_id || (env as any).__delegationLineage?.org_id || "";
+  let orgId = (env as any).__agentConfig?.org_id || (env as any).__delegationLineage?.org_id || "";
   const hyperdrive = (env as any).HYPERDRIVE;
 
   if (!hyperdrive) return "Memory not available (no database)";
+
+  // Resolve org_id if empty — FK constraint requires valid org
+  if (!orgId) {
+    try {
+      const { getDb } = await import("./db");
+      const sql = await getDb(hyperdrive);
+      const fallback = await sql`SELECT org_id FROM orgs LIMIT 1`;
+      orgId = fallback?.[0]?.org_id || "";
+    } catch { /* ignore */ }
+    if (!orgId) return "Memory save failed: no org_id available";
+  }
 
   const category = normalizeMemoryCategory(args.category);
 
