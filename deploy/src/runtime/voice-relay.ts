@@ -265,7 +265,7 @@ export function generateMediaStreamTwiML(wsUrl: string, greeting?: string): stri
 </Response>`;
 }
 
-function escapeXml(s: string): string {
+export function escapeXml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
@@ -275,7 +275,7 @@ function escapeXml(s: string): string {
  * Convert raw mulaw bytes to a WAV file (PCM 16-bit, mono).
  * Whisper needs WAV, Twilio sends mulaw.
  */
-function mulawToWav(mulaw: Uint8Array, sampleRate: number): Uint8Array {
+export function mulawToWav(mulaw: Uint8Array, sampleRate: number): Uint8Array {
   const pcmSamples = new Int16Array(mulaw.length);
 
   // Mulaw decode table
@@ -323,7 +323,7 @@ function writeString(view: DataView, offset: number, str: string) {
 const MULAW_BIAS = 0x84;
 const MULAW_CLIP = 32635;
 
-function mulawDecode(mulawByte: number): number {
+export function mulawDecode(mulawByte: number): number {
   mulawByte = ~mulawByte & 0xFF;
   const sign = (mulawByte & 0x80) !== 0 ? -1 : 1;
   const exponent = (mulawByte >> 4) & 0x07;
