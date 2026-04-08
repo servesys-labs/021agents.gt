@@ -3254,13 +3254,21 @@ export default {
         serviceToken,
         speed: 1.0,
       }, async (transcript: string) => {
-        // Agent callback: transcribed text → agent response
+        // Fast agent path — sub-5s latency, escalates to full pipeline if needed
         try {
-          const result = await runViaAgent(env, agentName, transcript, {
+          const { fastAgentTurn } = await import("./runtime/fast-agent");
+          const fastResult = await fastAgentTurn(env, agentName, transcript, {
             org_id: orgId,
             channel: "voice-stream",
           });
-          return result?.output || "I didn't catch that.";
+          if (fastResult.escalated) {
+            const fullResult = await runViaAgent(env, agentName, transcript, {
+              org_id: orgId,
+              channel: "voice-stream",
+            });
+            return fullResult?.output || "I didn't catch that.";
+          }
+          return fastResult?.output || "I didn't catch that.";
         } catch {
           return "Sorry, I encountered an error.";
         }
@@ -3434,12 +3442,25 @@ export default {
               safeSend(JSON.stringify({ type: "transcript", speaker: "user", text: transcript }));
               safeSend(JSON.stringify({ type: "status", step: "agent", message: "Agent thinking..." }));
 
-              // 4. Run through agent (full pipeline — tools, memory, conversation)
-              const agentResult = await runViaAgent(env, agentName, transcript, {
+              // 4. Fast conversational agent — bypasses Workflow/DO for sub-5s latency
+              const { fastAgentTurn } = await import("./runtime/fast-agent");
+              const agentResult = await fastAgentTurn(env, agentName, transcript, {
                 org_id: orgId,
                 channel: "voice",
               });
-              let responseText = agentResult?.output || "I didn't catch that.";
+
+              let responseText: string;
+              if (agentResult.escalated) {
+                // Complex task — tell user and fall back to full pipeline
+                safeSend(JSON.stringify({ type: "transcript", speaker: "agent", text: "Let me work on that. I'll have the answer in a moment." }));
+                const fullResult = await runViaAgent(env, agentName, transcript, {
+                  org_id: orgId,
+                  channel: "voice",
+                });
+                responseText = fullResult?.output || "I didn't catch that.";
+              } else {
+                responseText = agentResult?.output || "I didn't catch that.";
+              }
 
               // Strip markdown, plan steps, and formatting — voice should be plain spoken text
               responseText = responseText
@@ -3527,17 +3548,28 @@ export default {
           const userText = (msg.voicePrompt || "").trim();
           if (!userText) return;
 
-          // Full agent pipeline — tools, memory, conversation history, plan routing
-          // channel: "voice" triggers voice-optimized system prompt in engine.ts/stream.ts
+          // Fast conversational agent — sub-5s latency, escalates to full pipeline if needed
           ctx.waitUntil((async () => {
             try {
-              const result = await runViaAgent(env, agentName, userText, {
+              const { fastAgentTurn } = await import("./runtime/fast-agent");
+              const fastResult = await fastAgentTurn(env, agentName, userText, {
                 org_id: orgId,
                 channel: "voice",
-                channel_user_id: `twilio-${callSid}`,
+                session_id: `twilio-${callSid}`,
               });
 
-              let response = result.output || "I didn't catch that. Could you say that again?";
+              let response: string;
+              if (fastResult.escalated) {
+                // Complex task — fall back to full pipeline
+                const fullResult = await runViaAgent(env, agentName, userText, {
+                  org_id: orgId,
+                  channel: "voice",
+                  channel_user_id: `twilio-${callSid}`,
+                });
+                response = fullResult.output || "I didn't catch that. Could you say that again?";
+              } else {
+                response = fastResult.output || "I didn't catch that. Could you say that again?";
+              }
 
               // Strip any markdown that slipped through
               response = response
