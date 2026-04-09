@@ -4913,8 +4913,8 @@ export async function textToSpeech(env: RuntimeEnv, args: Record<string, any>): 
   const text = args.text || "";
   const style = String(args.style || args.provider || "fast").toLowerCase();
   const voice = args.voice || "af_heart";
-  const serviceToken = (env as any).SERVICE_TOKEN || "";
-  const authHeaders: Record<string, string> = serviceToken ? { Authorization: `Bearer ${serviceToken}` } : {};
+  const gpuKey = (env as any).GPU_SERVICE_KEY || (env as any).SERVICE_TOKEN || "";
+  const authHeaders: Record<string, string> = gpuKey ? { Authorization: `Bearer ${gpuKey}` } : {};
 
   let audioBuffer: ArrayBuffer;
   let modelUsed = "";
@@ -5019,8 +5019,8 @@ export async function speechToText(env: RuntimeEnv, args: Record<string, any>, s
   const audioPath = args.audio_path || args.path || "";
   const audioUrl = args.audio_url || args.url || "";
   const provider = String(args.provider || "auto").toLowerCase();
-  const serviceToken = (env as any).SERVICE_TOKEN || "";
-  const authHeaders: Record<string, string> = serviceToken ? { Authorization: `Bearer ${serviceToken}` } : {};
+  const gpuKey = (env as any).GPU_SERVICE_KEY || (env as any).SERVICE_TOKEN || "";
+  const authHeaders: Record<string, string> = gpuKey ? { Authorization: `Bearer ${gpuKey}` } : {};
 
   if (!audioPath && !audioUrl) return "speech-to-text requires audio_path or audio_url";
 
