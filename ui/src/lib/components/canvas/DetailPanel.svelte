@@ -3,6 +3,7 @@
   import CoreDetailPanel from "./panels/CoreDetailPanel.svelte";
   import PromptDetailPanel from "./panels/PromptDetailPanel.svelte";
   import GuardrailDetailPanel from "./panels/GuardrailDetailPanel.svelte";
+  import CategoryDetailPanel from "./panels/CategoryDetailPanel.svelte";
   import { getToolById } from "$lib/data/tools";
 
   interface Props {
@@ -13,16 +14,18 @@
 
   let nodeId = $derived(store.selectedNodeId);
 
-  let panelType = $derived<"core" | "prompt" | "guardrail" | "tool" | null>(
+  let panelType = $derived<"core" | "prompt" | "guardrail" | "tool" | "category" | null>(
     nodeId === "core"
       ? "core"
       : nodeId === "prompt"
         ? "prompt"
         : nodeId === "guardrail"
           ? "guardrail"
-          : nodeId?.startsWith("tool-")
-            ? "tool"
-            : null
+          : nodeId?.startsWith("cat-")
+            ? "category"
+            : nodeId?.startsWith("tool-")
+              ? "tool"
+              : null
   );
 
   let selectedToolId = $derived(
@@ -41,6 +44,7 @@
       {#if panelType === "core"}Agent Config
       {:else if panelType === "prompt"}Prompt
       {:else if panelType === "guardrail"}Guardrails
+      {:else if panelType === "category"}Category
       {:else if panelType === "tool"}Tool
       {:else}Details
       {/if}
@@ -63,6 +67,8 @@
       <PromptDetailPanel {store} />
     {:else if panelType === "guardrail"}
       <GuardrailDetailPanel {store} />
+    {:else if panelType === "category" && nodeId}
+      <CategoryDetailPanel {store} categoryNodeId={nodeId} />
     {:else if panelType === "tool" && selectedTool}
       <div class="space-y-4">
         <div class="flex items-center gap-3">
