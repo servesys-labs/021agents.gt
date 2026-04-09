@@ -383,12 +383,11 @@ export async function searchFacts(
   const limit = opts.limit || 5;
 
   // Try Vectorize first (embedding similarity)
-  if (env.VECTORIZE && env.AI) {
+  if (env.VECTORIZE) {
     try {
-      const embedResult = await env.AI.run("@cf/baai/bge-base-en-v1.5" as any, {
-        text: [query],
-      }) as any;
-      const queryVec = embedResult.data?.[0];
+      const { embedForQuery } = await import("./embeddings");
+      const embResult = await embedForQuery(query, env);
+      const queryVec = embResult.vector;
       if (queryVec) {
         const filter: Record<string, string> = {};
         if (opts.agent_name) filter.agent_name = opts.agent_name;
@@ -453,12 +452,11 @@ export async function storeFact(
   const id = `fact-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   // Store in Vectorize for embedding search
-  if (env.VECTORIZE && env.AI) {
+  if (env.VECTORIZE) {
     try {
-      const embedResult = await env.AI.run("@cf/baai/bge-base-en-v1.5" as any, {
-        text: [fact.content],
-      }) as any;
-      const vec = embedResult.data?.[0];
+      const { embedSingle } = await import("./embeddings");
+      const embResult = await embedSingle(fact.content, env);
+      const vec = embResult.vector;
       if (vec) {
         await env.VECTORIZE.upsert([{
           id,

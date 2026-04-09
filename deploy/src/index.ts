@@ -6127,8 +6127,9 @@ export default {
       if (url.pathname === "/cf/ai/embed" && request.method === "POST") {
         const body = await request.json() as { texts: string[] };
         try {
-          const result = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: body.texts }) as any;
-          return Response.json({ vectors: result.data || [] });
+          const { embed: embedTexts } = await import("./runtime/embeddings");
+          const result = await embedTexts(body.texts, env);
+          return Response.json({ vectors: result.vectors, model: result.model, dimensions: result.dimensions });
         } catch (err: any) {
           return Response.json({ error: err.message }, { status: 500 });
         }
@@ -6852,8 +6853,9 @@ export default {
         try {
           // Vectorize doesn't have a bulk delete-by-metadata API yet,
           // so we query matching vectors and delete by ID
-          const embedResult = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: [agentName] }) as any;
-          const queryVec = embedResult.data?.[0];
+          const { embedForQuery: embedAgent } = await import("./runtime/embeddings");
+          const embResult = await embedAgent(agentName, env);
+          const queryVec = embResult.vector;
           if (queryVec) {
             const filter: Record<string, string> = { agent_name: agentName };
             if (orgId) filter.org_id = orgId;
@@ -7433,15 +7435,13 @@ export default {
               const text = args.content || args.text || "";
               const key = args.key || "knowledge";
               try {
-                const embedResult = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: [text] }) as any;
-                const vec = embedResult.data?.[0];
-                if (vec) {
-                  await env.VECTORIZE.upsert([{
-                    id: `knowledge-${Date.now()}`,
-                    values: vec,
-                    metadata: { text, source: key, agent_name: args.agent_name || "", org_id: args.org_id || "" },
-                  }]);
-                }
+                const { embedSingle: embedKnowledge } = await import("./runtime/embeddings");
+                const embResult = await embedKnowledge(text, env);
+                await env.VECTORIZE.upsert([{
+                  id: `knowledge-${Date.now()}`,
+                  values: embResult.vector,
+                  metadata: { text, source: key, agent_name: args.agent_name || "", org_id: args.org_id || "" },
+                }]);
                 result = `Stored knowledge: '${key}' (${text.length} chars)`;
               } catch (err: any) {
                 result = `Store failed: ${err.message}`;
@@ -7453,8 +7453,9 @@ export default {
               const query = args.query || "";
               const topK = args.top_k || 5;
               try {
-                const embedResult = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: [query] }) as any;
-                const queryVec = embedResult.data?.[0];
+                const { embedForQuery: embedKnowledgeQuery } = await import("./runtime/embeddings");
+                const embResult = await embedKnowledgeQuery(query, env);
+                const queryVec = embResult.vector;
                 if (!queryVec) { result = "Embedding failed"; break; }
                 const matches = await env.VECTORIZE.query(queryVec, {
                   topK, returnMetadata: "all",
