@@ -449,16 +449,23 @@ CREATE TABLE IF NOT EXISTS billing_events (
 -- ============================================================================
 
 CREATE TABLE IF NOT EXISTS eval_test_cases (
-  id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-  org_id          TEXT NOT NULL,
-  agent_name      TEXT NOT NULL DEFAULT '',
-  name            TEXT NOT NULL DEFAULT '',
-  input           TEXT NOT NULL DEFAULT '',
-  expected_output TEXT NOT NULL DEFAULT '',
-  grader          TEXT NOT NULL DEFAULT 'llm_rubric',
-  rubric          TEXT,
-  tags            JSONB NOT NULL DEFAULT '[]',
-  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  id                TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  org_id            TEXT NOT NULL,
+  agent_name        TEXT NOT NULL DEFAULT '',
+  name              TEXT NOT NULL DEFAULT '',
+  input             TEXT NOT NULL DEFAULT '',
+  expected_output   TEXT NOT NULL DEFAULT '',
+  grader            TEXT NOT NULL DEFAULT 'llm_rubric',
+  rubric            TEXT,
+  tags              JSONB NOT NULL DEFAULT '[]',
+  category          TEXT NOT NULL DEFAULT 'general',
+  is_holdout        BOOLEAN NOT NULL DEFAULT false,
+  source            TEXT NOT NULL DEFAULT 'manual',
+  source_session_id TEXT,
+  saturated         BOOLEAN NOT NULL DEFAULT false,
+  pass_count        INT NOT NULL DEFAULT 0,
+  fail_count        INT NOT NULL DEFAULT 0,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS eval_runs (
