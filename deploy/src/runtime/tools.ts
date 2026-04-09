@@ -2203,11 +2203,9 @@ async function dispatch(
             for (let i = 0; i < textsToEmbed.length; i += 100) {
               const batch = textsToEmbed.slice(i, i + 100);
               try {
-                const embedResult = (await env.AI.run(
-                  "@cf/baai/bge-base-en-v1.5" as keyof AiModels,
-                  { text: batch.map((b) => b.text) },
-                )) as any;
-                const vectors = embedResult.data || [];
+                const { embed: embedBatch } = await import("./embeddings");
+                const embedResult = await embedBatch(batch.map((b) => b.text), env);
+                const vectors = embedResult.vectors;
                 // Fix #3+#4: Content-based IDs for dedup (same content → same ID → upsert)
                 const upserts = await Promise.all(
                   vectors.map(async (vec: number[], idx: number) => ({
@@ -2217,7 +2215,7 @@ async function dispatch(
                   })),
                 );
                 if (upserts.length > 0) {
-                  await env.VECTORIZE.upsert(upserts);
+                  await env.VECTORIZE.upsert(upserts as any);
                   embedded += upserts.length;
                 }
               } catch {
@@ -4616,8 +4614,9 @@ async function ingestDocument(env: RuntimeEnv, args: Record<string, any>): Promi
     chunks.push(words.slice(i, i + 512).join(" "));
   }
 
-  const embedResult = (await env.AI.run("@cf/baai/bge-base-en-v1.5" as keyof AiModels, { text: chunks })) as any;
-  const vectors = embedResult.data || [];
+  const { embed: embedPipelineChunks } = await import("./embeddings");
+  const embedResult = await embedPipelineChunks(chunks, env);
+  const vectors = embedResult.vectors;
 
   const vecInserts = vectors.map((vec: number[], idx: number) => ({
     id: `ocr-${source}-${Date.now()}-${idx}`,
