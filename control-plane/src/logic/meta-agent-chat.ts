@@ -62,7 +62,7 @@ const TOOL_GROUPS: Record<string, string[]> = {
   config: ["read_agent_config", "update_agent_config"],
   sessions: ["read_sessions", "read_session_messages", "read_observability", "read_conversation_quality"],
   training: ["start_training", "read_training_status", "activate_trained_config", "rollback_training", "read_training_circuit_breaker"],
-  eval: ["read_eval_results", "add_eval_test_cases", "test_agent", "analyze_and_suggest", "run_eval"],
+  eval: ["read_eval_results", "add_eval_test_cases", "test_agent", "analyze_and_suggest", "run_eval", "mine_session_failures"],
   agents: ["create_sub_agent", "manage_connectors"],
   marketplace: ["marketplace_publish", "marketplace_stats"],
   analytics: ["run_query"],
@@ -459,7 +459,7 @@ const META_TOOLS: ToolDef[] = [
     function: {
       name: "add_eval_test_cases",
       description:
-        "Add test cases to the agent's eval suite. Each test case has an input (what a user would say), expected behavior, and grading criteria. The agent can then be evaluated against these cases.",
+        "Add test cases to the agent's eval suite. Each test case has an input (what a user would say), expected behavior, and grading criteria. The agent can then be evaluated against these cases. ~20% of cases are auto-assigned as holdout (not used during training optimization).",
       parameters: {
         type: "object",
         properties: {
@@ -473,6 +473,8 @@ const META_TOOLS: ToolDef[] = [
                 expected: { type: "string", description: "What a correct response should contain" },
                 rubric: { type: "string", description: "Grading criteria: Score 1 if... Score 0 if..." },
                 tags: { type: "array", items: { type: "string" }, description: "Capability tags" },
+                category: { type: "string", description: "Behavioral category: tool_selection, multi_step, follow_up_quality, error_handling, safety, domain_specific, general (default: general)" },
+                is_holdout: { type: "boolean", description: "Force this case as holdout (default: auto-assign ~20%)" },
               },
               required: ["name", "input", "expected"],
             },
@@ -504,13 +506,29 @@ const META_TOOLS: ToolDef[] = [
     function: {
       name: "run_eval",
       description:
-        "Run the agent's eval suite NOW and return results. Executes all test cases (from eval_test_cases table and config.eval_config), measures pass rate, latency, and cost. Use this before/after config changes to measure impact.",
+        "Run the agent's eval suite NOW and return results. Executes test cases (from eval_test_cases table and config.eval_config), measures pass rate, latency, and cost. By default runs optimization cases only (excludes holdout). Set include_holdout=true for final validation.",
       parameters: {
         type: "object",
         properties: {
           max_cases: { type: "number", description: "Max test cases to run (default: all). Use a smaller number for quick spot-checks." },
+          include_holdout: { type: "boolean", description: "Include holdout cases in the run (default: false). Set true for final validation." },
         },
         required: [],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "mine_session_failures",
+      description:
+        "Scan recent sessions for failures and propose eval test cases. Finds errors, timeouts, and user corrections in the last 7 days and suggests test cases to prevent regression.",
+      parameters: {
+        type: "object",
+        properties: {
+          days: { type: "number", description: "Number of days to scan (default 7)" },
+          limit: { type: "number", description: "Max failures to return (default 20)" },
+        },
       },
     },
   },
@@ -1356,16 +1374,21 @@ async function executeTool(
         const jobId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
         const now = new Date().toISOString();
 
-        // Load eval test cases from agent config or eval_test_cases table
+        // Load optimization eval test cases (exclude holdout) from eval_test_cases table
         let evalTasks: Array<{ input: string; expected: string; grader: string }> = [];
+        let holdoutCount = 0;
+        let totalCaseCount = 0;
         try {
           const testRows = await sql`
-            SELECT input, expected_output, grader FROM eval_test_cases
+            SELECT input, expected_output, grader, is_holdout FROM eval_test_cases
             WHERE agent_name = ${ctx.agentName} AND org_id = ${ctx.orgId}
-            ORDER BY created_at DESC LIMIT 20
+            ORDER BY created_at DESC LIMIT 50
           `;
-          if (testRows.length > 0) {
-            evalTasks = testRows.map((r: any) => ({
+          totalCaseCount = testRows.length;
+          holdoutCount = testRows.filter((r: any) => r.is_holdout).length;
+          const optimizationRows = testRows.filter((r: any) => !r.is_holdout);
+          if (optimizationRows.length > 0) {
+            evalTasks = optimizationRows.map((r: any) => ({
               input: String(r.input || ""),
               expected: String(r.expected_output || ""),
               grader: String(r.grader || "contains"),
@@ -1424,7 +1447,9 @@ async function executeTool(
           max_iterations: maxIterations,
           auto_activate: autoActivate,
           eval_task_count: evalTasks.length,
-          message: `Training job started with ${evalTasks.length} eval tasks. Use read_training_status to monitor progress.`,
+          holdout_count: holdoutCount,
+          total_cases: totalCaseCount,
+          message: `Training job started with ${evalTasks.length} optimization eval tasks (${holdoutCount} holdout cases reserved for final validation). Use read_training_status to monitor progress. After training, run_eval with include_holdout=true to validate against holdout set.`,
         });
       } catch (err: any) {
         return JSON.stringify({ error: `Training not available: ${err.message || err}` });
@@ -1755,17 +1780,35 @@ async function executeTool(
         const config = typeof agent.config === "string" ? JSON.parse(agent.config) : agent.config || {};
         const evalConfig = config.eval_config || { test_cases: [], rubric: { criteria: [], pass_threshold: 0.7 }, scenarios: [] };
 
-        // Add new test cases
+        // Add new test cases to config and DB table
         const existing = evalConfig.test_cases || [];
+        let holdoutCount = 0;
         for (const tc of testCases) {
+          const isHoldout = tc.is_holdout !== undefined ? Boolean(tc.is_holdout) : Math.random() < 0.2;
+          const category = String(tc.category || "general");
+          const tags = Array.isArray(tc.tags) ? tc.tags : [];
+          if (isHoldout) holdoutCount++;
+
           existing.push({
             name: tc.name,
             input: tc.input,
             expected: tc.expected,
             grader: "llm_rubric",
             rubric: tc.rubric || `Score 1 if the response addresses "${tc.expected}". Score 0 otherwise.`,
-            tags: tc.tags || [],
+            tags,
+            category,
+            is_holdout: isHoldout,
           });
+
+          // Also insert into eval_test_cases table
+          try {
+            await sql`
+              INSERT INTO eval_test_cases (org_id, agent_name, name, input, expected_output, grader, rubric, tags, category, is_holdout, source)
+              VALUES (${ctx.orgId}, ${ctx.agentName}, ${tc.name}, ${tc.input}, ${tc.expected},
+                ${"llm_rubric"}, ${tc.rubric || `Score 1 if the response addresses "${tc.expected}". Score 0 otherwise.`},
+                ${JSON.stringify(tags)}, ${category}, ${isHoldout}, ${"manual"})
+            `;
+          } catch {}
         }
         evalConfig.test_cases = existing;
         config.eval_config = evalConfig;
@@ -1775,6 +1818,8 @@ async function executeTool(
         return JSON.stringify({
           added: testCases.length,
           total_test_cases: existing.length,
+          holdout_count: holdoutCount,
+          optimization_count: testCases.length - holdoutCount,
           test_names: testCases.map((tc: any) => tc.name),
         });
       } catch (err: any) {
@@ -1826,20 +1871,23 @@ async function executeTool(
     // ── Run Eval Suite ──────────────────────────────────────────────
     case "run_eval": {
       try {
-        // Load test cases
-        let testCases: Array<{ name: string; input: string; expected: string; grader: string; rubric?: string }> = [];
+        const includeHoldout = args.include_holdout === true;
+        // Load test cases from DB with holdout info
+        let testCases: Array<{ id?: string; name: string; input: string; expected: string; grader: string; rubric?: string; is_holdout: boolean }> = [];
         try {
           const rows = await sql`
-            SELECT name, input, expected_output, grader, rubric FROM eval_test_cases
+            SELECT id, name, input, expected_output, grader, rubric, is_holdout FROM eval_test_cases
             WHERE agent_name = ${ctx.agentName} AND org_id = ${ctx.orgId}
             ORDER BY created_at DESC LIMIT 50
           `;
           testCases = rows.map((r: any) => ({
+            id: r.id,
             name: r.name || `test_${rows.indexOf(r)}`,
             input: String(r.input || ""),
             expected: String(r.expected_output || ""),
             grader: String(r.grader || "contains"),
             rubric: r.rubric,
+            is_holdout: Boolean(r.is_holdout),
           }));
         } catch {}
 
@@ -1856,6 +1904,7 @@ async function executeTool(
                 expected: String(tc.expected || ""),
                 grader: String(tc.grader || "llm_rubric"),
                 rubric: tc.rubric,
+                is_holdout: Boolean(tc.is_holdout),
               }));
             }
           } catch {}
@@ -1865,19 +1914,24 @@ async function executeTool(
           return JSON.stringify({ error: "No eval test cases found. Use add_eval_test_cases to create some first." });
         }
 
-        const maxCases = Number(args.max_cases) || testCases.length;
-        const casesToRun = testCases.slice(0, maxCases);
+        // Split into optimization and holdout sets
+        const optimizationCases = testCases.filter(tc => !tc.is_holdout);
+        const holdoutCases = testCases.filter(tc => tc.is_holdout);
+        const casesToRun = includeHoldout ? testCases : optimizationCases;
+
+        const maxCases = Number(args.max_cases) || casesToRun.length;
+        const casesSliced = casesToRun.slice(0, maxCases);
 
         if (!ctx.env.RUNTIME) {
           return JSON.stringify({ error: "Runtime not available for eval execution" });
         }
 
         // Run each test case
-        const results: Array<{ name: string; input: string; passed: boolean; actual: string; expected: string; cost_usd: number; latency_ms: number; error?: string }> = [];
+        const results: Array<{ id?: string; name: string; input: string; passed: boolean; actual: string; expected: string; cost_usd: number; latency_ms: number; is_holdout: boolean; error?: string }> = [];
         let totalCost = 0;
         const evalStart = Date.now();
 
-        for (const tc of casesToRun) {
+        for (const tc of casesSliced) {
           const tcStart = Date.now();
           try {
             const resp = await ctx.env.RUNTIME.fetch("https://runtime/run", {
@@ -1910,27 +1964,54 @@ async function executeTool(
             }
 
             results.push({
-              name: tc.name, input: tc.input.slice(0, 200), passed, actual: actual.slice(0, 500),
-              expected: tc.expected.slice(0, 200), cost_usd: cost, latency_ms: Date.now() - tcStart,
+              id: tc.id, name: tc.name, input: tc.input.slice(0, 200), passed, actual: actual.slice(0, 500),
+              expected: tc.expected.slice(0, 200), cost_usd: cost, latency_ms: Date.now() - tcStart, is_holdout: tc.is_holdout,
             });
           } catch (err: any) {
             results.push({
-              name: tc.name, input: tc.input.slice(0, 200), passed: false, actual: "",
-              expected: tc.expected.slice(0, 200), cost_usd: 0, latency_ms: Date.now() - tcStart,
+              id: tc.id, name: tc.name, input: tc.input.slice(0, 200), passed: false, actual: "",
+              expected: tc.expected.slice(0, 200), cost_usd: 0, latency_ms: Date.now() - tcStart, is_holdout: tc.is_holdout,
               error: err.message || String(err),
             });
           }
         }
 
-        const passCount = results.filter(r => r.passed).length;
-        const passRate = Math.round((passCount / results.length) * 100);
+        // Update pass_count / fail_count on each test case in the DB
+        for (const r of results) {
+          if (r.id) {
+            try {
+              if (r.passed) {
+                await sql`UPDATE eval_test_cases SET pass_count = pass_count + 1, saturated = CASE WHEN pass_count + 1 > 10 THEN true ELSE saturated END WHERE id = ${r.id}`;
+              } else {
+                await sql`UPDATE eval_test_cases SET fail_count = fail_count + 1 WHERE id = ${r.id}`;
+              }
+            } catch {}
+          }
+        }
+
+        // Calculate scores separately for optimization and holdout
+        const optResults = results.filter(r => !r.is_holdout);
+        const holdResults = results.filter(r => r.is_holdout);
+        const optPassCount = optResults.filter(r => r.passed).length;
+        const holdPassCount = holdResults.filter(r => r.passed).length;
+        const optScore = optResults.length > 0 ? Math.round((optPassCount / optResults.length) * 100) : null;
+        const holdScore = holdResults.length > 0 ? Math.round((holdPassCount / holdResults.length) * 100) : null;
+
+        const totalPassCount = results.filter(r => r.passed).length;
+        const overallPassRate = Math.round((totalPassCount / results.length) * 100);
+
+        // Overfitting warning
+        let overfitWarning: string | undefined;
+        if (optScore !== null && holdScore !== null && optScore - holdScore > 15) {
+          overfitWarning = `Warning: optimization score (${optScore}%) is significantly higher than holdout score (${holdScore}%). This may indicate overfitting to the optimization set.`;
+        }
 
         // Write eval run record
         const runId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
         try {
           await sql`
             INSERT INTO eval_runs (id, agent_name, org_id, pass_rate, total_tasks, avg_latency_ms, total_cost_usd, created_at)
-            VALUES (${runId}, ${ctx.agentName}, ${ctx.orgId}, ${passRate / 100}, ${results.length},
+            VALUES (${runId}, ${ctx.agentName}, ${ctx.orgId}, ${overallPassRate / 100}, ${results.length},
               ${Math.round(results.reduce((s, r) => s + r.latency_ms, 0) / results.length)},
               ${totalCost}, now())
           `;
@@ -1938,15 +2019,21 @@ async function executeTool(
 
         return JSON.stringify({
           eval_run_id: runId,
-          pass_rate_pct: passRate,
-          passed: passCount,
-          failed: results.length - passCount,
+          pass_rate_pct: overallPassRate,
+          optimization_score: optScore !== null ? `${optScore}%` : "no optimization cases",
+          holdout_score: holdScore !== null ? `${holdScore}%` : (includeHoldout ? "no holdout cases" : "not included (set include_holdout=true)"),
+          overfit_warning: overfitWarning,
+          passed: totalPassCount,
+          failed: results.length - totalPassCount,
           total: results.length,
+          optimization_cases: optResults.length,
+          holdout_cases: holdResults.length,
           total_cost_usd: Math.round(totalCost * 10000) / 10000,
           total_latency_ms: Date.now() - evalStart,
           results: results.map(r => ({
             name: r.name,
             passed: r.passed,
+            is_holdout: r.is_holdout,
             actual_preview: r.actual.slice(0, 200),
             expected: r.expected,
             cost_usd: r.cost_usd,
@@ -1958,11 +2045,62 @@ async function executeTool(
             input: r.input,
             expected: r.expected,
             actual: r.actual.slice(0, 300),
+            is_holdout: r.is_holdout,
             error: r.error,
           })),
         });
       } catch (err: any) {
         return JSON.stringify({ error: `Eval run failed: ${err.message || err}` });
+      }
+    }
+
+    // ── Mine Session Failures ────────────────────────────────────
+    case "mine_session_failures": {
+      const days = Number(args.days) || 7;
+      const limit = Number(args.limit) || 20;
+      const since = new Date(Date.now() - days * 86400_000).toISOString();
+
+      try {
+        // Find failed turns
+        const failures = await sql`
+          SELECT t.input_text, t.error, t.reflection, t.model_used, s.status, s.session_id, t.created_at
+          FROM turns t
+          JOIN sessions s ON s.session_id = t.session_id
+          WHERE s.org_id = ${ctx.orgId} AND s.agent_name = ${ctx.agentName}
+            AND t.created_at > ${since}
+            AND (t.error IS NOT NULL AND t.error != '' OR s.status IN ('error', 'failed'))
+          ORDER BY t.created_at DESC LIMIT ${limit}
+        `;
+
+        // Also find sessions with low step counts that might indicate confusion
+        const shortSessions = await sql`
+          SELECT session_id, status, step_count, wall_clock_seconds, created_at
+          FROM sessions
+          WHERE org_id = ${ctx.orgId} AND agent_name = ${ctx.agentName}
+            AND created_at > ${since}
+            AND step_count <= 1 AND status = 'success'
+            AND wall_clock_seconds > 30
+          ORDER BY created_at DESC LIMIT 5
+        `;
+
+        const proposed = failures.map((f: any) => ({
+          input: String(f.input_text).slice(0, 500),
+          error: String(f.error || f.reflection || "").slice(0, 300),
+          model: f.model_used,
+          session_id: f.session_id,
+          suggestion: `Test that the agent handles: "${String(f.input_text).slice(0, 100)}..." without errors`,
+        }));
+
+        return JSON.stringify({
+          failures_found: failures.length,
+          short_sessions: shortSessions.length,
+          proposed_cases: proposed,
+          suggestion: failures.length > 0
+            ? `Found ${failures.length} failures. Use add_eval_test_cases to create regression tests for these.`
+            : "No recent failures found. The agent is performing well.",
+        });
+      } catch (err: any) {
+        return JSON.stringify({ error: `Failed to mine sessions: ${err.message || err}` });
       }
     }
 
