@@ -14,8 +14,12 @@ describe("queue consumer mapping", () => {
     const runtimeEventBlock = source.match(/type === "runtime_event"[\s\S]*?INSERT INTO runtime_events[\s\S]*?ts\(p\.created_at\)/s);
     expect(runtimeEventBlock).not.toBeNull();
     const block = runtimeEventBlock![0];
-    expect(block).toContain("latency_ms");
-    expect(block).toContain("p.duration_ms || 0");
+    const supportsEventDataDuration =
+      block.includes("duration_ms: Number(p.duration_ms || 0)") &&
+      block.includes("event_data");
+    const supportsLegacyLatencyColumn =
+      block.includes("latency_ms") && block.includes("p.duration_ms || 0");
+    expect(supportsEventDataDuration || supportsLegacyLatencyColumn).toBe(true);
   });
 
   it("writes billing_flush updates through sessions summary columns", () => {

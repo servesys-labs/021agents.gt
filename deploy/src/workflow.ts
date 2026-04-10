@@ -407,10 +407,14 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       // Reasoning strategy
       const { selectReasoningStrategy, autoSelectStrategy } = await memo("reasoning", () => import("./runtime/reasoning-strategies"));
       const { getToolDefinitions } = await memo("tools", () => import("./runtime/tools"));
-      const toolDefs = getToolDefinitions(config.tools, config.blocked_tools);
+      const allToolDefsForConfig = getToolDefinitions(config.tools, config.blocked_tools);
+      const llmVisibleToolDefs = config.use_code_mode
+        ? allToolDefsForConfig.filter((t) =>
+            t.function.name === "execute-code" || t.function.name === "discover-api")
+        : allToolDefsForConfig;
       const reasoningPrompt = selectReasoningStrategy(
         config.reasoning_strategy as string | undefined, p.input, 1,
-      ) || autoSelectStrategy(p.input, toolDefs.length);
+      ) || autoSelectStrategy(p.input, llmVisibleToolDefs.length);
 
       // ── Latency fix 3: Parallelize feature flag checks (saves 30-100ms) ──
       const { isEnabled: checkFlag } = await memo("features", () => import("./runtime/features"));
@@ -424,7 +428,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       // Coordinator mode: auto-detect complex multi-part tasks
       const { shouldCoordinate, buildCoordinatorPrompt } = await memo("coordinator", () => import("./runtime/coordinator"));
       let coordinatorPrompt = "";
-      if ((config.reasoning_strategy as string) === "coordinator" || shouldCoordinate(p.input, toolDefs.length)) {
+      if ((config.reasoning_strategy as string) === "coordinator" || shouldCoordinate(p.input, llmVisibleToolDefs.length)) {
         try {
           const { loadAgentList } = await memo("db", () => import("./runtime/db"));
           const agents = await loadAgentList(this.env.HYPERDRIVE, p.org_id);
@@ -451,7 +455,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         },
         reasoning_prompt: reasoningPrompt,
         coordinator_prompt: coordinatorPrompt,
-        tool_count: toolDefs.length,
+        tool_count: llmVisibleToolDefs.length,
         featureFlags,
       };
     });
@@ -1006,17 +1010,25 @@ ALWAYS:
         const { getToolDefinitions, selectToolsForQuery, buildDeferredToolIndex } = await memo("tools", () => import("./runtime/tools"));
         const allToolDefs = getToolDefinitions(config.tools, config.blocked_tools);
 
-        // Progressive tool discovery: only send relevant tools per turn
-        const recentContext = messages.slice(-3).map(m => m.content || "").join(" ");
-        const toolDefs = selectToolsForQuery(allToolDefs, p.input, recentContext);
+        let toolDefs;
+        if (config.use_code_mode) {
+          // Code mode: present a single orchestration surface to reduce tool-call churn.
+          toolDefs = allToolDefs.filter(
+            (t) => t.function.name === "execute-code" || t.function.name === "discover-api",
+          );
+        } else {
+          // Progressive tool discovery: only send relevant tools per turn
+          const recentContext = messages.slice(-3).map(m => m.content || "").join(" ");
+          toolDefs = selectToolsForQuery(allToolDefs, p.input, recentContext);
 
-        // Phase 2.2: Inject deferred tool index on first turn so model knows
-        // what else exists without paying full schema cost
-        if (turn === 1) {
-          const deferredIndex = buildDeferredToolIndex(allToolDefs, toolDefs);
-          if (deferredIndex) {
-            const hasIndex = messages.some(m => m.role === "system" && (m.content || "").includes("Additional Tools"));
-            if (!hasIndex) messages.push({ role: "system", content: deferredIndex });
+          // Phase 2.2: Inject deferred tool index on first turn so model knows
+          // what else exists without paying full schema cost
+          if (turn === 1) {
+            const deferredIndex = buildDeferredToolIndex(allToolDefs, toolDefs);
+            if (deferredIndex) {
+              const hasIndex = messages.some(m => m.role === "system" && (m.content || "").includes("Additional Tools"));
+              if (!hasIndex) messages.push({ role: "system", content: deferredIndex });
+            }
           }
         }
 

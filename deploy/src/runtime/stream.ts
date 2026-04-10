@@ -411,7 +411,11 @@ export async function streamRun(
     // ── 1. TOOLS ──────────────────────────────────────────────
     const toolDefs = getToolDefinitions(config.tools, config.blocked_tools);
     const blockedSet = new Set(config.blocked_tools);
-    const activeTools = toolDefs.filter((t) => !blockedSet.has(t.function.name));
+    const activeTools = config.use_code_mode
+      ? toolDefs.filter((t) =>
+          !blockedSet.has(t.function.name) &&
+          (t.function.name === "execute-code" || t.function.name === "discover-api"))
+      : toolDefs.filter((t) => !blockedSet.has(t.function.name));
 
     // ── 2. WORKSPACE HYDRATION (restore files from R2) ──────
     if (env.STORAGE && env.SANDBOX) {
