@@ -408,12 +408,20 @@ export async function streamRun(
         const { getSandbox: _getSandbox } = await import("@cloudflare/sandbox");
         const sandboxId = `session-${sessionId}`;
         const rawSandbox = _getSandbox(env.SANDBOX, sandboxId);
-        // Wrap with 30s timeout so workspace hydration doesn't hang if capacity is exhausted
+        // Wrap with 30s timeout so workspace hydration doesn't hang if capacity is exhausted.
+        // Also normalizes exec timeout from seconds → ms (the rest of the
+        // codebase passes seconds, but @cloudflare/sandbox 0.7+ takes ms).
         const sandbox = new Proxy(rawSandbox, {
           get: (target, prop) => {
             const val = (target as any)[prop];
             if (typeof val !== "function") return val;
             return (...args: any[]) => {
+              if (prop === "exec" && args.length >= 2 && args[1] && typeof args[1] === "object") {
+                const opts = args[1] as { timeout?: number };
+                if (typeof opts.timeout === "number" && opts.timeout <= 600) {
+                  args = [args[0], { ...opts, timeout: opts.timeout * 1000 }];
+                }
+              }
               const result = val.apply(target, args);
               if (result && typeof result.then === "function") {
                 return Promise.race([

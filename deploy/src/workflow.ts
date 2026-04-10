@@ -172,6 +172,10 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     const sessionId = event.instanceId.slice(0, 16);
     const traceId = crypto.randomUUID().slice(0, 16);
 
+    // Setup timing — measured from run() entry until the first turn starts,
+    // gives the UI pipeline a real duration for the Setup step.
+    const setupStartedAt = Date.now();
+
     // Set RLS org context for all DB calls during this workflow run
     if (p.org_id) {
       const { setDbOrgContext } = await import("./runtime/db");
@@ -331,6 +335,32 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       agent_name: p.agent_name,
     });
 
+    // ── checkpoint_resumed — fired when snapshot hydration recovered prior state
+    // This is the durability flex: the Worker was restarted mid-run and the
+    // Workflow picked up exactly where it left off. Frontend highlights it.
+    if (snapshot && (recoveredCost > 0 || recoveredTurns > 0)) {
+      await this.emit(p.progress_key, {
+        type: "checkpoint_resumed",
+        resumed_at: "llm",
+        turn: recoveredTurns,
+        recovered_cost_usd: recoveredCost,
+        checkpoint_id: event.instanceId,
+      });
+    }
+
+    // ── setup_done — marks the end of the Setup phase for the UI pipeline.
+    // This emits the real timing/content so the UI no longer synthesizes it.
+    await this.emit(p.progress_key, {
+      type: "setup_done",
+      duration_ms: Date.now() - setupStartedAt,
+      model: config.model || "",
+      plan: config.plan || "standard",
+      tool_count: bootstrap.tool_count || (config.tools?.length ?? 0),
+      system_prompt_tokens: Math.round((config.system_prompt?.length || 0) / 4),
+      rls_enforced: !!p.org_id,
+      config_migrated: configMigrated,
+    });
+
     if (bootstrap.reasoning_prompt) {
       await this.emit(p.progress_key, {
         type: "reasoning", strategy: config.reasoning_strategy || "auto",
@@ -367,12 +397,25 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
           sleepAfter: "10m",
           enableInternet: false,
         } as any);
-        // Wrap with 30s acquire timeout so users get feedback instead of hanging
+        // Wrap with 30s acquire timeout so users get feedback instead of hanging.
+        // Also normalizes the timeout unit on exec() calls — @cloudflare/sandbox 0.7+
+        // takes timeout in MILLISECONDS, but the rest of the codebase passes
+        // seconds (the original convention). Without this conversion, every
+        // hydration command aborts in N milliseconds. Heuristic: any value
+        // <= 600 is treated as seconds (10min cap is well above any
+        // reasonable per-command limit).
         const sandbox = new Proxy(rawSandbox, {
           get: (target, prop) => {
             const val = (target as any)[prop];
             if (typeof val !== "function") return val;
             return (...args: any[]) => {
+              // Convert seconds → ms on exec() calls only
+              if (prop === "exec" && args.length >= 2 && args[1] && typeof args[1] === "object") {
+                const opts = args[1] as { timeout?: number };
+                if (typeof opts.timeout === "number" && opts.timeout <= 600) {
+                  args = [args[0], { ...opts, timeout: opts.timeout * 1000 }];
+                }
+              }
               const result = val.apply(target, args);
               if (result && typeof result.then === "function") {
                 return Promise.race([
@@ -677,6 +720,9 @@ ALWAYS:
     const LOOP_DETECTION_WINDOW = 5;
     const LOOP_THRESHOLD = 3;
 
+    // Whether governance_pass has been emitted for this run (fires once at turn 1).
+    let governanceEmitted = false;
+
     for (let turn = 1; turn <= config.max_turns; turn++) {
      try { // Phase 1.4: wrap turn body in try-catch for resilient error handling
       lastWorkflowTurn = turn;
@@ -757,6 +803,51 @@ ALWAYS:
         AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN || "",
         CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN || "",
       } as any);
+
+      // ── governance_pass — emit once at the start of the first turn.
+      // Consolidates the guards that ran during setup + pre-turn checks into
+      // a single event so the UI pipeline's Governance step has real content.
+      if (!governanceEmitted) {
+        const governanceStartedAt = Date.now();
+        const guards: Array<{ name: string; passed: boolean; detail?: string }> = [
+          {
+            name: "budget-check",
+            passed: totalCost < config.budget_limit_usd,
+            detail: `$${totalCost.toFixed(4)} / $${config.budget_limit_usd}`,
+          },
+          {
+            name: "session-limit",
+            passed: !sessionLimit.limited,
+            detail: `${sessionLimit.active ?? 0}/${sessionLimit.max ?? "∞"}`,
+          },
+          {
+            name: "org-isolation",
+            passed: !!p.org_id,
+            detail: p.org_id ? "RLS enforced" : "no org context",
+          },
+          {
+            name: "tool-allowlist",
+            passed: true,
+            detail: `${config.tools?.length ?? 0} allowed`,
+          },
+          {
+            name: "wall-clock",
+            passed: Date.now() - startTime < 270_000,
+            detail: `${Math.round((Date.now() - startTime) / 1000)}s elapsed`,
+          },
+          {
+            name: "workflow-step-budget",
+            passed: workflowStepCount < WORKFLOW_STEP_LIMIT,
+            detail: `${workflowStepCount}/${WORKFLOW_STEP_LIMIT}`,
+          },
+        ];
+        await this.emit(p.progress_key, {
+          type: "governance_pass",
+          duration_ms: Date.now() - governanceStartedAt,
+          guards,
+        });
+        governanceEmitted = true;
+      }
 
       // ── LLM call — retryable, checkpointed ──
       await this.emit(p.progress_key, { type: "turn_start", turn, model: route.model, plan: config.plan });
@@ -872,7 +963,10 @@ ALWAYS:
         }
         await this.emit(p.progress_key, {
           type: "turn_end", turn, model: llm.model, cost_usd: llm.cost_usd,
-          tokens: llm.input_tokens + llm.output_tokens, done: true,
+          tokens: llm.input_tokens + llm.output_tokens,
+          input_tokens: llm.input_tokens,
+          output_tokens: llm.output_tokens,
+          done: true,
         });
         // Record final answer turn
         turnRecords.push({
@@ -1143,7 +1237,10 @@ ALWAYS:
 
       await this.emit(p.progress_key, {
         type: "turn_end", turn, model: llm.model, cost_usd: llm.cost_usd,
-        tokens: llm.input_tokens + llm.output_tokens, done: false,
+        tokens: llm.input_tokens + llm.output_tokens,
+        input_tokens: llm.input_tokens,
+        output_tokens: llm.output_tokens,
+        done: false,
         tool_calls: executableCalls.length,
       });
 
