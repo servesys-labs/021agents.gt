@@ -27,7 +27,7 @@ import {
   type TurnResult,
 } from "./runtime";
 // streamRun removed — all execution goes through Cloudflare Workflows
-import { getCircuitStatus } from "./runtime/tools";
+import { getCircuitStatus, getToolsBreakerSummary } from "./runtime/tools";
 import { parseJsonColumn } from "./runtime/parse-json-column";
 
 // ── Input size limit ──
@@ -140,11 +140,21 @@ function getTimedSandbox(namespace: any, sandboxId: string, opts?: any) {
         (e) => { clearTimeout(timer); reject(e); },
       );
     });
+  // CRITICAL: @cloudflare/sandbox 0.7+ takes `timeout` in MILLISECONDS.
+  // Callers in this file pass seconds (the original convention), so we
+  // convert at this single choke point. Heuristic: any value <= 600 is
+  // treated as seconds (10 min cap is well above any reasonable
+  // per-command limit; real ms values would be much larger).
+  function normalizeOpts(o?: any): any {
+    if (!o || typeof o.timeout !== "number") return o;
+    if (o.timeout > 600) return o; // already in ms
+    return { ...o, timeout: o.timeout * 1000 };
+  }
   return {
-    exec: (cmd: string, execOpts?: any) => wrap(raw.exec(cmd, execOpts)),
+    exec: (cmd: string, execOpts?: any) => wrap(raw.exec(cmd, normalizeOpts(execOpts))),
     writeFile: (path: string, content: string) => wrap(raw.writeFile(path, content)),
     readFile: (path: string) =>
-      wrap((raw as any).readFile?.(path) ?? raw.exec(`cat "${path}"`, { timeout: 10 }).then((r: any) => r.stdout || "")),
+      wrap((raw as any).readFile?.(path) ?? raw.exec(`cat "${path}"`, { timeout: 10_000 }).then((r: any) => r.stdout || "")),
   };
 }
 
@@ -1349,8 +1359,10 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         // triggers the container to boot so it's warm by the time the first tool runs.
         if (this.env.SANDBOX) {
           try {
+            // Warm-up no-op — uses ms (5000) since this bypasses the
+            // getTimedSandbox proxy that does the seconds→ms conversion.
             const sandbox = getSandbox(this.env.SANDBOX, this.name, { sleepAfter: "30m" } as any);
-            sandbox.exec("true", { timeout: 5 }).catch(() => {});
+            sandbox.exec("true", { timeout: 5000 }).catch(() => {});
           } catch { /* non-blocking — ignore errors */ }
         }
 
@@ -3088,8 +3100,8 @@ export default {
       }
       const degraded = degradedReasons.length > 0;
       
-      return Response.json({ 
-        status: "ok", 
+      return Response.json({
+        status: "ok",
         version: "0.2.0",
         service: "runtime",
         timestamp: Date.now(),
@@ -3103,7 +3115,51 @@ export default {
         degraded_reasons: degradedReasons,
       }, { status: degraded ? 503 : 200 });
     }
-    
+
+    // ── Circuit breaker snapshot for the canvas LiveStatsPanel ──
+    // Aggregates the DB + LLM + tools breakers into a three-lane summary
+    // the frontend can render as green/amber/red dots without re-deriving.
+    //
+    // Shape:
+    //   { db: { state, failures, opened_at },
+    //     llm: { state, failures, opened_at, last_error },
+    //     tools: { state, open_count, half_open_count, worst_tools: [...] },
+    //     timestamp }
+    //
+    // All three breakers are real now — no more inferred signals. The LLM
+    // breaker lives in runtime/llm.ts and trips on 5 consecutive upstream
+    // failures (AI Gateway / OpenRouter / Workers AI), failing fast for
+    // 30 seconds before probing half-open.
+    if (url.pathname === "/api/v1/runtime/breakers" && request.method === "GET") {
+      const { getCircuitBreakerState } = await import("./runtime/db");
+      const { getLlmBreakerState } = await import("./runtime/llm");
+      const db = getCircuitBreakerState();
+      const llm = getLlmBreakerState();
+      const tools = getToolsBreakerSummary();
+
+      return Response.json({
+        db: {
+          state: db.open ? "open" : db.failures > 0 ? "half-open" : "closed",
+          failures: db.failures,
+          opened_at: db.openedAt || null,
+        },
+        llm: {
+          state: llm.state,
+          failures: llm.failures,
+          opened_at: llm.openedAt || null,
+          last_failure_at: llm.lastFailureAt || null,
+          last_error: llm.lastError,
+        },
+        tools,
+        timestamp: Date.now(),
+      }, {
+        headers: {
+          "Cache-Control": "no-store",
+          "Access-Control-Allow-Origin": "*",
+        },
+      });
+    }
+
     // ── Dream memory consolidation (called by control-plane queue consumer) ──
     if (url.pathname === "/api/v1/memory/consolidate" && request.method === "POST") {
       try {
