@@ -99,13 +99,14 @@
   interface Props {
     message: MessageData;
     streaming: boolean;
+    agentName?: string;
     index?: number;
     onEdit?: (index: number) => void;
     onRegenerate?: (index: number) => void;
     onDelete?: (index: number) => void;
   }
 
-  let { message, streaming, index = 0, onEdit, onRegenerate, onDelete }: Props = $props();
+  let { message, streaming, agentName, index = 0, onEdit, onRegenerate, onDelete }: Props = $props();
 
   let renderedHtml = $state("");
   let spinnerVerbIndex = $state(Math.floor(Math.random() * SPINNER_VERBS.length));
@@ -248,6 +249,7 @@
                     <ToolCallBlock
                       toolCall={tc}
                       expanded={!tc.output && streaming}
+                      {agentName}
                     />
                   </div>
                 {/each}
@@ -263,6 +265,7 @@
                 <ToolCallBlock
                   toolCall={tc}
                   expanded={!tc.output && streaming}
+                  {agentName}
                 />
               {/each}
             {/if}

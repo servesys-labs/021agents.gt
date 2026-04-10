@@ -18,7 +18,8 @@ export function connectChannel(
   type: string,
   config: Record<string, unknown>
 ): Promise<{ ok: boolean }> {
-  return api.post<{ ok: boolean }>(`/chat/channels/${encodeURIComponent(type)}`, {
+  // Backend exposes upsert as PUT /chat/channels/:channel.
+  return api.put<{ ok: boolean }>(`/chat/channels/${encodeURIComponent(type)}`, {
     agent_name: agentName,
     is_active: true,
     config,

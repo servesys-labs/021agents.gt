@@ -67,23 +67,373 @@ async function invokeAgent(
   orgId?: string,
 ): Promise<string> {
   try {
-    const resp = await env.RUNTIME.fetch("https://runtime/api/v1/runtime-proxy/runnable/invoke", {
+    const resp = await env.RUNTIME.fetch("https://runtime/run", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(env.SERVICE_TOKEN ? { Authorization: `Bearer ${env.SERVICE_TOKEN}` } : {}),
+      },
       body: JSON.stringify({
         agent_name: agentName,
         input,
         channel,
         channel_user_id: channelUserId,
         org_id: orgId,
-        wait: true,
       }),
     });
-    const data = await resp.json() as any;
-    return typeof data.output === "string" ? data.output : String(data.output || "");
+    if (resp.status >= 400) {
+      const text = await resp.text().catch(() => "");
+      return `Sorry, I hit a runtime error (${resp.status}). ${text.slice(0, 180)}`;
+    }
+    const data = await resp.json().catch(() => ({})) as Record<string, unknown>;
+    return typeof data.output === "string"
+      ? data.output
+      : typeof data.response === "string"
+        ? data.response
+        : "";
   } catch (e: any) {
     return `Sorry, I encountered an error: ${String(e.message).slice(0, 200)}`;
   }
+}
+
+async function resetChannelSession(
+  env: any,
+  agentName: string,
+  orgId: string,
+  channelUserId: string,
+): Promise<boolean> {
+  try {
+    const resp = await env.RUNTIME.fetch("https://runtime/api/v1/runtime-proxy/runnable/stream", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(env.SERVICE_TOKEN ? { Authorization: `Bearer ${env.SERVICE_TOKEN}` } : {}),
+      },
+      body: JSON.stringify({
+        __reset: true,
+        agent_name: agentName,
+        org_id: orgId || "",
+        channel_user_id: channelUserId,
+      }),
+    });
+    return resp.status < 500;
+  } catch {
+    return false;
+  }
+}
+
+const CHANNEL_SESSION_MAX = 20;
+
+function sessionStateKey(orgId: string, channel: string, channelUserId: string): string {
+  return `chan-sess:${orgId}:${channel}:${channelUserId}`;
+}
+
+function sessionLastInputKey(orgId: string, channel: string, channelUserId: string, sessionName: string): string {
+  return `chan-sess-last:${orgId}:${channel}:${channelUserId}:${sessionName}`;
+}
+
+function sanitizeSessionName(raw: string): string {
+  return raw.toLowerCase().replace(/[^a-z0-9:_-]/g, "-").replace(/-+/g, "-").slice(0, 40) || "main";
+}
+
+function scopedChannelUserId(channelUserId: string, sessionName: string): string {
+  return sessionName === "main" ? channelUserId : `${channelUserId}::${sessionName}`;
+}
+
+type ChannelSessionState = {
+  current: string;
+  sessions: Array<{ name: string; last_used_ms: number }>;
+};
+
+async function getChannelSessionState(
+  env: any,
+  orgId: string,
+  channel: "telegram" | "whatsapp" | "slack",
+  channelUserId: string,
+): Promise<ChannelSessionState> {
+  const fallback: ChannelSessionState = {
+    current: "main",
+    sessions: [{ name: "main", last_used_ms: Date.now() }],
+  };
+  const kv = env.AGENT_PROGRESS_KV;
+  if (!kv) return fallback;
+  try {
+    const raw = await kv.get(sessionStateKey(orgId, channel, channelUserId));
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw) as Partial<ChannelSessionState>;
+    const sessions = Array.isArray(parsed.sessions)
+      ? parsed.sessions
+          .filter((s) => s && typeof s.name === "string")
+          .map((s) => ({ name: sanitizeSessionName(s.name), last_used_ms: Number(s.last_used_ms) || Date.now() }))
+      : [];
+    const dedup = new Map<string, number>();
+    for (const s of sessions) dedup.set(s.name, Math.max(dedup.get(s.name) || 0, s.last_used_ms));
+    if (!dedup.has("main")) dedup.set("main", Date.now());
+    const normalized = [...dedup.entries()]
+      .map(([name, last_used_ms]) => ({ name, last_used_ms }))
+      .sort((a, b) => b.last_used_ms - a.last_used_ms)
+      .slice(0, CHANNEL_SESSION_MAX);
+    const current = sanitizeSessionName(String(parsed.current || "main"));
+    if (!normalized.some((s) => s.name === current)) normalized.unshift({ name: current, last_used_ms: Date.now() });
+    return {
+      current,
+      sessions: normalized.slice(0, CHANNEL_SESSION_MAX),
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+async function saveChannelSessionState(
+  env: any,
+  orgId: string,
+  channel: "telegram" | "whatsapp" | "slack",
+  channelUserId: string,
+  state: ChannelSessionState,
+) {
+  const kv = env.AGENT_PROGRESS_KV;
+  if (!kv) return;
+  await kv.put(
+    sessionStateKey(orgId, channel, channelUserId),
+    JSON.stringify(state),
+    { expirationTtl: 60 * 60 * 24 * 120 },
+  );
+}
+
+async function getSessionLastInput(
+  env: any,
+  orgId: string,
+  channel: "telegram" | "whatsapp" | "slack",
+  channelUserId: string,
+  sessionName: string,
+): Promise<string> {
+  const kv = env.AGENT_PROGRESS_KV;
+  if (!kv) return "";
+  return (await kv.get(sessionLastInputKey(orgId, channel, channelUserId, sanitizeSessionName(sessionName)))) || "";
+}
+
+async function setSessionLastInput(
+  env: any,
+  orgId: string,
+  channel: "telegram" | "whatsapp" | "slack",
+  channelUserId: string,
+  sessionName: string,
+  input: string,
+) {
+  const kv = env.AGENT_PROGRESS_KV;
+  if (!kv) return;
+  await kv.put(
+    sessionLastInputKey(orgId, channel, channelUserId, sanitizeSessionName(sessionName)),
+    String(input || "").slice(0, 12000),
+    { expirationTtl: 60 * 60 * 24 * 30 },
+  );
+}
+
+async function deleteSessionLastInput(
+  env: any,
+  orgId: string,
+  channel: "telegram" | "whatsapp" | "slack",
+  channelUserId: string,
+  sessionName: string,
+) {
+  const kv = env.AGENT_PROGRESS_KV;
+  if (!kv) return;
+  await kv.delete(sessionLastInputKey(orgId, channel, channelUserId, sanitizeSessionName(sessionName)));
+}
+
+async function touchChannelSession(
+  env: any,
+  orgId: string,
+  channel: "telegram" | "whatsapp" | "slack",
+  channelUserId: string,
+  sessionName: string,
+): Promise<ChannelSessionState> {
+  const state = await getChannelSessionState(env, orgId, channel, channelUserId);
+  const name = sanitizeSessionName(sessionName);
+  const now = Date.now();
+  const sessions = state.sessions.filter((s) => s.name !== name);
+  sessions.unshift({ name, last_used_ms: now });
+  const next: ChannelSessionState = {
+    current: name,
+    sessions: sessions.slice(0, CHANNEL_SESSION_MAX),
+  };
+  await saveChannelSessionState(env, orgId, channel, channelUserId, next);
+  return next;
+}
+
+type ChannelCommandResult = {
+  handled: boolean;
+  reply?: string;
+  activeSession: string;
+  retryInput?: string;
+};
+
+async function handleCommonChannelCommand(
+  env: any,
+  channel: "telegram" | "whatsapp" | "slack",
+  text: string,
+  agentName: string,
+  orgId: string,
+  channelUserId: string,
+): Promise<ChannelCommandResult> {
+  const state = await getChannelSessionState(env, orgId, channel, channelUserId);
+  const raw = String(text || "").trim();
+  if (!raw.startsWith("/")) {
+    await touchChannelSession(env, orgId, channel, channelUserId, state.current);
+    return { handled: false, activeSession: state.current };
+  }
+
+  const [cmd, ...rest] = raw.split(/\s+/);
+  const arg = rest.join(" ").trim();
+  const normalized = cmd.toLowerCase();
+  const channelLabel = channel === "telegram" ? "Telegram" : channel === "whatsapp" ? "WhatsApp" : "Slack";
+
+  if (normalized === "/start") {
+    return { handled: true, activeSession: state.current, reply: "Hi! I'm your OneShots agent. Send me a message and I'll help." };
+  }
+  if (normalized === "/help") {
+    return {
+      handled: true,
+      activeSession: state.current,
+      reply: "Commands:\n/start\n/help\n/status\n/new\n/reset\n/stop\n/cancel\n/retry\n/undo\n/sessions\n/session [name|#]\n/session rename <name>\n/session delete <name|#>\n\nUse /new for a fresh session and /sessions to switch.",
+    };
+  }
+  if (normalized === "/status") {
+    return {
+      handled: true,
+      activeSession: state.current,
+      reply: `Status: ready\nChannel: ${channelLabel}\nAgent: ${agentName}\nSession: ${state.current}`,
+    };
+  }
+  if (normalized === "/sessions") {
+    const lines = state.sessions.slice(0, 10).map((s, i) =>
+      `${i + 1}. ${s.name}${s.name === state.current ? " (active)" : ""}`
+    );
+    return {
+      handled: true,
+      activeSession: state.current,
+      reply: lines.length
+        ? `Recent sessions:\n${lines.join("\n")}\n\nUse /session <number|name> to switch.`
+        : "No sessions yet. Use /new to start one.",
+    };
+  }
+  if (normalized === "/session") {
+    const lowerArg = arg.toLowerCase();
+    if (lowerArg.startsWith("rename ")) {
+      const nextName = sanitizeSessionName(arg.slice(7).trim());
+      if (!nextName) {
+        return { handled: true, activeSession: state.current, reply: "Usage: /session rename <name>" };
+      }
+      const prev = state.current;
+      if (nextName === prev) {
+        return { handled: true, activeSession: state.current, reply: `Session is already named ${state.current}.` };
+      }
+      const migratedSessions = state.sessions
+        .map((s) => ({ ...s, name: s.name === prev ? nextName : s.name }))
+        .filter((s, idx, arr) => arr.findIndex((x) => x.name === s.name) === idx);
+      const nextState: ChannelSessionState = {
+        current: nextName,
+        sessions: migratedSessions.slice(0, CHANNEL_SESSION_MAX),
+      };
+      await saveChannelSessionState(env, orgId, channel, channelUserId, nextState);
+      const last = await getSessionLastInput(env, orgId, channel, channelUserId, prev);
+      if (last) await setSessionLastInput(env, orgId, channel, channelUserId, nextName, last);
+      await deleteSessionLastInput(env, orgId, channel, channelUserId, prev);
+      return { handled: true, activeSession: nextName, reply: `Renamed session ${prev} -> ${nextName}` };
+    }
+    if (lowerArg.startsWith("delete ")) {
+      const targetRaw = arg.slice(7).trim();
+      if (!targetRaw) return { handled: true, activeSession: state.current, reply: "Usage: /session delete <name|#>" };
+      let target = "";
+      const idx = Number(targetRaw);
+      if (Number.isFinite(idx) && idx >= 1 && idx <= state.sessions.length) {
+        target = state.sessions[idx - 1].name;
+      } else {
+        target = sanitizeSessionName(targetRaw);
+      }
+      if (target === "main") {
+        return { handled: true, activeSession: state.current, reply: "Cannot delete the main session." };
+      }
+      const nextSessions = state.sessions.filter((s) => s.name !== target);
+      const nextCurrent = state.current === target ? "main" : state.current;
+      const nextState: ChannelSessionState = {
+        current: nextCurrent,
+        sessions: nextSessions.length > 0 ? nextSessions : [{ name: "main", last_used_ms: Date.now() }],
+      };
+      await saveChannelSessionState(env, orgId, channel, channelUserId, nextState);
+      await deleteSessionLastInput(env, orgId, channel, channelUserId, target);
+      await resetChannelSession(env, agentName, orgId, scopedChannelUserId(channelUserId, target));
+      return { handled: true, activeSession: nextCurrent, reply: `Deleted session ${target}. Active: ${nextCurrent}` };
+    }
+    if (!arg) {
+      return {
+        handled: true,
+        activeSession: state.current,
+        reply: `Active session: ${state.current}\nUse /sessions to list, /session <number|name> to switch.`,
+      };
+    }
+    let selected = "";
+    const idx = Number(arg);
+    if (Number.isFinite(idx) && idx >= 1 && idx <= state.sessions.length) {
+      selected = state.sessions[idx - 1].name;
+    } else {
+      selected = sanitizeSessionName(arg);
+    }
+    const next = await touchChannelSession(env, orgId, channel, channelUserId, selected);
+    return {
+      handled: true,
+      activeSession: next.current,
+      reply: `Switched to session: ${next.current}`,
+    };
+  }
+  if (normalized === "/new") {
+    const newSession = `s-${Date.now().toString(36)}`;
+    const next = await touchChannelSession(env, orgId, channel, channelUserId, newSession);
+    return {
+      handled: true,
+      activeSession: next.current,
+      reply: `Started a fresh session: ${next.current}`,
+    };
+  }
+  if (normalized === "/retry") {
+    const last = await getSessionLastInput(env, orgId, channel, channelUserId, state.current);
+    if (!last) {
+      return { handled: true, activeSession: state.current, reply: "No previous input found in this session to retry." };
+    }
+    return {
+      handled: true,
+      activeSession: state.current,
+      reply: "Retrying your previous request...",
+      retryInput: last,
+    };
+  }
+  if (normalized === "/undo") {
+    const scopedId = scopedChannelUserId(channelUserId, state.current);
+    const ok = await resetChannelSession(env, agentName, orgId, scopedId);
+    await deleteSessionLastInput(env, orgId, channel, channelUserId, state.current);
+    return {
+      handled: true,
+      activeSession: state.current,
+      reply: ok ? `Undid the last turn by resetting session ${state.current}.` : "I couldn't undo right now. Please try again.",
+    };
+  }
+  if (normalized === "/reset" || normalized === "/stop" || normalized === "/cancel") {
+    const scopedId = scopedChannelUserId(channelUserId, state.current);
+    const ok = await resetChannelSession(env, agentName, orgId, scopedId);
+    if (normalized === "/stop" || normalized === "/cancel") {
+      return {
+        handled: true,
+        activeSession: state.current,
+        reply: ok ? `Stopped current run and cleared session ${state.current}.` : "I couldn't stop right now. Please try again.",
+      };
+    }
+    return {
+      handled: true,
+      activeSession: state.current,
+      reply: ok ? `Reset session ${state.current}.` : "I couldn't reset right now. Please try again.",
+    };
+  }
+  return { handled: false, activeSession: state.current };
 }
 
 /** HMAC-SHA256 verification for Meta platforms (WhatsApp, Instagram, Messenger). */
@@ -232,7 +582,7 @@ async function sendTelegramMessage(
   text: string,
   replyTo?: number,
   parseMode: string = "Markdown",
-) {
+): Promise<number | undefined> {
   const body: any = { chat_id: chatId, text, parse_mode: parseMode };
   if (replyTo) body.reply_to_message_id = replyTo;
   try {
@@ -242,16 +592,24 @@ async function sendTelegramMessage(
       body: JSON.stringify(body),
     });
     const data = await resp.json() as any;
+    if (data?.ok && typeof data?.result?.message_id === "number") {
+      return data.result.message_id;
+    }
     // Retry without parse mode if markdown fails
     if (!data.ok && String(data.description || "").toLowerCase().includes("can't parse")) {
       delete body.parse_mode;
-      await fetch(`${TG_API}/bot${token}/sendMessage`, {
+      const retryResp = await fetch(`${TG_API}/bot${token}/sendMessage`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
+      const retryData = await retryResp.json().catch(() => ({})) as any;
+      if (retryData?.ok && typeof retryData?.result?.message_id === "number") {
+        return retryData.result.message_id;
+      }
     }
   } catch {}
+  return undefined;
 }
 
 /** Send typing indicator. */
@@ -261,6 +619,32 @@ async function sendTelegramTyping(token: string, chatId: number) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, action: "typing" }),
   }).catch(() => {});
+}
+
+/** Edit an existing Telegram message (used for long-run status updates). */
+async function editTelegramMessage(
+  token: string,
+  chatId: number,
+  messageId: number,
+  text: string,
+) {
+  const body: any = { chat_id: chatId, message_id: messageId, text, parse_mode: "Markdown" };
+  try {
+    const resp = await fetch(`${TG_API}/bot${token}/editMessageText`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json().catch(() => ({})) as any;
+    if (!data.ok && String(data.description || "").toLowerCase().includes("can't parse")) {
+      delete body.parse_mode;
+      await fetch(`${TG_API}/bot${token}/editMessageText`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }).catch(() => {});
+    }
+  } catch {}
 }
 
 /** Get a Telegram file's download URL. */
@@ -570,21 +954,23 @@ chatPlatformRoutes.openapi(telegramWebhookRoute, async (c): Promise<any> => {
 
   const rawText = parsed.text || parsed.caption || "";
 
-  // Handle commands
-  if (rawText.startsWith("/start")) {
-    await sendTelegramMessage(botToken, chatId, "Hi! I'm your OneShots agent. Send me a message and I'll help.");
+  // Handle shared slash commands
+  const agentNameForCommand = orgId ? await resolveChannelAgent(sql, orgId, "telegram") : "telegram-bot";
+  const commandResult = await handleCommonChannelCommand(
+    c.env,
+    "telegram",
+    rawText,
+    agentNameForCommand,
+    orgId,
+    String(chatId),
+  );
+  if (commandResult.handled) {
+    if (commandResult.reply) await sendTelegramMessage(botToken, chatId, commandResult.reply);
     return c.json({ ok: true });
   }
-  if (rawText.startsWith("/help")) {
-    await sendTelegramMessage(botToken, chatId, "I can help with research, code, data analysis, and more. Just send a message, photo, voice note, or document.");
-    return c.json({ ok: true });
-  }
-  if (rawText.startsWith("/status")) {
-    await sendTelegramMessage(botToken, chatId, "Agent is running.");
-    return c.json({ ok: true });
-  }
+  const telegramScopedUserId = scopedChannelUserId(String(chatId), commandResult.activeSession);
 
-  // Send typing indicator
+  // Send initial typing indicator
   await sendTelegramTyping(botToken, chatId);
 
   // Build agent input — include media context
@@ -635,29 +1021,73 @@ chatPlatformRoutes.openapi(telegramWebhookRoute, async (c): Promise<any> => {
   if (!input) return c.json({ ok: true });
 
   // Resolve agent name
-  const agentName = orgId ? await resolveChannelAgent(sql, orgId, "telegram") : "telegram-bot";
+  const agentName = agentNameForCommand;
 
   // Invoke agent via RUNTIME service binding
+  let typingHeartbeat: ReturnType<typeof setInterval> | null = null;
+  let progressNudge: ReturnType<typeof setTimeout> | null = null;
+  let statusMessageId: number | undefined;
   let output = "";
   try {
-    const resp = await c.env.RUNTIME.fetch("https://runtime/api/v1/runtime-proxy/runnable/invoke", {
+    // Keep Telegram "typing..." visible while longer jobs run.
+    typingHeartbeat = setInterval(() => {
+      sendTelegramTyping(botToken, chatId).catch(() => {});
+    }, 4500);
+    // For slower tasks, post one progress message and edit it later.
+    progressNudge = setTimeout(() => {
+      sendTelegramMessage(
+        botToken,
+        chatId,
+        "Working on it... this one may take a little longer.",
+      ).then((id) => {
+        statusMessageId = id;
+      }).catch(() => {});
+    }, 12000);
+
+    const resp = await c.env.RUNTIME.fetch("https://runtime/run", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(c.env.SERVICE_TOKEN ? { Authorization: `Bearer ${c.env.SERVICE_TOKEN}` } : {}),
+      },
       body: JSON.stringify({
         agent_name: agentName,
         input,
         channel: "telegram",
-        channel_user_id: String(chatId),
+        channel_user_id: telegramScopedUserId,
         org_id: orgId || undefined,
-        wait: true,
         // Pass media context so agent can process images/audio
         ...(mediaUrls.length > 0 ? { media_urls: mediaUrls, media_types: mediaTypes } : {}),
       }),
     });
-    const data = await resp.json() as any;
-    output = typeof data.output === "string" ? data.output : String(data.output || "");
+    if (resp.status >= 400) {
+      const errText = await resp.text().catch(() => "");
+      output = `Sorry, I hit a runtime error (${resp.status}). Please try again. ${errText ? `\n\n${errText.slice(0, 180)}` : ""}`;
+    } else {
+      const data = await resp.json().catch(() => ({})) as Record<string, unknown>;
+      output = typeof data.output === "string"
+        ? data.output
+        : typeof data.response === "string"
+          ? data.response
+          : "";
+      if (!output) {
+        output = "I finished processing but didn't produce a response. Please try rephrasing.";
+      }
+    }
   } catch (e: any) {
     output = `Sorry, I encountered an error: ${String(e.message).slice(0, 200)}`;
+  } finally {
+    if (typingHeartbeat) clearInterval(typingHeartbeat);
+    if (progressNudge) clearTimeout(progressNudge);
+  }
+
+  if (statusMessageId) {
+    await editTelegramMessage(
+      botToken,
+      chatId,
+      statusMessageId,
+      "Done. Sending your response now...",
+    );
   }
 
   // Send reply with markdown-aware chunking
@@ -727,8 +1157,8 @@ chatPlatformRoutes.openapi(telegramConnectRoute, async (c): Promise<any> => {
     `;
   } catch {}
 
-  // Register webhook with Telegram — points to deploy worker (no /api/v1 prefix)
-  const webhookUrl = `${c.env.RUNTIME_WORKER_URL}/chat/telegram/webhook`;
+  // Register webhook to control-plane handler, which reads org-scoped secrets.
+  const webhookUrl = `${new URL(c.req.url).origin}/api/v1/chat/telegram/webhook`;
   let webhookRegistered = false;
   try {
     const resp = await fetch(`https://api.telegram.org/bot${botToken}/setWebhook`, {
@@ -1073,28 +1503,22 @@ chatPlatformRoutes.openapi(whatsappWebhookRoute, async (c): Promise<any> => {
         if (!input) continue;
 
         const agentName = await resolveChannelAgent(sql, orgId, "whatsapp");
-
-        // Invoke agent
-        let output = "";
-        try {
-          const resp = await c.env.RUNTIME.fetch("https://runtime/api/v1/runtime-proxy/runnable/invoke", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              agent_name: agentName,
-              input,
-              channel: "whatsapp",
-              channel_user_id: from,
-              org_id: orgId,
-              wait: true,
-              ...(mediaUrls.length > 0 ? { media_urls: mediaUrls, media_types: mediaTypes } : {}),
-            }),
-          });
-          const data = await resp.json() as any;
-          output = typeof data.output === "string" ? data.output : String(data.output || "");
-        } catch (e: any) {
-          output = `Sorry, I encountered an error: ${String(e.message).slice(0, 200)}`;
+        const commandResult = await handleCommonChannelCommand(
+          c.env,
+          "whatsapp",
+          msgType === "text" ? String(msg.text?.body || "") : "",
+          agentName,
+          orgId,
+          from,
+        );
+        if (commandResult.handled) {
+          if (phoneNumberId) {
+            await sendWhatsAppText(waToken, phoneNumberId, from, commandResult.reply || "Done.", msgId);
+          }
+          continue;
         }
+        const waScopedUserId = scopedChannelUserId(from, commandResult.activeSession);
+        const output = await invokeAgent(c.env, agentName, input, "whatsapp", waScopedUserId, orgId);
 
         // Reply with markdown-aware chunking
         if (output && phoneNumberId) {
@@ -1280,7 +1704,18 @@ chatPlatformRoutes.openapi(slackWebhookRoute, async (c): Promise<any> => {
   if (!input) return c.json({ ok: true });
 
   const agentName = await resolveChannelAgent(sql, orgId, "slack");
-  const output = await invokeAgent(c.env, agentName, input, "slack", userId, orgId);
+  const commandResult = await handleCommonChannelCommand(
+    c.env,
+    "slack",
+    cleanText,
+    agentName,
+    orgId,
+    userId,
+  );
+  const slackScopedUserId = scopedChannelUserId(userId, commandResult.activeSession);
+  const output = commandResult.handled
+    ? (commandResult.reply || "Done.")
+    : await invokeAgent(c.env, agentName, input, "slack", slackScopedUserId, orgId);
 
   // Reply via Slack Web API with chunking and thread support
   if (botToken && channelId && output) {

@@ -180,7 +180,7 @@
           {#if turn.tool_calls?.length}
             <div class="space-y-2">
               {#each turn.tool_calls as tc, i (`${turn.turn_number}-${i}`)}
-                <ToolCallBlock toolCall={normalizeToolCall(tc, i)} expanded={false} />
+                <ToolCallBlock toolCall={normalizeToolCall(tc, i)} expanded={false} agentName={session.agent_name} />
               {/each}
             </div>
           {/if}

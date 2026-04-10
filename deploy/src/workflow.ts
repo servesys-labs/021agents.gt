@@ -72,6 +72,16 @@ async function memo<T>(key: string, loader: () => Promise<T>): Promise<T> {
 const MAX_PENDING_RESULT_BYTES = 500_000; // 500KB aggregate cap
 const MAX_COMPLETION_GATE_INTERVENTIONS = 2;
 
+type RunPhase =
+  | "setup"
+  | "governance"
+  | "planning"
+  | "executing"
+  | "synthesizing"
+  | "finalizing"
+  | "done"
+  | "error";
+
 function applyResultBackpressure(
   results: Array<{ result?: string; error?: string; [key: string]: any }>,
 ): void {
@@ -119,6 +129,71 @@ function looksLikePrematurePlanCompletion(
     };
   }
   return { blocked: false, reason: "" };
+}
+
+function isDeepResearchIntent(input: string): boolean {
+  const q = String(input || "").toLowerCase();
+  return /\b(competitive|deep research|market analysis|research report|benchmark|vendor analysis)\b/.test(q);
+}
+
+function extractJsonObject(text: string): Record<string, unknown> | null {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  const candidates: string[] = [raw];
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced?.[1]) candidates.push(fenced[1].trim());
+  const firstBrace = raw.indexOf("{");
+  const lastBrace = raw.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) candidates.push(raw.slice(firstBrace, lastBrace + 1));
+  for (const c of candidates) {
+    try {
+      const parsed = JSON.parse(c);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+    } catch {}
+  }
+  return null;
+}
+
+function validateResearchArtifact(artifact: Record<string, unknown>): boolean {
+  const companies = artifact.companies;
+  if (!Array.isArray(companies) || companies.length === 0) return false;
+  return companies.every((c) => c && typeof c === "object" && typeof (c as any).name === "string");
+}
+
+function renderResearchArtifactMarkdown(artifact: Record<string, unknown>): string {
+  const summary = String(artifact.summary || "").trim();
+  const confidence = String(artifact.confidence || "medium").trim();
+  const companies = Array.isArray(artifact.companies) ? artifact.companies : [];
+  const gaps = Array.isArray(artifact.gaps) ? artifact.gaps : [];
+  const lines: string[] = [];
+  if (summary) {
+    lines.push(summary, "");
+  }
+  lines.push("## Competitive Matrix");
+  lines.push("| Company | Offering | Contact | Social DM / Chat Widget | Meta-Agent / Eval Loops | Billing |");
+  lines.push("|---|---|---|---|---|---|");
+  for (const item of companies) {
+    const row = item as Record<string, unknown>;
+    lines.push(`| ${String(row.name || "-")} | ${String(row.offering || "-")} | ${String(row.contact || "-")} | ${String(row.social_dm_chat_widget || "-")} | ${String(row.meta_agent_loops || "-")} | ${String(row.billing_model || "-")} |`);
+  }
+  lines.push("", "## Sources");
+  for (const item of companies) {
+    const row = item as Record<string, unknown>;
+    const company = String(row.name || "Source");
+    const evidence = Array.isArray(row.evidence) ? row.evidence : [];
+    for (const ev of evidence) {
+      const e = ev as Record<string, unknown>;
+      const label = String(e.label || company);
+      const url = String(e.url || "").trim();
+      if (url) lines.push(`- [${label}](${url})`);
+    }
+  }
+  if (gaps.length > 0) {
+    lines.push("", "## Open Gaps");
+    for (const g of gaps) lines.push(`- ${String(g)}`);
+  }
+  lines.push("", `Confidence: ${confidence}`);
+  return lines.join("\n");
 }
 
 // ── Types ────────────────────────────────────────────────────
@@ -728,8 +803,32 @@ ALWAYS:
     const startTime = Date.now();
     let terminationReason = "completed";
     const planOnlyRequested = userRequestedPlanOnly(p.input);
+    const researchIntent = isDeepResearchIntent(p.input);
+    let artifactSynthesisAttempted = false;
+    let artifactSynthesisValidated = false;
     let completionGateInterventions = 0;
     let completionGateReason = "";
+    let runPhase: RunPhase = "setup";
+    const runPhaseHistory: RunPhase[] = ["setup"];
+    const allowedTransitions: Record<RunPhase, RunPhase[]> = {
+      setup: ["governance", "planning", "finalizing", "error"],
+      governance: ["planning", "finalizing", "error"],
+      planning: ["executing", "synthesizing", "finalizing", "error"],
+      executing: ["planning", "synthesizing", "finalizing", "error"],
+      synthesizing: ["planning", "finalizing", "error"],
+      finalizing: ["done", "error"],
+      done: [],
+      error: [],
+    };
+    const transitionPhase = (next: RunPhase) => {
+      if (next === runPhase) return;
+      const allowed = allowedTransitions[runPhase] || [];
+      if (!allowed.includes(next)) {
+        throw new NonRetryableError(`Invalid run phase transition: ${runPhase} -> ${next}`);
+      }
+      runPhase = next;
+      runPhaseHistory.push(next);
+    };
     const turnRecords: Array<{
       turn: number; model: string; content: string;
       input_tokens: number; output_tokens: number; cost_usd: number;
@@ -852,6 +951,7 @@ ALWAYS:
       // Consolidates the guards that ran during setup + pre-turn checks into
       // a single event so the UI pipeline's Governance step has real content.
       if (!governanceEmitted) {
+        transitionPhase("governance");
         const governanceStartedAt = Date.now();
         const guards: Array<{ name: string; passed: boolean; detail?: string }> = [
           {
@@ -894,6 +994,7 @@ ALWAYS:
       }
 
       // ── LLM call — retryable, checkpointed ──
+      transitionPhase("planning");
       await this.emit(p.progress_key, { type: "turn_start", turn, model: selectedRoute.model, plan: config.plan });
       const preLlmMs = Date.now() - turnStartedAt;
 
@@ -1066,6 +1167,7 @@ ALWAYS:
 
       // ── No tools → final answer (stream as tokens for the frontend) ──
       if (llm.tool_calls.length === 0) {
+        transitionPhase("synthesizing");
         const completionGate = planOnlyRequested
           ? { blocked: false, reason: "" }
           : looksLikePrematurePlanCompletion(llm.content, p.input, totalToolCalls);
@@ -1212,6 +1314,7 @@ ALWAYS:
 
       // Filter out discover-tools from actual execution
       const executableCalls = llm.tool_calls.filter(tc => tc.name !== "discover-tools");
+      transitionPhase("executing");
       const toolExecStartedAt = Date.now();
 
       // ── Phase 1.2: Pre-execution budget check ──
@@ -1618,6 +1721,7 @@ ALWAYS:
 
     // If loop ended without final answer, do one more LLM call without tools
     if (!finalOutput && totalToolCalls > 0) {
+      transitionPhase("synthesizing");
       const recovery = await step.do("recovery-llm", {
         retries: { limit: 2, delay: "3 seconds", backoff: "exponential" },
         timeout: "2 minutes",
@@ -1640,6 +1744,81 @@ ALWAYS:
       totalCost += recovery.cost_usd;
       totalInputTokens += recovery.input_tokens;
       totalOutputTokens += recovery.output_tokens;
+    }
+
+    // ── Artifact-schema synthesis for deep research tasks ──
+    // Build a canonical structured artifact first, then render final markdown.
+    if (researchIntent && finalOutput) {
+      artifactSynthesisAttempted = true;
+      const synthesized = await step.do("artifact-synthesis", {
+        retries: { limit: 2, delay: "3 seconds", backoff: "linear" },
+        timeout: "2 minutes",
+      }, async () => {
+        const { callLLM } = await memo("llm", () => import("./runtime/llm"));
+        const schemaPrompt = [
+          "Produce STRICT JSON only (no prose) with this exact schema:",
+          "{",
+          '  "summary": string,',
+          '  "companies": [',
+          "    {",
+          '      "name": string,',
+          '      "offering": string,',
+          '      "contact": string,',
+          '      "social_dm_chat_widget": string,',
+          '      "meta_agent_loops": string,',
+          '      "billing_model": string,',
+          '      "evidence": [ { "label": string, "url": string } ]',
+          "    }",
+          "  ],",
+          '  "gaps": string[],',
+          '  "confidence": "high" | "medium" | "low"',
+          "}",
+          "At least 3 companies, and each company must include at least 1 URL in evidence.",
+          "If evidence is weak, state that in gaps and confidence.",
+        ].join("\n");
+        const response = await callLLM(
+          {
+            AI: this.env.AI,
+            CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID,
+            AI_GATEWAY_ID: this.env.AI_GATEWAY_ID,
+            AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN,
+            CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
+            GPU_SERVICE_KEY: this.env.GPU_SERVICE_KEY,
+          } as any,
+          [
+            { role: "system", content: schemaPrompt },
+            { role: "user", content: `User request:\n${p.input}\n\nCurrent draft output:\n${finalOutput.slice(0, 12000)}` },
+          ] as any,
+          [],
+          { model: selectedRoute.model, provider: selectedRoute.provider },
+        );
+        return {
+          content: response.content || "",
+          cost_usd: response.cost_usd || 0,
+          input_tokens: response.usage?.input_tokens || 0,
+          output_tokens: response.usage?.output_tokens || 0,
+        };
+      });
+      totalCost += synthesized.cost_usd || 0;
+      totalInputTokens += synthesized.input_tokens || 0;
+      totalOutputTokens += synthesized.output_tokens || 0;
+
+      const artifact = extractJsonObject(synthesized.content || "");
+      if (artifact && validateResearchArtifact(artifact)) {
+        artifactSynthesisValidated = true;
+        finalOutput = renderResearchArtifactMarkdown(artifact);
+        await this.emit(p.progress_key, {
+          type: "system",
+          message: "Deep-research artifact schema synthesis completed.",
+          artifact_schema: "research_v1",
+        });
+      } else {
+        await this.emit(p.progress_key, {
+          type: "warning",
+          message: "Deep-research artifact synthesis failed validation; falling back to textual output.",
+          artifact_schema: "research_v1",
+        });
+      }
     }
 
     queueSessionEpisodicNote((this.env as any).HYPERDRIVE, {
@@ -1668,15 +1847,21 @@ ALWAYS:
     };
 
     // Emit final done event (include conversation_id if present)
+    transitionPhase("finalizing");
     await step.do("finalize", async () => {
       await this.emit(p.progress_key, {
         type: "done",
         ...result,
+        run_phase: runPhase,
+        run_phase_history: runPhaseHistory,
+        artifact_schema: researchIntent ? "research_v1" : undefined,
+        artifact_schema_validated: researchIntent ? artifactSynthesisValidated : undefined,
         source: "workflow_kv",
         latency_ms: Date.now() - startTime,
         ...(p.conversation_id ? { conversation_id: p.conversation_id } : {}),
       });
     });
+    transitionPhase("done");
 
     // Cloud C3.3: Compact KV progress events — remove intermediate events
     await compactProgressEvents(this.env.AGENT_PROGRESS_KV, p.progress_key);
@@ -1749,6 +1934,53 @@ ALWAYS:
             details: {
               completion_gate_interventions: completionGateInterventions,
               completion_gate_reason: completionGateReason || "unknown",
+            },
+            created_at: Date.now(),
+          },
+        });
+      }
+
+      await queue.send({
+        type: "event",
+        payload: {
+          org_id: p.org_id || "",
+          agent_name: p.agent_name || "",
+          session_id: sessionId,
+          trace_id: traceId,
+          turn: lastWorkflowTurn || 0,
+          event_type: "run_phase_state",
+          action: "final_state",
+          plan: config.plan || "",
+          provider: config.provider || "",
+          model: config.model || "",
+          tool_name: "",
+          status: runPhase,
+          latency_ms: 0,
+          details: { run_phase: runPhase, run_phase_history: runPhaseHistory },
+          created_at: Date.now(),
+        },
+      });
+
+      if (researchIntent) {
+        await queue.send({
+          type: "event",
+          payload: {
+            org_id: p.org_id || "",
+            agent_name: p.agent_name || "",
+            session_id: sessionId,
+            trace_id: traceId,
+            turn: lastWorkflowTurn || 0,
+            event_type: "research_artifact",
+            action: "schema_synthesis",
+            plan: config.plan || "",
+            provider: config.provider || "",
+            model: config.model || "",
+            tool_name: "",
+            status: artifactSynthesisValidated ? "ok" : "fallback",
+            latency_ms: 0,
+            details: {
+              artifact_synthesis_attempted: artifactSynthesisAttempted,
+              artifact_synthesis_validated: artifactSynthesisValidated,
             },
             created_at: Date.now(),
           },
