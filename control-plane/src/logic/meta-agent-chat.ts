@@ -2845,9 +2845,13 @@ export async function runMetaChat(
       },
     );
 
-    const turnCostUsd = (llmResult as any).cost_usd || 0;
-    const turnInputTokens = (llmResult as any).usage?.input_tokens || (llmResult as any).input_tokens || 0;
-    const turnOutputTokens = (llmResult as any).usage?.output_tokens || (llmResult as any).output_tokens || 0;
+    const turnInputTokens = llmResult.usage?.prompt_tokens || (llmResult as any).usage?.input_tokens || 0;
+    const turnOutputTokens = llmResult.usage?.completion_tokens || (llmResult as any).usage?.output_tokens || 0;
+    // Calculate cost from tokens — Sonnet 4.6: $3.00/M input, $15.00/M output
+    const SONNET_INPUT_COST_PER_M = 3.00;
+    const SONNET_OUTPUT_COST_PER_M = 15.00;
+    const turnCostUsd = (turnInputTokens / 1_000_000) * SONNET_INPUT_COST_PER_M
+                      + (turnOutputTokens / 1_000_000) * SONNET_OUTPUT_COST_PER_M;
     totalCost += turnCostUsd;
     totalInputTokens += turnInputTokens;
     totalOutputTokens += turnOutputTokens;
