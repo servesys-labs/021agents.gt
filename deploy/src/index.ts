@@ -2064,7 +2064,9 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
 
               let lastActivity = Date.now();
               while (!done && Date.now() - start < maxWait) {
-                await new Promise(r => setTimeout(r, 500));
+                // Match WebSocket behavior: poll faster in the first 30s.
+                const pollInterval = Date.now() - start < 30_000 ? 250 : 1000;
+                await new Promise(r => setTimeout(r, pollInterval));
 
                 // Heartbeat every 15s to keep connection alive
                 if (Date.now() - lastActivity > 15000) {
