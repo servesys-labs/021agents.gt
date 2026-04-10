@@ -82,11 +82,22 @@ observabilityRoutes.openapi(summaryRoute, async (c): Promise<any> => {
            COALESCE(SUM(t.output_tokens), 0) as output_tokens,
            COALESCE(SUM(t.cost_usd), 0) as turn_cost,
            COALESCE(AVG(t.latency_ms), 0) as avg_turn_latency_ms,
+           COALESCE(AVG(t.llm_latency_ms), 0) as avg_llm_latency_ms,
+           COALESCE(AVG(NULLIF(t.ttft_ms, 0)), 0) as avg_ttft_ms,
+           COALESCE(AVG(t.pre_llm_ms), 0) as avg_pre_llm_ms,
+           COALESCE(AVG(t.tool_exec_ms), 0) as avg_tool_exec_ms,
+           COALESCE(AVG(t.llm_retry_count), 0) as avg_llm_retry_count,
+           COALESCE(AVG(t.queue_delay_ms), 0) as avg_queue_delay_ms,
+           COALESCE(AVG(t.tokens_per_sec), 0) as avg_tokens_per_sec,
+           COALESCE(AVG(t.llm_cost_usd), 0) as avg_llm_cost_usd,
+           COALESCE(AVG(t.tool_cost_usd), 0) as avg_tool_cost_usd,
+           COALESCE(AVG(CASE WHEN t.compaction_triggered THEN 1 ELSE 0 END), 0) as compaction_turn_rate,
            COUNT(DISTINCT t.model_used) as models_used
     FROM turns t
     JOIN sessions s ON s.session_id = t.session_id
     WHERE s.org_id = ${user.org_id} AND t.created_at >= ${since}
   `;
+  const tokensRow = (tokens ?? {}) as Record<string, unknown>;
 
   // Top models by usage
   const topModels = await sql`
@@ -117,13 +128,23 @@ observabilityRoutes.openapi(summaryRoute, async (c): Promise<any> => {
     total_sessions: Number(sessions.total),
     total_cost_usd: Number(sessions.cost),
     avg_latency_seconds: Number(sessions.avg_latency),
-    avg_turn_latency_ms: Number(tokens.avg_turn_latency_ms),
+    avg_turn_latency_ms: Number(tokensRow.avg_turn_latency_ms || 0),
+    avg_llm_latency_ms: Number(tokensRow.avg_llm_latency_ms || 0),
+    avg_ttft_ms: Number(tokensRow.avg_ttft_ms || 0),
+    avg_pre_llm_ms: Number(tokensRow.avg_pre_llm_ms || 0),
+    avg_tool_exec_ms: Number(tokensRow.avg_tool_exec_ms || 0),
+    avg_llm_retry_count: Number(tokensRow.avg_llm_retry_count || 0),
+    avg_queue_delay_ms: Number(tokensRow.avg_queue_delay_ms || 0),
+    avg_tokens_per_sec: Number(tokensRow.avg_tokens_per_sec || 0),
+    avg_llm_cost_usd: Number(tokensRow.avg_llm_cost_usd || 0),
+    avg_tool_cost_usd: Number(tokensRow.avg_tool_cost_usd || 0),
+    compaction_turn_rate: Number(tokensRow.compaction_turn_rate || 0),
     success_rate: Number(sessions.success_rate),
     error_count: Number(sessions.error_count),
     total_steps: Number(sessions.total_steps),
-    total_input_tokens: Number(tokens.input_tokens),
-    total_output_tokens: Number(tokens.output_tokens),
-    models_used: Number(tokens.models_used),
+    total_input_tokens: Number(tokensRow.input_tokens || 0),
+    total_output_tokens: Number(tokensRow.output_tokens || 0),
+    models_used: Number(tokensRow.models_used || 0),
     top_models: topModels.map((m: any) => ({ model: m.model, turns: Number(m.turns), input_tokens: Number(m.input_tokens), output_tokens: Number(m.output_tokens) })),
     top_agents: topAgents.map((a: any) => ({ agent: a.agent_name, sessions: Number(a.sessions), steps: Number(a.total_steps), avg_latency: Number(a.avg_latency) })),
     daily: dailySessions.map((d: any) => ({ day: d.day, sessions: Number(d.sessions), steps: Number(d.steps), cost: Number(d.cost) })),

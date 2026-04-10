@@ -39,6 +39,13 @@ export interface LLMResponse {
   };
   cost_usd: number;
   latency_ms: number;
+  /**
+   * Time from request initiation to response headers received. Closest
+   * analog to TTFT (time to first token) for non-streaming responses —
+   * measures gateway + provider routing + first-byte time, distinct
+   * from latency_ms which includes the full body parse.
+   */
+  ttft_ms?: number;
   // AI Gateway correlation IDs — used to look up exact cost from gateway logs API
   gateway_log_id?: string;
   gateway_event_id?: string;

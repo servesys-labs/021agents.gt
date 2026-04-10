@@ -143,6 +143,7 @@ export interface RunOutput {
   output_tokens: number;
   session_id: string;
   trace_id: string;
+  termination_reason?: string;
 }
 
 interface LLMResult {
@@ -154,6 +155,10 @@ interface LLMResult {
   output_tokens: number;
   // Observability enrichment (migration 026)
   llm_latency_ms: number;
+  /** Time from request initiation to response headers received (TTFT proxy). */
+  ttft_ms?: number;
+  /** Number of retries performed inside callLLM before success (0 = first attempt). */
+  retry_count?: number;
   stop_reason?: string;
   refusal?: boolean;
   cache_read_tokens: number;
@@ -703,6 +708,7 @@ ALWAYS:
     const WORKFLOW_STEP_LIMIT = 900;
     let workflowStepCount = 2; // bootstrap + hydrate-workspace already consumed
     const startTime = Date.now();
+    let terminationReason = "completed";
     const turnRecords: Array<{
       turn: number; model: string; content: string;
       input_tokens: number; output_tokens: number; cost_usd: number;
@@ -710,8 +716,18 @@ ALWAYS:
       errors: string[];
       // Observability enrichment
       llm_latency_ms?: number; stop_reason?: string; refusal?: boolean;
+      ttft_ms?: number;
+      llm_retry_count?: number;
+      llm_cost_usd?: number;
+      tool_cost_usd?: number;
+      tokens_per_sec?: number;
+      compaction_triggered?: boolean;
+      messages_dropped?: number;
       cache_read_tokens?: number; cache_write_tokens?: number;
       gateway_log_id?: string;
+      phase_pre_llm_ms?: number;
+      phase_tool_exec_ms?: number;
+      phase_total_turn_ms?: number;
     }> = [];
 
     // ── Phase 1.4: Loop detection state ──
@@ -724,11 +740,15 @@ ALWAYS:
     let governanceEmitted = false;
 
     for (let turn = 1; turn <= config.max_turns; turn++) {
+      let turnCompactionTriggered = false;
+      let turnMessagesDropped = 0;
      try { // Phase 1.4: wrap turn body in try-catch for resilient error handling
       lastWorkflowTurn = turn;
+      const turnStartedAt = Date.now();
 
       // ── Wall-clock guard (4.5 min cap — 30s buffer before CF 5-min limit) ──
       if (Date.now() - startTime > 270_000) {
+        terminationReason = "wall_clock_limit";
         logger.warn("wall_clock_limit", { elapsed_ms: Date.now() - startTime, turn });
         await this.emit(p.progress_key, { type: "error", message: "This task is taking longer than expected. I've saved my progress — please send a follow-up message to continue." });
         finalOutput = "I ran out of time on this turn (hit the 4.5-minute wall-clock limit). My progress so far has been saved. Please send a follow-up message and I'll pick up where I left off.";
@@ -737,6 +757,7 @@ ALWAYS:
 
       // ── Budget check (no step needed — pure logic) ──
       if (totalCost >= config.budget_limit_usd) {
+        terminationReason = "budget_exhausted";
         const budgetErr = new BudgetError(totalCost, config.budget_limit_usd);
         await this.emit(p.progress_key, { type: "error", message: budgetErr.userMessage || "Budget exhausted", code: budgetErr.code });
         break;
@@ -746,6 +767,7 @@ ALWAYS:
       // Each turn uses at minimum 1 step (LLM call) + N steps (tool calls).
       // Exit early to leave room for finalization steps (recovery-llm, finalize, write-telemetry).
       if (workflowStepCount >= WORKFLOW_STEP_LIMIT) {
+        terminationReason = "workflow_step_limit";
         logger.warn("workflow_step_limit", { steps: workflowStepCount, turn, limit: WORKFLOW_STEP_LIMIT });
         await this.emit(p.progress_key, {
           type: "error",
@@ -786,9 +808,11 @@ ALWAYS:
         const dropped = messages.length - compacted.length;
         messages = compacted;
         compactionCount++;
+        turnCompactionTriggered = true;
+        turnMessagesDropped += Math.max(0, dropped);
         await this.emit(p.progress_key, {
           type: "system",
-          content: `Context compressed: ${dropped} messages summarized to stay within token limits.`,
+          message: `Context compressed: ${dropped} messages summarized to stay within token limits.`,
         });
       }
 
@@ -851,6 +875,7 @@ ALWAYS:
 
       // ── LLM call — retryable, checkpointed ──
       await this.emit(p.progress_key, { type: "turn_start", turn, model: route.model, plan: config.plan });
+      const preLlmMs = Date.now() - turnStartedAt;
 
       const llm = await step.do(`llm-${turn}`, {
         retries: { limit: 3, delay: "5 seconds", backoff: "exponential" },
@@ -874,12 +899,80 @@ ALWAYS:
           }
         }
 
-        const response = await callLLM(
-          { AI: this.env.AI, CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID, AI_GATEWAY_ID: this.env.AI_GATEWAY_ID, AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN, CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN, GPU_SERVICE_KEY: this.env.GPU_SERVICE_KEY } as any,
-          messages.map(m => ({ role: m.role as any, content: m.content || "", tool_calls: m.tool_calls, tool_call_id: m.tool_call_id, name: m.name })),
-          toolDefs,
-          { model: route.model, provider: route.provider, max_tokens: route.max_tokens },
-        );
+        // Reactive compaction fallback — when the LLM rejects the request
+        // because the context window is exceeded (despite proactive
+        // shouldCompact() at 85%), aggressively compact the message
+        // history and retry once. This is the "reactive layer" of the
+        // 4-layer compaction model the codebase already comments about.
+        function isContextOverflow(err: any): boolean {
+          const msg = String(err?.message || err || "").toLowerCase();
+          return (
+            msg.includes("context_length_exceeded") ||
+            msg.includes("context length") ||
+            msg.includes("context window") ||
+            msg.includes("prompt is too long") ||
+            msg.includes("max_tokens_to_sample") ||
+            msg.includes("request_too_large") ||
+            msg.includes("input is too long") ||
+            msg.includes("maximum context")
+          );
+        }
+
+        const llmEnv = {
+          AI: this.env.AI,
+          CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID,
+          AI_GATEWAY_ID: this.env.AI_GATEWAY_ID,
+          AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN,
+          CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
+          GPU_SERVICE_KEY: this.env.GPU_SERVICE_KEY,
+        };
+
+        let response;
+        try {
+          response = await callLLM(
+            llmEnv as any,
+            messages.map(m => ({ role: m.role as any, content: m.content || "", tool_calls: m.tool_calls, tool_call_id: m.tool_call_id, name: m.name })),
+            toolDefs,
+            { model: route.model, provider: route.provider, max_tokens: route.max_tokens },
+          );
+        } catch (err: any) {
+          if (!isContextOverflow(err)) {
+            throw err; // Not a context error — let the Workflow retry path handle it
+          }
+          logger.warn("reactive_compaction_triggered", {
+            turn,
+            error: String(err.message || err).slice(0, 200),
+            messages_before: messages.length,
+          });
+          // Aggressive compaction: keep only system + last 4 messages
+          // (vs proactive layer which keeps last 6). This is the
+          // emergency layer — sacrifices more history to make the
+          // request fit no matter what.
+          const { compactMessages: compactNow } = await memo("compact", () => import("./runtime/compact"));
+          const compacted = await compactNow(messages, 4);
+          const dropped = messages.length - compacted.length;
+          messages = compacted;
+          compactionCount++;
+          turnCompactionTriggered = true;
+          turnMessagesDropped += Math.max(0, dropped);
+          logger.info("reactive_compaction_complete", {
+            turn,
+            dropped,
+            messages_after: messages.length,
+          });
+          await this.emit(p.progress_key, {
+            type: "system",
+            message: `Context overflow recovered: aggressively compacted ${dropped} messages and retrying.`,
+          });
+          // Retry once with the compacted history. If this fails too,
+          // the Workflow's step retry mechanism will catch it.
+          response = await callLLM(
+            llmEnv as any,
+            messages.map(m => ({ role: m.role as any, content: m.content || "", tool_calls: m.tool_calls, tool_call_id: m.tool_call_id, name: m.name })),
+            toolDefs,
+            { model: route.model, provider: route.provider, max_tokens: route.max_tokens },
+          );
+        }
 
         return {
           content: response.content || "",
@@ -889,6 +982,8 @@ ALWAYS:
           input_tokens: response.usage?.input_tokens || 0,
           output_tokens: response.usage?.output_tokens || 0,
           llm_latency_ms: response.latency_ms || 0,
+          ttft_ms: response.ttft_ms,
+          retry_count: response.retry_count,
           stop_reason: response.stop_reason,
           refusal: response.refusal,
           cache_read_tokens: response.usage?.cache_read_tokens || 0,
@@ -935,6 +1030,7 @@ ALWAYS:
 
       // ── Phase 9.3: Handle model refusal ──
       if (llm.refusal) {
+        terminationReason = "model_refusal";
         await this.emit(p.progress_key, {
           type: "warning",
           message: "Model declined this request due to usage policies.",
@@ -950,6 +1046,11 @@ ALWAYS:
 
       // ── No tools → final answer (stream as tokens for the frontend) ──
       if (llm.tool_calls.length === 0) {
+        const totalTurnMs = Date.now() - turnStartedAt;
+        const tokensPerSec = llm.output_tokens > 0
+          ? Number((llm.output_tokens / Math.max(0.001, llm.llm_latency_ms / 1000)).toFixed(4))
+          : 0;
+        terminationReason = llm.stop_reason || "completed";
         finalOutput = llm.content;
         // Emit content as token chunks so frontend shows streaming
         const words = llm.content.split(/(\s+)/);
@@ -966,17 +1067,32 @@ ALWAYS:
           tokens: llm.input_tokens + llm.output_tokens,
           input_tokens: llm.input_tokens,
           output_tokens: llm.output_tokens,
+          latency_ms: totalTurnMs,
+          llm_latency_ms: llm.llm_latency_ms,
+          phase_pre_llm_ms: preLlmMs,
+          phase_tool_exec_ms: 0,
           done: true,
         });
         // Record final answer turn
         turnRecords.push({
           turn, model: llm.model, content: llm.content,
           input_tokens: llm.input_tokens, output_tokens: llm.output_tokens,
-          cost_usd: llm.cost_usd, latency_ms: llm.llm_latency_ms,
+          cost_usd: llm.cost_usd, latency_ms: totalTurnMs,
           tool_calls: [], tool_results: [], errors: [],
           stop_reason: llm.stop_reason, refusal: llm.refusal,
+          llm_latency_ms: llm.llm_latency_ms,
+          ttft_ms: llm.ttft_ms,
+          llm_retry_count: llm.retry_count || 0,
+          llm_cost_usd: llm.cost_usd,
+          tool_cost_usd: 0,
+          tokens_per_sec: tokensPerSec,
+          compaction_triggered: turnCompactionTriggered,
+          messages_dropped: turnMessagesDropped,
           cache_read_tokens: llm.cache_read_tokens, cache_write_tokens: llm.cache_write_tokens,
           gateway_log_id: llm.gateway_log_id,
+          phase_pre_llm_ms: preLlmMs,
+          phase_tool_exec_ms: 0,
+          phase_total_turn_ms: totalTurnMs,
         });
         break;
       }
@@ -1030,6 +1146,7 @@ ALWAYS:
 
       // Filter out discover-tools from actual execution
       const executableCalls = llm.tool_calls.filter(tc => tc.name !== "discover-tools");
+      const toolExecStartedAt = Date.now();
 
       // ── Phase 1.2: Pre-execution budget check ──
       // Estimate total tool cost before executing. Prevents overspend when
@@ -1142,6 +1259,7 @@ ALWAYS:
       for (const tc of executableCalls) sessionWorkflowToolNames.push(tc.name);
 
       // Accumulate tool costs (was missing — caused silent zero billing for tools)
+      const toolCostUsd = toolResultEntries.reduce((sum, tr) => sum + (tr.cost_usd || 0), 0);
       for (const tr of toolResultEntries) {
         totalCost += tr.cost_usd || 0;
       }
@@ -1240,6 +1358,10 @@ ALWAYS:
         tokens: llm.input_tokens + llm.output_tokens,
         input_tokens: llm.input_tokens,
         output_tokens: llm.output_tokens,
+        latency_ms: Date.now() - turnStartedAt,
+        llm_latency_ms: llm.llm_latency_ms,
+        phase_pre_llm_ms: preLlmMs,
+        phase_tool_exec_ms: Date.now() - toolExecStartedAt,
         done: false,
         tool_calls: executableCalls.length,
       });
@@ -1251,13 +1373,26 @@ ALWAYS:
         content: llm.content,
         input_tokens: llm.input_tokens,
         output_tokens: llm.output_tokens,
-        cost_usd: llm.cost_usd + toolResultEntries.reduce((s, t) => s + (t.cost_usd || 0), 0),
-        latency_ms: llm.llm_latency_ms,
+        cost_usd: llm.cost_usd + toolCostUsd,
+        latency_ms: Date.now() - turnStartedAt,
+        llm_latency_ms: llm.llm_latency_ms,
+        ttft_ms: llm.ttft_ms,
+        llm_retry_count: llm.retry_count || 0,
+        llm_cost_usd: llm.cost_usd,
+        tool_cost_usd: toolCostUsd,
+        tokens_per_sec: llm.output_tokens > 0
+          ? Number((llm.output_tokens / Math.max(0.001, llm.llm_latency_ms / 1000)).toFixed(4))
+          : 0,
+        compaction_triggered: turnCompactionTriggered,
+        messages_dropped: turnMessagesDropped,
         stop_reason: llm.stop_reason,
         refusal: llm.refusal,
         cache_read_tokens: llm.cache_read_tokens,
         cache_write_tokens: llm.cache_write_tokens,
         gateway_log_id: llm.gateway_log_id,
+        phase_pre_llm_ms: preLlmMs,
+        phase_tool_exec_ms: Date.now() - toolExecStartedAt,
+        phase_total_turn_ms: Date.now() - turnStartedAt,
         tool_calls: executableCalls.map(tc => {
           let args: Record<string, unknown> = {};
           try { args = JSON.parse(tc.arguments || "{}"); } catch {}
@@ -1292,8 +1427,9 @@ ALWAYS:
           );
           for (const mm of mailMessages) {
             if (mm.message_type === "shutdown") {
-              await this.emit(p.progress_key, { type: "system", content: "Received shutdown signal from parent agent." });
+              await this.emit(p.progress_key, { type: "system", message: "Received shutdown signal from parent agent." });
               finalOutput = finalOutput || "Shutdown requested by parent agent.";
+              terminationReason = "parent_shutdown";
               shutdownRequested = true;
               break;
             }
@@ -1331,6 +1467,7 @@ ALWAYS:
           logger.warn("loop_detected", { tool: loopTool, repeat_count: repeatCount, turn });
           (this.env as any).TELEMETRY_QUEUE?.send?.({ type: "loop_detected", payload: { session_id: sessionId, tool: loopTool, repeat_count: repeatCount, turn, org_id: p.org_id, agent_name: p.agent_name } }).catch(() => {});
           finalOutput = `I encountered a repeated failure with the ${loopTool} tool and stopped to avoid wasting resources. Please check the tool configuration or try a different approach.`;
+          terminationReason = "loop_detected";
           break;
         }
       }
@@ -1345,6 +1482,7 @@ ALWAYS:
           message: `Stuck pattern detected: ${failingTools.join(", ")} failing repeatedly (${errorCount}/${LOOP_DETECTION_WINDOW} errors). Stopping.`,
         });
         finalOutput = `Multiple tools are failing repeatedly (${failingTools.join(", ")}). Stopped to avoid wasting resources.`;
+        terminationReason = "loop_detected";
         break;
       }
 
@@ -1366,6 +1504,27 @@ ALWAYS:
        const isStructured = turnErr instanceof AgentOSError;
        const errMsg = isStructured ? turnErr.userMessage || turnErr.message : (turnErr?.message || String(turnErr));
        const errCode = isStructured ? turnErr.code : (turnErr?.name === "NonRetryableError" ? "NON_RETRYABLE" : "TURN_ERROR");
+
+       // Reactive context-limit fallback: compact immediately and retry turn once.
+       if (
+         bootstrap.featureFlags?.context_compression !== false &&
+         /context length|context window|prompt is too long|too many tokens|maximum context/i.test(errMsg)
+       ) {
+         const compacted = await compactMessages(messages, 6);
+         if (compacted.length < messages.length) {
+           const dropped = messages.length - compacted.length;
+           messages = compacted;
+           compactionCount++;
+          turnCompactionTriggered = true;
+          turnMessagesDropped += Math.max(0, dropped);
+           await this.emit(p.progress_key, {
+             type: "warning",
+             message: `Model hit context limits. Auto-compacted ${dropped} messages and retrying turn ${turn}.`,
+           });
+           continue;
+         }
+       }
+
        logger.error("turn_error", { turn, error: errMsg.slice(0, 500), code: errCode, retryable: isStructured ? turnErr.retryable : undefined });
        await this.emit(p.progress_key, {
          type: "error", message: `Turn ${turn} failed: ${errMsg.slice(0, 200)}`,
@@ -1374,6 +1533,7 @@ ALWAYS:
        // NonRetryableErrors and non-retryable AgentOSErrors should stop the loop
        if (turnErr instanceof NonRetryableError || (isStructured && !turnErr.retryable)) {
          finalOutput = `Error: ${errMsg.slice(0, 500)}`;
+         terminationReason = "turn_error";
          break;
        }
        // For other errors, let the Workflow retry mechanism handle it
@@ -1431,6 +1591,7 @@ ALWAYS:
       output_tokens: totalOutputTokens,
       session_id: sessionId,
       trace_id: traceId,
+      termination_reason: terminationReason,
     };
 
     // Emit final done event (include conversation_id if present)
@@ -1438,6 +1599,7 @@ ALWAYS:
       await this.emit(p.progress_key, {
         type: "done",
         ...result,
+        latency_ms: Date.now() - startTime,
         ...(p.conversation_id ? { conversation_id: p.conversation_id } : {}),
       });
     });
@@ -1486,6 +1648,7 @@ ALWAYS:
           feature_flags: JSON.stringify(bootstrap.featureFlags || {}),
           repair_count: repairCount,
           compaction_count: compactionCount,
+          termination_reason: result.termination_reason || "completed",
           trace_id: traceId,
           channel: p.channel || "workflow",
           ...(p.conversation_id ? { conversation_id: p.conversation_id } : {}),
@@ -1505,6 +1668,16 @@ ALWAYS:
             output_tokens: turnData.output_tokens,
             latency_ms: turnData.latency_ms,
             llm_latency_ms: turnData.llm_latency_ms || turnData.latency_ms,
+            ttft_ms: turnData.ttft_ms ?? null,
+            pre_llm_ms: turnData.phase_pre_llm_ms ?? null,
+            tool_exec_ms: turnData.phase_tool_exec_ms ?? null,
+            llm_retry_count: turnData.llm_retry_count || 0,
+            llm_cost_usd: turnData.llm_cost_usd || 0,
+            tool_cost_usd: turnData.tool_cost_usd || 0,
+            tokens_per_sec: turnData.tokens_per_sec ?? null,
+            compaction_triggered: Boolean(turnData.compaction_triggered),
+            messages_dropped: turnData.messages_dropped || 0,
+            created_at: Date.now(),
             llm_content: (turnData.content || "").slice(0, 5000),
             cost_total_usd: turnData.cost_usd,
             stop_reason: turnData.stop_reason || null,
@@ -1515,6 +1688,33 @@ ALWAYS:
             tool_calls: JSON.stringify(turnData.tool_calls || []),
             tool_results: JSON.stringify(turnData.tool_results || []),
             errors: JSON.stringify(turnData.errors || []),
+          },
+        })
+      ));
+
+      // Per-turn phase timings for latency debugging and regression tracking.
+      await Promise.all(turnRecords.map(turnData =>
+        queue.send({
+          type: "event",
+          payload: {
+            session_id: sessionId,
+            turn: turnData.turn,
+            event_type: "turn_phase",
+            action: "timing",
+            plan: config.plan || "",
+            provider: config.provider || "",
+            model: turnData.model || config.model || "",
+            tool_name: "",
+            status: "ok",
+            latency_ms: turnData.phase_total_turn_ms || turnData.latency_ms || 0,
+            details: {
+              pre_llm_ms: turnData.phase_pre_llm_ms || 0,
+              llm_ms: turnData.llm_latency_ms || turnData.latency_ms || 0,
+              ttft_ms: turnData.ttft_ms || 0,
+              tool_exec_ms: turnData.phase_tool_exec_ms || 0,
+              total_turn_ms: turnData.phase_total_turn_ms || turnData.latency_ms || 0,
+            },
+            created_at: Date.now(),
           },
         })
       ));

@@ -47,9 +47,18 @@ type WsSend = (data: string) => void;
  * during long-running tools (>30s with no output).
  *
  * Exported for use by DO WebSocket handlers and workflow progress emission.
+ *
+ * Event shape conforms to ToolProgressEvent in protocol.ts:
+ *   { type: "tool_progress", name, tool_call_id, progress: {...} }
+ *
+ * Previously this helper sent a flat shape (tool/status/elapsed_ms/message)
+ * that the frontend silently dropped because it didn't match the union
+ * type. The fix moves the runtime fields into a `progress` sub-object so
+ * any consumer typed against ToolProgressEvent can read them.
  */
 export function withProgress(
   toolName: string,
+  toolCallId: string,
   promise: Promise<string>,
   send?: WsSend,
   intervalMs = 5000,
@@ -62,13 +71,16 @@ export function withProgress(
 
   const timer = setInterval(() => {
     elapsed += intervalMs;
-    // Tool progress event
+    // Tool progress event — matches ToolProgressEvent in protocol.ts
     send(JSON.stringify({
       type: "tool_progress",
-      tool: toolName,
-      status: "running",
-      elapsed_ms: elapsed,
-      message: `Still running... (${Math.round(elapsed / 1000)}s elapsed)`,
+      name: toolName,
+      tool_call_id: toolCallId,
+      progress: {
+        status: "running",
+        elapsed_ms: elapsed,
+        message: `Still running... (${Math.round(elapsed / 1000)}s elapsed)`,
+      },
     }));
     // Phase 3.4: Heartbeat every 15s
     if (Date.now() - lastHeartbeat >= HEARTBEAT_INTERVAL) {

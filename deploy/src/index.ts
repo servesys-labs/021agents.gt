@@ -7748,6 +7748,7 @@ export default {
               detailed_cost, feature_flags,
               total_cache_read_tokens, total_cache_write_tokens,
               repair_count, compaction_count,
+              termination_reason,
               created_at
             ) VALUES (
               ${p.session_id}, ${p.org_id}, ${p.project_id || ""},
@@ -7760,6 +7761,7 @@ export default {
               ${jp(p.feature_flags, null)},
               ${p.total_cache_read_tokens || 0}, ${p.total_cache_write_tokens || 0},
               ${p.repair_count || 0}, ${p.compaction_count || 0},
+              ${p.termination_reason || null},
               ${ts(p.created_at)}
             ) ON CONFLICT (session_id) DO UPDATE SET
               status = EXCLUDED.status, output_text = EXCLUDED.output_text,
@@ -7768,14 +7770,27 @@ export default {
               detailed_cost = COALESCE(EXCLUDED.detailed_cost, sessions.detailed_cost),
               total_cache_read_tokens = EXCLUDED.total_cache_read_tokens,
               total_cache_write_tokens = EXCLUDED.total_cache_write_tokens,
-              repair_count = EXCLUDED.repair_count, compaction_count = EXCLUDED.compaction_count`;
+              repair_count = EXCLUDED.repair_count, compaction_count = EXCLUDED.compaction_count,
+              termination_reason = COALESCE(EXCLUDED.termination_reason, sessions.termination_reason)`;
 
           } else if (type === "turn") {
             if (!p.session_id) { msg.ack(); continue; }
+            let queueDelayMs = 0;
+            if (p.created_at !== undefined && p.created_at !== null) {
+              const parsedMs = typeof p.created_at === "number"
+                ? Number(p.created_at)
+                : Date.parse(String(p.created_at));
+              if (Number.isFinite(parsedMs)) {
+                queueDelayMs = Math.max(0, Date.now() - parsedMs);
+              }
+            }
             // plan and reflection are NOT NULL DEFAULT '{}' — never pass null
             await sql`INSERT INTO turns (
               session_id, turn_number, model_used, input_tokens, output_tokens,
-              latency_ms, llm_latency_ms, output_text, cost_usd,
+              latency_ms, llm_latency_ms, ttft_ms, pre_llm_ms, tool_exec_ms,
+              llm_retry_count, llm_cost_usd, tool_cost_usd, tokens_per_sec, queue_delay_ms,
+              compaction_triggered, messages_dropped,
+              output_text, cost_usd,
               tool_calls, tool_results, errors,
               execution_mode, plan, reflection,
               stop_reason, refusal, cache_read_tokens, cache_write_tokens,
@@ -7784,6 +7799,12 @@ export default {
               ${p.session_id}, ${p.turn_number || 0}, ${p.model_used || ""},
               ${p.input_tokens || 0}, ${p.output_tokens || 0},
               ${p.latency_ms || 0}, ${p.llm_latency_ms || p.latency_ms || 0},
+              ${p.ttft_ms ?? null},
+              ${p.pre_llm_ms ?? null}, ${p.tool_exec_ms ?? null},
+              ${p.llm_retry_count || 0},
+              ${p.llm_cost_usd || 0}, ${p.tool_cost_usd || 0},
+              ${p.tokens_per_sec ?? null}, ${queueDelayMs},
+              ${Boolean(p.compaction_triggered)}, ${p.messages_dropped || 0},
               ${p.llm_content || p.output_text || ""}, ${p.cost_total_usd || p.cost_usd || 0},
               ${jp(p.tool_calls, [])},
               ${jp(p.tool_results, [])},
@@ -7798,6 +7819,16 @@ export default {
               cost_usd = EXCLUDED.cost_usd,
               input_tokens = EXCLUDED.input_tokens,
               output_tokens = EXCLUDED.output_tokens,
+              ttft_ms = EXCLUDED.ttft_ms,
+              pre_llm_ms = EXCLUDED.pre_llm_ms,
+              tool_exec_ms = EXCLUDED.tool_exec_ms,
+              llm_retry_count = EXCLUDED.llm_retry_count,
+              llm_cost_usd = EXCLUDED.llm_cost_usd,
+              tool_cost_usd = EXCLUDED.tool_cost_usd,
+              tokens_per_sec = EXCLUDED.tokens_per_sec,
+              queue_delay_ms = EXCLUDED.queue_delay_ms,
+              compaction_triggered = EXCLUDED.compaction_triggered,
+              messages_dropped = EXCLUDED.messages_dropped,
               tool_calls = EXCLUDED.tool_calls,
               tool_results = EXCLUDED.tool_results`;
 
