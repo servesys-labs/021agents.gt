@@ -4,6 +4,7 @@
   import ToolCallBlock from "$lib/components/chat/ToolCallBlock.svelte";
   import TrainingStream from "./TrainingStream.svelte";
   import Button from "$lib/components/ui/button.svelte";
+  import { SPINNER_VERBS, randomVerbIndex } from "$lib/data/spinner-verbs";
 
   interface Props {
     agentName: string;
@@ -55,6 +56,18 @@
   let messages = $derived(metaAgentStore.getMessages(agentName));
   let streaming = $derived(metaAgentStore.streaming);
   let statusText = $derived(metaAgentStore.statusText);
+
+  // Rotating spinner verbs (Claude Code style)
+  let spinnerVerbIndex = $state(randomVerbIndex());
+  $effect(() => {
+    if (!streaming) return;
+    spinnerVerbIndex = randomVerbIndex();
+    const timer = setInterval(() => {
+      spinnerVerbIndex = (spinnerVerbIndex + 1) % SPINNER_VERBS.length;
+    }, 1150);
+    return () => clearInterval(timer);
+  });
+  let spinnerLabel = $derived(`${SPINNER_VERBS[spinnerVerbIndex]}...`);
 
   function scrollToBottom() {
     if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -280,20 +293,13 @@
                 </div>
               {/if}
 
-              <!-- Streaming indicator -->
-              {#if streaming && i === messages.length - 1 && !msg.content && (!msg.toolCalls || msg.toolCalls.length === 0)}
-                <div class="flex items-center gap-2">
-                  <span class="inline-block h-4 w-0.5 animate-pulse bg-foreground"></span>
-                  {#if statusText}
-                    <span class="text-xs text-muted-foreground animate-pulse">{statusText}</span>
-                  {/if}
-                </div>
-              {/if}
-              <!-- Status text while streaming with content already present -->
-              {#if streaming && i === messages.length - 1 && statusText && (msg.content || (msg.toolCalls && msg.toolCalls.length > 0))}
+              <!-- Streaming indicator with rotating verbs -->
+              {#if streaming && i === messages.length - 1}
                 <div class="flex items-center gap-2 mt-1">
-                  <span class="inline-block h-3 w-0.5 animate-pulse bg-foreground/50"></span>
-                  <span class="text-xs text-muted-foreground animate-pulse">{statusText}</span>
+                  <span class="inline-block h-2 w-2 animate-pulse rounded-full bg-muted-foreground"></span>
+                  <span class="inline-block bg-gradient-to-r from-muted-foreground via-foreground to-muted-foreground bg-[length:200%_100%] bg-clip-text text-sm font-medium text-transparent animate-shimmer">
+                    {statusText || spinnerLabel}
+                  </span>
                 </div>
               {/if}
             {/if}
