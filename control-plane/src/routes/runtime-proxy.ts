@@ -10,6 +10,7 @@ import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { hasCredits, deductCredits } from "../logic/credits";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
+import type { CurrentUser } from "../auth/types";
 
 export const runtimeProxyRoutes = createOpenAPIRouter();
 
@@ -147,6 +148,13 @@ function requireServiceTokenForEdge(
   return { ok: true };
 }
 
+function canAccessAgent(user: CurrentUser, agentName: string): boolean {
+  const allowed = user.allowedAgents;
+  if (!Array.isArray(allowed) || allowed.length === 0) return true;
+  if (allowed.includes("*")) return true;
+  return allowed.includes(agentName);
+}
+
 // ── GET /health — Runtime health status ─────────────────────────────
 
 const healthRoute = createRoute({
@@ -276,6 +284,9 @@ runtimeProxyRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
   if (!agentName || !input) {
     return c.json({ error: "agent_name and input are required" }, 400);
   }
+  if (!canAccessAgent(user, agentName)) {
+    return c.json({ error: `API key is not allowed to access agent '${agentName}'` }, 403);
+  }
 
   // Credit gate: verify org has credits before running (skip for free plan — zero cost)
   const orgId = user.org_id;
@@ -379,6 +390,9 @@ runtimeProxyRoutes.openapi(batchRoute, async (c): Promise<any> => {
 
   if (!agentName) return c.json({ error: "agent_name is required" }, 400);
   if (inputs.length === 0) return c.json({ error: "inputs array is required" }, 400);
+  if (!canAccessAgent(user, agentName)) {
+    return c.json({ error: `API key is not allowed to access agent '${agentName}'` }, 403);
+  }
 
   // Credit gate: verify org has enough credits for the batch
   // Estimate: ~$0.01 per item minimum (actual cost deducted per-item after completion)
@@ -605,6 +619,9 @@ runtimeProxyRoutes.openapi(streamRoute, async (c): Promise<any> => {
 
   if (!agentName) {
     return c.json({ error: "agent_name is required" }, 400);
+  }
+  if (!canAccessAgent(user, agentName)) {
+    return c.json({ error: `API key is not allowed to access agent '${agentName}'` }, 403);
   }
 
   // Credit gate: verify org has credits before streaming (skip for free plan)
@@ -845,6 +862,9 @@ runtimeProxyRoutes.openapi(resetRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const body = c.req.valid("json");
   const agentName = body.agent_name;
+  if (!canAccessAgent(user, agentName)) {
+    return c.json({ error: `API key is not allowed to access agent '${agentName}'` }, 403);
+  }
   const orgId = user.org_id || "";
   const userId = user.user_id || "";
   const orgPrefix = orgId ? `${orgId}-` : "";
@@ -929,6 +949,13 @@ runtimeProxyRoutes.post("/agent/run/queued", requireScope("agents:write"), async
   const user = c.get("user");
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
   const orgId = user.org_id;
+  const queuedAgentName = String(body.agent_name || "").trim();
+  if (!queuedAgentName) {
+    return c.json({ error: "agent_name is required" }, 400);
+  }
+  if (!canAccessAgent(user, queuedAgentName)) {
+    return c.json({ error: `API key is not allowed to access agent '${queuedAgentName}'` }, 403);
+  }
 
   // Drain any pending queued requests before processing new ones
   drainQueue(c.env.RUNTIME).catch(() => {});

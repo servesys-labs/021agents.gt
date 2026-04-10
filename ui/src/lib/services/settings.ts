@@ -8,20 +8,67 @@ export interface ApiKey {
   prefix: string;
   created_at: string;
   last_used_at: string | null;
+  allowed_agents: string[];
+  scopes: string[];
 }
 
 export interface ApiKeyCreateResponse {
   id: string;
   name: string;
   key: string;
+  prefix?: string;
+  allowed_agents?: string[];
+}
+
+interface ApiKeyRaw {
+  id?: string;
+  key_id?: string;
+  name?: string;
+  prefix?: string;
+  key_prefix?: string;
+  created_at?: string;
+  last_used_at?: string | null;
+  allowed_agents?: unknown;
+  scopes?: unknown;
+}
+
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
+}
+
+function normalizeApiKey(raw: ApiKeyRaw): ApiKey {
+  return {
+    id: typeof raw.id === "string" ? raw.id : (typeof raw.key_id === "string" ? raw.key_id : ""),
+    name: typeof raw.name === "string" ? raw.name : "",
+    prefix: typeof raw.prefix === "string" ? raw.prefix : (typeof raw.key_prefix === "string" ? raw.key_prefix : ""),
+    created_at: typeof raw.created_at === "string" ? raw.created_at : "",
+    last_used_at: typeof raw.last_used_at === "string" ? raw.last_used_at : null,
+    allowed_agents: asStringArray(raw.allowed_agents),
+    scopes: asStringArray(raw.scopes),
+  };
 }
 
 export function listApiKeys(): Promise<ApiKey[]> {
-  return api.get<ApiKey[]>("/api-keys");
+  return api.get<ApiKeyRaw[]>("/api-keys").then((rows) =>
+    rows.map(normalizeApiKey).filter((k) => k.id.length > 0),
+  );
 }
 
-export function createApiKey(name: string): Promise<ApiKeyCreateResponse> {
-  return api.post<ApiKeyCreateResponse>("/api-keys", { name });
+export function createApiKey(
+  name: string,
+  options?: { allowed_agents?: string[]; scopes?: string[] },
+): Promise<ApiKeyCreateResponse> {
+  return api.post<Record<string, unknown>>("/api-keys", {
+    name,
+    ...(options?.allowed_agents ? { allowed_agents: options.allowed_agents } : {}),
+    ...(options?.scopes ? { scopes: options.scopes } : {}),
+  }).then((row) => ({
+    id: typeof row.id === "string" ? row.id : (typeof row.key_id === "string" ? row.key_id : ""),
+    name: typeof row.name === "string" ? row.name : name,
+    key: typeof row.key === "string" ? row.key : "",
+    prefix: typeof row.prefix === "string" ? row.prefix : (typeof row.key_prefix === "string" ? row.key_prefix : undefined),
+    allowed_agents: asStringArray(row.allowed_agents),
+  }));
 }
 
 export function deleteApiKey(id: string): Promise<void> {

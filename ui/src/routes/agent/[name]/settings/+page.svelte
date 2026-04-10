@@ -14,6 +14,8 @@
   import Switch from "$lib/components/ui/switch.svelte";
   import Dialog from "$lib/components/ui/dialog.svelte";
   import AgentNav from "$lib/components/agent/AgentNav.svelte";
+  import { listApiKeys, createApiKey, deleteApiKey, type ApiKey, type ApiKeyCreateResponse } from "$lib/services/settings";
+  import { timeAgo } from "$lib/utils/time";
 
   let agentName = $derived($page.params.name ?? "");
 
@@ -58,6 +60,15 @@
 
   // Deployment copy
   let copied = $state<string | null>(null);
+  let apiKeysLoading = $state(false);
+  let agentApiKeys = $state<ApiKey[]>([]);
+  let keyName = $state("");
+  let creatingKey = $state(false);
+  let createdKey = $state<ApiKeyCreateResponse | null>(null);
+  let createdKeyOpen = $state(false);
+  let deletingKey = $state<ApiKey | null>(null);
+  let deleteKeyOpen = $state(false);
+  let deletingKeyBusy = $state(false);
 
   const defaultTriggers = [
     { id: "angry_customer", label: "Customer is angry or frustrated" },
@@ -89,6 +100,21 @@
     { value: "decompose", label: "Decompose" },
     { value: "verify-then-respond", label: "Verify then Respond" },
   ];
+
+  const validReasoningStrategies = new Set([
+    "auto",
+    "step-back",
+    "chain-of-thought",
+    "plan-then-execute",
+    "verify-then-respond",
+    "decompose",
+  ]);
+
+  function normalizeReasoningStrategy(value: unknown): string {
+    return typeof value === "string" && validReasoningStrategies.has(value)
+      ? value
+      : "auto";
+  }
 
   const availableTools = [
     { id: "web-search", name: "Web Search", description: "Search the web for current information" },
@@ -142,7 +168,7 @@
       modelOverride = a.model_override ?? a.config_json?.model_override ?? "";
       temperature = a.temperature ?? a.config_json?.temperature ?? 0.7;
       maxTokens = a.max_tokens ?? a.config_json?.max_tokens ?? 4096;
-      reasoningStrategy = a.reasoning_strategy ?? a.config_json?.reasoning_strategy ?? "auto";
+      reasoningStrategy = normalizeReasoningStrategy(a.reasoning_strategy ?? a.config_json?.reasoning_strategy);
       maxTurns = a.max_turns ?? a.config_json?.max_turns ?? 15;
       selectedTools = a.tools ?? [];
       const rawBudget = a.budget_limit_usd ?? a.budget_limit ?? a.config_json?.budget_limit;
@@ -160,10 +186,60 @@
         handoffPhone = hc.phone ?? "";
         handoffSlack = hc.slack ?? "";
       }
+      await loadAgentApiKeys();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to load agent");
     } finally {
       loading = false;
+    }
+  }
+
+  async function loadAgentApiKeys() {
+    apiKeysLoading = true;
+    try {
+      const keys = await listApiKeys();
+      agentApiKeys = keys.filter((k) => k.allowed_agents.includes(agentName));
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to load API keys");
+    } finally {
+      apiKeysLoading = false;
+    }
+  }
+
+  async function handleCreateAgentKey() {
+    if (!keyName.trim()) {
+      toast.error("Please enter a key name");
+      return;
+    }
+    creatingKey = true;
+    try {
+      createdKey = await createApiKey(keyName.trim(), {
+        allowed_agents: [agentName],
+      });
+      createdKeyOpen = true;
+      keyName = "";
+      await loadAgentApiKeys();
+      toast.success(`Created key scoped to ${agentName}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to create API key");
+    } finally {
+      creatingKey = false;
+    }
+  }
+
+  async function handleDeleteAgentKey() {
+    if (!deletingKey) return;
+    deletingKeyBusy = true;
+    try {
+      await deleteApiKey(deletingKey.id);
+      toast.success(`Deleted key "${deletingKey.name}"`);
+      deleteKeyOpen = false;
+      deletingKey = null;
+      await loadAgentApiKeys();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to delete key");
+    } finally {
+      deletingKeyBusy = false;
     }
   }
 
@@ -178,7 +254,7 @@
         model_override: modelOverride || undefined,
         temperature,
         max_tokens: maxTokens,
-        reasoning_strategy: reasoningStrategy,
+        reasoning_strategy: normalizeReasoningStrategy(reasoningStrategy),
         max_turns: maxTurns,
         tools: selectedTools,
         budget_limit_usd: budgetEnabled ? budgetLimit : 0,
@@ -227,7 +303,7 @@
         tools: selectedTools,
         temperature,
         max_tokens: maxTokens,
-        reasoning_strategy: reasoningStrategy,
+        reasoning_strategy: normalizeReasoningStrategy(reasoningStrategy),
         max_turns: maxTurns,
         budget_limit_usd: budgetLimit,
         timeout_seconds: timeoutSeconds,
@@ -254,7 +330,7 @@
         tools: selectedTools,
         temperature,
         max_tokens: maxTokens,
-        reasoning_strategy: reasoningStrategy,
+        reasoning_strategy: normalizeReasoningStrategy(reasoningStrategy),
         max_turns: maxTurns,
         budget_limit_usd: budgetLimit,
         timeout_seconds: timeoutSeconds,
@@ -316,6 +392,14 @@
   confirmText={deleting ? "Deleting..." : "Delete Agent"}
   variant="destructive"
   onConfirm={handleDelete}
+/>
+<Dialog
+  bind:open={deleteKeyOpen}
+  title="Delete API Key"
+  description={`This will revoke "${deletingKey?.name ?? ""}" for ${agentName}.`}
+  confirmText={deletingKeyBusy ? "Deleting..." : "Delete Key"}
+  variant="destructive"
+  onConfirm={handleDeleteAgentKey}
 />
 
 <div class="flex h-full flex-col">
@@ -410,6 +494,50 @@
               <div class="flex items-center gap-2 text-sm text-muted-foreground">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" /></svg>
                 <span>Manage API keys in <a href="/settings/api-keys" class="text-primary hover:underline">Settings &rarr; API Keys</a></span>
+              </div>
+              <div class="rounded-lg border border-border p-4">
+                <div class="mb-3 flex items-center justify-between gap-3">
+                  <div>
+                    <p class="text-sm font-medium text-foreground">Agent API keys</p>
+                    <p class="text-xs text-muted-foreground">Keys created here are automatically scoped to <code>{agentName}</code>.</p>
+                  </div>
+                </div>
+                <div class="mb-4 flex gap-2">
+                  <Input
+                    placeholder={`e.g. ${agentName}-prod-widget`}
+                    bind:value={keyName}
+                    onkeydown={(e: KeyboardEvent) => { if (e.key === "Enter") handleCreateAgentKey(); }}
+                  />
+                  <Button disabled={creatingKey || !keyName.trim()} onclick={handleCreateAgentKey}>
+                    {#if creatingKey}
+                      <span class="mr-2 h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent"></span>
+                    {/if}
+                    Create
+                  </Button>
+                </div>
+                {#if apiKeysLoading}
+                  <p class="text-xs text-muted-foreground">Loading keys...</p>
+                {:else if agentApiKeys.length === 0}
+                  <p class="text-xs text-muted-foreground">No keys scoped to this agent yet.</p>
+                {:else}
+                  <div class="space-y-2">
+                    {#each agentApiKeys as key}
+                      <div class="flex items-center justify-between rounded-md border border-border px-3 py-2">
+                        <div class="min-w-0">
+                          <p class="truncate text-sm font-medium text-foreground">{key.name}</p>
+                          <p class="text-xs text-muted-foreground">{key.prefix} • created {timeAgo(key.created_at)}</p>
+                        </div>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onclick={() => { deletingKey = key; deleteKeyOpen = true; }}
+                        >
+                          Delete
+                        </Button>
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
               </div>
             </div>
           </section>
@@ -718,4 +846,33 @@
     </svg>
     Improve
   </button>
+{/if}
+
+<!-- Created key dialog -->
+{#if createdKeyOpen && createdKey}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="fixed inset-0 z-[100] flex items-center justify-center bg-black/60"
+    onclick={(e) => { if (e.target === e.currentTarget) { createdKeyOpen = false; createdKey = null; } }}
+    onkeydown={(e) => { if (e.key === "Escape") { createdKeyOpen = false; createdKey = null; } }}
+  >
+    <div class="mx-4 w-full max-w-lg rounded-lg border border-border bg-background p-6 shadow-lg" role="dialog" aria-modal="true">
+      <h3 class="text-lg font-semibold text-foreground">Agent API Key Created</h3>
+      <p class="mt-2 text-sm text-muted-foreground">This key is scoped to <code>{agentName}</code>. Copy it now; it will not be shown again.</p>
+      <div class="mt-4 flex gap-2">
+        <code class="flex-1 overflow-x-auto rounded-lg bg-code-background px-3 py-2.5 font-mono text-sm text-code-foreground">
+          {createdKey.key}
+        </code>
+        <Button
+          variant="outline"
+          onclick={() => handleCopy(createdKey?.key || "", "agent-key")}
+        >
+          {copied === "agent-key" ? "Copied" : "Copy"}
+        </Button>
+      </div>
+      <div class="mt-6 flex justify-end">
+        <Button onclick={() => { createdKeyOpen = false; createdKey = null; }}>Done</Button>
+      </div>
+    </div>
+  </div>
 {/if}
