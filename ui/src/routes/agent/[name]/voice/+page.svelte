@@ -625,7 +625,7 @@
       };
 
       testWs.onmessage = (event) => {
-        let msg: { type: string; speaker?: string; text?: string; data?: string; message?: string };
+        let msg: { type: string; speaker?: string; text?: string; data?: string; message?: string; step?: string };
         try {
           msg = JSON.parse(event.data);
         } catch {

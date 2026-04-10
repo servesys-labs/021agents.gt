@@ -36,6 +36,30 @@
   // Render markdown for each turn content
   let renderedContent = $state<Map<number, string>>(new Map());
 
+  interface ToolCallView {
+    name: string;
+    input: string;
+    output?: string;
+    call_id: string;
+    latency_ms?: number;
+    error?: string;
+  }
+
+  function normalizeToolCall(tc: unknown, index: number): ToolCallView {
+    const raw = (tc ?? {}) as Record<string, unknown>;
+    return {
+      name: String(raw.name ?? raw.tool ?? "tool"),
+      input:
+        typeof raw.input === "string"
+          ? raw.input
+          : JSON.stringify(raw.input ?? raw.args ?? {}, null, 2),
+      output: typeof raw.output === "string" ? raw.output : undefined,
+      call_id: String(raw.call_id ?? raw.tool_call_id ?? `tc-${index}`),
+      latency_ms: typeof raw.latency_ms === "number" ? raw.latency_ms : undefined,
+      error: typeof raw.error === "string" ? raw.error : undefined,
+    };
+  }
+
   $effect(() => {
     const renderAll = async () => {
       const map = new Map<number, string>();
@@ -72,12 +96,12 @@
     <span class="text-border">|</span>
     <div class="flex items-center gap-1.5">
       <span class="text-muted-foreground">Cost:</span>
-      <span class="text-foreground">{formatCost(session.cost_total_usd ?? session.cost_usd)}</span>
+      <span class="text-foreground">{formatCost(session.cost_total_usd)}</span>
     </div>
     <span class="text-border">|</span>
     <div class="flex items-center gap-1.5">
       <span class="text-muted-foreground">Duration:</span>
-      <span class="text-foreground">{formatDuration(session.wall_clock_seconds ?? session.duration_s)}</span>
+      <span class="text-foreground">{formatDuration(session.wall_clock_seconds)}</span>
     </div>
     {#if session.trace_id}
       <span class="text-border">|</span>
@@ -109,7 +133,7 @@
             <div class="flex items-center gap-3 rounded-md bg-background px-3 py-2 text-xs">
               <span class="font-mono text-muted-foreground">{(ts.session_id || "").slice(0, 12)}</span>
               <Badge variant={ts.status === "error" ? "destructive" : "secondary"}>{ts.status || "done"}</Badge>
-              <span class="text-muted-foreground">{ts.agent_name || ts.model || ""}</span>
+              <span class="text-muted-foreground">{ts.agent_name || ""}</span>
               {#if ts.depth && ts.depth > 0}
                 <span class="text-muted-foreground">depth:{ts.depth}</span>
               {/if}
@@ -155,8 +179,8 @@
           <!-- Tool calls -->
           {#if turn.tool_calls?.length}
             <div class="space-y-2">
-              {#each turn.tool_calls as tc (tc.call_id)}
-                <ToolCallBlock toolCall={tc} expanded={false} />
+              {#each turn.tool_calls as tc, i (`${turn.turn_number}-${i}`)}
+                <ToolCallBlock toolCall={normalizeToolCall(tc, i)} expanded={false} />
               {/each}
             </div>
           {/if}

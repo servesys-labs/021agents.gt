@@ -201,9 +201,9 @@
                           {#if turn.content}
                             <p class="mt-2 text-sm text-muted-foreground line-clamp-3">{turn.content}</p>
                           {/if}
-                          {#if turn.tool_calls.length > 0}
+                          {#if (turn.tool_calls ?? []).length > 0}
                             <div class="mt-2 flex flex-wrap gap-1">
-                              {#each turn.tool_calls as tc}
+                              {#each (turn.tool_calls ?? []) as tc}
                                 <span class="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
                                   {(tc as Record<string, unknown>).name || (tc as Record<string, unknown>).tool || "tool"}
                                 </span>

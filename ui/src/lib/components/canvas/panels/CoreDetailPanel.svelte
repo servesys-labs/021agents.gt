@@ -123,6 +123,7 @@
       class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-ring {store.isActive ? 'bg-primary' : 'bg-muted'}"
       role="switch"
       aria-checked={store.isActive}
+      aria-label="Toggle agent active state"
       onclick={() => (store.isActive = !store.isActive)}
     >
       <span

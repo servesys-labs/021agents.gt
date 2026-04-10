@@ -22,7 +22,7 @@ class ConversationStore {
     this.loading = true;
     try {
       const result = await listConversations(agentName);
-      this.conversations = result.conversations;
+      this.conversations = Array.isArray(result?.conversations) ? result.conversations : [];
     } catch (err) {
       console.error("Failed to fetch conversations:", err);
       this.conversations = [];
@@ -36,7 +36,7 @@ class ConversationStore {
     this.messagesLoading = true;
     try {
       const result = await getConversationMessages(id);
-      this.messages = result.messages;
+      this.messages = Array.isArray(result?.messages) ? result.messages : [];
     } catch (err) {
       console.error("Failed to load conversation:", err);
       this.messages = [];

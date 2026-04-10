@@ -11,6 +11,9 @@
 
   let summary = $state<ObservabilitySummary | null>(null);
   let loading = $state(true);
+  let topModels = $derived(summary?.top_models ?? []);
+  let topAgents = $derived(summary?.top_agents ?? []);
+  let dailyPoints = $derived(summary?.daily ?? []);
 
   async function load() {
     loading = true;
@@ -117,7 +120,7 @@
     </div>
 
     <!-- Top Models -->
-    {#if summary.top_models.length > 0}
+    {#if topModels.length > 0}
       <div class="mb-8">
         <h2 class="mb-4">Models</h2>
         <Table>
@@ -130,7 +133,7 @@
             </tr>
           {/snippet}
           {#snippet tbody()}
-            {#each summary.top_models as m}
+            {#each topModels as m}
               <tr class="hover:bg-muted/30">
                 <td class="px-4 py-3">
                   <Badge variant="secondary">{m.model}</Badge>
@@ -146,7 +149,7 @@
     {/if}
 
     <!-- Top Agents -->
-    {#if summary.top_agents.length > 0}
+    {#if topAgents.length > 0}
       <div class="mb-8">
         <h2 class="mb-4">Agents</h2>
         <Table>
@@ -159,7 +162,7 @@
             </tr>
           {/snippet}
           {#snippet tbody()}
-            {#each summary.top_agents as a}
+            {#each topAgents as a}
               <tr class="hover:bg-muted/30">
                 <td class="px-4 py-3 font-medium">{a.agent}</td>
                 <td class="px-4 py-3 text-right text-muted-foreground">{a.sessions}</td>
@@ -173,7 +176,7 @@
     {/if}
 
     <!-- Daily Activity -->
-    {#if summary.daily.length > 0}
+    {#if dailyPoints.length > 0}
       <div>
         <h2 class="mb-4">Daily Activity</h2>
         <Table>
@@ -186,7 +189,7 @@
             </tr>
           {/snippet}
           {#snippet tbody()}
-            {#each summary.daily as d}
+            {#each dailyPoints as d}
               <tr class="hover:bg-muted/30">
                 <td class="px-4 py-3 font-medium text-foreground">{d.day}</td>
                 <td class="px-4 py-3 text-right text-muted-foreground">{d.sessions}</td>

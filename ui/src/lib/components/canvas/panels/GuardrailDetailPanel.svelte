@@ -21,6 +21,7 @@
         class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-ring {store.budgetEnabled ? 'bg-primary' : 'bg-muted'}"
         role="switch"
         aria-checked={store.budgetEnabled}
+        aria-label="Toggle budget limit"
         onclick={() => (store.budgetEnabled = !store.budgetEnabled)}
       >
         <span
