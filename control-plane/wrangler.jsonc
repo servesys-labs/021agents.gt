@@ -35,7 +35,7 @@
   "vectorize": [
     {
       "binding": "VECTORIZE",
-      "index_name": "agentos-knowledge"
+      "index_name": "agentos-knowledge-v2"
     }
   ],
 
