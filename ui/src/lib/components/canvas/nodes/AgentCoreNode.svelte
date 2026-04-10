@@ -9,6 +9,7 @@
       budgetLimit: number;
       maxTurns: number;
       isActive: boolean;
+      pulsing?: boolean;
     };
   }
 
@@ -27,13 +28,19 @@
 </script>
 
 <div
-  class="flex flex-col items-center justify-center rounded-xl border-2 border-primary bg-card p-4 shadow-lg"
-  style="width: 280px; min-height: 180px;"
+  class="agent-canvas-core flex flex-col items-center justify-center rounded-xl border-2 border-primary bg-card p-4 shadow-lg"
+  class:core-pulsing={data.pulsing}
+  style="width: 320px; min-height: 200px;"
 >
-  <Handle type="target" position={Position.Top} class="!bg-primary !w-3 !h-3" />
-  <Handle type="target" position={Position.Left} class="!bg-primary !w-3 !h-3" />
-  <Handle type="target" position={Position.Right} class="!bg-primary !w-3 !h-3" />
-  <Handle type="target" position={Position.Bottom} class="!bg-primary !w-3 !h-3" />
+  <!-- Four handles with explicit IDs. The core sits in the middle of the
+       layout, so it needs to be both a target (for tier 1 / tier 3 inputs)
+       and a source (for tier 4 sinks). Multiple handles at the same
+       position are allowed by xyflow as long as IDs differ. -->
+  <Handle id="top-target" type="target" position={Position.Top} class="!bg-primary !w-3 !h-3" />
+  <Handle id="bottom-target" type="target" position={Position.Bottom} class="!bg-primary !w-3 !h-3" />
+  <Handle id="bottom-source" type="source" position={Position.Bottom} class="!bg-primary !w-3 !h-3 !opacity-0" />
+  <Handle id="left-target" type="target" position={Position.Left} class="!bg-primary !w-3 !h-3 !opacity-0" />
+  <Handle id="right-target" type="target" position={Position.Right} class="!bg-primary !w-3 !h-3 !opacity-0" />
 
   <div class="flex items-center gap-2">
     {#if !data.isActive}
@@ -61,3 +68,31 @@
     </span>
   </div>
 </div>
+
+<style>
+  /* Core node has a slightly stronger glow than capability satellites —
+     it's the center of attention by default, and it becomes even more
+     prominent when pulsing during the Result step. */
+  :global(.agent-canvas-core) {
+    box-shadow:
+      0 0 40px -10px hsl(var(--primary) / 0.35),
+      0 10px 30px -10px hsl(var(--foreground) / 0.15);
+  }
+  :global(.core-pulsing) {
+    animation: core-pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes core-pulse {
+    0%, 100% {
+      box-shadow:
+        0 0 0 0 hsl(var(--primary) / 0.5),
+        0 0 40px -10px hsl(var(--primary) / 0.45),
+        0 10px 30px -10px hsl(var(--foreground) / 0.15);
+    }
+    50% {
+      box-shadow:
+        0 0 0 10px hsl(var(--primary) / 0),
+        0 0 60px -10px hsl(var(--primary) / 0.6),
+        0 10px 30px -10px hsl(var(--foreground) / 0.15);
+    }
+  }
+</style>

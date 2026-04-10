@@ -126,3 +126,120 @@
 .animate-shimmer {
   animation: shimmer 4s ease-in-out infinite;
 }
+
+/* ── Markdown content styling ─────────────────────────────────────────
+   Used by ChatMessage and the canvas StepInspector to render
+   renderStreamingMarkdown output. Defined globally here (rather than in
+   a single component's <style>) so any place can render markdown
+   consistently by adding the `prose-chat` class to a wrapper. */
+.prose-chat p {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+}
+.prose-chat p:first-child { margin-top: 0; }
+.prose-chat p:last-child  { margin-bottom: 0; }
+
+.prose-chat a {
+  color: oklch(0.55 0.15 250);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.dark .prose-chat a { color: oklch(0.7 0.15 250); }
+.prose-chat a:hover { opacity: 0.8; }
+
+.prose-chat strong { font-weight: 600; }
+.prose-chat em { font-style: italic; }
+
+.prose-chat code:not(pre code) {
+  background: var(--code-background);
+  color: var(--code-foreground);
+  padding: 0.15em 0.35em;
+  border-radius: 0.25rem;
+  font-size: 0.85em;
+  font-family: var(--font-mono);
+}
+.prose-chat pre { margin: 0; }
+.prose-chat pre code {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+}
+
+.prose-chat ul {
+  list-style-type: disc;
+  padding-left: 1.5em;
+  margin: 0.5em 0;
+}
+.prose-chat ol {
+  list-style-type: decimal;
+  padding-left: 1.5em;
+  margin: 0.5em 0;
+}
+.prose-chat li { margin: 0.25em 0; }
+
+.prose-chat blockquote {
+  border-left: 3px solid var(--border);
+  padding-left: 1em;
+  margin: 0.75em 0;
+  color: var(--muted-foreground);
+  font-style: italic;
+}
+
+.prose-chat h1 {
+  font-size: 1.375rem;
+  font-weight: 600;
+  margin: 1em 0 0.5em;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+}
+.prose-chat h2 {
+  font-size: 1.175rem;
+  font-weight: 600;
+  margin: 0.875em 0 0.375em;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+.prose-chat h3 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 0.75em 0 0.25em;
+}
+.prose-chat h4 {
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin: 0.6em 0 0.2em;
+}
+
+.prose-chat table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.75em 0;
+  font-size: 0.8125rem;
+}
+.prose-chat th {
+  text-align: left;
+  font-weight: 600;
+  border-bottom: 2px solid var(--border);
+  padding: 0.5em 0.75em;
+}
+.prose-chat td {
+  border-bottom: 1px solid var(--border);
+  padding: 0.5em 0.75em;
+}
+
+.prose-chat hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1.5em 0;
+}
+
+/* highlight.js overrides — use design tokens for syntax colors */
+.prose-chat .hljs {
+  background: transparent;
+  color: var(--code-foreground);
+}
+
+/* Code block wrapper produced by wrapCodeBlocksWithHeader() */
+.prose-chat .code-block-wrapper {
+  margin: 0.75em 0;
+}
