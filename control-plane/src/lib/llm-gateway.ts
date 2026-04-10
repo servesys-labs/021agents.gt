@@ -15,6 +15,14 @@ export interface GatewayConfig {
   aiGatewayId?: string;
   cloudflareApiToken?: string;
   aiGatewayToken?: string;
+  /**
+   * Bearer token for the GPU proxy that sits behind the AI Gateway for
+   * custom-gemma4 models. The Gateway forwards the `Authorization` header
+   * through to the origin, and the GPU proxy enforces its own auth with
+   * this value. Missing this causes a 401 from the GPU origin:
+   * "Unauthorized: invalid or missing X-Service-Key or Authorization Bearer".
+   */
+  gpuServiceKey?: string;
   /** @deprecated Not used — all routing goes through AI Gateway. Kept for caller compat. */
   openrouterApiKey?: string;
 }
@@ -72,6 +80,16 @@ export async function callLLMGateway(
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (cfToken) headers["cf-aig-authorization"] = `Bearer ${cfToken}`;
   if (options.metadata) headers["cf-aig-metadata"] = JSON.stringify(options.metadata);
+
+  // GPU origin auth — the AI Gateway forwards Authorization through to
+  // the origin. The custom-gemma4 GPU proxy requires a bearer token here
+  // (same value as GPU_SERVICE_KEY in the runtime worker). Without this,
+  // the origin returns 401: "invalid or missing X-Service-Key or
+  // Authorization Bearer". Only set for custom models — workers-ai and
+  // compat endpoints don't need it.
+  if (isCustomModel && config.gpuServiceKey) {
+    headers["Authorization"] = `Bearer ${config.gpuServiceKey}`;
+  }
 
   let endpoint: string;
   if (isCustomModel) {
@@ -344,5 +362,9 @@ export function gatewayConfigFromEnv(env: any): GatewayConfig {
     aiGatewayId: env.AI_GATEWAY_ID || "",
     cloudflareApiToken: env.CLOUDFLARE_API_TOKEN || "",
     aiGatewayToken: env.AI_GATEWAY_TOKEN || "",
+    // Bearer token for the custom-gemma4 GPU proxy origin. Falls back to
+    // SERVICE_TOKEN so pre-existing deploys with only SERVICE_TOKEN set
+    // continue to work without a secret migration.
+    gpuServiceKey: env.GPU_SERVICE_KEY || env.SERVICE_TOKEN || "",
   };
 }
