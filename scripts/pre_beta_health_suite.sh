@@ -19,6 +19,7 @@ MAX_TTFT_P95_MS="${PREBETA_MAX_TTFT_P95_MS:-12000}"
 MAX_DONE_MISSING_RATE="${PREBETA_MAX_DONE_MISSING_RATE:-0.20}"
 MAX_COMPLETION_GATE_EXHAUSTED_RATE="${PREBETA_MAX_COMPLETION_GATE_EXHAUSTED_RATE:-0.05}"
 RUN_REAL_TASK_CHAIN="${PREBETA_RUN_REAL_TASK_CHAIN:-1}"
+MIN_REAL_TASK_TOOL_CALLS="${PREBETA_MIN_REAL_TASK_TOOL_CALLS:-3}"
 
 RED="\033[31m"
 GREEN="\033[32m"
@@ -433,6 +434,11 @@ PY
     if [[ -n "$chain_sid" ]]; then
       ttft_series="${ttft_series} $(turn_ttft_series_ms "$TOKEN" "$chain_sid")"
     fi
+    local chain_tool_calls
+    chain_tool_calls="$(json_field "$chain_sum" 'int(d.get("tool_calls", 0) or 0)')"
+    if [[ "${chain_tool_calls}" -lt "${MIN_REAL_TASK_TOOL_CALLS}" ]]; then
+      fail "real-task chain used too few tools (${chain_tool_calls} < ${MIN_REAL_TASK_TOOL_CALLS})"
+    fi
     local chain_out
     chain_out="$(json_field "$chain_sum" 'str(d.get("output_head",""))')"
     if [[ "$chain_out" != *"CHAIN_OK:${run_tag}"* ]]; then
@@ -529,6 +535,7 @@ PY
     echo "- baseline: ${SUM1}"
     echo "- completion_gate: ${SUM2}"
     echo "- real_task_chain: ${chain_summary_json}"
+    echo "- real_task_min_tool_calls: ${MIN_REAL_TASK_TOOL_CALLS}"
   } > "$SUMMARY_MD_PATH"
 
   info "Pre-beta health suite complete"
