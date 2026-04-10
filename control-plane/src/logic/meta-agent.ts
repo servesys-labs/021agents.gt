@@ -360,6 +360,8 @@ export async function buildFromDescription(
     aiGatewayId?: string;
     cloudflareApiToken?: string;
     aiGatewayToken?: string;
+    /** Bearer token for the custom-gemma4 GPU origin (forwarded by AI Gateway) */
+    gpuServiceKey?: string;
     plan?: string;
     pipedream?: { clientId: string; clientSecret: string; projectId: string };
     orgProfile?: {
@@ -623,6 +625,7 @@ Return ONLY valid JSON. No markdown fences, no explanation.`;
       aiGatewayId: (opts as any).aiGatewayId,
       cloudflareApiToken: (opts as any).cloudflareApiToken,
       aiGatewayToken: (opts as any).aiGatewayToken,
+      gpuServiceKey: (opts as any).gpuServiceKey,
       openrouterApiKey: opts.openrouterApiKey,
     },
     {

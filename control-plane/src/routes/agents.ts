@@ -1110,6 +1110,7 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
         aiGatewayId: c.env.AI_GATEWAY_ID,
         cloudflareApiToken: c.env.CLOUDFLARE_API_TOKEN,
         aiGatewayToken: c.env.AI_GATEWAY_TOKEN,
+        gpuServiceKey: c.env.GPU_SERVICE_KEY || c.env.SERVICE_TOKEN || "",
         pipedream: c.env.PIPEDREAM_CLIENT_ID ? {
           clientId: c.env.PIPEDREAM_CLIENT_ID,
           clientSecret: c.env.PIPEDREAM_CLIENT_SECRET ?? "",
@@ -1581,6 +1582,7 @@ agentRoutes.openapi(suggestionsRoute, async (c): Promise<any> => {
         aiGatewayId: c.env.AI_GATEWAY_ID,
         aiGatewayToken: c.env.AI_GATEWAY_TOKEN,
         cloudflareApiToken: c.env.CLOUDFLARE_API_TOKEN,
+        gpuServiceKey: c.env.GPU_SERVICE_KEY || c.env.SERVICE_TOKEN || "",
       },
       {
         model: "anthropic/claude-sonnet-4-6",
@@ -1713,6 +1715,7 @@ agentRoutes.openapi(metaChatRoute, async (c): Promise<any> => {
       aiGatewayId: c.env.AI_GATEWAY_ID,
       cloudflareApiToken: c.env.CLOUDFLARE_API_TOKEN,
       aiGatewayToken: c.env.AI_GATEWAY_TOKEN,
+      gpuServiceKey: c.env.GPU_SERVICE_KEY || c.env.SERVICE_TOKEN || "",
       mode: mode || "live",
       env: {
         RUNTIME: c.env.RUNTIME,
