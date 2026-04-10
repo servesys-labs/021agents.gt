@@ -859,6 +859,29 @@ export default {
 
   // Cron Triggers — scheduled agent runs + data retention
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    // Simple next-cron-run calculator for common patterns
+    // Supports: "M H * * *" (daily), "M H * * D" (weekly), "*/N * * * *" (every N min)
+    function computeNextCronRun(cron: string): string {
+      const parts = cron.trim().split(/\s+/);
+      const now = new Date();
+      if (parts.length !== 5) return new Date(now.getTime() + 3600_000).toISOString(); // fallback: 1 hour
+
+      const [minPart, hourPart] = parts;
+
+      // Every N minutes: */5, */10, etc.
+      if (minPart.startsWith("*/")) {
+        const interval = parseInt(minPart.slice(2)) || 10;
+        return new Date(now.getTime() + interval * 60_000).toISOString();
+      }
+
+      // Daily at specific hour: "0 8 * * *" = daily at 8:00
+      const minute = parseInt(minPart) || 0;
+      const hour = parseInt(hourPart) || 0;
+      const next = new Date(now);
+      next.setHours(hour, minute, 0, 0);
+      if (next <= now) next.setDate(next.getDate() + 1); // already passed today, schedule tomorrow
+      return next.toISOString();
+    }
     // Autopilot: tick active sessions
     ctx.waitUntil(tickAutopilotSessions(env));
 
@@ -895,7 +918,7 @@ export default {
             SET run_count = run_count + 1,
                 last_run_at = ${now},
                 last_status = 'dispatched',
-                next_run_at = ${nowEpoch + 60}
+                next_run_at = ${computeNextCronRun(String(schedule.cron || "0 0 * * *"))}
             WHERE id = ${schedule.id}
           `;
         } catch (err) {
