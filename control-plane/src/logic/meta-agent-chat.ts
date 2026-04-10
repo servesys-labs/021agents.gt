@@ -896,7 +896,7 @@ async function executeTool(
       const rows = await sql`
         SELECT t.turn_number, t.model_used, t.llm_content,
                t.tool_calls, t.tool_results, t.errors,
-               t.cost_total_usd, t.latency_ms,
+               t.cost_usd, t.latency_ms,
                t.input_tokens, t.output_tokens, t.execution_mode,
                t.created_at
         FROM turns t
@@ -936,7 +936,7 @@ async function executeTool(
               cost_usd: tr.cost_usd,
             })),
             errors,
-            cost_usd: r.cost_total_usd,
+            cost_usd: r.cost_usd,
             latency_ms: r.latency_ms,
             tokens: (r.input_tokens || 0) + (r.output_tokens || 0),
             created_at: r.created_at,
@@ -988,7 +988,7 @@ async function executeTool(
         modelBreakdown = await sql`
           SELECT t.model_used as model, COUNT(*) as turn_count,
             SUM(t.input_tokens) as input_tokens, SUM(t.output_tokens) as output_tokens,
-            SUM(t.cost_total_usd) as cost_usd, AVG(t.latency_ms) as avg_latency_ms
+            SUM(t.cost_usd) as cost_usd, AVG(t.latency_ms) as avg_latency_ms
           FROM turns t JOIN sessions s ON t.session_id = s.session_id
           WHERE s.agent_name = ${ctx.agentName} AND s.org_id = ${ctx.orgId}
             AND t.created_at > now() - ${interval}::interval
@@ -2350,7 +2350,7 @@ async function executeTool(
       try {
         // Read turns and extract diagnostic events from errors and tool_results
         const turns = await sql`
-          SELECT t.turn_number, t.tool_calls, t.tool_results, t.errors, t.cost_total_usd, t.created_at
+          SELECT t.turn_number, t.tool_calls, t.tool_results, t.errors, t.cost_usd, t.created_at
           FROM turns t
           JOIN sessions s ON t.session_id = s.session_id
           WHERE t.session_id = ${sessionId} AND s.org_id = ${ctx.orgId}

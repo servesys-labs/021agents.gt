@@ -422,7 +422,7 @@ export async function writeSession(
         session_id, org_id, project_id, agent_name, status,
         input_text, output_text, model, trace_id, parent_session_id,
         depth, step_count, action_count, wall_clock_seconds,
-        cost_total_usd, created_at
+        cost_total_usd, created_at, ended_at
       ) VALUES (
         ${session.session_id}, ${session.org_id || ""}, ${session.project_id},
         ${session.agent_name}, ${session.status},
@@ -430,13 +430,15 @@ export async function writeSession(
         ${session.model}, ${session.trace_id}, ${session.parent_session_id || ""},
         ${Number(session.depth) || 0}, ${session.step_count}, ${session.action_count},
         ${session.wall_clock_seconds}, ${session.cost_total_usd},
-        ${new Date().toISOString()}
+        ${new Date().toISOString()},
+        ${session.status !== "pending" ? new Date().toISOString() : null}
       ) ON CONFLICT (session_id) DO UPDATE SET
         status = EXCLUDED.status,
         output_text = EXCLUDED.output_text,
         cost_total_usd = EXCLUDED.cost_total_usd,
         step_count = EXCLUDED.step_count,
-        wall_clock_seconds = EXCLUDED.wall_clock_seconds
+        wall_clock_seconds = EXCLUDED.wall_clock_seconds,
+        ended_at = CASE WHEN EXCLUDED.status IN ('success', 'error', 'failed') THEN NOW() ELSE sessions.ended_at END
     `;
     recordDbSuccess();
   } catch (err) {
