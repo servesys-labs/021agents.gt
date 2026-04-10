@@ -57,17 +57,13 @@
   let streaming = $derived(metaAgentStore.streaming);
   let statusText = $derived(metaAgentStore.statusText);
 
-  // Rotating spinner verbs (Claude Code style)
-  let spinnerVerbIndex = $state(randomVerbIndex());
+  // One random verb per turn, not rotating — matches Claude Code style
+  let spinnerLabel = $state(`${SPINNER_VERBS[randomVerbIndex()]}...`);
   $effect(() => {
-    if (!streaming) return;
-    spinnerVerbIndex = randomVerbIndex();
-    const timer = setInterval(() => {
-      spinnerVerbIndex = (spinnerVerbIndex + 1) % SPINNER_VERBS.length;
-    }, 1150);
-    return () => clearInterval(timer);
+    if (streaming) {
+      spinnerLabel = `${SPINNER_VERBS[randomVerbIndex()]}...`;
+    }
   });
-  let spinnerLabel = $derived(`${SPINNER_VERBS[spinnerVerbIndex]}...`);
 
   function scrollToBottom() {
     if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;

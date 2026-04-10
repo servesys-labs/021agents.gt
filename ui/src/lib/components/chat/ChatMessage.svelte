@@ -119,21 +119,11 @@
     }
   });
 
-  // Claude-style rotating status verbs while the assistant is still working.
+  // One random verb per turn — pick once when streaming starts, don't rotate
   $effect(() => {
-    const shouldRotate =
-      streaming &&
-      message.role === "assistant" &&
-      !message.content;
-
-    if (!shouldRotate) return;
-
-    spinnerVerbIndex = Math.floor(Math.random() * SPINNER_VERBS.length);
-    const timer = setInterval(() => {
-      spinnerVerbIndex = (spinnerVerbIndex + 1) % SPINNER_VERBS.length;
-    }, 1150);
-
-    return () => clearInterval(timer);
+    if (streaming && message.role === "assistant" && !message.content) {
+      spinnerVerbIndex = Math.floor(Math.random() * SPINNER_VERBS.length);
+    }
   });
 
   // Copy code button event delegation
