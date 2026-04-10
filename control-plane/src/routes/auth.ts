@@ -519,11 +519,23 @@ authRoutes.openapi(loginRoute, async (c): Promise<any> => {
 
   const { email, password } = c.req.valid("json");
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  let sql;
+  try {
+    sql = await getDb(c.env.HYPERDRIVE);
+  } catch (err: any) {
+    console.error("[auth/login] DB connection failed:", err);
+    return c.json({ error: "Database unavailable", detail: err?.message || "DB connection failed" }, 503);
+  }
 
-  const rows = await sql`
-    SELECT user_id, email, name, password_hash FROM users WHERE email = ${email}
-  `;
+  let rows: Array<{ user_id: string; email: string; name: string; password_hash: string }>;
+  try {
+    rows = await sql`
+      SELECT user_id, email, name, password_hash FROM users WHERE email = ${email}
+    `;
+  } catch (err: any) {
+    console.error("[auth/login] User lookup failed:", err);
+    return c.json({ error: "Database query failed", detail: err?.message || "Query failed" }, 500);
+  }
   if (rows.length === 0) {
     // Security event: login failed — unknown email
     logSecurityEvent(sql, {
