@@ -260,6 +260,10 @@ export async function loadAgentConfig(
     console.warn(`[config:${agentName}] Unknown plan '${resolvedPlan}' — falling back to 'standard' routing`);
   }
 
+  const hasExplicitCodeMode =
+    typeof cfg.use_code_mode === "boolean" || typeof cfg.useCodeMode === "boolean";
+  const personalAgentDefaultCodeMode = cfg.is_personal === true && !hasExplicitCodeMode;
+
   return {
     agent_name: row.name || agentName,
     system_prompt: String(cfg.system_prompt || cfg.systemPrompt || row.description || "You are a helpful AI assistant."),
@@ -288,7 +292,7 @@ export async function loadAgentConfig(
     routing: parseJson(cfg.routing),
     codemode_middleware: parseJson(cfg.codemode_middleware || cfg.codemodeMiddleware),
     codemode_observability: cfg.codemode_observability || cfg.codemodeObservability || undefined,
-    use_code_mode: cfg.use_code_mode === true || cfg.useCodeMode === true,
+    use_code_mode: cfg.use_code_mode === true || cfg.useCodeMode === true || personalAgentDefaultCodeMode,
     reasoning_strategy: cfg.reasoning_strategy || cfg.reasoningStrategy || undefined,
     harness: harness && Object.keys(harness).length > 0 ? harness : undefined,
     enable_workspace_checkpoints: enableWorkspaceCheckpoints,

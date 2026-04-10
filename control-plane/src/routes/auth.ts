@@ -355,6 +355,7 @@ authRoutes.openapi(signupRoute, async (c): Promise<any> => {
         version: "1.0.0",
         governance: { budget_limit_usd: 10 },
         reasoning_strategy: "",  // auto-select is best for a generalist
+        use_code_mode: true,     // Collapse tool schema for better latency and fewer direct tool calls.
         parallel_tool_calls: true,
         is_personal: true,
       };
@@ -787,6 +788,7 @@ authRoutes.openapi(cfAccessExchangeRoute, async (c): Promise<any> => {
         version: "1.0.0",
         governance: { budget_limit_usd: 10 },
         reasoning_strategy: "",
+        use_code_mode: true,
         parallel_tool_calls: true,
         is_personal: true,
       };
