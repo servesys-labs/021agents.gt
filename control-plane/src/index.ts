@@ -96,24 +96,59 @@ import { mfaEnforcementMiddleware } from "./middleware/mfa-enforcement";
 
 const app = createApp();
 
+const DEFAULT_ALLOWED_ORIGINS = [
+  "http://localhost:3000",
+  "http://localhost:5173",
+  "https://app.021agents.ai",
+  "https://021agents.ai",
+];
+
+function getConfiguredAllowedOrigins(): Set<string> {
+  const raw =
+    typeof process !== "undefined" &&
+    process?.env &&
+    typeof process.env.ALLOWED_ORIGINS === "string"
+      ? process.env.ALLOWED_ORIGINS
+      : "";
+
+  const configured = raw
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+  return new Set([...DEFAULT_ALLOWED_ORIGINS, ...configured]);
+}
+
+function isAllowedOrigin(origin: string, allowedOrigins: Set<string>): boolean {
+  if (!origin) return false;
+  if (allowedOrigins.has("*") || allowedOrigins.has(origin)) return true;
+
+  try {
+    const { protocol, hostname } = new URL(origin);
+    if (protocol !== "https:") return false;
+
+    if (hostname === "021agents.ai") return true;
+    if (hostname.endsWith(".oneshots.co")) return true;
+    if (hostname.endsWith(".agentos.dev")) return true;
+    if (hostname.endsWith(".servesys.workers.dev")) return true;
+    if (hostname.endsWith(".021agents.ai")) return true;
+    if (hostname === "oneshots-portal.pages.dev") return true;
+    if (hostname.endsWith(".oneshots-portal.pages.dev")) return true;
+  } catch {
+    return false;
+  }
+
+  return false;
+}
+
 // ── Global middleware ────────────────────────────────────────────────────
 app.use("*", securityHeadersMiddleware);
 app.use("*", cors({
   origin: (origin) => {
-    const allowed = (process.env.ALLOWED_ORIGINS || "http://localhost:3000,http://localhost:5173,https://app.021agents.ai").split(",");
-    if (!origin || allowed.includes(origin) || allowed.includes("*")) return origin;
-    // Allow any *.oneshots.co subdomain
-    if (origin && /^https:\/\/[a-z0-9-]+\.oneshots\.co$/.test(origin)) return origin;
-    // Allow any *.agentos.dev subdomain (custom org domains)
-    if (origin && /^https:\/\/[a-z0-9-]+\.agentos\.dev$/.test(origin)) return origin;
-    // Allow any *.servesys.workers.dev subdomain (internal services)
-    if (origin && /^https:\/\/[a-z0-9-]+\.servesys\.workers\.dev$/.test(origin)) return origin;
-    // Allow any *.021agents.ai subdomain (new brand domain)
-    if (origin && /^https:\/\/[a-z0-9-]+\.021agents\.ai$/.test(origin)) return origin;
-    if (origin === "https://021agents.ai") return origin;
-    // Allow CF Pages preview/production domains
-    if (origin && /^https:\/\/[a-z0-9-]+\.oneshots-portal\.pages\.dev$/.test(origin)) return origin;
-    if (origin === "https://oneshots-portal.pages.dev") return origin;
+    // Requests without Origin are typically server-to-server and don't need CORS headers.
+    if (!origin) return origin;
+    const allowedOrigins = getConfiguredAllowedOrigins();
+    if (isAllowedOrigin(origin, allowedOrigins)) return origin;
     return null;
   },
   allowMethods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
