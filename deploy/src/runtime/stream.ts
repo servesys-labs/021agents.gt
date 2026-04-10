@@ -676,23 +676,52 @@ export async function streamRun(
 
       send(serializeForWebSocket({ type: "turn_start", turn, model: route.model }));
 
-      // Stream LLM response (with per-turn timeout to prevent hanging)
-      let llmResponse: LLMResponse;
+      // Stream LLM response (with per-turn timeout + model fallback chain)
+      let llmResponse: LLMResponse | null = null;
       try {
         const PER_TURN_TIMEOUT_MS = 120_000; // 2 min max per turn
-        llmResponse = await Promise.race([
-          streamLLM(env, messages, activeTools, {
-            model: route.model,
-            provider: route.provider,
-            max_tokens: route.max_tokens,
-            signal: opts?.signal,
-          }, send),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error(`Turn ${turn} timed out after ${PER_TURN_TIMEOUT_MS / 1000}s`)), PER_TURN_TIMEOUT_MS),
-          ),
-        ]);
+        const fallbackChain = Array.isArray((route as any).fallback_chain) ? (route as any).fallback_chain : [];
+        const candidates = [{ model: route.model, provider: route.provider }, ...fallbackChain];
+        let lastErr: any = null;
+        let resolved = false;
+
+        for (let i = 0; i < candidates.length; i++) {
+          const candidate = candidates[i];
+          try {
+            const candidateResponse = await Promise.race([
+              streamLLM(env, messages, activeTools, {
+                model: candidate.model,
+                provider: candidate.provider,
+                max_tokens: route.max_tokens,
+                signal: opts?.signal,
+              }, send),
+              new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error(`Turn ${turn} timed out after ${PER_TURN_TIMEOUT_MS / 1000}s`)), PER_TURN_TIMEOUT_MS),
+              ),
+            ]);
+            llmResponse = candidateResponse;
+            if (i > 0) {
+              send(serializeForWebSocket({
+                type: "system",
+                message: `Model fallback activated: using ${candidate.model}`,
+              } as any));
+            }
+            resolved = true;
+            break;
+          } catch (err: any) {
+            lastErr = err;
+          }
+        }
+
+        if (!resolved) {
+          throw lastErr || new Error("LLM failed on all routed candidates");
+        }
       } catch (err: any) {
         send(serializeForWebSocket({ type: "error", message: `LLM failed: ${err.message}`, code: "LLM_ERROR" }));
+        break;
+      }
+      if (!llmResponse) {
+        send(serializeForWebSocket({ type: "error", message: "LLM failed with empty response", code: "LLM_ERROR" }));
         break;
       }
 

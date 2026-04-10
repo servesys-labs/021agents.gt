@@ -262,7 +262,12 @@ export async function loadAgentConfig(
 
   const hasExplicitCodeMode =
     typeof cfg.use_code_mode === "boolean" || typeof cfg.useCodeMode === "boolean";
-  const personalAgentDefaultCodeMode = cfg.is_personal === true && !hasExplicitCodeMode;
+  const cfgTags = Array.isArray(cfg.tags) ? cfg.tags.map((t: any) => String(t).toLowerCase()) : [];
+  const looksLikePersonalAssistant =
+    cfg.is_personal === true ||
+    row.name === "my-assistant" ||
+    (cfgTags.includes("personal") && cfgTags.includes("assistant"));
+  const personalAgentDefaultCodeMode = looksLikePersonalAssistant && !hasExplicitCodeMode;
 
   return {
     agent_name: row.name || agentName,
@@ -324,25 +329,56 @@ export async function loadAgentConfig(
 //   Workers AI MoE (edge) — fallback if tunnels are down
 //
 // When ready to monetize, uncomment the paid plan routes below.
-const GEMMA_FAST = { model: "gemma-4-26b-moe", provider: "custom-gemma4-fast" };
-const GEMMA_DEEP = { model: "gemma-4-31b", provider: "custom-gemma4-local" };
-const GEMMA_EDGE = { model: "@cf/google/gemma-4-26b-a4b-it", provider: "workers-ai" };
+const GEMMA_FAST = {
+  model: "gemma-4-26b-moe",
+  provider: "custom-gemma4-fast",
+  fallback: [
+    { model: "@cf/google/gemma-4-26b-a4b-it", provider: "workers-ai" },
+    { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai" },
+  ],
+};
+const GEMMA_DEEP = {
+  model: "gemma-4-31b",
+  provider: "custom-gemma4-local",
+  fallback: [
+    { model: "gemma-4-26b-moe", provider: "custom-gemma4-fast" },
+    { model: "@cf/google/gemma-4-26b-a4b-it", provider: "workers-ai" },
+    { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai" },
+  ],
+};
+const KIMI_COMPLEX = {
+  model: "@cf/moonshotai/kimi-k2.5",
+  provider: "workers-ai",
+  fallback: [
+    { model: "gemma-4-31b", provider: "custom-gemma4-local" },
+    { model: "gemma-4-26b-moe", provider: "custom-gemma4-fast" },
+    { model: "@cf/google/gemma-4-26b-a4b-it", provider: "workers-ai" },
+  ],
+};
+const GEMMA_EDGE = {
+  model: "@cf/google/gemma-4-26b-a4b-it",
+  provider: "workers-ai",
+  fallback: [
+    { model: "gemma-4-26b-moe", provider: "custom-gemma4-fast" },
+    { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai" },
+  ],
+};
 
 const PLAN_ROUTING: Record<string, Record<string, Record<string, { model: string; provider: string }>>> = {
   free: {
-    general: { simple: GEMMA_FAST, moderate: GEMMA_FAST, complex: GEMMA_DEEP, tool_call: GEMMA_FAST },
+    general: { simple: GEMMA_FAST, moderate: GEMMA_FAST, complex: KIMI_COMPLEX, tool_call: GEMMA_FAST },
     multimodal: { vision: GEMMA_DEEP },
   },
   basic: {
-    general: { simple: GEMMA_FAST, moderate: GEMMA_FAST, complex: GEMMA_DEEP, tool_call: GEMMA_FAST },
+    general: { simple: GEMMA_FAST, moderate: GEMMA_FAST, complex: KIMI_COMPLEX, tool_call: GEMMA_FAST },
     multimodal: { vision: GEMMA_DEEP },
   },
   standard: {
-    general: { simple: GEMMA_FAST, moderate: GEMMA_DEEP, complex: GEMMA_DEEP, tool_call: GEMMA_FAST },
+    general: { simple: GEMMA_FAST, moderate: GEMMA_DEEP, complex: KIMI_COMPLEX, tool_call: GEMMA_FAST },
     multimodal: { vision: GEMMA_DEEP },
   },
   premium: {
-    general: { simple: GEMMA_FAST, moderate: GEMMA_DEEP, complex: GEMMA_DEEP, tool_call: GEMMA_FAST },
+    general: { simple: GEMMA_FAST, moderate: GEMMA_DEEP, complex: KIMI_COMPLEX, tool_call: GEMMA_FAST },
     multimodal: { vision: GEMMA_DEEP },
   },
   // ── Paid plans (uncomment when ready to monetize) ──────────────────

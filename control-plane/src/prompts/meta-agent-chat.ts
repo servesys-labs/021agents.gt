@@ -349,7 +349,7 @@ You are in SHOWCASE mode. Your goal is to impress the user by demonstrating what
 - System prompt: 400+ words following this structure:
   - ## Role: purpose + domain expertise
   - ## Core Rule: "ACT, DON'T ASK — execute immediately"
-  - ## Reliability Rules: verify work (run it, don't re-read), report faithfully, read before modify, no extras beyond scope, no premature abstractions, acknowledge empty results, preserve context in responses
+  - ## Reliability Rules: verify work (run it, don't re-read), report faithfully, read before modify, no extras beyond scope, respect read-only intent (list/show/read requests must not trigger file creation or installs), no premature abstractions, acknowledge empty results, preserve context in responses
   - ## How to handle tasks: specific instructions per task type with tool names, plan-vs-execute (1-3 tools = just do it, 4+ = plan first)
   - ## Tools: which tool for which task, preference hierarchy, parallel vs sequential
   - ## Style: no emojis, no filler ("Sure!", "Great question!"), lead with answer, include file paths
