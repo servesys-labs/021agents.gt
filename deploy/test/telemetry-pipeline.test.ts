@@ -279,6 +279,10 @@ describe("queue consumer → DB schema alignment", () => {
     const turnCols026 = [
       "llm_latency_ms", "stop_reason", "refusal",
       "cache_read_tokens", "cache_write_tokens", "gateway_log_id",
+      "pre_llm_ms", "tool_exec_ms",
+      "llm_retry_count", "llm_cost_usd", "tool_cost_usd",
+      "tokens_per_sec", "queue_delay_ms",
+      "compaction_triggered", "messages_dropped",
     ];
     for (const col of turnCols026) {
       expect(turnInsert).toContain(col);
@@ -472,6 +476,10 @@ describe("consolidated schema — observability columns", () => {
     const turnsCols = [
       "llm_latency_ms", "stop_reason", "refusal",
       "cache_read_tokens", "cache_write_tokens", "gateway_log_id",
+      "pre_llm_ms", "tool_exec_ms",
+      "llm_retry_count", "llm_cost_usd", "tool_cost_usd",
+      "tokens_per_sec", "queue_delay_ms",
+      "compaction_triggered", "messages_dropped",
     ];
     for (const col of turnsCols) {
       expect(migration).toContain(col);

@@ -85,20 +85,24 @@ export function streamAgent(
   const run = async () => {
     let res: Response;
     try {
+      const requestBody: Record<string, unknown> = {
+        agent_name: agentName,
+        input: message,
+        ...(sessionId ? { session_id: sessionId } : {}),
+        ...(plan ? { plan } : {}),
+        ...(conversationId ? { conversation_id: conversationId } : {}),
+      };
+      if (history && history.length > 0) {
+        requestBody.history = history;
+      }
+
       res = await fetch(`${api.baseUrl}/runtime-proxy/runnable/stream`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           ...(api.token ? { Authorization: `Bearer ${api.token}` } : {}),
         },
-        body: JSON.stringify({
-          agent_name: agentName,
-          input: message,
-          session_id: sessionId,
-          ...(plan ? { plan } : {}),
-          ...(history && history.length > 0 ? { history } : {}),
-          ...(conversationId ? { conversation_id: conversationId } : {}),
-        }),
+        body: JSON.stringify(requestBody),
         signal: controller.signal,
       });
     } catch (err) {
@@ -179,7 +183,8 @@ export function streamAgent(
       }
     }
 
-    onEvent({ type: "done", data: {} });
+    // Do not synthesize "done" on stream close.
+    // The server emits an explicit done event with authoritative metadata.
   };
 
   run().catch((err) => {
