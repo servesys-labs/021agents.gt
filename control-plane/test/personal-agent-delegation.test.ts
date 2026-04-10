@@ -25,6 +25,21 @@ describe("personal assistant prompt — lean and focused", () => {
     expect(estimatedTokens).toBeLessThan(5500);
   });
 
+  // ── Total turn-0 budget — prompt text + tool schemas ──
+  // The previous test only measured the prompt template. In production
+  // the LLM also receives tool schemas in the same context, which adds
+  // ~200 tokens per tool. The personal assistant defaults to ~12 core
+  // tools, so the realistic turn-0 input is prompt + 12 * 200 = prompt +
+  // 2,400 tokens. This test catches regressions that bloat either side.
+  it("prompt + ~12 tool schemas stays under 7500 tokens", () => {
+    const promptTokens = Math.ceil(prompt.length / 4);
+    const AVG_TOOL_SCHEMA_TOKENS = 200;
+    const CORE_TOOL_COUNT = 12;
+    const toolTokens = CORE_TOOL_COUNT * AVG_TOOL_SCHEMA_TOKENS;
+    const totalTurnZeroTokens = promptTokens + toolTokens;
+    expect(totalTurnZeroTokens).toBeLessThan(7500);
+  });
+
   it("documents core tools including extended set", () => {
     // Core tools section should list these
     expect(prompt).toContain("## Core tools (always available)");
@@ -252,11 +267,29 @@ describe("personal assistant prompt — quality checks", () => {
     expect(prompt).toContain("PII");
   });
 
-  it("defaults to 'there' when no username provided", () => {
+  it("defaults to 'the user' when no username provided", () => {
+    // Previous fallback was "there", which produced the ungrammatical
+    // greeting "for there on the OneShots platform". Fixed to "the user".
     const defaultPrompt = buildPersonalAgentPrompt();
-    expect(defaultPrompt).toContain("for there on the OneShots");
-    // The prompt uses "there" as fallback name
-    expect(defaultPrompt).toContain("there");
+    expect(defaultPrompt).toContain("for the user on the OneShots");
+    // Make sure the old broken fallback doesn't sneak back in
+    expect(defaultPrompt).not.toContain("for there on the OneShots");
+  });
+
+  it("includes session continuity + conversation repair guidance", () => {
+    const prompt = buildPersonalAgentPrompt("TestUser");
+    expect(prompt).toContain("# Session continuity");
+    expect(prompt).toContain("Conversation repair");
+    expect(prompt).toContain("[Tool execution interrupted]");
+  });
+
+  it("renders inline code without backslash escaping artifacts", () => {
+    // Regression test for the \\\`...\\\` triple-backslash bug that
+    // produced visible backslashes in 19 places throughout the prompt.
+    const prompt = buildPersonalAgentPrompt("TestUser");
+    expect(prompt).not.toContain("\\`memory-save\\`");
+    expect(prompt).not.toContain("\\`tool-name\\`");
+    expect(prompt).toContain("`memory-save`");
   });
 });
 
@@ -279,6 +312,9 @@ describe("token savings — lean vs old", () => {
     const savings = oldTotal - leanTotal;
 
     expect(savings).toBeGreaterThan(400); // At least 400 tokens saved per turn
-    expect(leanTotal).toBeLessThan(5000); // Total overhead under 5000 tokens
+    // Total overhead under 5500 tokens. Bumped from 5000 to accommodate
+    // the Session continuity / conversation repair section added to the
+    // prompt — about 120 tokens of valuable behavioral guidance.
+    expect(leanTotal).toBeLessThan(5500);
   });
 });
