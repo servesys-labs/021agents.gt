@@ -163,8 +163,9 @@ apiKeyRoutes.openapi(createApiKeyRoute, async (c): Promise<any> => {
 
   const scopesJson = JSON.stringify(req.scopes);
 
-  const ipAllowlistArr = req.ip_allowlist.length > 0 ? req.ip_allowlist : null;
-  const allowedAgentsArr = req.allowed_agents.length > 0 ? req.allowed_agents : null;
+  // Keep JSONB NOT NULL columns non-null on insert.
+  const ipAllowlistArr = Array.isArray(req.ip_allowlist) ? req.ip_allowlist : [];
+  const allowedAgentsArr = Array.isArray(req.allowed_agents) ? req.allowed_agents : [];
 
   await sql`
     INSERT INTO api_keys (
@@ -348,8 +349,8 @@ apiKeyRoutes.openapi(rotateApiKeyRoute, async (c): Promise<any> => {
       ${newKeyId}, ${user.org_id}, ${user.user_id}, ${old.name}, ${prefix},
       ${keyHash}, ${scopesJson}, ${old.project_id || ""}, ${old.env || ""},
       ${old.expires_at || null}, ${true}, ${nowEpoch},
-      ${Array.isArray(old.ip_allowlist) && old.ip_allowlist.length > 0 ? old.ip_allowlist : null},
-      ${Array.isArray(old.allowed_agents) && old.allowed_agents.length > 0 ? old.allowed_agents : null},
+      ${Array.isArray(old.ip_allowlist) ? old.ip_allowlist : []},
+      ${Array.isArray(old.allowed_agents) ? old.allowed_agents : []},
       ${Number(old.rate_limit_rpm || 60)}, ${Number(old.rate_limit_rpd || 10000)}
     )
   `;
