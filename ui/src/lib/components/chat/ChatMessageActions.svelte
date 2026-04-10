@@ -33,7 +33,7 @@
 
 <div
   class={cn(
-    "absolute -top-3 right-2 z-10 flex items-center gap-0.5 rounded-lg border border-border bg-popover px-1 py-0.5 shadow-sm",
+    "absolute -bottom-4 right-2 z-10 flex items-center gap-0.5 rounded-lg border border-border bg-popover px-1 py-0.5 shadow-md",
     "opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100"
   )}
   role="toolbar"
