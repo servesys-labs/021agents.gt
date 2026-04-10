@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   # ── Control Plane (Cloudflare Worker) ──────────────────────────────
@@ -40,6 +41,8 @@ jobs:
         with:
           node-version: "22"
       - run: npm ci
+      - name: Sandbox image E2E (assistant-office profile)
+        run: bash ../scripts/e2e_sandbox_office_image.sh
       - name: Test
         run: npm test
       - name: Deploy runtime
@@ -96,3 +99,31 @@ jobs:
         run: echo "E2E gate skipped — E2E_SERVICE_TOKEN not configured"
         env:
           E2E_SERVICE_TOKEN: ${{ secrets.E2E_SERVICE_TOKEN }}
+
+  # ── Pre-Beta Health Suite (manual trigger) ─────────────────────────────
+  pre-beta-health:
+    runs-on: ubuntu-latest
+    needs: [control-plane, deploy, ui]
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run pre-beta health suite
+        if: env.E2E_SERVICE_TOKEN != '' && env.E2E_USER_EMAIL != '' && env.E2E_USER_PASSWORD != ''
+        run: bash scripts/pre_beta_health_suite.sh
+        env:
+          E2E_CONTROL_PLANE_URL: ${{ secrets.E2E_CONTROL_PLANE_URL }}
+          E2E_RUNTIME_URL: ${{ secrets.E2E_RUNTIME_URL }}
+          E2E_SERVICE_TOKEN: ${{ secrets.E2E_SERVICE_TOKEN }}
+          E2E_AGENT_NAME: ${{ secrets.E2E_AGENT_NAME }}
+          E2E_ORG_ID: ${{ secrets.E2E_ORG_ID }}
+          E2E_USER_EMAIL: ${{ secrets.E2E_USER_EMAIL }}
+          E2E_USER_PASSWORD: ${{ secrets.E2E_USER_PASSWORD }}
+          E2E_TIMEOUT_SECONDS: 180
+          PREBETA_RUN_INFRA_GATE: 1
+      - name: Skip notice
+        if: env.E2E_SERVICE_TOKEN == '' || env.E2E_USER_EMAIL == '' || env.E2E_USER_PASSWORD == ''
+        run: echo "Pre-beta suite skipped — set E2E_SERVICE_TOKEN, E2E_USER_EMAIL, and E2E_USER_PASSWORD secrets"
+        env:
+          E2E_SERVICE_TOKEN: ${{ secrets.E2E_SERVICE_TOKEN }}
+          E2E_USER_EMAIL: ${{ secrets.E2E_USER_EMAIL }}
+          E2E_USER_PASSWORD: ${{ secrets.E2E_USER_PASSWORD }}

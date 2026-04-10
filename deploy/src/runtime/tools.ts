@@ -250,6 +250,7 @@ function withSandboxTimeout<T>(promise: Promise<T>, sandboxId: string): Promise<
  */
 // Track which sandbox IDs have been initialized (warm) in this isolate lifetime
 const _warmSandboxes = new Set<string>();
+const _sandboxWarmups = new Map<string, Promise<void>>();
 
 function getSafeSandbox(env: RuntimeEnv, sandboxId: string) {
   // getSandbox returns immediately — container only starts on first operation.
@@ -263,11 +264,36 @@ function getSafeSandbox(env: RuntimeEnv, sandboxId: string) {
     // and ephemeral disk (no persistent secrets to exfiltrate).
   } as any);
 
-  const isCold = !_warmSandboxes.has(sandboxId);
+  async function ensureSandboxReady(): Promise<void> {
+    if (_warmSandboxes.has(sandboxId)) return;
+    const existing = _sandboxWarmups.get(sandboxId);
+    if (existing) {
+      await existing;
+      return;
+    }
+    const warmup = (async () => {
+      const warmupStart = Date.now();
+      try {
+        // Cold-start probe: keep the 30s guard here to fail fast when capacity is exhausted.
+        // IMPORTANT: this only validates allocation/readiness; it does not cap user command runtime.
+        await withSandboxTimeout<any>(raw.exec("true", { timeout: 1_000 }), sandboxId);
+        _warmSandboxes.add(sandboxId);
+        emitSandboxStartEvent((env as any).TELEMETRY_QUEUE, sandboxId, true, Date.now() - warmupStart, resolveTelemetryOrgId(env));
+      } catch (err) {
+        _warmSandboxes.add(sandboxId);
+        emitSandboxStartEvent((env as any).TELEMETRY_QUEUE, sandboxId, true, Date.now() - warmupStart, resolveTelemetryOrgId(env), "error");
+        throw err;
+      } finally {
+        _sandboxWarmups.delete(sandboxId);
+      }
+    })();
+    _sandboxWarmups.set(sandboxId, warmup);
+    await warmup;
+  }
 
   return {
     exec: async (cmd: string, opts?: any): Promise<{ stdout?: string; stderr?: string; exitCode?: number }> => {
-      const execStart = Date.now();
+      await ensureSandboxReady();
       // CRITICAL: @cloudflare/sandbox 0.7+ takes `timeout` in MILLISECONDS.
       // The rest of this file passes seconds (the original convention),
       // so we convert here at the choke point. Without this, every command
@@ -291,35 +317,25 @@ function getSafeSandbox(env: RuntimeEnv, sandboxId: string) {
         normalizedOpts.timeout = normalizedOpts.timeout * 1000;
       }
       try {
-        const result = await withSandboxTimeout<any>(raw.exec(cmd, normalizedOpts), sandboxId);
-        // Emit cold/warm start telemetry on first exec (P0-4)
-        if (isCold && !_warmSandboxes.has(sandboxId)) {
-          _warmSandboxes.add(sandboxId);
-          emitSandboxStartEvent((env as any).TELEMETRY_QUEUE, sandboxId, true, Date.now() - execStart, (env as any).ORG_ID);
-        }
-        return result;
+        return await raw.exec(cmd, normalizedOpts);
       } catch (err: any) {
         console.error(`[sandbox] exec failed (${sandboxId}): ${err.message?.slice(0, 200)}`);
-        if (isCold && !_warmSandboxes.has(sandboxId)) {
-          _warmSandboxes.add(sandboxId);
-          emitSandboxStartEvent((env as any).TELEMETRY_QUEUE, sandboxId, true, Date.now() - execStart, (env as any).ORG_ID, "error");
-        }
         throw err;
       }
     },
     writeFile: async (path: string, content: string): Promise<void> => {
       try {
-        return await withSandboxTimeout<any>(raw.writeFile(path, content), sandboxId);
+        await ensureSandboxReady();
+        return await raw.writeFile(path, content);
       } catch (err: any) {
         console.error(`[sandbox] writeFile failed (${sandboxId}): ${err.message?.slice(0, 200)}`);
         throw err;
       }
     },
-    readFile: (path: string): Promise<string> =>
-      withSandboxTimeout<any>(
-        (raw as any).readFile?.(path) ?? raw.exec(`cat "${path}"`, { timeout: 10 }).then((r: any) => r.stdout || ""),
-        sandboxId,
-      ),
+    readFile: async (path: string): Promise<string> => {
+      await ensureSandboxReady();
+      return (raw as any).readFile?.(path) ?? raw.exec(`cat "${path}"`, { timeout: 10 }).then((r: any) => r.stdout || "");
+    },
   };
 }
 
@@ -328,13 +344,15 @@ function emitSandboxStartEvent(queue: any, sandboxId: string, cold: boolean, lat
   if (!queue?.send) return;
   queue.send({
     type: "runtime_event",
-    event_type: "sandbox_start",
-    session_id: "",
-    org_id: orgId || "",
-    node_id: sandboxId,
-    status,
-    duration_ms: latencyMs,
-    details: { cold, sandbox_id: sandboxId },
+    payload: {
+      event_type: "sandbox_start",
+      session_id: "",
+      org_id: orgId || "",
+      node_id: sandboxId,
+      status,
+      duration_ms: latencyMs,
+      details: { cold, sandbox_id: sandboxId },
+    },
   }).catch(() => {});
 }
 
@@ -346,6 +364,11 @@ function emitSandboxStartEvent(queue: any, sandboxId: string, cold: boolean, lat
  */
 function stableSandboxId(env: RuntimeEnv, sessionId: string): string {
   return (env as any).DO_SESSION_ID || `session-${sessionId}`;
+}
+
+function resolveTelemetryOrgId(env: RuntimeEnv): string {
+  const cfg = (env as any).__agentConfig || {};
+  return String((env as any).__orgId || (env as any).ORG_ID || cfg.orgId || cfg.org_id || "");
 }
 
 function workspaceScopeFromEnv(env: RuntimeEnv): { org: string; agent: string; userId: string } {
@@ -1099,7 +1122,7 @@ async function executeSingleTool(
     recordSuccess(tc.name, (env as any).TELEMETRY_QUEUE);
 
     // Emit per-tool latency telemetry (P0-3)
-    emitToolExecEvent((env as any).TELEMETRY_QUEUE, tc.name, latencyMs, "success", sessionId, (env as any).ORG_ID);
+    emitToolExecEvent((env as any).TELEMETRY_QUEUE, tc.name, latencyMs, "success", sessionId, resolveTelemetryOrgId(env));
 
     return {
       tool: tc.name,
@@ -1117,7 +1140,7 @@ async function executeSingleTool(
     }
 
     // Emit per-tool latency telemetry (P0-3)
-    emitToolExecEvent((env as any).TELEMETRY_QUEUE, tc.name, latencyMs, "error", sessionId, (env as any).ORG_ID);
+    emitToolExecEvent((env as any).TELEMETRY_QUEUE, tc.name, latencyMs, "error", sessionId, resolveTelemetryOrgId(env));
 
     // Wrap raw errors in structured ToolError for telemetry-safe reporting
     const toolErr = err instanceof ToolError ? err : new ToolError(tc.name, err.message || String(err), {
@@ -1140,13 +1163,15 @@ function emitToolExecEvent(queue: any, toolName: string, latencyMs: number, stat
   if (!queue?.send) return;
   queue.send({
     type: "runtime_event",
-    event_type: "tool_exec",
-    session_id: sessionId,
-    org_id: orgId || "",
-    node_id: toolName,
-    status,
-    duration_ms: latencyMs,
-    details: { tool: toolName },
+    payload: {
+      event_type: "tool_exec",
+      session_id: sessionId,
+      org_id: orgId || "",
+      node_id: toolName,
+      status,
+      duration_ms: latencyMs,
+      details: { tool: toolName },
+    },
   }).catch(() => {});
 }
 
