@@ -21,10 +21,104 @@ import type { LLMMessage, LLMResponse, ToolCall, ToolDefinition, RuntimeEnv } fr
 import { LLMError, RefusalError, classifyFetchError } from "./errors";
 // Pricing imported dynamically in callLLM to avoid circular deps
 
+// ── Circuit Breaker for LLM Calls ─────────────────────────────
+// When the AI Gateway or upstream provider (OpenRouter / Workers AI) is
+// having a bad time, keep burning retries is pointless — it wastes time,
+// compounds the outage, and produces no useful signal. The breaker fails
+// fast after N consecutive failures, then waits for a cooldown before
+// probing again in half-open state.
+//
+// This is intentionally pessimistic: we open on 5 failures, not 10. LLM
+// calls are the single most expensive and latency-sensitive operation in
+// the runtime, and the AI Gateway already has its own internal retry and
+// fallback logic — if 5 of our calls in a row have burned through that
+// and still failed, the issue isn't transient.
+
+const LLM_BREAKER_THRESHOLD = 5;        // consecutive failures before opening
+const LLM_BREAKER_COOLDOWN_MS = 30_000; // 30s cooldown before half-open probe
+
+let _llmBreakerFailures = 0;
+let _llmBreakerOpenedAt = 0;
+let _llmBreakerLastFailureAt = 0;
+let _llmBreakerLastErrorMessage: string | null = null;
+
+function recordLlmSuccess(): void {
+  _llmBreakerFailures = 0;
+  _llmBreakerOpenedAt = 0;
+  _llmBreakerLastErrorMessage = null;
+}
+
+function recordLlmFailure(message: string): void {
+  _llmBreakerFailures++;
+  _llmBreakerLastFailureAt = Date.now();
+  _llmBreakerLastErrorMessage = message.slice(0, 200);
+  if (_llmBreakerFailures >= LLM_BREAKER_THRESHOLD && _llmBreakerOpenedAt === 0) {
+    _llmBreakerOpenedAt = Date.now();
+    console.warn(
+      `[LLM:breaker] OPEN after ${_llmBreakerFailures} consecutive failures — ` +
+      `failing fast for ${LLM_BREAKER_COOLDOWN_MS / 1000}s. Last error: ${_llmBreakerLastErrorMessage}`,
+    );
+  }
+}
+
+/**
+ * Returns true if the breaker is currently open.
+ * Also handles the half-open transition: after the cooldown elapses,
+ * the next call is allowed through. If it succeeds, the breaker closes
+ * via recordLlmSuccess(). If it fails, recordLlmFailure() will re-open
+ * the breaker because failures > threshold - 1.
+ */
+function isLlmBreakerOpen(): boolean {
+  if (_llmBreakerFailures < LLM_BREAKER_THRESHOLD) return false;
+  if (_llmBreakerOpenedAt > 0 && Date.now() - _llmBreakerOpenedAt > LLM_BREAKER_COOLDOWN_MS) {
+    console.info("[LLM:breaker] HALF-OPEN — allowing next call through");
+    _llmBreakerFailures = LLM_BREAKER_THRESHOLD - 1; // one more failure re-opens
+    _llmBreakerOpenedAt = 0;
+    return false;
+  }
+  return true;
+}
+
+/** Returns breaker state for the /api/v1/runtime/breakers endpoint. */
+export function getLlmBreakerState(): {
+  state: "closed" | "half-open" | "open";
+  failures: number;
+  openedAt: number;
+  lastFailureAt: number;
+  lastError: string | null;
+} {
+  const now = Date.now();
+  // "half-open" is a transient state we only actually enter on the next call;
+  // for reporting, surface it when we're in the cooldown window.
+  let state: "closed" | "half-open" | "open" = "closed";
+  if (_llmBreakerFailures >= LLM_BREAKER_THRESHOLD) {
+    if (_llmBreakerOpenedAt > 0 && now - _llmBreakerOpenedAt > LLM_BREAKER_COOLDOWN_MS) {
+      state = "half-open";
+    } else {
+      state = "open";
+    }
+  } else if (_llmBreakerFailures > 0) {
+    state = "half-open";
+  }
+  return {
+    state,
+    failures: _llmBreakerFailures,
+    openedAt: _llmBreakerOpenedAt,
+    lastFailureAt: _llmBreakerLastFailureAt,
+    lastError: _llmBreakerLastErrorMessage,
+  };
+}
+
 /**
  * Call an LLM through CF AI Gateway.
  * Workers AI (@cf/) → /workers-ai/v1/ endpoint.
  * All others → /openrouter/ endpoint.
+ *
+ * Wraps the raw implementation with circuit breaker instrumentation:
+ * - Fails fast when the breaker is open (no wasted retries during outages)
+ * - Records success/failure on every call so the breaker state stays live
+ * - Non-retryable LLMErrors (4xx from the gateway) do NOT trip the breaker
+ *   because they signal a problem with our request, not the upstream
  */
 export async function callLLM(
   env: RuntimeEnv,
@@ -35,7 +129,65 @@ export async function callLLM(
     provider?: string;
     max_tokens?: number;
     temperature?: number;
-    // Metadata for AI Gateway logging — enables per-agent/session cost tracking
+    metadata?: {
+      agent_name?: string;
+      session_id?: string;
+      trace_id?: string;
+      org_id?: string;
+      turn?: number;
+      channel?: string;
+    };
+  },
+): Promise<LLMResponse> {
+  // ── Circuit breaker fail-fast ──
+  // If we're in an outage window, don't even hit the gateway. This saves
+  // ~90s per call (retry + idle watchdog) and prevents cascading failures
+  // when AI Gateway or upstream providers are degraded.
+  if (isLlmBreakerOpen()) {
+    const cooldownRemaining = Math.max(
+      0,
+      LLM_BREAKER_COOLDOWN_MS - (Date.now() - _llmBreakerOpenedAt),
+    );
+    const retryAfterSec = Math.ceil(cooldownRemaining / 1000);
+    throw new LLMError(
+      opts.model,
+      `LLM circuit breaker open — ${_llmBreakerFailures} consecutive failures. ` +
+      `Retry in ${retryAfterSec}s. Last error: ${_llmBreakerLastErrorMessage ?? "unknown"}`,
+      {
+        retryable: true,
+        statusCode: 503,
+      },
+    );
+  }
+
+  try {
+    const result = await _doCallLLM(env, messages, tools, opts);
+    recordLlmSuccess();
+    return result;
+  } catch (err: any) {
+    // Only count failures that signal an upstream problem (transient network,
+    // 5xx, timeout). 4xx errors are our fault (bad request, missing auth) —
+    // tripping the breaker on them would mask the real bug.
+    const isUpstreamFailure =
+      !(err instanceof LLMError) ||
+      err.retryable === true ||
+      (err.statusCode !== undefined && err.statusCode >= 500);
+    if (isUpstreamFailure) {
+      recordLlmFailure(err?.message || String(err));
+    }
+    throw err;
+  }
+}
+
+async function _doCallLLM(
+  env: RuntimeEnv,
+  messages: LLMMessage[],
+  tools: ToolDefinition[],
+  opts: {
+    model: string;
+    provider?: string;
+    max_tokens?: number;
+    temperature?: number;
     metadata?: {
       agent_name?: string;
       session_id?: string;

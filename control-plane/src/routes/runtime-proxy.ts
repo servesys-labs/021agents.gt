@@ -185,6 +185,56 @@ runtimeProxyRoutes.openapi(healthRoute, async (c): Promise<any> => {
   }, health.healthy ? 200 : 503);
 });
 
+// ── GET /breakers — Circuit breaker snapshot for the canvas LiveStatsPanel ──
+// Proxies to the runtime's /api/v1/runtime/breakers endpoint. Returns
+// { db, llm, tools, timestamp }. Uncached on purpose — this is a live
+// health signal and we want the UI to see degradations in near real-time.
+runtimeProxyRoutes.get("/breakers", async (c): Promise<any> => {
+  try {
+    const resp = await c.env.RUNTIME.fetch(
+      "https://runtime/api/v1/runtime/breakers",
+      { method: "GET" },
+    );
+    const body = await resp.text();
+    return new Response(body, {
+      status: resp.status,
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+      },
+    });
+  } catch (err: any) {
+    return c.json(
+      {
+        error: "runtime_unreachable",
+        message: err?.message || "Failed to reach runtime",
+        // Fail-soft: surface a conservative all-closed snapshot so the UI
+        // doesn't flash red on a single network blip. Includes a note so
+        // callers can tell the difference between "healthy" and "unknown".
+        db: { state: "closed", failures: 0, opened_at: null },
+        llm: {
+          state: "closed",
+          failures: 0,
+          opened_at: null,
+          last_failure_at: null,
+          last_error: null,
+          note: "unknown — runtime unreachable",
+        },
+        tools: {
+          state: "closed",
+          total_tools_tracked: 0,
+          open_count: 0,
+          half_open_count: 0,
+          worst_tools: [],
+        },
+        timestamp: Date.now(),
+        degraded: true,
+      },
+      200,
+    );
+  }
+});
+
 // ── POST /agent/run — Agent execution ───────────────────────────────
 
 const agentRunRoute = createRoute({

@@ -268,8 +268,30 @@ function getSafeSandbox(env: RuntimeEnv, sandboxId: string) {
   return {
     exec: async (cmd: string, opts?: any): Promise<{ stdout?: string; stderr?: string; exitCode?: number }> => {
       const execStart = Date.now();
+      // CRITICAL: @cloudflare/sandbox 0.7+ takes `timeout` in MILLISECONDS.
+      // The rest of this file passes seconds (the original convention),
+      // so we convert here at the choke point. Without this, every command
+      // aborts in N milliseconds and the agent loses access to the
+      // sandbox entirely. The bug surfaces as: "Command timeout after 5ms".
+      // CRITICAL: @cloudflare/sandbox 0.7+ takes `timeout` in MILLISECONDS.
+      // The rest of this file passes seconds (the original convention),
+      // so we convert here at the choke point. Without this, every command
+      // aborts in N milliseconds and the agent loses access to the sandbox
+      // entirely. Symptom: "Command timeout after 5ms".
+      //
+      // Heuristic: any value <= 600 is treated as seconds and multiplied.
+      // 600s = 10min, well above any reasonable per-command cap. Real ms
+      // values for non-trivial commands are always 1000+.
+      const normalizedOpts: any = opts ? { ...opts } : undefined;
+      if (
+        normalizedOpts &&
+        typeof normalizedOpts.timeout === "number" &&
+        normalizedOpts.timeout <= 600
+      ) {
+        normalizedOpts.timeout = normalizedOpts.timeout * 1000;
+      }
       try {
-        const result = await withSandboxTimeout<any>(raw.exec(cmd, opts), sandboxId);
+        const result = await withSandboxTimeout<any>(raw.exec(cmd, normalizedOpts), sandboxId);
         // Emit cold/warm start telemetry on first exec (P0-4)
         if (isCold && !_warmSandboxes.has(sandboxId)) {
           _warmSandboxes.add(sandboxId);
@@ -333,6 +355,9 @@ async function sandboxExecWithLimits(
   timeoutSeconds?: number,
   stdin?: string,
 ): Promise<{ stdout?: string; stderr?: string; exitCode?: number }> {
+  // The timeout here stays in seconds — the seconds→ms conversion
+  // happens in the getSafeSandbox proxy's exec wrapper, so this is
+  // the only place in tools.ts that should think in seconds.
   const timeout = clampSandboxTimeout(timeoutSeconds);
   const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
   return sandbox.exec(command, {
@@ -402,6 +427,45 @@ let _circuitBreakerSql: ((query: string, ...params: any[]) => any) | null = null
  */
 export function setCircuitBreakerSql(sqlFn: typeof _circuitBreakerSql): void {
   _circuitBreakerSql = sqlFn;
+}
+
+/**
+ * Aggregate circuit breaker state across all tracked tools.
+ * Used by the /api/v1/runtime/breakers health endpoint so the UI can
+ * display a single green/amber/red indicator for "tools".
+ *
+ * Returns the worst state seen across all tools, along with counts
+ * and the top 3 offenders (tools with open/half-open state or the
+ * highest failure counts).
+ */
+export function getToolsBreakerSummary(): {
+  state: "closed" | "half-open" | "open";
+  total_tools_tracked: number;
+  open_count: number;
+  half_open_count: number;
+  worst_tools: Array<{ name: string; state: string; failures: number }>;
+} {
+  let open = 0;
+  let halfOpen = 0;
+  const worst: Array<{ name: string; state: string; failures: number }> = [];
+
+  for (const [name, state] of circuitStates.entries()) {
+    if (state.state === "open") open++;
+    else if (state.state === "half-open") halfOpen++;
+    if (state.state !== "closed" || state.failures > 0) {
+      worst.push({ name, state: state.state, failures: state.failures });
+    }
+  }
+
+  worst.sort((a, b) => b.failures - a.failures);
+
+  return {
+    state: open > 0 ? "open" : halfOpen > 0 ? "half-open" : "closed",
+    total_tools_tracked: circuitStates.size,
+    open_count: open,
+    half_open_count: halfOpen,
+    worst_tools: worst.slice(0, 3),
+  };
 }
 
 /**
