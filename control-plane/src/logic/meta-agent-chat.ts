@@ -47,6 +47,7 @@ interface MetaChatContext {
   aiGatewayId?: string;
   cloudflareApiToken?: string;
   aiGatewayToken?: string;
+  gpuServiceKey?: string;
   /** "demo" = showcase mode (auto-generate, minimal questions), "live" = production interview mode */
   mode?: "demo" | "live";
   env: {
@@ -2873,6 +2874,7 @@ export async function runMetaChat(
         aiGatewayId: ctx.aiGatewayId,
         cloudflareApiToken: ctx.cloudflareApiToken,
         aiGatewayToken: ctx.aiGatewayToken,
+        gpuServiceKey: ctx.gpuServiceKey,
         openrouterApiKey: ctx.openrouterApiKey,
       },
       {
