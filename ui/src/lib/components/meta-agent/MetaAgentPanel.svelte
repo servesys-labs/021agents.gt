@@ -19,6 +19,21 @@
   let textareaEl: HTMLTextAreaElement | undefined = $state();
   let messagesEl: HTMLDivElement | undefined = $state();
   let resizing = $state(false);
+  let copiedIndex = $state<number | null>(null);
+
+  function formatElapsed(ms: number): string {
+    if (ms < 1000) return `${ms}ms`;
+    const s = Math.round(ms / 1000);
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    return `${m}m ${s % 60}s`;
+  }
+
+  function copyMessage(content: string, index: number) {
+    navigator.clipboard.writeText(content);
+    copiedIndex = index;
+    setTimeout(() => { if (copiedIndex === index) copiedIndex = null; }, 2000);
+  }
 
   /** Active training job shown inline */
   let activeTrainingJobId = $state<string | null>(null);
@@ -39,6 +54,7 @@
 
   let messages = $derived(metaAgentStore.getMessages(agentName));
   let streaming = $derived(metaAgentStore.streaming);
+  let statusText = $derived(metaAgentStore.statusText);
 
   function scrollToBottom() {
     if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -201,6 +217,18 @@
                 </div>
               </div>
             {:else}
+              <!-- Thinking / reasoning block -->
+              {#if msg.thinking}
+                <details class="group rounded-lg bg-muted/30 text-xs">
+                  <summary class="cursor-pointer px-3 py-1.5 text-muted-foreground select-none">
+                    Reasoning <span class="text-muted-foreground/50">({msg.thinking.length} chars)</span>
+                  </summary>
+                  <div class="whitespace-pre-wrap px-3 pb-2 text-muted-foreground/70 font-mono text-[11px]">
+                    {msg.thinking}
+                  </div>
+                </details>
+              {/if}
+
               <!-- Tool calls -->
               {#if msg.toolCalls?.length}
                 <div class="space-y-2">
@@ -217,21 +245,56 @@
 
               <!-- Assistant content -->
               {#if msg.content}
-                <div class="prose-chat text-[13px]">
-                  {#if renderedCache.has(i)}
-                    {@html renderedCache.get(i) ?? ""}
-                  {:else}
-                    <div class="whitespace-pre-wrap">{msg.content}</div>
+                <div class="group relative">
+                  <div class="prose-chat text-[13px]">
+                    {#if renderedCache.has(i)}
+                      {@html renderedCache.get(i) ?? ""}
+                    {:else}
+                      <div class="whitespace-pre-wrap">{msg.content}</div>
+                    {/if}
+                  </div>
+                  <!-- Copy button -->
+                  <button
+                    class="absolute right-1 top-1 rounded p-1 text-muted-foreground transition-opacity hover:text-foreground {copiedIndex === i ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}"
+                    onclick={() => copyMessage(msg.content, i)}
+                    aria-label="Copy"
+                  >
+                    {#if copiedIndex === i}
+                      <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 text-green-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+                    {:else}
+                      <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+                    {/if}
+                  </button>
+                </div>
+                <!-- Meta line: model badge, cost, elapsed time -->
+                <div class="flex items-center gap-2 mt-0.5">
+                  {#if msg.model}
+                    <span class="inline-flex items-center rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">{msg.model}</span>
+                  {/if}
+                  {#if msg.cost_usd !== undefined && msg.cost_usd > 0}
+                    <span class="text-[10px] text-muted-foreground">${(msg.cost_usd ?? 0).toFixed(4)}</span>
+                  {/if}
+                  {#if msg.elapsedMs}
+                    <span class="text-[10px] text-muted-foreground">took {formatElapsed(msg.elapsedMs)}</span>
                   {/if}
                 </div>
-                {#if msg.cost_usd !== undefined && msg.cost_usd > 0}
-                  <p class="text-[10px] text-muted-foreground">${(msg.cost_usd ?? 0).toFixed(4)}</p>
-                {/if}
               {/if}
 
               <!-- Streaming indicator -->
               {#if streaming && i === messages.length - 1 && !msg.content && (!msg.toolCalls || msg.toolCalls.length === 0)}
-                <span class="inline-block h-4 w-0.5 animate-pulse bg-foreground"></span>
+                <div class="flex items-center gap-2">
+                  <span class="inline-block h-4 w-0.5 animate-pulse bg-foreground"></span>
+                  {#if statusText}
+                    <span class="text-xs text-muted-foreground animate-pulse">{statusText}</span>
+                  {/if}
+                </div>
+              {/if}
+              <!-- Status text while streaming with content already present -->
+              {#if streaming && i === messages.length - 1 && statusText && (msg.content || (msg.toolCalls && msg.toolCalls.length > 0))}
+                <div class="flex items-center gap-2 mt-1">
+                  <span class="inline-block h-3 w-0.5 animate-pulse bg-foreground/50"></span>
+                  <span class="text-xs text-muted-foreground animate-pulse">{statusText}</span>
+                </div>
               {/if}
             {/if}
           {/each}

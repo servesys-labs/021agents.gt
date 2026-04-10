@@ -17,6 +17,7 @@ export interface MetaAgentMessage {
   thinking?: string;
   model?: string;
   cost_usd?: number;
+  elapsedMs?: number;
 }
 
 const STORAGE_PREFIX = "oneshots_meta_agent_";
@@ -38,8 +39,11 @@ class MetaAgentStore {
   streaming = $state(false);
   /** Is the panel open */
   panelOpen = $state(false);
+  /** Status text for the streaming indicator */
+  statusText = $state("");
 
   private abortFn: (() => void) | null = null;
+  private startedAt: number | null = null;
 
   getMessages(agentName: string): MetaAgentMessage[] {
     return this.messages[agentName] ?? [];
@@ -106,6 +110,8 @@ class MetaAgentStore {
     };
     this.messages[agentName] = [...this.messages[agentName], assistantMsg];
     this.streaming = true;
+    this.startedAt = Date.now();
+    this.statusText = "Thinking...";
 
     // Build history from previous messages for multi-turn context
     const history = this.messages[agentName].slice(0, -2).map(m => ({
@@ -161,6 +167,7 @@ class MetaAgentStore {
               ...(last.toolCalls ?? []),
               { name: tc.name, input: inputStr, call_id: callId },
             ];
+            this.statusText = `Executing ${tc.name}...`;
             this.messages[agentName] = [...msgs];
             break;
           }
@@ -192,8 +199,13 @@ class MetaAgentStore {
             if (done.cost_usd !== undefined) last.cost_usd = done.cost_usd;
             if (done.session_id) this.sessionIds[agentName] = done.session_id;
             if (done.output && !last.content) last.content = done.output;
+            if (this.startedAt) {
+              last.elapsedMs = Date.now() - this.startedAt;
+              this.startedAt = null;
+            }
             this.messages[agentName] = [...msgs];
             this.streaming = false;
+            this.statusText = "";
             this.abortFn = null;
             this.saveHistory(agentName);
             break;
@@ -203,6 +215,8 @@ class MetaAgentStore {
             last.content += `\n\n**Error:** ${err}`;
             this.messages[agentName] = [...msgs];
             this.streaming = false;
+            this.statusText = "";
+            this.startedAt = null;
             this.abortFn = null;
             break;
           }
@@ -219,6 +233,8 @@ class MetaAgentStore {
   stopStreaming() {
     this.abortFn?.();
     this.streaming = false;
+    this.statusText = "";
+    this.startedAt = null;
     this.abortFn = null;
   }
 
