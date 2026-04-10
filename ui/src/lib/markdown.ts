@@ -13,7 +13,8 @@ function rehypeEnhanceLinks() {
   return (tree: Root) => {
     visit(tree, "element", (node) => {
       if (node.tagName === "a") {
-        const href = (node.properties?.href as string) || "";
+        const hrefValue = node.properties?.href;
+        const href = typeof hrefValue === "string" ? hrefValue : "";
         if (href.startsWith("http://") || href.startsWith("https://")) {
           node.properties = node.properties || {};
           node.properties.target = "_blank";
@@ -38,7 +39,8 @@ function rehypeEnhanceCodeBlocks() {
         "tagName" in parent &&
         parent.tagName === "pre"
       ) {
-        const classNames = (node.properties?.className as string[]) || [];
+        const rawClassNames = (node.properties?.className as unknown[]) || [];
+        const classNames = rawClassNames.filter((c): c is string => typeof c === "string");
         const langClass = classNames.find((c) => c.startsWith("language-") || c.startsWith("hljs-"));
         const lang = langClass?.replace(/^language-/, "").replace(/^hljs-/, "") || "";
 

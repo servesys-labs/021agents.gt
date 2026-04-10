@@ -28,6 +28,32 @@
   let expandedId = $state<string | null>(null);
   let renderedOutputs = $state(new Map<string, string>());
 
+  function asString(value: unknown): string {
+    if (typeof value === "string") return value;
+    if (value == null) return "";
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+
+  function normalizeRun(input: unknown): ScheduledRun {
+    const raw = (input ?? {}) as Record<string, unknown>;
+    return {
+      session_id: asString(raw.session_id),
+      status: asString(raw.status),
+      input_text: asString(raw.input_text),
+      output_text: asString(raw.output_text),
+      step_count: typeof raw.step_count === "number" ? raw.step_count : Number(raw.step_count ?? 0),
+      wall_clock_seconds: typeof raw.wall_clock_seconds === "number" ? raw.wall_clock_seconds : Number(raw.wall_clock_seconds ?? 0),
+      cost_total_usd: typeof raw.cost_total_usd === "number" ? raw.cost_total_usd : Number(raw.cost_total_usd ?? 0),
+      model: asString(raw.model),
+      created_at: asString(raw.created_at),
+      ended_at: raw.ended_at == null ? null : asString(raw.ended_at),
+    };
+  }
+
   async function load() {
     loading = true;
     try {
@@ -35,10 +61,11 @@
       const data = await api.get<ScheduledRun[] | { sessions: ScheduledRun[] }>(
         `/sessions?agent_name=${encodeURIComponent(agentName)}&limit=20&channel=api`
       );
-      const sessions = Array.isArray(data) ? data : (data.sessions ?? []);
+      const sessionsRaw = Array.isArray(data) ? data : (data.sessions ?? []);
+      const sessions = sessionsRaw.map(normalizeRun);
       // Filter to likely scheduled runs (input contains schedule-like content or channel is schedule)
       runs = sessions.filter((s: ScheduledRun) =>
-        s.input_text && s.input_text.length > 50 && !s.input_text.startsWith("hi") && !s.input_text.startsWith("Hello")
+        s.input_text.length > 50 && !s.input_text.startsWith("hi") && !s.input_text.startsWith("Hello")
       );
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to load runs");

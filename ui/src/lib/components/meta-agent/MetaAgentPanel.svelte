@@ -150,14 +150,14 @@
   ></div>
 
   <!-- Resize handle (desktop only) -->
-  <div
+  <button
+    type="button"
     class="hidden md:flex w-1.5 cursor-col-resize items-center justify-center hover:bg-accent/50 active:bg-accent transition-colors shrink-0 {resizing ? 'bg-accent' : ''}"
-    role="separator"
     aria-label="Resize panel"
     onmousedown={startResize}
   >
     <div class="h-8 w-0.5 rounded-full bg-muted-foreground/20"></div>
-  </div>
+  </button>
 
   <!-- Panel — in flex flow on desktop, fixed overlay on mobile -->
   <div

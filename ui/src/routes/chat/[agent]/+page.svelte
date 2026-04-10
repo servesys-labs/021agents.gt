@@ -79,7 +79,7 @@
     }
   }
   let panelWidth = $state(400);
-  let selectedPlan = $state<"free" | "basic" | "standard" | "premium">(
+  let selectedPlan = $derived<"free" | "basic" | "standard" | "premium">(
     (agent?.plan as "free" | "basic" | "standard" | "premium") || "standard"
   );
 
@@ -387,6 +387,7 @@
           {:else}
             <div class="max-h-72 overflow-y-auto">
               {#each conversationStore.conversations as conv}
+                {@const convTitle = typeof conv.title === "string" && conv.title.trim().length > 0 ? conv.title : "Untitled conversation"}
                 <button
                   type="button"
                   class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-sm transition-colors hover:bg-accent {conversationId === conv.id ? 'bg-primary/5' : ''}"
@@ -399,7 +400,7 @@
                 >
                   <div class="min-w-0 flex-1">
                     <p class="truncate text-xs font-medium text-foreground">
-                      {conv.title.slice(0, 50)}{conv.title.length > 50 ? "..." : ""}
+                      {convTitle.slice(0, 50)}{convTitle.length > 50 ? "..." : ""}
                     </p>
                     <p class="text-[11px] text-muted-foreground">
                       {conv.message_count} msgs &middot; {new Date(conv.updated_at).toLocaleDateString()}

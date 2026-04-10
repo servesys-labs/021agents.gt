@@ -552,7 +552,7 @@
                 <div class="space-y-4 border-t border-border pt-4">
                   <!-- Escalation triggers -->
                   <div>
-                    <label class="mb-3 block text-sm font-medium text-foreground">Escalation Triggers</label>
+                    <p class="mb-3 block text-sm font-medium text-foreground">Escalation Triggers</p>
                     <div class="flex flex-wrap gap-2">
                       {#each defaultTriggers as trigger}
                         <button
@@ -601,7 +601,7 @@
 
                   <!-- Destinations -->
                   <div>
-                    <label class="mb-3 block text-sm font-medium text-foreground">Notification Destinations</label>
+                    <p class="mb-3 block text-sm font-medium text-foreground">Notification Destinations</p>
                     <div class="grid gap-4 sm:grid-cols-3">
                       <div>
                         <label for="handoff-email" class="mb-1 block text-xs text-muted-foreground">Email</label>

@@ -421,7 +421,7 @@
                         <p class="mb-2 text-sm font-medium text-foreground">Webhook URL</p>
                         <div class="flex items-center gap-2">
                           <code class="flex-1 rounded-lg bg-muted px-3 py-2 text-xs text-muted-foreground">{webhookUrl}/telegram</code>
-                          <button class="rounded-md bg-secondary p-2 text-secondary-foreground hover:bg-secondary/80" onclick={() => handleCopy(`${webhookUrl}/telegram`, "tg-wh")}>
+                          <button class="rounded-md bg-secondary p-2 text-secondary-foreground hover:bg-secondary/80" aria-label="Copy Telegram webhook URL" onclick={() => handleCopy(`${webhookUrl}/telegram`, "tg-wh")}>
                             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" /></svg>
                           </button>
                         </div>
@@ -460,7 +460,7 @@
                         <p class="mb-2 text-sm font-medium text-foreground">Webhook URL</p>
                         <div class="flex items-center gap-2">
                           <code class="flex-1 rounded-lg bg-muted px-3 py-2 text-xs text-muted-foreground">{webhookUrl}/whatsapp</code>
-                          <button class="rounded-md bg-secondary p-2 text-secondary-foreground hover:bg-secondary/80" onclick={() => handleCopy(`${webhookUrl}/whatsapp`, "wa-wh")}>
+                          <button class="rounded-md bg-secondary p-2 text-secondary-foreground hover:bg-secondary/80" aria-label="Copy WhatsApp webhook URL" onclick={() => handleCopy(`${webhookUrl}/whatsapp`, "wa-wh")}>
                             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" /></svg>
                           </button>
                         </div>
@@ -497,7 +497,7 @@
                         <p class="mb-2 text-sm font-medium text-foreground">Webhook URL</p>
                         <div class="flex items-center gap-2">
                           <code class="flex-1 rounded-lg bg-muted px-3 py-2 text-xs text-muted-foreground">{webhookUrl}/slack</code>
-                          <button class="rounded-md bg-secondary p-2 text-secondary-foreground hover:bg-secondary/80" onclick={() => handleCopy(`${webhookUrl}/slack`, "slack-wh")}>
+                          <button class="rounded-md bg-secondary p-2 text-secondary-foreground hover:bg-secondary/80" aria-label="Copy Slack webhook URL" onclick={() => handleCopy(`${webhookUrl}/slack`, "slack-wh")}>
                             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" /></svg>
                           </button>
                         </div>
@@ -656,7 +656,7 @@
                         <p class="mb-2 text-sm font-medium text-foreground">Webhook URL</p>
                         <div class="flex items-center gap-2">
                           <code class="flex-1 rounded-lg bg-muted px-3 py-2 text-xs text-muted-foreground">{webhookUrl}/sms</code>
-                          <button class="rounded-md bg-secondary p-2 text-secondary-foreground hover:bg-secondary/80" onclick={() => handleCopy(`${webhookUrl}/sms`, "sms-wh")}>
+                          <button class="rounded-md bg-secondary p-2 text-secondary-foreground hover:bg-secondary/80" aria-label="Copy SMS webhook URL" onclick={() => handleCopy(`${webhookUrl}/sms`, "sms-wh")}>
                             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" /></svg>
                           </button>
                         </div>
@@ -777,7 +777,7 @@
                         <p class="mb-2 text-sm font-medium text-foreground">Webhook URL</p>
                         <div class="flex items-center gap-2">
                           <code class="flex-1 rounded-lg bg-muted px-3 py-2 text-xs text-muted-foreground">{webhookUrl}/tiktok</code>
-                          <button class="rounded-md bg-secondary p-2 text-secondary-foreground hover:bg-secondary/80" onclick={() => handleCopy(`${webhookUrl}/tiktok`, "tt-wh")}>
+                          <button class="rounded-md bg-secondary p-2 text-secondary-foreground hover:bg-secondary/80" aria-label="Copy TikTok webhook URL" onclick={() => handleCopy(`${webhookUrl}/tiktok`, "tt-wh")}>
                             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" /></svg>
                           </button>
                         </div>
@@ -844,7 +844,7 @@
                         <p class="mb-2 text-sm font-medium text-foreground">API Endpoint</p>
                         <div class="flex items-center gap-2">
                           <code class="flex-1 rounded-lg bg-muted px-3 py-2 text-sm font-mono text-foreground">{apiEndpoint}</code>
-                          <button class="rounded-md bg-secondary p-2 text-secondary-foreground hover:bg-secondary/80" onclick={() => handleCopy(apiEndpoint, "api-ep")}>
+                          <button class="rounded-md bg-secondary p-2 text-secondary-foreground hover:bg-secondary/80" aria-label="Copy API endpoint" onclick={() => handleCopy(apiEndpoint, "api-ep")}>
                             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" /></svg>
                           </button>
                         </div>

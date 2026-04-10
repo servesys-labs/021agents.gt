@@ -3,7 +3,7 @@
 
   interface Props {
     agentName: string;
-    activePath: string;
+    activePath?: string;
   }
 
   let { agentName, activePath }: Props = $props();
@@ -23,8 +23,9 @@
   ];
 
   function isActive(match: string): boolean {
-    if (match === "/chat/") return activePath.startsWith("/chat/");
-    return activePath.endsWith(match);
+    const path = activePath ?? "";
+    if (match === "/chat/") return path.startsWith("/chat/");
+    return path.endsWith(match);
   }
 </script>
 
