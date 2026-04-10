@@ -360,6 +360,7 @@ export async function buildFromDescription(
     aiGatewayId?: string;
     cloudflareApiToken?: string;
     aiGatewayToken?: string;
+    plan?: string;
     pipedream?: { clientId: string; clientSecret: string; projectId: string };
     orgProfile?: {
       org_name?: string;
@@ -611,7 +612,10 @@ Return ONLY valid JSON. No markdown fences, no explanation.`;
 
   const userPrompt = `Design a complete agent package for: ${description}`;
 
-  // Call Gemma 4 via AI Gateway
+  // Call LLM via AI Gateway — plan-based model selection
+  const buildModel = opts.plan === "standard" || opts.plan === "premium"
+    ? "anthropic/claude-sonnet-4-6"
+    : "gemma-4-31b";
   const { callLLMGateway } = await import("../lib/llm-gateway");
   const llmResult = await callLLMGateway(
     {
@@ -622,7 +626,7 @@ Return ONLY valid JSON. No markdown fences, no explanation.`;
       openrouterApiKey: opts.openrouterApiKey,
     },
     {
-      model: "anthropic/claude-sonnet-4-6",
+      model: buildModel,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
