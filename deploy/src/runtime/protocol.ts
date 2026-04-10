@@ -175,6 +175,10 @@ export interface TurnEndEvent extends BaseEvent {
   input_tokens?: number; // Per-turn input tokens (added for live UI stats)
   output_tokens?: number; // Per-turn output tokens (added for live UI stats)
   tool_calls?: number; // Number of tool calls in this turn
+  latency_ms?: number; // End-to-end turn latency
+  llm_latency_ms?: number; // Model-only latency
+  phase_pre_llm_ms?: number; // Guard/routing/prep before LLM dispatch
+  phase_tool_exec_ms?: number; // Tool execution phase duration
   done: boolean; // true if this is the final turn
 }
 
@@ -191,6 +195,7 @@ export interface DoneEvent extends BaseEvent {
   input_tokens: number;
   output_tokens: number;
   latency_ms: number;
+  termination_reason?: string;
 }
 
 // ── Error/Warning Events ─────────────────────────────────────────────

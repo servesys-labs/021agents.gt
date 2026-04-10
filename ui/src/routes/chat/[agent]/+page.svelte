@@ -196,6 +196,10 @@
     // Tell auto-scroll to re-enable and scroll down
     autoScroll.onNewMessage();
 
+    // History is only needed as cold-start fallback when there is no stable
+    // server-side thread yet. Sending it every turn inflates request size.
+    const shouldSendHistory = !sessionId && !conversationId;
+
     const { abort } = streamAgent(
       agentName,
       text,
@@ -311,9 +315,9 @@
       },
       sessionId,
       selectedPlan,
-      // Send conversation history for session continuity — the DO uses this as fallback
-      // when its SQLite is empty (e.g., after a code deploy resets the DO)
-      messages.slice(0, -1).map(m => ({ role: m.role, content: m.content })),
+      shouldSendHistory
+        ? messages.slice(0, -1).map(m => ({ role: m.role, content: m.content }))
+        : undefined,
       conversationId,
     );
 
