@@ -1,6 +1,8 @@
 import { api } from "./api";
 import type { ChatEvent } from "./chat";
 
+export type MetaModelPath = "auto" | "gemma" | "sonnet";
+
 interface MetaChatResponse {
   response: string;
   messages: Array<{
@@ -14,6 +16,8 @@ interface MetaChatResponse {
   }>;
   cost_usd: number;
   turns: number;
+  model?: string;
+  model_path?: MetaModelPath;
 }
 
 /**
@@ -24,10 +28,11 @@ interface MetaChatResponse {
 export async function sendMetaAgentMessage(
   agentName: string,
   messages: Array<{ role: string; content: string; tool_call_id?: string; tool_calls?: unknown[] }>,
+  modelPath?: MetaModelPath,
 ): Promise<MetaChatResponse> {
   return api.post<MetaChatResponse>(
     `/agents/${encodeURIComponent(agentName)}/meta-chat`,
-    { messages },
+    { messages, ...(modelPath ? { model_path: modelPath } : {}) },
   );
 }
 
@@ -42,6 +47,7 @@ export function streamMetaAgent(
   sessionId?: string,
   history?: Array<{ role: string; content: string; tool_call_id?: string; tool_calls?: unknown[] }>,
   mode?: "demo" | "live",
+  modelPath?: MetaModelPath,
 ): { abort: () => void } {
   const controller = new AbortController();
 
@@ -59,7 +65,11 @@ export function streamMetaAgent(
           "Content-Type": "application/json",
           ...(api.token ? { Authorization: `Bearer ${api.token}` } : {}),
         },
-        body: JSON.stringify({ messages, ...(mode ? { mode } : {}) }),
+        body: JSON.stringify({
+          messages,
+          ...(mode ? { mode } : {}),
+          ...(modelPath ? { model_path: modelPath } : {}),
+        }),
         signal: controller.signal,
       });
 
@@ -108,6 +118,8 @@ export function streamMetaAgent(
           cost_usd: data.cost_usd || 0,
           turns: data.turns || 0,
           output: data.response,
+          model: data.model || "",
+          model_path: data.model_path || "auto",
         },
       });
     } catch (err) {

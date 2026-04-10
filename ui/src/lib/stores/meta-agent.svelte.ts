@@ -1,4 +1,4 @@
-import { streamMetaAgent } from "$lib/services/meta-agent";
+import { streamMetaAgent, type MetaModelPath } from "$lib/services/meta-agent";
 import type { ChatEvent } from "$lib/services/chat";
 
 interface ToolCall {
@@ -87,7 +87,7 @@ class MetaAgentStore {
     localStorage.removeItem(sessionKey(agentName));
   }
 
-  sendMessage(agentName: string, text: string, mode?: "demo" | "live") {
+  sendMessage(agentName: string, text: string, mode?: "demo" | "live", modelPath: MetaModelPath = "auto") {
     if (!text.trim() || this.streaming) return;
 
     // Ensure array exists
@@ -195,10 +195,12 @@ class MetaAgentStore {
               cost_usd?: number;
               session_id?: string;
               output?: string;
+              model?: string;
             };
             if (done.cost_usd !== undefined) last.cost_usd = done.cost_usd;
             if (done.session_id) this.sessionIds[agentName] = done.session_id;
             if (done.output && !last.content) last.content = done.output;
+            if (done.model) last.model = done.model;
             if (this.startedAt) {
               last.elapsedMs = Date.now() - this.startedAt;
               this.startedAt = null;
@@ -225,6 +227,7 @@ class MetaAgentStore {
       this.sessionIds[agentName],
       history,
       mode,
+      modelPath,
     );
 
     this.abortFn = abort;
