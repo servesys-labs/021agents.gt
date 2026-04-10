@@ -723,6 +723,7 @@ runtimeProxyRoutes.openapi(streamRoute, async (c): Promise<any> => {
     c.executionCtx.waitUntil((async () => {
       const reader = sseStream!.getReader();
       let buffer = "";
+      let billedDone = false;
       try {
         while (true) {
           const { done, value } = await reader.read();
@@ -731,25 +732,47 @@ runtimeProxyRoutes.openapi(streamRoute, async (c): Promise<any> => {
           await writer.write(encoder.encode(chunk));
           buffer += chunk;
 
-          // Check for "done" event in the chunk
-          const doneMatch = buffer.match(/data:\s*(\{[^}]*"type"\s*:\s*"done"[^}]*\})/);
-          if (doneMatch) {
+          // Parse complete SSE frames robustly instead of regex-matching JSON blobs.
+          while (true) {
+            const sepMatch = buffer.match(/\r?\n\r?\n/);
+            if (!sepMatch || sepMatch.index === undefined) break;
+
+            const frame = buffer.slice(0, sepMatch.index);
+            buffer = buffer.slice(sepMatch.index + sepMatch[0].length);
+            if (!frame.trim()) continue;
+
+            const dataLines = frame
+              .split(/\r?\n/)
+              .filter((line) => line.startsWith("data:"))
+              .map((line) => line.slice(5).trim());
+            if (dataLines.length === 0) continue;
+
+            const payloadText = dataLines.join("\n").trim();
+            if (!payloadText.startsWith("{")) continue;
+
             try {
-              const doneEvent = JSON.parse(doneMatch[1]);
-              const costUsd = Number(doneEvent.cost_usd || 0);
-              if (costUsd > 0) {
-                const deductSql = await getDbForOrg(c.env.HYPERDRIVE, orgIdForBilling);
-                const deductResult = await deductCredits(deductSql, orgIdForBilling, costUsd,
-                  `Agent run: ${agentNameForBilling}`, agentNameForBilling,
-                  String(doneEvent.session_id || ""));
-                if (!deductResult.success) {
-                  console.error(`[sse-billing] FAILED deduction $${costUsd} from org ${orgIdForBilling} — insufficient credits`);
+              const parsed = JSON.parse(payloadText) as Record<string, unknown>;
+              if (String(parsed.type || "") === "done" && !billedDone) {
+                billedDone = true;
+                const costUsd = Number(parsed.cost_usd || 0);
+                if (costUsd > 0) {
+                  const deductSql = await getDbForOrg(c.env.HYPERDRIVE, orgIdForBilling);
+                  const deductResult = await deductCredits(
+                    deductSql,
+                    orgIdForBilling,
+                    costUsd,
+                    `Agent run: ${agentNameForBilling}`,
+                    agentNameForBilling,
+                    String(parsed.session_id || ""),
+                  );
+                  if (!deductResult.success) {
+                    console.error(`[sse-billing] FAILED deduction $${costUsd} from org ${orgIdForBilling} — insufficient credits`);
+                  }
                 }
               }
             } catch (err: any) {
               console.error(`[sse-billing] Credit deduction error: ${err.message}`);
             }
-            buffer = ""; // stop scanning after done
           }
         }
       } catch {} finally {

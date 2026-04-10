@@ -42,6 +42,23 @@
   let sessionId = $state<string | undefined>(undefined);
   let conversationId = $state<string | undefined>(undefined);
   let improveOpen = $state(false);
+  let messageFlushScheduled = $state(false);
+  let messageFlushNeedsScroll = $state(false);
+
+  function scheduleMessageFlush(scroll = false) {
+    messageFlushNeedsScroll = messageFlushNeedsScroll || scroll;
+    if (messageFlushScheduled) return;
+    messageFlushScheduled = true;
+    requestAnimationFrame(() => {
+      messageFlushScheduled = false;
+      const shouldScroll = messageFlushNeedsScroll;
+      messageFlushNeedsScroll = false;
+      messages = [...messages];
+      if (shouldScroll && autoScroll.isEnabled()) {
+        autoScroll.scrollToBottom(false);
+      }
+    });
+  }
 
   // On mount: check URL for ?c=<conversation_id> and load from server
   $effect(() => {
@@ -213,23 +230,20 @@
           case "turn_start": {
             const model = (d as { model?: string }).model;
             if (model) last.model = model;
-            messages = [...messages];
+            scheduleMessageFlush();
             break;
           }
           case "token": {
             const text = (d as { content?: string; text?: string }).content ??
                          (d as { text?: string }).text ?? "";
             last.content += text;
-            messages = [...messages];
-            if (autoScroll.isEnabled()) {
-              requestAnimationFrame(() => autoScroll.scrollToBottom(false));
-            }
+            scheduleMessageFlush(true);
             break;
           }
           case "thinking": {
             const content = (d as { content?: string }).content ?? "";
             last.thinking = (last.thinking || "") + content;
-            messages = [...messages];
+            scheduleMessageFlush();
             break;
           }
           case "tool_call": {
@@ -247,10 +261,7 @@
               ...(last.toolCalls ?? []),
               { name: tc.name, input: inputStr, call_id: callId },
             ];
-            messages = [...messages];
-            if (autoScroll.isEnabled()) {
-              requestAnimationFrame(() => autoScroll.scrollToBottom(false));
-            }
+            scheduleMessageFlush(true);
             break;
           }
           case "tool_result": {
@@ -269,7 +280,7 @@
               tc.latency_ms = tr.latency_ms;
               if (tr.error) tc.error = tr.error;
             }
-            messages = [...messages];
+            scheduleMessageFlush();
             break;
           }
           case "done": {
@@ -298,7 +309,7 @@
               // Refresh sidebar conversation list
               conversationStore.fetchConversations(agentName);
             }
-            messages = [...messages];
+            scheduleMessageFlush();
             streaming = false;
             abortFn = null;
             break;
@@ -306,7 +317,7 @@
           case "error": {
             const err = (d as { message?: string }).message ?? "Unknown error";
             last.content += `\n\n**Error:** ${err}`;
-            messages = [...messages];
+            scheduleMessageFlush();
             streaming = false;
             abortFn = null;
             break;

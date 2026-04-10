@@ -402,41 +402,29 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
           sleepAfter: "10m",
           enableInternet: false,
         } as any);
-        // Wrap with 30s acquire timeout so users get feedback instead of hanging.
-        // Also normalizes the timeout unit on exec() calls — @cloudflare/sandbox 0.7+
-        // takes timeout in MILLISECONDS, but the rest of the codebase passes
-        // seconds (the original convention). Without this conversion, every
-        // hydration command aborts in N milliseconds. Heuristic: any value
-        // <= 600 is treated as seconds (10min cap is well above any
-        // reasonable per-command limit).
-        const sandbox = new Proxy(rawSandbox, {
-          get: (target, prop) => {
-            const val = (target as any)[prop];
-            if (typeof val !== "function") return val;
-            return (...args: any[]) => {
-              // Convert seconds → ms on exec() calls only
-              if (prop === "exec" && args.length >= 2 && args[1] && typeof args[1] === "object") {
-                const opts = args[1] as { timeout?: number };
-                if (typeof opts.timeout === "number" && opts.timeout <= 600) {
-                  args = [args[0], { ...opts, timeout: opts.timeout * 1000 }];
-                }
-              }
-              const result = val.apply(target, args);
-              if (result && typeof result.then === "function") {
-                return Promise.race([
-                  result,
-                  new Promise((_, reject) =>
-                    setTimeout(() => reject(new Error(
-                      `Sandbox unavailable — no container could be allocated within 30 seconds. ` +
-                      `Please try again in a moment. (sandbox: ${sandboxId})`
-                    )), 30_000)
-                  ),
-                ]);
-              }
-              return result;
-            };
+        // Wrap with 30s acquire timeout and seconds->ms timeout normalization
+        // using a plain object adapter (Workflow RPC cannot serialize Proxy receivers).
+        const withAcquireTimeout = <T>(p: Promise<T>) =>
+          Promise.race([
+            p,
+            new Promise<T>((_, reject) =>
+              setTimeout(() => reject(new Error(
+                `Sandbox unavailable — no container could be allocated within 30 seconds. ` +
+                `Please try again in a moment. (sandbox: ${sandboxId})`
+              )), 30_000)
+            ),
+          ]);
+        const sandbox = {
+          exec: async (cmd: string, opts?: { timeout?: number }) => {
+            const normalized = { ...(opts || {}) } as { timeout?: number };
+            if (typeof normalized.timeout === "number" && normalized.timeout <= 600) {
+              normalized.timeout = normalized.timeout * 1000;
+            }
+            return withAcquireTimeout(rawSandbox.exec(cmd, normalized as any));
           },
-        });
+          writeFile: async (path: string, content: string) =>
+            withAcquireTimeout(rawSandbox.writeFile(path, content) as Promise<unknown>),
+        };
         const { restored, skipped } = await hydrateWorkspace(
           this.env.STORAGE, sandbox, orgId, p.agent_name, p.channel_user_id || "",
         );
@@ -1448,7 +1436,9 @@ ALWAYS:
       // Track tool call signatures (name + args hash + error presence).
       // If the same signature appears 3+ times in the last 5 calls, break.
       for (const tr of toolResultEntries) {
-        const sig = `${tr.name}:${tr.error ? "ERR" : "OK"}`;
+        const matchedCall = executableCalls.find((tc) => tc.id === tr.tool_call_id);
+        const argsSig = matchedCall ? hashArgs(matchedCall.arguments || "{}") : "noargs";
+        const sig = `${tr.name}:${argsSig}:${tr.error ? "ERR" : "OK"}`;
         recentToolSignatures.push(sig);
         if (recentToolSignatures.length > LOOP_DETECTION_WINDOW) {
           recentToolSignatures.shift();
