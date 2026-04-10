@@ -377,9 +377,11 @@ CREATE TABLE IF NOT EXISTS credit_transactions (
 CREATE TABLE IF NOT EXISTS billing_records (
   id               BIGSERIAL PRIMARY KEY,
   org_id           TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE RESTRICT,
+  customer_id      TEXT NOT NULL DEFAULT '',
   session_id       TEXT,
   agent_name       TEXT,
   cost_type        TEXT NOT NULL DEFAULT '',
+  description      TEXT NOT NULL DEFAULT '',
   model            TEXT NOT NULL DEFAULT '',
   provider         TEXT NOT NULL DEFAULT '',
   input_tokens     INT NOT NULL DEFAULT 0,
