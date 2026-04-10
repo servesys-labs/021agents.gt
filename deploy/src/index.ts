@@ -1439,7 +1439,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                     const doneEvt = this._buildDoneEvent(out, { source: "workflow_status_fallback", seq: lastIdx + 1 });
                     if (!doneSent) {
                       try { connection.send(JSON.stringify(doneEvt)); } catch {}
-                      this._appendConversationMessage("assistant", doneEvt.output, data.channel || "websocket");
+                      this._appendConversationMessage("assistant", String(doneEvt.output || ""), data.channel || "websocket");
                       this._storeLastResult(doneEvt);
                       doneSent = true;
                     }
@@ -1489,7 +1489,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                   const out = (st as any).output as { output?: string; session_id?: string; trace_id?: string; cost_usd?: number; tool_calls?: number; input_tokens?: number; output_tokens?: number; turns?: number; latency_ms?: number; termination_reason?: string } | undefined;
                   const doneEvt = this._buildDoneEvent(out, { source: "workflow_status_fallback", seq: lastIdx + 1 });
                   try { connection.send(JSON.stringify(doneEvt)); } catch {}
-                  this._appendConversationMessage("assistant", doneEvt.output, data.channel || "websocket");
+                  this._appendConversationMessage("assistant", String(doneEvt.output || ""), data.channel || "websocket");
                   this._storeLastResult(doneEvt);
                   doneSent = true;
                   done = true;
@@ -1527,7 +1527,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                   const out = (st as any).output as { output?: string; session_id?: string; trace_id?: string; cost_usd?: number; tool_calls?: number; input_tokens?: number; output_tokens?: number; turns?: number; latency_ms?: number; termination_reason?: string } | undefined;
                   const doneEvt = this._buildDoneEvent(out, { source: "workflow_status_fallback", seq: kvEvents.length + 1 });
                   try { connection.send(JSON.stringify(doneEvt)); } catch {}
-                  this._appendConversationMessage("assistant", doneEvt.output, data.channel || "websocket");
+                  this._appendConversationMessage("assistant", String(doneEvt.output || ""), data.channel || "websocket");
                   this._storeLastResult(doneEvt);
                   doneSent = true;
                 }
@@ -2135,7 +2135,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                             session_id: evt.session_id || "", org_id: orgId,
                             project_id: data.project_id || "", agent_name: agentName,
                             status: "success", input_text: inputText,
-                            output_text: (evt.output || "").slice(0, 2000),
+                            output_text: String(evt.output || ""),
                             model: "workflow",
                             trace_id: evt.trace_id || "",
                             step_count: Number(evt.turns) || 1,
@@ -2170,7 +2170,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                     const doneEvt = self._buildDoneEvent(out, { source: "workflow_status_fallback", seq: lastEventIndex + 1 });
                     controller.enqueue(encoder.encode(`data: ${JSON.stringify(doneEvt)}\n\n`));
                     self._appendConversationMessage("user", inputText, data.channel || "sse");
-                    self._appendConversationMessage("assistant", doneEvt.output, data.channel || "sse");
+                    self._appendConversationMessage("assistant", String(doneEvt.output || ""), data.channel || "sse");
                     done = true;
                   }
                   if (status.status === "errored") {
@@ -7728,6 +7728,25 @@ export default {
       idle_timeout: 20,
       connect_timeout: 10,
     });
+    const tableColumns = new Map<string, Set<string>>();
+    try {
+      const schemaRows = await sql<{ table_name: string; column_name: string }[]>`
+        SELECT table_name, column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name IN ('otel_events', 'runtime_events')
+      `;
+      for (const row of schemaRows) {
+        if (!tableColumns.has(row.table_name)) tableColumns.set(row.table_name, new Set<string>());
+        tableColumns.get(row.table_name)!.add(String(row.column_name || ""));
+      }
+    } catch (schemaErr: any) {
+      console.warn("[queue] schema introspection failed:", schemaErr?.message || String(schemaErr));
+    }
+    const otelCols = tableColumns.get("otel_events") || new Set<string>();
+    const runtimeCols = tableColumns.get("runtime_events") || new Set<string>();
+    const otelUsesEventData = otelCols.has("event_data");
+    const runtimeUsesEventData = runtimeCols.has("event_data");
 
     try {
       for (const msg of batch.messages) {
@@ -7855,27 +7874,70 @@ export default {
               VALUES (${p.session_id || ""}, ${p.input || ""}, ${p.output || ""})`;
 
           } else if (type === "event") {
-            await sql`INSERT INTO otel_events (
-              session_id, turn, event_type, action, plan, tier,
-              provider, model, tool_name, status, latency_ms, details, created_at
-            ) VALUES (
-              ${p.session_id || ""}, ${p.turn || 0}, ${p.event_type || ""},
-              ${p.action || ""}, ${p.plan || ""}, ${p.tier || ""},
-              ${p.provider || ""}, ${p.model || ""}, ${p.tool_name || ""},
-              ${p.status || ""}, ${p.latency_ms || 0}, ${jp(p.details, {})},
-              ${ts(p.created_at)}
-            )`;
+            if (otelUsesEventData) {
+              const eventData = {
+                ...(jp(p.details, {}) || {}),
+                session_id: p.session_id || "",
+                trace_id: p.trace_id || "",
+                turn: Number(p.turn || 0),
+                action: p.action || "",
+                plan: p.plan || "",
+                tier: p.tier || "",
+                provider: p.provider || "",
+                model: p.model || "",
+                tool_name: p.tool_name || "",
+                status: p.status || "",
+                latency_ms: Number(p.latency_ms || 0),
+                source: p.source || "queue_event",
+              };
+              await sql`INSERT INTO otel_events (
+                org_id, agent_name, session_id, trace_id, event_type, event_data, created_at
+              ) VALUES (
+                ${p.org_id || ""}, ${p.agent_name || ""}, ${p.session_id || ""},
+                ${p.trace_id || ""}, ${p.event_type || ""}, ${jp(eventData, {})},
+                ${ts(p.created_at)}
+              )`;
+            } else {
+              await sql`INSERT INTO otel_events (
+                session_id, turn, event_type, action, plan, tier,
+                provider, model, tool_name, status, latency_ms, details, created_at
+              ) VALUES (
+                ${p.session_id || ""}, ${p.turn || 0}, ${p.event_type || ""},
+                ${p.action || ""}, ${p.plan || ""}, ${p.tier || ""},
+                ${p.provider || ""}, ${p.model || ""}, ${p.tool_name || ""},
+                ${p.status || ""}, ${p.latency_ms || 0}, ${jp(p.details, {})},
+                ${ts(p.created_at)}
+              )`;
+            }
 
           } else if (type === "runtime_event") {
-            await sql`INSERT INTO runtime_events (
-              trace_id, session_id, org_id, event_type, node_id,
-              status, latency_ms, payload, created_at
-            ) VALUES (
-              ${p.trace_id || ""}, ${p.session_id || ""}, ${p.org_id || ""},
-              ${p.event_type || ""}, ${p.node_id || ""},
-              ${p.status || ""}, ${p.duration_ms || 0}, ${jp(p.details, {})},
-              ${ts(p.created_at)}
-            )`;
+            if (runtimeUsesEventData) {
+              const eventData = {
+                ...(jp(p.details, {}) || {}),
+                trace_id: p.trace_id || "",
+                session_id: p.session_id || "",
+                node_id: p.node_id || "",
+                status: p.status || "",
+                duration_ms: Number(p.duration_ms || 0),
+                source: p.source || "queue_runtime_event",
+              };
+              await sql`INSERT INTO runtime_events (
+                org_id, agent_name, event_type, event_data, created_at
+              ) VALUES (
+                ${p.org_id || ""}, ${p.agent_name || ""}, ${p.event_type || ""},
+                ${jp(eventData, {})}, ${ts(p.created_at)}
+              )`;
+            } else {
+              await sql`INSERT INTO runtime_events (
+                trace_id, session_id, org_id, event_type, node_id,
+                status, latency_ms, payload, created_at
+              ) VALUES (
+                ${p.trace_id || ""}, ${p.session_id || ""}, ${p.org_id || ""},
+                ${p.event_type || ""}, ${p.node_id || ""},
+                ${p.status || ""}, ${p.duration_ms || 0}, ${jp(p.details, {})},
+                ${ts(p.created_at)}
+              )`;
+            }
 
           } else if (type === "middleware_event") {
             // Table schema: session_id, middleware_name, action, details, turn_number, created_at
@@ -7910,18 +7972,37 @@ export default {
 
           } else if (type === "do_eviction") {
             console.log(`[telemetry] DO eviction: session=${p.session_id} org=${p.org_id}`);
-            await sql`INSERT INTO runtime_events (
-              trace_id, session_id, org_id, event_type, node_id,
-              status, latency_ms, payload, created_at
-            ) VALUES (
-              ${p.trace_id || ""}, ${p.session_id || ""}, ${p.org_id || ""},
-              'do_eviction', ${p.agent_name || ""},
-              'evicted', ${p.uptime_ms || 0}, ${JSON.stringify({
-                turns: p.turns || 0, cost_usd: p.cost_usd || 0,
-                reason: p.reason || "unknown",
-              })},
-              ${new Date().toISOString()}
-            )`;
+            if (runtimeUsesEventData) {
+              await sql`INSERT INTO runtime_events (
+                org_id, agent_name, event_type, event_data, created_at
+              ) VALUES (
+                ${p.org_id || ""}, ${p.agent_name || ""}, 'do_eviction',
+                ${jp({
+                  trace_id: p.trace_id || "",
+                  session_id: p.session_id || "",
+                  status: "evicted",
+                  duration_ms: Number(p.uptime_ms || 0),
+                  turns: p.turns || 0,
+                  cost_usd: p.cost_usd || 0,
+                  reason: p.reason || "unknown",
+                  source: p.source || "queue_do_eviction",
+                }, {})},
+                ${new Date().toISOString()}
+              )`;
+            } else {
+              await sql`INSERT INTO runtime_events (
+                trace_id, session_id, org_id, event_type, node_id,
+                status, latency_ms, payload, created_at
+              ) VALUES (
+                ${p.trace_id || ""}, ${p.session_id || ""}, ${p.org_id || ""},
+                'do_eviction', ${p.agent_name || ""},
+                'evicted', ${p.uptime_ms || 0}, ${JSON.stringify({
+                  turns: p.turns || 0, cost_usd: p.cost_usd || 0,
+                  reason: p.reason || "unknown",
+                })},
+                ${new Date().toISOString()}
+              )`;
+            }
           }
           msg.ack();
         } catch (err: any) {

@@ -70,6 +70,7 @@ async function memo<T>(key: string, loader: () => Promise<T>): Promise<T> {
 // simultaneously. Caps aggregate pending result bytes and applies
 // progressive truncation when the budget is exceeded.
 const MAX_PENDING_RESULT_BYTES = 500_000; // 500KB aggregate cap
+const MAX_COMPLETION_GATE_INTERVENTIONS = 2;
 
 function applyResultBackpressure(
   results: Array<{ result?: string; error?: string; [key: string]: any }>,
@@ -87,6 +88,37 @@ function applyResultBackpressure(
       }
     }
   }
+}
+
+function userRequestedPlanOnly(input: string): boolean {
+  const q = String(input || "").toLowerCase();
+  const asksPlan = /\b(plan|roadmap|outline|steps)\b/.test(q);
+  const asksExecution = /\b(execute|run|implement|research|analy[sz]e|compare|find|build|write|create|deliver)\b/.test(q);
+  return asksPlan && !asksExecution;
+}
+
+function looksLikePrematurePlanCompletion(
+  content: string,
+  input: string,
+  priorToolCalls: number,
+): { blocked: boolean; reason: string } {
+  const text = String(content || "").toLowerCase();
+  const prompt = String(input || "").toLowerCase();
+  const planMarkers = (
+    text.includes("## plan")
+    || text.includes("executing now")
+    || text.includes("final report generation")
+    || text.includes("competitive matrix")
+    || /\bstep\s*1\b/.test(text)
+  );
+  const researchIntent = /\bresearch|competitive|analysis|matrix|report|deep dive|compare\b/.test(prompt);
+  if (planMarkers && (researchIntent || priorToolCalls < 2)) {
+    return {
+      blocked: true,
+      reason: priorToolCalls < 2 ? "plan_without_execution" : "plan_without_synthesis",
+    };
+  }
+  return { blocked: false, reason: "" };
 }
 
 // ── Types ────────────────────────────────────────────────────
@@ -144,6 +176,8 @@ export interface RunOutput {
   session_id: string;
   trace_id: string;
   termination_reason?: string;
+  completion_gate_interventions?: number;
+  completion_gate_reason?: string;
 }
 
 interface LLMResult {
@@ -693,6 +727,9 @@ ALWAYS:
     let workflowStepCount = 2; // bootstrap + hydrate-workspace already consumed
     const startTime = Date.now();
     let terminationReason = "completed";
+    const planOnlyRequested = userRequestedPlanOnly(p.input);
+    let completionGateInterventions = 0;
+    let completionGateReason = "";
     const turnRecords: Array<{
       turn: number; model: string; content: string;
       input_tokens: number; output_tokens: number; cost_usd: number;
@@ -1029,6 +1066,52 @@ ALWAYS:
 
       // ── No tools → final answer (stream as tokens for the frontend) ──
       if (llm.tool_calls.length === 0) {
+        const completionGate = planOnlyRequested
+          ? { blocked: false, reason: "" }
+          : looksLikePrematurePlanCompletion(llm.content, p.input, totalToolCalls);
+        if (completionGate.blocked) {
+          if (completionGateInterventions < MAX_COMPLETION_GATE_INTERVENTIONS && turn < config.max_turns) {
+            completionGateInterventions++;
+            completionGateReason = completionGate.reason;
+            messages.push({ role: "assistant", content: llm.content || "" });
+            messages.push({
+              role: "system",
+              content: "Execution contract: do not output another plan. Execute the remaining steps now, then return a final deliverable with concrete findings and source links.",
+            });
+            await this.emit(p.progress_key, {
+              type: "warning",
+              message: "Detected plan-like completion before execution finished. Continuing automatically.",
+              completion_gate_reason: completionGate.reason,
+              completion_gate_interventions: completionGateInterventions,
+            });
+            await this.emit(p.progress_key, {
+              type: "turn_end",
+              turn,
+              model: llm.model,
+              cost_usd: llm.cost_usd,
+              tokens: llm.input_tokens + llm.output_tokens,
+              input_tokens: llm.input_tokens,
+              output_tokens: llm.output_tokens,
+              latency_ms: Date.now() - turnStartedAt,
+              llm_latency_ms: llm.llm_latency_ms,
+              phase_pre_llm_ms: preLlmMs,
+              phase_tool_exec_ms: 0,
+              done: false,
+              completion_gate_triggered: true,
+              completion_gate_reason: completionGate.reason,
+            });
+            continue;
+          }
+          terminationReason = "completion_gate_exhausted";
+          completionGateReason = completionGate.reason;
+          finalOutput = "I could not safely finalize because execution never progressed beyond planning. Please retry; this run has been flagged for reliability safeguards.";
+          await this.emit(p.progress_key, {
+            type: "error",
+            message: "Completion gate exhausted: model repeatedly returned plan-only output without executing remaining steps.",
+            completion_gate_reason: completionGate.reason,
+          });
+          break;
+        }
         const totalTurnMs = Date.now() - turnStartedAt;
         const tokensPerSec = llm.output_tokens > 0
           ? Number((llm.output_tokens / Math.max(0.001, llm.llm_latency_ms / 1000)).toFixed(4))
@@ -1183,6 +1266,7 @@ ALWAYS:
                 AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN,
                 AGENT_RUN_WORKFLOW: this.env.AGENT_RUN_WORKFLOW,
                 AGENT_PROGRESS_KV: this.env.AGENT_PROGRESS_KV,
+                TELEMETRY_QUEUE: (this.env as any).TELEMETRY_QUEUE,
                 SERVICE_TOKEN: (this.env as any).SERVICE_TOKEN,
                 GPU_SERVICE_KEY: (this.env as any).GPU_SERVICE_KEY,
                 CONTROL_PLANE_URL: (this.env as any).CONTROL_PLANE_URL,
@@ -1579,6 +1663,8 @@ ALWAYS:
       session_id: sessionId,
       trace_id: traceId,
       termination_reason: terminationReason,
+      completion_gate_interventions: completionGateInterventions,
+      completion_gate_reason: completionGateReason || undefined,
     };
 
     // Emit final done event (include conversation_id if present)
@@ -1618,7 +1704,7 @@ ALWAYS:
           project_id: p.project_id || "",
           agent_name: p.agent_name,
           model: config.model || "workflow",
-          status: result.output ? "success" : "error",
+          status: (result.output && result.termination_reason !== "completion_gate_exhausted") ? "success" : "error",
           input_text: p.input.slice(0, 2000),
           output_text: (result.output || "").slice(0, 2000),
           step_count: result.turns,
@@ -1642,6 +1728,32 @@ ALWAYS:
           ...(p.conversation_id ? { conversation_id: p.conversation_id } : {}),
         },
       });
+
+      if (completionGateInterventions > 0) {
+        await queue.send({
+          type: "event",
+          payload: {
+            org_id: p.org_id || "",
+            agent_name: p.agent_name || "",
+            session_id: sessionId,
+            trace_id: traceId,
+            turn: lastWorkflowTurn || 0,
+            event_type: "completion_gate",
+            action: "intervened",
+            plan: config.plan || "",
+            provider: config.provider || "",
+            model: config.model || "",
+            tool_name: "",
+            status: terminationReason === "completion_gate_exhausted" ? "exhausted" : "ok",
+            latency_ms: 0,
+            details: {
+              completion_gate_interventions: completionGateInterventions,
+              completion_gate_reason: completionGateReason || "unknown",
+            },
+            created_at: Date.now(),
+          },
+        });
+      }
 
       // Write individual turn records — batched concurrently (not sequential)
       // Sprint audit: sequential queue.send in a loop risks 30s timeout on 10+ turns
@@ -1685,7 +1797,10 @@ ALWAYS:
         queue.send({
           type: "event",
           payload: {
+            org_id: p.org_id || "",
+            agent_name: config.name || p.agent_name || "",
             session_id: sessionId,
+            trace_id: traceId,
             turn: turnData.turn,
             event_type: "turn_phase",
             action: "timing",

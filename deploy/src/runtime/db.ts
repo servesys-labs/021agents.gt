@@ -917,6 +917,30 @@ export async function listEvalTrialsByRun(
 
 // ── Runtime Event Replay (LangSmith-style timelines) ─────────
 
+let _otelUsesEventDataCache: boolean | null = null;
+let _otelUsesEventDataCheckedAt = 0;
+
+async function otelUsesEventData(sql: Sql): Promise<boolean> {
+  const now = Date.now();
+  if (_otelUsesEventDataCache != null && now - _otelUsesEventDataCheckedAt < 60_000) {
+    return _otelUsesEventDataCache;
+  }
+  try {
+    const rows = await sql<{ column_name: string }[]>`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'otel_events'
+    `;
+    const cols = new Set((rows || []).map((r) => String(r.column_name || "")));
+    _otelUsesEventDataCache = cols.has("event_data");
+  } catch {
+    _otelUsesEventDataCache = false;
+  }
+  _otelUsesEventDataCheckedAt = now;
+  return _otelUsesEventDataCache;
+}
+
 type OtelEventRow = {
   id?: number;
   session_id: string;
@@ -1169,7 +1193,38 @@ export async function replayOtelEventsAtCursor(
       watermark_event_count: totalCount,
     };
   } catch {
-    return empty();
+    // Fallback path for schema drift (e.g., otel_events using event_data JSONB shape).
+    // We still return a deterministic snapshot without strict row-id cursor semantics.
+    try {
+      const fallbackEvents = await loadRuntimeEvents(hyperdrive, {
+        session_id: sessionId || undefined,
+        trace_id: traceId || undefined,
+        limit: safeScan,
+      });
+      const stateSnapshot = foldStateSnapshotFromRuntimeEvents(fallbackEvents);
+      const cursorIndex = fallbackEvents.length > 0 ? fallbackEvents.length - 1 : -1;
+      const eventAtCursor = cursorIndex >= 0 ? fallbackEvents[cursorIndex] : null;
+      const lastEventId = String(eventAtCursor?.event_id || "");
+      const rowish = Number.parseInt(lastEventId.replace(/^otel_/, ""), 10);
+      const cursorRowId = Number.isFinite(rowish) ? rowish : 0;
+      return {
+        trace_id: traceId || String(fallbackEvents[0]?.trace_id || ""),
+        session_id: sessionId || String(fallbackEvents[0]?.session_id || ""),
+        cursor_row_id: cursorRowId,
+        cursor_index: cursorIndex,
+        event_count: fallbackEvents.length,
+        state_snapshot: stateSnapshot,
+        event_at_cursor: eventAtCursor,
+        events: includeEvents ? fallbackEvents : [],
+        has_more: false,
+        next_row_id: null,
+        next_cursor_index: null,
+        watermark_row_id: cursorRowId,
+        watermark_event_count: fallbackEvents.length,
+      };
+    } catch {
+      return empty();
+    }
   }
 }
 
@@ -1191,6 +1246,7 @@ export async function loadRuntimeEvents(
   },
 ): Promise<RuntimeEvent[]> {
   const sql = await getDb(hyperdrive);
+  const useEventData = await otelUsesEventData(sql);
   const limit = Math.max(1, Math.min(Number(opts.limit) || 1000, 5000));
   const sessionId = String(opts.session_id || "").trim();
   const traceId = String(opts.trace_id || "").trim();
@@ -1205,44 +1261,86 @@ export async function loadRuntimeEvents(
     session_id: string;
     turn_number: number;
     event_type: string;
-    details: string;
+    details?: string;
     created_at: string | number;
     trace_id?: string;
   };
 
   let rows: EventRow[] = [];
   if (sessionId) {
-    rows = await sql`
-      SELECT
-        e.id, e.session_id, e.turn AS turn_number, e.event_type,
-        e.details, e.created_at, s.trace_id
-      FROM otel_events e
-      LEFT JOIN sessions s ON s.session_id = e.session_id
-      WHERE e.session_id = ${sessionId}
-        AND (${eventType} = '' OR e.event_type = ${eventType})
-        AND (${toolName} = '' OR e.tool_name = ${toolName})
-        AND (${status} = '' OR e.status = ${status})
-        AND (${fromTsMs} <= 0 OR e.created_at >= (${fromTsMs} / 1000.0))
-        AND (${toTsMs} <= 0 OR e.created_at <= (${toTsMs} / 1000.0))
-      ORDER BY e.id ASC
-      LIMIT ${limit}
-    `;
+    if (useEventData) {
+      rows = await sql`
+        SELECT
+          e.id, e.session_id,
+          COALESCE(NULLIF(e.event_data->>'turn', ''), '0')::int AS turn_number,
+          e.event_type,
+          e.event_data::text AS details,
+          e.created_at,
+          COALESCE(NULLIF(e.event_data->>'trace_id', ''), e.trace_id, '') AS trace_id
+        FROM otel_events e
+        WHERE e.session_id = ${sessionId}
+          AND (${eventType} = '' OR e.event_type = ${eventType})
+          AND (${toolName} = '' OR COALESCE(e.event_data->>'tool_name', '') = ${toolName})
+          AND (${status} = '' OR COALESCE(e.event_data->>'status', '') = ${status})
+          AND (${fromTsMs} <= 0 OR e.created_at >= to_timestamp(${fromTsMs} / 1000.0))
+          AND (${toTsMs} <= 0 OR e.created_at <= to_timestamp(${toTsMs} / 1000.0))
+        ORDER BY e.id ASC
+        LIMIT ${limit}
+      `;
+    } else {
+      rows = await sql`
+        SELECT
+          e.id, e.session_id, e.turn AS turn_number, e.event_type,
+          e.details, e.created_at, s.trace_id
+        FROM otel_events e
+        LEFT JOIN sessions s ON s.session_id = e.session_id
+        WHERE e.session_id = ${sessionId}
+          AND (${eventType} = '' OR e.event_type = ${eventType})
+          AND (${toolName} = '' OR e.tool_name = ${toolName})
+          AND (${status} = '' OR e.status = ${status})
+          AND (${fromTsMs} <= 0 OR e.created_at >= (${fromTsMs} / 1000.0))
+          AND (${toTsMs} <= 0 OR e.created_at <= (${toTsMs} / 1000.0))
+        ORDER BY e.id ASC
+        LIMIT ${limit}
+      `;
+    }
   } else if (traceId) {
-    rows = await sql`
-      SELECT
-        e.id, e.session_id, e.turn AS turn_number, e.event_type,
-        e.details, e.created_at, s.trace_id
-      FROM otel_events e
-      INNER JOIN sessions s ON s.session_id = e.session_id
-      WHERE s.trace_id = ${traceId}
-        AND (${eventType} = '' OR e.event_type = ${eventType})
-        AND (${toolName} = '' OR e.tool_name = ${toolName})
-        AND (${status} = '' OR e.status = ${status})
-        AND (${fromTsMs} <= 0 OR e.created_at >= (${fromTsMs} / 1000.0))
-        AND (${toTsMs} <= 0 OR e.created_at <= (${toTsMs} / 1000.0))
-      ORDER BY e.id ASC
-      LIMIT ${limit}
-    `;
+    if (useEventData) {
+      rows = await sql`
+        SELECT
+          e.id, e.session_id,
+          COALESCE(NULLIF(e.event_data->>'turn', ''), '0')::int AS turn_number,
+          e.event_type,
+          e.event_data::text AS details,
+          e.created_at,
+          COALESCE(NULLIF(e.event_data->>'trace_id', ''), e.trace_id, '') AS trace_id
+        FROM otel_events e
+        WHERE COALESCE(NULLIF(e.event_data->>'trace_id', ''), e.trace_id, '') = ${traceId}
+          AND (${eventType} = '' OR e.event_type = ${eventType})
+          AND (${toolName} = '' OR COALESCE(e.event_data->>'tool_name', '') = ${toolName})
+          AND (${status} = '' OR COALESCE(e.event_data->>'status', '') = ${status})
+          AND (${fromTsMs} <= 0 OR e.created_at >= to_timestamp(${fromTsMs} / 1000.0))
+          AND (${toTsMs} <= 0 OR e.created_at <= to_timestamp(${toTsMs} / 1000.0))
+        ORDER BY e.id ASC
+        LIMIT ${limit}
+      `;
+    } else {
+      rows = await sql`
+        SELECT
+          e.id, e.session_id, e.turn AS turn_number, e.event_type,
+          e.details, e.created_at, s.trace_id
+        FROM otel_events e
+        INNER JOIN sessions s ON s.session_id = e.session_id
+        WHERE s.trace_id = ${traceId}
+          AND (${eventType} = '' OR e.event_type = ${eventType})
+          AND (${toolName} = '' OR e.tool_name = ${toolName})
+          AND (${status} = '' OR e.status = ${status})
+          AND (${fromTsMs} <= 0 OR e.created_at >= (${fromTsMs} / 1000.0))
+          AND (${toTsMs} <= 0 OR e.created_at <= (${toTsMs} / 1000.0))
+        ORDER BY e.id ASC
+        LIMIT ${limit}
+      `;
+    }
   } else {
     return [];
   }
@@ -1333,6 +1431,7 @@ export async function loadRuntimeEventsPage(
   },
 ): Promise<RuntimeEventPage> {
   const sql = await getDb(hyperdrive);
+  const useEventData = await otelUsesEventData(sql);
   const limit = Math.max(1, Math.min(Number(opts.limit) || 100, 1000));
   const sessionId = String(opts.session_id || "").trim();
   const traceId = String(opts.trace_id || "").trim();
@@ -1352,7 +1451,7 @@ export async function loadRuntimeEventsPage(
     session_id: string;
     turn_number: number;
     event_type: string;
-    details: string;
+    details?: string;
     created_at: string | number;
     trace_id?: string;
   };
@@ -1360,16 +1459,27 @@ export async function loadRuntimeEventsPage(
   let rows: EventRow[] = [];
   let watermark = providedWatermark;
   if (sessionId) {
-    const maxRows = await sql<{ max_id: number | null }[]>`
-      SELECT MAX(id) AS max_id
-      FROM otel_events
-      WHERE session_id = ${sessionId}
-        AND (${eventType} = '' OR event_type = ${eventType})
-        AND (${toolName} = '' OR tool_name = ${toolName})
-        AND (${status} = '' OR status = ${status})
-        AND (${fromTsMs} <= 0 OR created_at >= (${fromTsMs} / 1000.0))
-        AND (${toTsMs} <= 0 OR created_at <= (${toTsMs} / 1000.0))
-    `;
+    const maxRows = useEventData
+      ? await sql<{ max_id: number | null }[]>`
+          SELECT MAX(id) AS max_id
+          FROM otel_events
+          WHERE session_id = ${sessionId}
+            AND (${eventType} = '' OR event_type = ${eventType})
+            AND (${toolName} = '' OR COALESCE(event_data->>'tool_name', '') = ${toolName})
+            AND (${status} = '' OR COALESCE(event_data->>'status', '') = ${status})
+            AND (${fromTsMs} <= 0 OR created_at >= to_timestamp(${fromTsMs} / 1000.0))
+            AND (${toTsMs} <= 0 OR created_at <= to_timestamp(${toTsMs} / 1000.0))
+        `
+      : await sql<{ max_id: number | null }[]>`
+          SELECT MAX(id) AS max_id
+          FROM otel_events
+          WHERE session_id = ${sessionId}
+            AND (${eventType} = '' OR event_type = ${eventType})
+            AND (${toolName} = '' OR tool_name = ${toolName})
+            AND (${status} = '' OR status = ${status})
+            AND (${fromTsMs} <= 0 OR created_at >= (${fromTsMs} / 1000.0))
+            AND (${toTsMs} <= 0 OR created_at <= (${toTsMs} / 1000.0))
+        `;
     const maxWatermark = Number(maxRows?.[0]?.max_id || 0);
     watermark = providedWatermark > 0 ? Math.min(providedWatermark, maxWatermark) : maxWatermark;
     if (cursorNum >= watermark) {
@@ -1380,35 +1490,67 @@ export async function loadRuntimeEventsPage(
         watermark_cursor: String(watermark),
       };
     }
-    rows = await sql`
-      SELECT
-        e.id, e.session_id, e.turn AS turn_number, e.event_type,
-        e.details, e.created_at, s.trace_id
-      FROM otel_events e
-      LEFT JOIN sessions s ON s.session_id = e.session_id
-      WHERE e.session_id = ${sessionId}
-        AND e.id > ${cursorNum}
-        AND e.id <= ${watermark}
-        AND (${eventType} = '' OR e.event_type = ${eventType})
-        AND (${toolName} = '' OR e.tool_name = ${toolName})
-        AND (${status} = '' OR e.status = ${status})
-        AND (${fromTsMs} <= 0 OR e.created_at >= (${fromTsMs} / 1000.0))
-        AND (${toTsMs} <= 0 OR e.created_at <= (${toTsMs} / 1000.0))
-      ORDER BY e.id ASC
-      LIMIT ${limit + 1}
-    `;
+    rows = useEventData
+      ? await sql`
+          SELECT
+            e.id, e.session_id,
+            COALESCE(NULLIF(e.event_data->>'turn', ''), '0')::int AS turn_number,
+            e.event_type,
+            e.event_data::text AS details,
+            e.created_at,
+            COALESCE(NULLIF(e.event_data->>'trace_id', ''), e.trace_id, '') AS trace_id
+          FROM otel_events e
+          WHERE e.session_id = ${sessionId}
+            AND e.id > ${cursorNum}
+            AND e.id <= ${watermark}
+            AND (${eventType} = '' OR e.event_type = ${eventType})
+            AND (${toolName} = '' OR COALESCE(e.event_data->>'tool_name', '') = ${toolName})
+            AND (${status} = '' OR COALESCE(e.event_data->>'status', '') = ${status})
+            AND (${fromTsMs} <= 0 OR e.created_at >= to_timestamp(${fromTsMs} / 1000.0))
+            AND (${toTsMs} <= 0 OR e.created_at <= to_timestamp(${toTsMs} / 1000.0))
+          ORDER BY e.id ASC
+          LIMIT ${limit + 1}
+        `
+      : await sql`
+          SELECT
+            e.id, e.session_id, e.turn AS turn_number, e.event_type,
+            e.details, e.created_at, s.trace_id
+          FROM otel_events e
+          LEFT JOIN sessions s ON s.session_id = e.session_id
+          WHERE e.session_id = ${sessionId}
+            AND e.id > ${cursorNum}
+            AND e.id <= ${watermark}
+            AND (${eventType} = '' OR e.event_type = ${eventType})
+            AND (${toolName} = '' OR e.tool_name = ${toolName})
+            AND (${status} = '' OR e.status = ${status})
+            AND (${fromTsMs} <= 0 OR e.created_at >= (${fromTsMs} / 1000.0))
+            AND (${toTsMs} <= 0 OR e.created_at <= (${toTsMs} / 1000.0))
+          ORDER BY e.id ASC
+          LIMIT ${limit + 1}
+        `;
   } else if (traceId) {
-    const maxRows = await sql<{ max_id: number | null }[]>`
-      SELECT MAX(e.id) AS max_id
-      FROM otel_events e
-      INNER JOIN sessions s ON s.session_id = e.session_id
-      WHERE s.trace_id = ${traceId}
-        AND (${eventType} = '' OR e.event_type = ${eventType})
-        AND (${toolName} = '' OR e.tool_name = ${toolName})
-        AND (${status} = '' OR e.status = ${status})
-        AND (${fromTsMs} <= 0 OR e.created_at >= (${fromTsMs} / 1000.0))
-        AND (${toTsMs} <= 0 OR e.created_at <= (${toTsMs} / 1000.0))
-    `;
+    const maxRows = useEventData
+      ? await sql<{ max_id: number | null }[]>`
+          SELECT MAX(e.id) AS max_id
+          FROM otel_events e
+          WHERE COALESCE(NULLIF(e.event_data->>'trace_id', ''), e.trace_id, '') = ${traceId}
+            AND (${eventType} = '' OR e.event_type = ${eventType})
+            AND (${toolName} = '' OR COALESCE(e.event_data->>'tool_name', '') = ${toolName})
+            AND (${status} = '' OR COALESCE(e.event_data->>'status', '') = ${status})
+            AND (${fromTsMs} <= 0 OR e.created_at >= to_timestamp(${fromTsMs} / 1000.0))
+            AND (${toTsMs} <= 0 OR e.created_at <= to_timestamp(${toTsMs} / 1000.0))
+        `
+      : await sql<{ max_id: number | null }[]>`
+          SELECT MAX(e.id) AS max_id
+          FROM otel_events e
+          INNER JOIN sessions s ON s.session_id = e.session_id
+          WHERE s.trace_id = ${traceId}
+            AND (${eventType} = '' OR e.event_type = ${eventType})
+            AND (${toolName} = '' OR e.tool_name = ${toolName})
+            AND (${status} = '' OR e.status = ${status})
+            AND (${fromTsMs} <= 0 OR e.created_at >= (${fromTsMs} / 1000.0))
+            AND (${toTsMs} <= 0 OR e.created_at <= (${toTsMs} / 1000.0))
+        `;
     const maxWatermark = Number(maxRows?.[0]?.max_id || 0);
     watermark = providedWatermark > 0 ? Math.min(providedWatermark, maxWatermark) : maxWatermark;
     if (cursorNum >= watermark) {
@@ -1419,23 +1561,44 @@ export async function loadRuntimeEventsPage(
         watermark_cursor: String(watermark),
       };
     }
-    rows = await sql`
-      SELECT
-        e.id, e.session_id, e.turn AS turn_number, e.event_type,
-        e.details, e.created_at, s.trace_id
-      FROM otel_events e
-      INNER JOIN sessions s ON s.session_id = e.session_id
-      WHERE s.trace_id = ${traceId}
-        AND e.id > ${cursorNum}
-        AND e.id <= ${watermark}
-        AND (${eventType} = '' OR e.event_type = ${eventType})
-        AND (${toolName} = '' OR e.tool_name = ${toolName})
-        AND (${status} = '' OR e.status = ${status})
-        AND (${fromTsMs} <= 0 OR e.created_at >= (${fromTsMs} / 1000.0))
-        AND (${toTsMs} <= 0 OR e.created_at <= (${toTsMs} / 1000.0))
-      ORDER BY e.id ASC
-      LIMIT ${limit + 1}
-    `;
+    rows = useEventData
+      ? await sql`
+          SELECT
+            e.id, e.session_id,
+            COALESCE(NULLIF(e.event_data->>'turn', ''), '0')::int AS turn_number,
+            e.event_type,
+            e.event_data::text AS details,
+            e.created_at,
+            COALESCE(NULLIF(e.event_data->>'trace_id', ''), e.trace_id, '') AS trace_id
+          FROM otel_events e
+          WHERE COALESCE(NULLIF(e.event_data->>'trace_id', ''), e.trace_id, '') = ${traceId}
+            AND e.id > ${cursorNum}
+            AND e.id <= ${watermark}
+            AND (${eventType} = '' OR e.event_type = ${eventType})
+            AND (${toolName} = '' OR COALESCE(e.event_data->>'tool_name', '') = ${toolName})
+            AND (${status} = '' OR COALESCE(e.event_data->>'status', '') = ${status})
+            AND (${fromTsMs} <= 0 OR e.created_at >= to_timestamp(${fromTsMs} / 1000.0))
+            AND (${toTsMs} <= 0 OR e.created_at <= to_timestamp(${toTsMs} / 1000.0))
+          ORDER BY e.id ASC
+          LIMIT ${limit + 1}
+        `
+      : await sql`
+          SELECT
+            e.id, e.session_id, e.turn AS turn_number, e.event_type,
+            e.details, e.created_at, s.trace_id
+          FROM otel_events e
+          INNER JOIN sessions s ON s.session_id = e.session_id
+          WHERE s.trace_id = ${traceId}
+            AND e.id > ${cursorNum}
+            AND e.id <= ${watermark}
+            AND (${eventType} = '' OR e.event_type = ${eventType})
+            AND (${toolName} = '' OR e.tool_name = ${toolName})
+            AND (${status} = '' OR e.status = ${status})
+            AND (${fromTsMs} <= 0 OR e.created_at >= (${fromTsMs} / 1000.0))
+            AND (${toTsMs} <= 0 OR e.created_at <= (${toTsMs} / 1000.0))
+          ORDER BY e.id ASC
+          LIMIT ${limit + 1}
+        `;
   } else {
     return {
       events: [],
