@@ -1,5 +1,6 @@
 <script lang="ts">
   import { metaAgentStore, type MetaAgentMessage } from "$lib/stores/meta-agent.svelte";
+  import type { MetaModelPath } from "$lib/services/meta-agent";
   import { renderMarkdown } from "$lib/markdown";
   import ToolCallBlock from "$lib/components/chat/ToolCallBlock.svelte";
   import TrainingStream from "./TrainingStream.svelte";
@@ -17,6 +18,7 @@
   let { agentName, open = $bindable(false), onClose, width = $bindable(400), onWidthChange }: Props = $props();
 
   let input = $state("");
+  let modelPath = $state<MetaModelPath>("auto");
   let textareaEl: HTMLTextAreaElement | undefined = $state();
   let messagesEl: HTMLDivElement | undefined = $state();
   let resizing = $state(false);
@@ -50,6 +52,18 @@
   $effect(() => {
     if (open && agentName) {
       metaAgentStore.loadHistory(agentName);
+      if (typeof window !== "undefined") {
+        const saved = localStorage.getItem(`oneshots_meta_model_path_${agentName}`);
+        if (saved === "auto" || saved === "gemma" || saved === "sonnet") {
+          modelPath = saved;
+        }
+      }
+    }
+  });
+
+  $effect(() => {
+    if (typeof window !== "undefined" && agentName) {
+      localStorage.setItem(`oneshots_meta_model_path_${agentName}`, modelPath);
     }
   });
 
@@ -73,7 +87,7 @@
     const text = input.trim();
     if (!text || streaming) return;
     input = "";
-    metaAgentStore.sendMessage(agentName, text);
+    metaAgentStore.sendMessage(agentName, text, undefined, modelPath);
     requestAnimationFrame(scrollToBottom);
   }
 
@@ -306,6 +320,19 @@
 
     <!-- Input -->
     <div class="p-3 shadow-[0_-1px_3px_0_rgba(0,0,0,0.06)]">
+      <div class="mb-2 flex items-center gap-2">
+        <label class="text-[11px] text-muted-foreground" for="meta-model-path">Model path</label>
+        <select
+          id="meta-model-path"
+          class="rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
+          bind:value={modelPath}
+          disabled={streaming}
+        >
+          <option value="auto">Auto (plan-based)</option>
+          <option value="gemma">Force Gemma</option>
+          <option value="sonnet">Force Sonnet</option>
+        </select>
+      </div>
       <div class="flex items-end gap-2">
         <textarea
           bind:this={textareaEl}

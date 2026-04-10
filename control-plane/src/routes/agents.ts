@@ -1649,6 +1649,7 @@ const metaChatRoute = createRoute({
               }),
             ),
             mode: z.enum(["demo", "live"]).optional(),
+            model_path: z.enum(["auto", "gemma", "sonnet"]).optional(),
           }),
         },
       },
@@ -1662,6 +1663,10 @@ const metaChatRoute = createRoute({
           schema: z.object({
             response: z.string(),
             messages: z.array(z.record(z.unknown())),
+            cost_usd: z.number().optional(),
+            turns: z.number().optional(),
+            model: z.string().optional(),
+            model_path: z.enum(["auto", "gemma", "sonnet"]).optional(),
           }),
         },
       },
@@ -1671,7 +1676,7 @@ const metaChatRoute = createRoute({
 });
 agentRoutes.openapi(metaChatRoute, async (c): Promise<any> => {
   const { name: identifier } = c.req.valid("param");
-  const { messages, mode } = c.req.valid("json");
+  const { messages, mode, model_path } = c.req.valid("json");
   const user = c.get("user");
 
   // Rate limit: max 10 meta-agent calls per hour per org (Sonnet 4.6 is expensive)
@@ -1716,6 +1721,7 @@ agentRoutes.openapi(metaChatRoute, async (c): Promise<any> => {
       cloudflareApiToken: c.env.CLOUDFLARE_API_TOKEN,
       aiGatewayToken: c.env.AI_GATEWAY_TOKEN,
       gpuServiceKey: c.env.GPU_SERVICE_KEY || c.env.SERVICE_TOKEN || "",
+      modelPath: model_path || "auto",
       mode: mode || "live",
       env: {
         RUNTIME: c.env.RUNTIME,
@@ -1729,6 +1735,8 @@ agentRoutes.openapi(metaChatRoute, async (c): Promise<any> => {
       messages: result.messages,
       cost_usd: result.cost_usd || 0,
       turns: result.turns || 0,
+      model: result.model,
+      model_path: result.model_path || model_path || "auto",
     });
   } catch (err: any) {
     console.error(`[meta-chat] Error for agent ${agentName}:`, err);

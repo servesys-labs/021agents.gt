@@ -48,6 +48,7 @@ interface MetaChatContext {
   cloudflareApiToken?: string;
   aiGatewayToken?: string;
   gpuServiceKey?: string;
+  modelPath?: "auto" | "gemma" | "sonnet";
   /** "demo" = showcase mode (auto-generate, minimal questions), "live" = production interview mode */
   mode?: "demo" | "live";
   env: {
@@ -2772,7 +2773,7 @@ Example: If an agent is on the Standard plan and the user asks "debug this Pytho
 export async function runMetaChat(
   messages: MetaChatMessage[],
   ctx: MetaChatContext,
-): Promise<{ messages: MetaChatMessage[]; response: string; cost_usd?: number; turns?: number; session_id?: string; input_tokens?: number; output_tokens?: number; tool_calls?: number }> {
+): Promise<{ messages: MetaChatMessage[]; response: string; cost_usd?: number; turns?: number; session_id?: string; input_tokens?: number; output_tokens?: number; tool_calls?: number; model?: string; model_path?: "auto" | "gemma" | "sonnet" }> {
   const systemPrompt = buildSystemPrompt(ctx.agentName, ctx.mode || "live");
 
   // Build messages for OpenRouter
@@ -2820,9 +2821,14 @@ export async function runMetaChat(
     }
   } catch { /* fail open — default to free/Gemma */ }
 
-  const metaModel = agentPlan === "standard" || agentPlan === "premium"
-    ? "anthropic/claude-sonnet-4-6"
-    : "gemma-4-31b";
+  const selectedModelPath = ctx.modelPath || "auto";
+  const metaModel = selectedModelPath === "gemma"
+    ? "gemma-4-31b"
+    : selectedModelPath === "sonnet"
+      ? "anthropic/claude-sonnet-4-6"
+      : (agentPlan === "standard" || agentPlan === "premium"
+        ? "anthropic/claude-sonnet-4-6"
+        : "gemma-4-31b");
 
   const MAX_TOOL_ROUNDS = 8;
   let round = 0;
@@ -3077,5 +3083,7 @@ export async function runMetaChat(
     input_tokens: totalInputTokens,
     output_tokens: totalOutputTokens,
     tool_calls: totalToolCalls,
+    model: metaModel,
+    model_path: selectedModelPath,
   };
 }
