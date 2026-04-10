@@ -1634,6 +1634,10 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       turns?: number;
       latency_ms?: number;
       termination_reason?: string;
+      run_phase?: string;
+      run_phase_history?: string[];
+      artifact_schema?: string;
+      artifact_schema_validated?: boolean;
     } | undefined,
     opts?: { source?: string; seq?: number },
   ): Record<string, unknown> {
@@ -1649,6 +1653,12 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       turns: out?.turns || 0,
       latency_ms: out?.latency_ms || 0,
       termination_reason: out?.termination_reason || "completed",
+      run_phase: out?.run_phase || undefined,
+      run_phase_history: out?.run_phase_history || undefined,
+      artifact_schema: out?.artifact_schema || undefined,
+      artifact_schema_validated: typeof out?.artifact_schema_validated === "boolean"
+        ? out.artifact_schema_validated
+        : undefined,
       source: opts?.source || "workflow_status_fallback",
       ts: Date.now(),
       _eid: crypto.randomUUID().slice(0, 12),
@@ -4353,38 +4363,41 @@ export default {
               if (done) break;
               const chunk = sseDecoder.decode(value, { stream: true });
               sseBuffer += chunk;
+              let sep = sseBuffer.indexOf("\n\n");
+              while (sep >= 0) {
+                const frame = sseBuffer.slice(0, sep);
+                sseBuffer = sseBuffer.slice(sep + 2);
+                sep = sseBuffer.indexOf("\n\n");
+                if (!frame.trim()) continue;
 
-              // Scan for done event to capture data
-              const doneMatch = sseBuffer.match(/data:\s*(\{[^}]*"type"\s*:\s*"done"[^}]*\})/);
-              if (doneMatch && !doneEventData) {
-                try { doneEventData = JSON.parse(doneMatch[1]); } catch {}
-              }
+                const dataLines = frame
+                  .split("\n")
+                  .filter((line) => line.startsWith("data:"))
+                  .map((line) => line.slice(5).trim());
+                if (dataLines.length === 0) {
+                  await writer.write(sseEncoder.encode(`${frame}\n\n`));
+                  continue;
+                }
 
-              // Capture token content for assistant message persistence
-              const tokenMatches = chunk.matchAll(/data:\s*(\{[^}]*"type"\s*:\s*"token"[^}]*\})/g);
-              for (const m of tokenMatches) {
+                const payload = dataLines.join("\n");
                 try {
-                  const parsed = JSON.parse(m[1]);
-                  fullAssistantContent += parsed.content || parsed.text || "";
-                } catch {}
-              }
-
-              // If done event found, inject conversation_id before forwarding
-              if (doneEventData && conversationId) {
-                const augmented = chunk.replace(
-                  /data:\s*(\{[^}]*"type"\s*:\s*"done"[^}]*\})/,
-                  (match) => {
-                    try {
-                      const obj = JSON.parse(match.slice(5).trim());
-                      obj.conversation_id = conversationId;
-                      return `data: ${JSON.stringify(obj)}`;
-                    } catch { return match; }
+                  const parsed = JSON.parse(payload) as Record<string, unknown>;
+                  if (parsed.type === "token") {
+                    fullAssistantContent += String(parsed.content || parsed.text || "");
                   }
-                );
-                await writer.write(sseEncoder.encode(augmented));
-              } else {
-                await writer.write(sseEncoder.encode(chunk));
+                  if (parsed.type === "done") {
+                    doneEventData = parsed;
+                    if (conversationId) parsed.conversation_id = conversationId;
+                  }
+                  await writer.write(sseEncoder.encode(`data: ${JSON.stringify(parsed)}\n\n`));
+                } catch {
+                  await writer.write(sseEncoder.encode(`${frame}\n\n`));
+                }
               }
+            }
+
+            if (sseBuffer.trim()) {
+              await writer.write(sseEncoder.encode(sseBuffer));
             }
 
             // ── After stream completes: persist conversation ──
@@ -6222,41 +6235,46 @@ export default {
           provider?: string;  // "workers-ai" | "openrouter" | auto-detect from model
         };
         const model = body.model || "@cf/meta/llama-3.1-8b-instruct";
-        const isWorkersAI = model.startsWith("@cf/");
-        const started = Date.now();
+        const inferredProvider = model.startsWith("@cf/") ? "workers-ai" : "custom-gemma4-fast";
+        const provider = String(body.provider || inferredProvider);
 
         try {
-          let content = "";
-          let toolCalls: any[] = [];
-          let inputTokens = 0;
-          let outputTokens = 0;
-          let resolvedModel = model;
-
-          if (isWorkersAI) {
-            // ── Workers AI (edge inference, sub-second) ──
-            const aiResult = await env.AI.run(model as keyof AiModels, {
-              messages: body.messages,
+          const { callLLM } = await import("./runtime/llm");
+          const llm = await callLLM(
+            {
+              AI: env.AI,
+              CLOUDFLARE_ACCOUNT_ID: env.CLOUDFLARE_ACCOUNT_ID,
+              AI_GATEWAY_ID: env.AI_GATEWAY_ID,
+              AI_GATEWAY_TOKEN: env.AI_GATEWAY_TOKEN,
+              CLOUDFLARE_API_TOKEN: env.CLOUDFLARE_API_TOKEN,
+              GPU_SERVICE_KEY: env.GPU_SERVICE_KEY,
+            } as any,
+            (body.messages || []).map((m: any) => ({
+              role: m.role,
+              content: String(m.content || ""),
+            })),
+            [],
+            {
+              model,
+              provider,
               max_tokens: body.max_tokens || 1024,
               temperature: body.temperature || 0,
-              ...(body.tools ? { tools: body.tools } : {}),
-            }) as any;
-            content = aiResult.response || aiResult.content || "";
-            toolCalls = aiResult.tool_calls || [];
-            inputTokens = aiResult.usage?.input_tokens || 0;
-            outputTokens = aiResult.usage?.output_tokens || 0;
+            },
+          );
 
-          } else {
-            // MVP: Only Workers AI / Gemma models — no paid providers
-            return Response.json({ error: `MVP mode: model "${model}" is not a Workers AI model. Only @cf/* and Gemma models are supported.` }, { status: 400 });
-          }
-
-          const latencyMs = Date.now() - started;
           return Response.json({
-            content, model: resolvedModel, provider: "workers-ai",
-            tool_calls: toolCalls, input_tokens: inputTokens, output_tokens: outputTokens, latency_ms: latencyMs,
+            content: llm.content || "",
+            model: llm.model || model,
+            provider,
+            tool_calls: llm.tool_calls || [],
+            input_tokens: llm.usage?.input_tokens || 0,
+            output_tokens: llm.usage?.output_tokens || 0,
+            cost_usd: llm.cost_usd || 0,
+            latency_ms: llm.latency_ms || 0,
+            stop_reason: llm.stop_reason || null,
           });
         } catch (err: any) {
-          return Response.json({ error: err.message, model }, { status: 500 });
+          return Response.json({ error: err.message, model, provider }, { status: 500 });
         }
       }
 

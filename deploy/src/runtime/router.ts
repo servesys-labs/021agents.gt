@@ -41,6 +41,7 @@ export interface RouteDecision {
   model: string;
   provider: string;
   max_tokens: number;
+  fallback_chain?: Array<{ model: string; provider: string }>;
   complexity: ComplexityTier;
   category: TaskCategory;
   role: TaskRole;
@@ -48,13 +49,16 @@ export interface RouteDecision {
   routing_cost_usd: number;
 }
 
+export interface ModelRoute {
+  model: string;
+  provider: string;
+  max_tokens?: number;
+  fallback?: Array<{ model: string; provider: string }>;
+}
+
 export interface PlanRouting {
   [category: string]: {
-    [role: string]: {
-      model: string;
-      provider: string;
-      max_tokens?: number;
-    };
+    [role: string]: ModelRoute;
   };
 }
 
@@ -313,6 +317,7 @@ export async function selectModel(
       model: defaultModel,
       provider: defaultProvider,
       max_tokens: 0, // Let model decide output length
+      fallback_chain: [],
       complexity,
       category,
       role,
@@ -329,6 +334,7 @@ export async function selectModel(
         model: route.model || defaultModel,
         provider: route.provider || defaultProvider,
         max_tokens: 0, // Let model decide
+        fallback_chain: Array.isArray(route.fallback) ? route.fallback : [],
         complexity,
         category,
         role,
@@ -346,6 +352,7 @@ export async function selectModel(
         model: route.model || defaultModel,
         provider: route.provider || defaultProvider,
         max_tokens: 0, // Let model decide
+        fallback_chain: Array.isArray(route.fallback) ? route.fallback : [],
         complexity,
         category,
         role,
@@ -359,6 +366,7 @@ export async function selectModel(
     model: defaultModel,
     provider: defaultProvider,
     max_tokens: 0, // Let model decide
+    fallback_chain: [],
     complexity,
     category,
     role,

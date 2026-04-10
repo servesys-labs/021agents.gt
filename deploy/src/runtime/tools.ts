@@ -219,6 +219,18 @@ function clampSandboxTimeout(timeoutSeconds?: number): number {
   return Math.max(1, Math.min(Math.ceil(fallback), MAX_SANDBOX_TIMEOUT_SECONDS));
 }
 
+function enforceHeavyCommandTimeoutFloor(command: string, timeoutSeconds?: number): number {
+  const base = clampSandboxTimeout(timeoutSeconds);
+  // Guard against agents setting unrealistically low timeouts for heavy commands.
+  // This prevents predictable failures like npm/pip installs timing out at 1s.
+  const HEAVY_COMMAND_PATTERN =
+    /\b(npm\s+(install|ci|run\s+build)|pnpm\s+(install|run\s+build)|yarn\s+(install|build)|pip3?\s+install|apt(-get)?\s+install|npx\s+tsc)\b/i;
+  if (HEAVY_COMMAND_PATTERN.test(command)) {
+    return Math.max(base, 30);
+  }
+  return base;
+}
+
 /** Max time (ms) to wait for a container to become available before giving up. */
 const SANDBOX_ACQUIRE_TIMEOUT_MS = 30_000;
 
@@ -251,6 +263,22 @@ function withSandboxTimeout<T>(promise: Promise<T>, sandboxId: string): Promise<
 // Track which sandbox IDs have been initialized (warm) in this isolate lifetime
 const _warmSandboxes = new Set<string>();
 const _sandboxWarmups = new Map<string, Promise<void>>();
+const _sandboxGenerations = new Map<string, number>();
+
+function baseSandboxId(env: RuntimeEnv, sessionId: string): string {
+  return (env as any).DO_SESSION_ID || `session-${sessionId}`;
+}
+
+function isFatalSandboxSessionError(err: unknown): boolean {
+  const msg = String((err as any)?.message || "").toLowerCase();
+  return msg.includes("session is not ready") || msg.includes("shell has died");
+}
+
+function bumpSandboxGeneration(baseId: string): number {
+  const next = (_sandboxGenerations.get(baseId) || 0) + 1;
+  _sandboxGenerations.set(baseId, next);
+  return next;
+}
 
 function getSafeSandbox(env: RuntimeEnv, sandboxId: string) {
   // getSandbox returns immediately — container only starts on first operation.
@@ -280,7 +308,8 @@ function getSafeSandbox(env: RuntimeEnv, sandboxId: string) {
         _warmSandboxes.add(sandboxId);
         emitSandboxStartEvent((env as any).TELEMETRY_QUEUE, sandboxId, true, Date.now() - warmupStart, resolveTelemetryOrgId(env));
       } catch (err) {
-        _warmSandboxes.add(sandboxId);
+        // Do NOT mark warm on failed probe; allow future calls to retry initialization.
+        _warmSandboxes.delete(sandboxId);
         emitSandboxStartEvent((env as any).TELEMETRY_QUEUE, sandboxId, true, Date.now() - warmupStart, resolveTelemetryOrgId(env), "error");
         throw err;
       } finally {
@@ -320,6 +349,11 @@ function getSafeSandbox(env: RuntimeEnv, sandboxId: string) {
         return await raw.exec(cmd, normalizedOpts);
       } catch (err: any) {
         console.error(`[sandbox] exec failed (${sandboxId}): ${err.message?.slice(0, 200)}`);
+        // If the underlying shell/session died, clear warm cache so next call re-probes.
+        const msg = String(err?.message || "").toLowerCase();
+        if (msg.includes("session is not ready") || msg.includes("shell has died")) {
+          _warmSandboxes.delete(sandboxId);
+        }
         throw err;
       }
     },
@@ -363,7 +397,9 @@ function emitSandboxStartEvent(queue: any, sandboxId: string, cold: boolean, lat
  * Falls back to session ID for non-DO contexts (e.g., eval runs).
  */
 function stableSandboxId(env: RuntimeEnv, sessionId: string): string {
-  return (env as any).DO_SESSION_ID || `session-${sessionId}`;
+  const baseId = baseSandboxId(env, sessionId);
+  const gen = _sandboxGenerations.get(baseId) || 0;
+  return gen > 0 ? `${baseId}-r${gen}` : baseId;
 }
 
 function resolveTelemetryOrgId(env: RuntimeEnv): string {
@@ -431,11 +467,25 @@ async function sandboxExecWithLimits(
   // happens in the getSafeSandbox proxy's exec wrapper, so this is
   // the only place in tools.ts that should think in seconds.
   const timeout = clampSandboxTimeout(timeoutSeconds);
-  const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
-  return sandbox.exec(command, {
+  const opts = {
     timeout,
     ...(stdin !== undefined ? { stdin } : {}),
-  } as any);
+  } as any;
+  const primarySandboxId = stableSandboxId(env, sessionId);
+  const sandbox = getSafeSandbox(env, primarySandboxId);
+  try {
+    return await sandbox.exec(command, opts);
+  } catch (err: any) {
+    if (!isFatalSandboxSessionError(err)) throw err;
+    // Recycle sandbox ID once to recover from dead shell/session states.
+    const baseId = baseSandboxId(env, sessionId);
+    const nextGen = bumpSandboxGeneration(baseId);
+    const recycledSandboxId = `${baseId}-r${nextGen}`;
+    _warmSandboxes.delete(primarySandboxId);
+    _sandboxWarmups.delete(primarySandboxId);
+    const recycled = getSafeSandbox(env, recycledSandboxId);
+    return await recycled.exec(command, opts);
+  }
 }
 
 async function getCachedDynamicWorker(env: RuntimeEnv, workerCode: string): Promise<any> {
@@ -1251,7 +1301,8 @@ async function dispatch(
       try {
         // Default to /workspace so generated files land in persistent scope.
         const wrappedCmd = `cd /workspace && (${cmd})`;
-        const r = await sandboxExecWithLimits(env, sessionId, wrappedCmd, args.timeout_seconds);
+        const timeoutSeconds = enforceHeavyCommandTimeoutFloor(cmd, args.timeout_seconds);
+        const r = await sandboxExecWithLimits(env, sessionId, wrappedCmd, timeoutSeconds);
         if ((r.exitCode ?? 0) === 0) {
           // Best-effort background durability for shell-created artifacts.
           syncRecentWorkspaceFilesToR2(env, sessionId).catch(() => {});

@@ -133,7 +133,7 @@ function looksLikePrematurePlanCompletion(
 
 function isDeepResearchIntent(input: string): boolean {
   const q = String(input || "").toLowerCase();
-  return /\b(competitive|deep research|market analysis|research report|benchmark|vendor analysis)\b/.test(q);
+  return /\b(research|competitive|deep research|market analysis|research report|benchmark|vendor analysis)\b/.test(q);
 }
 
 function extractJsonObject(text: string): Record<string, unknown> | null {
@@ -253,6 +253,10 @@ export interface RunOutput {
   termination_reason?: string;
   completion_gate_interventions?: number;
   completion_gate_reason?: string;
+  run_phase?: RunPhase;
+  run_phase_history?: RunPhase[];
+  artifact_schema?: string;
+  artifact_schema_validated?: boolean;
 }
 
 interface LLMResult {
@@ -1059,14 +1063,36 @@ ALWAYS:
           CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
           GPU_SERVICE_KEY: this.env.GPU_SERVICE_KEY,
         };
+        const fallbackChain = Array.isArray((selectedRoute as any).fallback_chain)
+          ? (selectedRoute as any).fallback_chain
+          : [];
+        const llmCandidates = [{ model: selectedRoute.model, provider: selectedRoute.provider }, ...fallbackChain];
+
+        async function callWithFallback(
+          promptMessages: Array<{ role: any; content: string; tool_calls?: any; tool_call_id?: string; name?: string }>,
+          toolDefinitions: any[],
+        ) {
+          let lastErr: any = null;
+          for (const candidate of llmCandidates) {
+            try {
+              return await callLLM(
+                llmEnv as any,
+                promptMessages,
+                toolDefinitions,
+                { model: candidate.model, provider: candidate.provider, max_tokens: selectedRoute.max_tokens },
+              );
+            } catch (err: any) {
+              lastErr = err;
+            }
+          }
+          throw lastErr || new Error("LLM failed on all routed candidates");
+        }
 
         let response;
         try {
-          response = await callLLM(
-            llmEnv as any,
+          response = await callWithFallback(
             messages.map(m => ({ role: m.role as any, content: m.content || "", tool_calls: m.tool_calls, tool_call_id: m.tool_call_id, name: m.name })),
             toolDefs,
-            { model: selectedRoute.model, provider: selectedRoute.provider, max_tokens: selectedRoute.max_tokens },
           );
         } catch (err: any) {
           if (!isContextOverflow(err)) {
@@ -1099,11 +1125,9 @@ ALWAYS:
           });
           // Retry once with the compacted history. If this fails too,
           // the Workflow's step retry mechanism will catch it.
-          response = await callLLM(
-            llmEnv as any,
+          response = await callWithFallback(
             messages.map(m => ({ role: m.role as any, content: m.content || "", tool_calls: m.tool_calls, tool_call_id: m.tool_call_id, name: m.name })),
             toolDefs,
-            { model: selectedRoute.model, provider: selectedRoute.provider, max_tokens: selectedRoute.max_tokens },
           );
         }
 
@@ -1856,10 +1880,17 @@ ALWAYS:
       termination_reason: terminationReason,
       completion_gate_interventions: completionGateInterventions,
       completion_gate_reason: completionGateReason || undefined,
+      run_phase: runPhase,
+      run_phase_history: runPhaseHistory,
+      artifact_schema: researchIntent ? "research_v1" : undefined,
+      artifact_schema_validated: researchIntent ? artifactSynthesisValidated : undefined,
     };
 
     // Emit final done event (include conversation_id if present)
     transitionPhase("finalizing");
+    transitionPhase("done");
+    result.run_phase = runPhase;
+    result.run_phase_history = [...runPhaseHistory];
     await step.do("finalize", async () => {
       await this.emit(p.progress_key, {
         type: "done",
@@ -1873,7 +1904,6 @@ ALWAYS:
         ...(p.conversation_id ? { conversation_id: p.conversation_id } : {}),
       });
     });
-    transitionPhase("done");
 
     // Cloud C3.3: Compact KV progress events — remove intermediate events
     await compactProgressEvents(this.env.AGENT_PROGRESS_KV, p.progress_key);
