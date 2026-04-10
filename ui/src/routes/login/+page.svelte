@@ -1,5 +1,6 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
+  import { page } from "$app/stores";
   import { authStore } from "$lib/stores/auth.svelte";
   import { agentStore } from "$lib/stores/agents.svelte";
   import { api } from "$lib/services/api";
@@ -20,6 +21,13 @@
   let signupPassword = $state("");
   let signupConfirm = $state("");
   let inviteCode = $state("");
+
+  $effect(() => {
+    const ref = ($page.url.searchParams.get("ref") || "").trim();
+    if (!ref) return;
+    inviteCode = ref;
+    mode = "signup";
+  });
 
   async function handleLogin(e: SubmitEvent) {
     e.preventDefault();

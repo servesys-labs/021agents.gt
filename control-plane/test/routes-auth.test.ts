@@ -33,6 +33,27 @@ function buildApp() {
 }
 
 describe("auth routes: password disable guards", () => {
+  it("requires invite code when OPEN_SIGNUPS=false", async () => {
+    const app = buildApp();
+    const env = mockEnv({
+      AUTH_ALLOW_PASSWORD: "true",
+      OPEN_SIGNUPS: "false",
+    });
+    const res = await app.request("/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: "invite-required@test.com",
+        password: "password123",
+        name: "Invite Required",
+      }),
+    }, env);
+    expect(res.status).toBe(403);
+    const payload = await res.json() as { code?: string; error?: string };
+    expect(payload.code).toBe("invite_required");
+    expect(payload.error || "").toMatch(/invite/i);
+  });
+
   it("blocks signup when AUTH_ALLOW_PASSWORD=false", async () => {
     const app = buildApp();
     const env = mockEnv({ AUTH_ALLOW_PASSWORD: "false" });

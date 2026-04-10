@@ -236,6 +236,13 @@ describe("Workspace R2 persistence", () => {
     expect(read2).toBe("user2 notes");
   });
 
+  // Additional: read fallback to shared scope for agent-generated artifacts
+  it("falls back to shared scope when user-scoped file is missing", async () => {
+    await syncFileToR2(bucket as any, "org1", "agent1", "daily_digest.md", "shared artifact", "sess1");
+    const readAsUser = await readFileFromR2(bucket as any, "org1", "agent1", "daily_digest.md", "portal-user");
+    expect(readAsUser).toBe("shared artifact");
+  });
+
   // Additional: deleteFileFromR2 on non-existent file does not throw
   it("does not throw when deleting a non-existent file", async () => {
     await expect(
