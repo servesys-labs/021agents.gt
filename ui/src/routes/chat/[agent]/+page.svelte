@@ -461,6 +461,7 @@
             <ChatMessage
               message={msg}
               streaming={streaming && i === messages.length - 1}
+              agentName={agentName}
               index={i}
               onEdit={handleEditMessage}
               onRegenerate={msg.role === "assistant" ? handleRegenerateMessage : undefined}

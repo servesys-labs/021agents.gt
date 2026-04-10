@@ -214,14 +214,27 @@
   async function saveChannel(channelId: string, config: Record<string, unknown>) {
     saving = true;
     try {
+      let persistedConfig = config;
+      if (channelId === "telegram") {
+        const botToken = String(config.bot_token ?? "").trim();
+        if (!botToken) throw new Error("Telegram bot token is required");
+        // Telegram needs explicit connect flow to store secret + set webhook.
+        const tg = await api.post<{ bot_username?: string; webhook_url?: string }>("/chat/telegram/connect", { bot_token: botToken });
+        persistedConfig = {
+          bot_username: tg.bot_username || "",
+          webhook_url: tg.webhook_url || "",
+        };
+        await updateChannel(agentName, channelId, persistedConfig);
+        telegramBotToken = "";
+      } else
       if (hasConfig(channelId)) {
-        await updateChannel(agentName, channelId, config);
+        await updateChannel(agentName, channelId, persistedConfig);
       } else {
-        await connectChannel(agentName, channelId, config);
+        await connectChannel(agentName, channelId, persistedConfig);
       }
       channelStatuses = {
         ...channelStatuses,
-        [channelId]: { is_active: true, config },
+        [channelId]: { is_active: true, config: persistedConfig },
       };
       expandedChannel = null;
       toast.success("Channel configured and activated!");
