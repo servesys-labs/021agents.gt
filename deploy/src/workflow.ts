@@ -1207,6 +1207,8 @@ ALWAYS:
                 // MVP: No paid model API keys — Gemma only
                 DO_SESSION_ID: p.do_session_id,
                 __agentConfig: config,
+                __orgId: p.org_id || "default",
+                __agentName: p.agent_name || config?.name || "agent",
                 __channelUserId: p.channel_user_id || "",
               } as any,
               [{ id: tc.id, name: tc.name, arguments: tc.arguments }],
