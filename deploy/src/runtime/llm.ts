@@ -297,6 +297,13 @@ async function _doCallLLM(
 
   let resp: Response | undefined;
   let lastError: Error | undefined;
+  let successAttempt = 0;
+  // TTFT proxy — time from request initiation to when fetch() resolves
+  // (i.e. response headers received). For a non-streaming fetch this is
+  // the closest analog to true streaming TTFT. Captured per-attempt and
+  // overwritten on success so we report the timing of the successful call
+  // rather than the failed retries.
+  let ttftMs = 0;
 
   for (let attempt = 0; attempt < MAX_LLM_RETRIES; attempt++) {
     try {
@@ -314,7 +321,11 @@ async function _doCallLLM(
         clearTimeout(idleTimeout);
       }
 
-      if (resp.ok) break; // Success
+      if (resp.ok) {
+        ttftMs = Date.now() - started;
+        successAttempt = attempt;
+        break; // Success
+      }
 
       const status = resp.status;
 
@@ -434,11 +445,16 @@ async function _doCallLLM(
     },
     cost_usd: costUsd,
     latency_ms: latencyMs,
+    // Time from request initiation to response headers received. Closest
+    // analog to TTFT (time to first token) for non-streaming responses —
+    // measures gateway + provider routing + first-byte time, distinct
+    // from latency_ms which includes the full body parse.
+    ttft_ms: ttftMs,
     gateway_log_id: gatewayLogId,
     gateway_event_id: gatewayEventId,
     refusal: isRefusal,
     stop_reason: stopReason || undefined,
-    retry_count: 0, // Updated below if retries occurred
+    retry_count: successAttempt,
   };
 }
 
