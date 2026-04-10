@@ -1591,6 +1591,7 @@ ALWAYS:
       await this.emit(p.progress_key, {
         type: "done",
         ...result,
+        source: "workflow_kv",
         latency_ms: Date.now() - startTime,
         ...(p.conversation_id ? { conversation_id: p.conversation_id } : {}),
       });
