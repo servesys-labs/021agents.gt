@@ -1671,8 +1671,30 @@ agentRoutes.openapi(metaChatRoute, async (c): Promise<any> => {
   const { messages, mode } = c.req.valid("json");
   const user = c.get("user");
 
-  // Resolve agent identifier (supports both agent_id and name)
+  // Rate limit: max 10 meta-agent calls per hour per org (Sonnet 4.6 is expensive)
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  try {
+    const [recent] = await sql`
+      SELECT count(*)::int as c FROM sessions
+      WHERE org_id = ${user.org_id} AND agent_name LIKE 'meta:%'
+        AND created_at > NOW() - INTERVAL '1 hour'
+    `;
+    if (Number(recent.c) >= 10) {
+      return c.json({
+        error: "Meta-agent rate limit: max 10 calls per hour. The meta-agent uses Claude Sonnet 4.6 which costs significantly more than regular agent calls. Try again later.",
+      }, 429);
+    }
+  } catch {} // fail open on rate limit check
+
+  // Check credit balance — don't run meta-agent if credits are exhausted
+  try {
+    const [bal] = await sql`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${user.org_id}`;
+    if (bal && Number(bal.balance_usd) <= 0) {
+      return c.json({ error: "Insufficient credits. The meta-agent uses Claude Sonnet 4.6 which requires credits. Add credits in Settings > Billing." }, 402);
+    }
+  } catch {}
+
+  // Resolve agent identifier (supports both agent_id and name)
   const agentName = await resolveAgentName(sql, identifier, user.org_id);
   if (!agentName) {
     return c.json({ error: `Agent '${identifier}' not found` }, 404);
