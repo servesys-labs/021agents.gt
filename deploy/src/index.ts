@@ -1435,12 +1435,8 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                   if (st.status === "complete") {
                     // Workflow finished but KV didn't get the done event — synthesize one
                     // Guard: only send if we haven't sent a done already in this run
-                    const out = (st as any).output as { output?: string; session_id?: string; trace_id?: string; cost_usd?: number; tool_calls?: number; input_tokens?: number; output_tokens?: number } | undefined;
-                    const doneEvt = {
-                      type: "done", output: out?.output || "", session_id: out?.session_id || "",
-                      trace_id: out?.trace_id || "", cost_usd: out?.cost_usd || 0,
-                      tool_calls: out?.tool_calls || 0, ts: Date.now(),
-                    };
+                    const out = (st as any).output as { output?: string; session_id?: string; trace_id?: string; cost_usd?: number; tool_calls?: number; input_tokens?: number; output_tokens?: number; turns?: number; latency_ms?: number; termination_reason?: string } | undefined;
+                    const doneEvt = this._buildDoneEvent(out, { source: "workflow_status_fallback", seq: lastIdx + 1 });
                     if (!doneSent) {
                       try { connection.send(JSON.stringify(doneEvt)); } catch {}
                       this._appendConversationMessage("assistant", doneEvt.output, data.channel || "websocket");
@@ -1490,12 +1486,8 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
               try {
                 const st = await instance.status();
                 if (st.status === "complete" && !doneSent) {
-                  const out = (st as any).output as { output?: string; session_id?: string; trace_id?: string; cost_usd?: number; tool_calls?: number; input_tokens?: number; output_tokens?: number } | undefined;
-                  const doneEvt = {
-                    type: "done", output: out?.output || "", session_id: out?.session_id || "",
-                    trace_id: out?.trace_id || "", cost_usd: out?.cost_usd || 0,
-                    tool_calls: out?.tool_calls || 0, ts: Date.now(),
-                  };
+                  const out = (st as any).output as { output?: string; session_id?: string; trace_id?: string; cost_usd?: number; tool_calls?: number; input_tokens?: number; output_tokens?: number; turns?: number; latency_ms?: number; termination_reason?: string } | undefined;
+                  const doneEvt = this._buildDoneEvent(out, { source: "workflow_status_fallback", seq: lastIdx + 1 });
                   try { connection.send(JSON.stringify(doneEvt)); } catch {}
                   this._appendConversationMessage("assistant", doneEvt.output, data.channel || "websocket");
                   this._storeLastResult(doneEvt);
@@ -1532,12 +1524,8 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                 const kvEvents = JSON.parse(await this.env.AGENT_PROGRESS_KV.get(progressKey) || "[]");
                 const kvHasDone = kvEvents.some((ev: any) => ev.type === "done");
                 if (!kvHasDone && !doneSent) {
-                  const out = (st as any).output as { output?: string; session_id?: string; trace_id?: string; cost_usd?: number; tool_calls?: number; input_tokens?: number; output_tokens?: number } | undefined;
-                  const doneEvt = {
-                    type: "done", output: out?.output || "", session_id: out?.session_id || "",
-                    trace_id: out?.trace_id || "", cost_usd: out?.cost_usd || 0,
-                    tool_calls: out?.tool_calls || 0, ts: Date.now(),
-                  };
+                  const out = (st as any).output as { output?: string; session_id?: string; trace_id?: string; cost_usd?: number; tool_calls?: number; input_tokens?: number; output_tokens?: number; turns?: number; latency_ms?: number; termination_reason?: string } | undefined;
+                  const doneEvt = this._buildDoneEvent(out, { source: "workflow_status_fallback", seq: kvEvents.length + 1 });
                   try { connection.send(JSON.stringify(doneEvt)); } catch {}
                   this._appendConversationMessage("assistant", doneEvt.output, data.channel || "websocket");
                   this._storeLastResult(doneEvt);
@@ -1633,6 +1621,42 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     } catch {}
   }
 
+  // Build a normalized done event for fallback/recovery paths.
+  private _buildDoneEvent(
+    out: {
+      output?: string;
+      session_id?: string;
+      trace_id?: string;
+      cost_usd?: number;
+      tool_calls?: number;
+      input_tokens?: number;
+      output_tokens?: number;
+      turns?: number;
+      latency_ms?: number;
+      termination_reason?: string;
+    } | undefined,
+    opts?: { source?: string; seq?: number },
+  ): Record<string, unknown> {
+    const doneEvt: Record<string, unknown> = {
+      type: "done",
+      output: out?.output || "",
+      session_id: out?.session_id || "",
+      trace_id: out?.trace_id || "",
+      cost_usd: out?.cost_usd || 0,
+      tool_calls: out?.tool_calls || 0,
+      input_tokens: out?.input_tokens || 0,
+      output_tokens: out?.output_tokens || 0,
+      turns: out?.turns || 0,
+      latency_ms: out?.latency_ms || 0,
+      termination_reason: out?.termination_reason || "completed",
+      source: opts?.source || "workflow_status_fallback",
+      ts: Date.now(),
+      _eid: crypto.randomUUID().slice(0, 12),
+    };
+    if (opts?.seq && Number.isFinite(opts.seq)) doneEvt._seq = opts.seq;
+    return doneEvt;
+  }
+
   // ── Orphaned Workflow Recovery ───────────────────────────────────
   // Called from onStart() for each workflow that was in-flight when the DO restarted.
   // Reconnects to the Workflow instance via .get(), polls to completion, and
@@ -1669,11 +1693,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
               } catch {}
             }
             // Store result for tab-close recovery
-            this._storeLastResult({
-              type: "done", output: out?.output || "", session_id: out?.session_id || "",
-              trace_id: out?.trace_id || "", cost_usd: out?.cost_usd || 0,
-              tool_calls: out?.tool_calls || 0, ts: Date.now(),
-            });
+            this._storeLastResult(this._buildDoneEvent(out, { source: "workflow_recovery" }));
             console.log(`[workflow-recovery] Recovered completed workflow ${workflowInstanceId}`);
             break;
           }
@@ -2146,12 +2166,8 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                 try {
                   const status = await instance.status();
                   if (status.status === "complete" && !done) {
-                    const out = (status as any).output as { output?: string; session_id?: string; trace_id?: string; cost_usd?: number; tool_calls?: number; input_tokens?: number; output_tokens?: number } | undefined;
-                    const doneEvt = {
-                      type: "done", output: out?.output || "", session_id: out?.session_id || "",
-                      trace_id: out?.trace_id || "", cost_usd: out?.cost_usd || 0,
-                      tool_calls: out?.tool_calls || 0, ts: Date.now(),
-                    };
+                    const out = (status as any).output as { output?: string; session_id?: string; trace_id?: string; cost_usd?: number; tool_calls?: number; input_tokens?: number; output_tokens?: number; turns?: number; latency_ms?: number; termination_reason?: string } | undefined;
+                    const doneEvt = self._buildDoneEvent(out, { source: "workflow_status_fallback", seq: lastEventIndex + 1 });
                     controller.enqueue(encoder.encode(`data: ${JSON.stringify(doneEvt)}\n\n`));
                     self._appendConversationMessage("user", inputText, data.channel || "sse");
                     self._appendConversationMessage("assistant", doneEvt.output, data.channel || "sse");
