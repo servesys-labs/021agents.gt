@@ -5,6 +5,76 @@
   import CollapsibleBlock from "./CollapsibleBlock.svelte";
   import ChatMessageActions from "./ChatMessageActions.svelte";
 
+  const SPINNER_VERBS = [
+    "Accomplishing",
+    "Architecting",
+    "Baking",
+    "Beaming",
+    "Boondoggling",
+    "Booping",
+    "Brewing",
+    "Calculating",
+    "Cerebrating",
+    "Churning",
+    "Clauding",
+    "Coalescing",
+    "Cogitating",
+    "Concocting",
+    "Considering",
+    "Contemplating",
+    "Cooking",
+    "Crafting",
+    "Crunching",
+    "Deciphering",
+    "Deliberating",
+    "Discombobulating",
+    "Doodling",
+    "Dreaming",
+    "Enchanting",
+    "Envisioning",
+    "Fermenting",
+    "Frolicking",
+    "Generating",
+    "Harmonizing",
+    "Hashing",
+    "Hyperspacing",
+    "Ideating",
+    "Imagining",
+    "Incubating",
+    "Inferring",
+    "Marinating",
+    "Meandering",
+    "Mulling",
+    "Musing",
+    "Noodling",
+    "Orbiting",
+    "Orchestrating",
+    "Percolating",
+    "Pondering",
+    "Pontificating",
+    "Processing",
+    "Puzzling",
+    "Reticulating",
+    "Ruminating",
+    "Simmering",
+    "Sketching",
+    "Spinning",
+    "Stewing",
+    "Synthesizing",
+    "Tempering",
+    "Thinking",
+    "Tinkering",
+    "Transmuting",
+    "Vibing",
+    "Wandering",
+    "Whirring",
+    "Whisking",
+    "Wibbling",
+    "Working",
+    "Wrangling",
+    "Zesting",
+  ] as const;
+
   interface ToolCall {
     name: string;
     input: string;
@@ -38,6 +108,7 @@
   let { message, streaming, index = 0, onEdit, onRegenerate, onDelete }: Props = $props();
 
   let renderedHtml = $state("");
+  let spinnerVerbIndex = $state(Math.floor(Math.random() * SPINNER_VERBS.length));
 
   // Render markdown reactively
   $effect(() => {
@@ -46,6 +117,23 @@
         renderedHtml = wrapCodeBlocksWithHeader(html);
       });
     }
+  });
+
+  // Claude-style rotating status verbs while the assistant is still working.
+  $effect(() => {
+    const shouldRotate =
+      streaming &&
+      message.role === "assistant" &&
+      !message.content;
+
+    if (!shouldRotate) return;
+
+    spinnerVerbIndex = Math.floor(Math.random() * SPINNER_VERBS.length);
+    const timer = setInterval(() => {
+      spinnerVerbIndex = (spinnerVerbIndex + 1) % SPINNER_VERBS.length;
+    }, 1150);
+
+    return () => clearInterval(timer);
   });
 
   // Copy code button event delegation
@@ -101,6 +189,8 @@
     !message.content &&
     (message.toolCalls?.some(tc => !tc.output && !tc.error) || false)
   );
+
+  let spinnerLabel = $derived(`${SPINNER_VERBS[spinnerVerbIndex]}...`);
 
   // Statistics
   let hasStats = $derived(
@@ -194,7 +284,7 @@
       {#if isProcessing}
         <div class="mb-3">
           <span class="inline-block bg-gradient-to-r from-muted-foreground via-foreground to-muted-foreground bg-[length:200%_100%] bg-clip-text text-sm font-medium text-transparent animate-shimmer">
-            Processing...
+            {spinnerLabel}
           </span>
         </div>
       {/if}
@@ -213,7 +303,13 @@
 
       <!-- Blinking cursor while waiting for first token -->
       {#if showCursor}
-        <span class="inline-block h-5 w-0.5 animate-pulse bg-foreground"></span>
+        <div class="mb-1 flex items-center gap-2 text-sm text-muted-foreground">
+          <span class="inline-block h-2 w-2 animate-pulse rounded-full bg-muted-foreground"></span>
+          <span class="inline-block bg-gradient-to-r from-muted-foreground via-foreground to-muted-foreground bg-[length:200%_100%] bg-clip-text font-medium text-transparent animate-shimmer">
+            {spinnerLabel}
+          </span>
+          <span class="inline-block h-4 w-0.5 animate-pulse bg-foreground"></span>
+        </div>
       {/if}
 
       <!-- Statistics row -->
