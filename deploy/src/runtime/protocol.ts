@@ -15,6 +15,9 @@
 export type EventType =
   | "connected"
   | "session_start"
+  | "setup_done"
+  | "governance_pass"
+  | "checkpoint_resumed"
   | "turn_start"
   | "token"
   | "tool_call"
@@ -52,6 +55,54 @@ export interface SessionStartEvent extends BaseEvent {
   trace_id: string;
   agent_name: string;
   delegation?: Record<string, unknown>;
+}
+
+/**
+ * Emitted after the bootstrap step completes — config loaded, tools resolved,
+ * memory ready. Gives the UI pipeline a real timing for its "Setup" step
+ * instead of synthesizing one.
+ */
+export interface SetupDoneEvent extends BaseEvent {
+  type: "setup_done";
+  duration_ms: number;
+  model: string;
+  plan: string;
+  tool_count: number;
+  system_prompt_tokens: number;
+  rls_enforced: boolean;
+  config_migrated: boolean;
+}
+
+/**
+ * Emitted after the pre-LLM guards have been evaluated. Lists each guard
+ * that ran and whether it passed. UI uses this to give the "Governance"
+ * step real content.
+ */
+export interface GovernancePassEvent extends BaseEvent {
+  type: "governance_pass";
+  duration_ms: number;
+  guards: Array<{
+    name: string;
+    passed: boolean;
+    detail?: string;
+  }>;
+}
+
+/**
+ * Emitted when a Workflow instance resumed execution from a durable
+ * checkpoint — either because the Worker restarted or the Workflow was
+ * retried. The UI highlights this prominently; it's the durability flex.
+ */
+export interface CheckpointResumedEvent extends BaseEvent {
+  type: "checkpoint_resumed";
+  /** Which synthetic step we resumed from (setup/governance/llm/tools/result/record). */
+  resumed_at: string;
+  /** Turn number the checkpoint was persisted at. */
+  turn: number;
+  /** Recovered cost at checkpoint time (USD). */
+  recovered_cost_usd: number;
+  /** Opaque checkpoint ID (workflow instance-relative). */
+  checkpoint_id?: string;
 }
 
 // ── Turn Lifecycle Events ────────────────────────────────────────────
@@ -120,7 +171,9 @@ export interface TurnEndEvent extends BaseEvent {
   turn: number;
   model: string;
   cost_usd: number;
-  tokens: number; // Total tokens (input + output) for this turn
+  tokens: number; // Total tokens (input + output) for this turn — kept for backcompat
+  input_tokens?: number; // Per-turn input tokens (added for live UI stats)
+  output_tokens?: number; // Per-turn output tokens (added for live UI stats)
   tool_calls?: number; // Number of tool calls in this turn
   done: boolean; // true if this is the final turn
 }
@@ -171,6 +224,9 @@ export interface ResetEvent extends BaseEvent {
 export type RuntimeEvent =
   | ConnectedEvent
   | SessionStartEvent
+  | SetupDoneEvent
+  | GovernancePassEvent
+  | CheckpointResumedEvent
   | TurnStartEvent
   | TokenEvent
   | ToolCallEvent
@@ -224,7 +280,8 @@ export function validateEvent(event: unknown): { valid: boolean; error?: string 
   }
   
   const validTypes: EventType[] = [
-    "connected", "session_start", "turn_start", "token",
+    "connected", "session_start", "setup_done", "governance_pass", "checkpoint_resumed",
+    "turn_start", "token",
     "tool_call", "tool_result", "tool_progress", "turn_end", "done",
     "error", "warning", "system", "thinking", "reasoning", "reset",
     "heartbeat", "loop_detected", "file_change"

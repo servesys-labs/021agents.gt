@@ -1,6 +1,10 @@
 import { api } from "./api";
 
 export type ChatEventType =
+  | "session_start"
+  | "setup_done"
+  | "governance_pass"
+  | "checkpoint_resumed"
   | "turn_start"
   | "thinking"
   | "tool_call"
