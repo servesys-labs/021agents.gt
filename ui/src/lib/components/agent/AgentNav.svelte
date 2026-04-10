@@ -13,6 +13,7 @@
     { label: "Canvas", href: (n: string) => `/agent/${n}/canvas`, match: "/canvas" },
     { label: "Settings", href: (n: string) => `/agent/${n}/settings`, match: "/settings" },
     { label: "Tests", href: (n: string) => `/agent/${n}/tests`, match: "/tests" },
+    { label: "Runs", href: (n: string) => `/agent/${n}/runs`, match: "/runs" },
     { label: "Activity", href: (n: string) => `/agent/${n}/activity`, match: "/activity" },
     { label: "Knowledge", href: (n: string) => `/agent/${n}/knowledge`, match: "/knowledge" },
     { label: "Skills", href: (n: string) => `/agent/${n}/skills`, match: "/skills" },
