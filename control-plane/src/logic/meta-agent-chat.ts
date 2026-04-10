@@ -2840,7 +2840,7 @@ export async function runMetaChat(
         tool_choice: "auto",
         max_tokens: 8192,
         temperature: 0.3,
-        timeout_ms: 120_000,
+        timeout_ms: 300_000,
         metadata: { agent: "meta-agent", org_id: ctx.orgId },
       },
     );
