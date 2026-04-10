@@ -40,6 +40,7 @@ interface MetaChatContext {
   agentName: string;
   orgId: string;
   userId: string;
+  userRole?: string;
   hyperdrive: Hyperdrive;
   openrouterApiKey: string;
   cloudflareAccountId?: string;
@@ -1366,6 +1367,20 @@ async function executeTool(
 
     // ── Training System Tool Execution ──────────────────────────
     case "start_training": {
+      // Check concurrent training job limit (max 3 per org)
+      try {
+        const [activeJobs] = await sql`
+          SELECT count(*)::int as c FROM training_jobs
+          WHERE org_id = ${ctx.orgId} AND status IN ('pending', 'running')
+        `;
+        if (Number(activeJobs.c) >= 3) {
+          return JSON.stringify({
+            error: "Training limit reached: max 3 concurrent training jobs per organization. Wait for existing jobs to complete or cancel them.",
+            active_jobs: Number(activeJobs.c),
+          });
+        }
+      } catch { /* fail open — allow if check fails */ }
+
       const algorithm = String(args.algorithm || "apo");
       const maxIterations = Number(args.max_iterations) || 10;
       const autoActivate = args.auto_activate === true;
@@ -1671,6 +1686,9 @@ async function executeTool(
 
     // ── Marketplace Tool Execution ───────────────────────────────
     case "marketplace_publish": {
+      if (ctx.userRole !== "owner" && ctx.userRole !== "admin") {
+        return JSON.stringify({ error: "Permission denied: only org owners and admins can publish to the marketplace." });
+      }
       const displayName = String(args.display_name || ctx.agentName);
       const shortDesc = String(args.short_description || "").slice(0, 200);
       const category = String(args.category || "other");
@@ -2466,6 +2484,9 @@ async function executeTool(
     }
 
     case "set_feature_flag": {
+      if (ctx.userRole !== "owner" && ctx.userRole !== "admin") {
+        return JSON.stringify({ error: "Permission denied: only org owners and admins can modify feature flags." });
+      }
       const flag = String(args.flag || "");
       const enabled = args.enabled === true;
       const validFlags = ["concurrent_tools", "context_compression", "deferred_tool_loading"];
@@ -2519,6 +2540,9 @@ async function executeTool(
     }
 
     case "manage_skills": {
+      if (ctx.userRole !== "owner" && ctx.userRole !== "admin") {
+        return JSON.stringify({ error: "Permission denied: only org owners and admins can manage skills." });
+      }
       const action = String(args.action || "list");
       try {
         if (action === "list") {
@@ -2781,6 +2805,24 @@ export async function runMetaChat(
     llmMessages.push(...system, ...recent);
   }
 
+  // ── Plan-based model selection: free/basic → Gemma, standard/premium → Sonnet ──
+  let agentPlan = "free";
+  try {
+    const sql = await getDbForOrg(ctx.hyperdrive, ctx.orgId);
+    const [row] = await sql`
+      SELECT config FROM agents
+      WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId} LIMIT 1
+    `;
+    if (row) {
+      const cfg = typeof row.config === "string" ? JSON.parse(row.config) : row.config ?? {};
+      agentPlan = cfg.plan || "free";
+    }
+  } catch { /* fail open — default to free/Gemma */ }
+
+  const metaModel = agentPlan === "standard" || agentPlan === "premium"
+    ? "anthropic/claude-sonnet-4-6"
+    : "gemma-4-31b";
+
   const MAX_TOOL_ROUNDS = 8;
   let round = 0;
   let totalCost = 0;
@@ -2834,7 +2876,7 @@ export async function runMetaChat(
         openrouterApiKey: ctx.openrouterApiKey,
       },
       {
-        model: "anthropic/claude-sonnet-4-6",
+        model: metaModel,
         messages: llmMessages as any,
         tools: relevantTools,
         tool_choice: "auto",
@@ -2847,11 +2889,12 @@ export async function runMetaChat(
 
     const turnInputTokens = llmResult.usage?.prompt_tokens || (llmResult as any).usage?.input_tokens || 0;
     const turnOutputTokens = llmResult.usage?.completion_tokens || (llmResult as any).usage?.output_tokens || 0;
-    // Calculate cost from tokens — Sonnet 4.6: $3.00/M input, $15.00/M output
-    const SONNET_INPUT_COST_PER_M = 3.00;
-    const SONNET_OUTPUT_COST_PER_M = 15.00;
-    const turnCostUsd = (turnInputTokens / 1_000_000) * SONNET_INPUT_COST_PER_M
-                      + (turnOutputTokens / 1_000_000) * SONNET_OUTPUT_COST_PER_M;
+    // Calculate cost from tokens — Sonnet 4.6: $3.00/$15.00, Gemma: $0.13/$0.40 per M tokens
+    const isGemmaModel = metaModel.startsWith("gemma-");
+    const INPUT_COST = isGemmaModel ? 0.13 : 3.00;
+    const OUTPUT_COST = isGemmaModel ? 0.40 : 15.00;
+    const turnCostUsd = (turnInputTokens / 1_000_000) * INPUT_COST
+                      + (turnOutputTokens / 1_000_000) * OUTPUT_COST;
     totalCost += turnCostUsd;
     totalInputTokens += turnInputTokens;
     totalOutputTokens += turnOutputTokens;
@@ -2873,7 +2916,7 @@ export async function runMetaChat(
       llmMessages.push({ role: "assistant", content: msg.content || "" });
       turnRecords.push({
         turn: round,
-        model: "anthropic/claude-sonnet-4-6",
+        model: metaModel,
         content: msg.content || "",
         input_tokens: turnInputTokens,
         output_tokens: turnOutputTokens,
