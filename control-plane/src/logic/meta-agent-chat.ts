@@ -2979,7 +2979,7 @@ export async function runMetaChat(
       await sql`
         INSERT INTO turns (session_id, turn_number, model_used, llm_content,
           tool_calls, tool_results, errors,
-          input_tokens, output_tokens, cost_total_usd, latency_ms, execution_mode, started_at)
+          input_tokens, output_tokens, cost_usd, latency_ms, execution_mode, started_at)
         VALUES (
           ${sessionId}, ${t.turn}, ${t.model}, ${t.content.slice(0, 10000)},
           ${JSON.stringify(t.tool_calls)}, ${JSON.stringify(t.tool_results)}, '[]',
@@ -2989,14 +2989,29 @@ export async function runMetaChat(
       `;
     }
 
-    // Deduct credits
+    // Write billing record for meta-agent usage (Sonnet 4.6 is paid)
     if (totalCost > 0) {
       await sql`
-        INSERT INTO credit_transactions (org_id, type, amount_usd, description, created_at)
-        VALUES (${ctx.orgId}, 'burn', ${-totalCost}, ${'meta-agent: ' + ctx.agentName + ' (' + round + ' turns, ' + totalToolCalls + ' tools)'}, ${now})
+        INSERT INTO billing_records (
+          org_id, customer_id, agent_name, cost_type, description,
+          model, provider, input_tokens, output_tokens,
+          inference_cost_usd, total_cost_usd, session_id, created_at
+        ) VALUES (
+          ${ctx.orgId}, ${ctx.userId}, ${'meta:' + ctx.agentName}, 'inference',
+          ${'Meta-agent: ' + round + ' turns, ' + totalToolCalls + ' tool calls'},
+          'anthropic/claude-sonnet-4-6', 'anthropic',
+          ${totalInputTokens}, ${totalOutputTokens},
+          ${totalCost}, ${totalCost}, ${sessionId}, ${now}
+        )
+      `.catch((e: any) => console.warn(`[meta-chat] billing_record write failed: ${e.message}`));
+
+      // Deduct credits
+      await sql`
+        INSERT INTO credit_transactions (org_id, type, amount_usd, description, reference_id, reference_type, created_at)
+        VALUES (${ctx.orgId}, 'burn', ${-totalCost}, ${'meta-agent: ' + ctx.agentName + ' (' + round + ' turns, ' + totalToolCalls + ' tools)'}, ${sessionId}, 'meta_agent', ${now})
       `;
       await sql`
-        UPDATE organizations SET credit_balance_usd = COALESCE(credit_balance_usd, 0) - ${totalCost}
+        UPDATE org_credit_balance SET balance_usd = balance_usd - ${totalCost}, updated_at = ${now}
         WHERE org_id = ${ctx.orgId}
       `.catch(() => {});
     }
