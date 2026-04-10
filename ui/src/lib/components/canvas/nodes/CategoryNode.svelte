@@ -9,6 +9,15 @@
       items: string[];
       color: string;
       accent: string;
+      subtitle?: string;
+      /** Long-form description shown on hover (browser native title). */
+      tooltip?: string;
+      /** Whether this node is the active step in the current run. */
+      pulsing?: boolean;
+      /** Whether this node is a drop target during tool drag. */
+      dropTarget?: boolean;
+      /** Tool name being dragged (shown in drop-target preview). */
+      dropPreview?: string;
     };
   }
 
@@ -17,10 +26,19 @@
 </script>
 
 <div
-  class="relative rounded-xl border-2 bg-card/95 shadow-md backdrop-blur-sm transition-all duration-200 hover:shadow-lg {data.accent}"
+  class="agent-canvas-node relative rounded-xl border-2 bg-card/95 shadow-md backdrop-blur-sm transition-all duration-200 hover:shadow-lg {data.accent}"
+  class:node-pulsing={data.pulsing}
+  class:node-drop-target={data.dropTarget}
   style="min-width: 160px; max-width: 240px;"
+  title={data.tooltip}
 >
-  <Handle type="target" position={Position.Top} class="!bg-muted-foreground/60 !h-2 !w-2 !border-background" />
+  <!-- Four handles with explicit IDs so edges can pick the geometrically
+       closest side. Without these, every edge defaults to top-target +
+       bottom-source which forces U-turns when source and target are on
+       the same side of the layout. -->
+  <Handle id="top-target" type="target" position={Position.Top} class="!bg-muted-foreground/60 !h-2 !w-2 !border-background" />
+  <Handle id="top-source" type="source" position={Position.Top} class="!bg-muted-foreground/60 !h-2 !w-2 !border-background !opacity-0" />
+  <Handle id="bottom-target" type="target" position={Position.Bottom} class="!bg-muted-foreground/60 !h-2 !w-2 !border-background !opacity-0" />
 
   <!-- Header — always visible -->
   <button
@@ -34,7 +52,9 @@
     </span>
     <div class="min-w-0 flex-1">
       <p class="text-xs font-semibold text-foreground">{data.label}</p>
-      <p class="text-[10px] text-muted-foreground">{data.count} active</p>
+      <p class="text-[10px] text-muted-foreground truncate">
+        {data.subtitle ?? `${data.count} active`}
+      </p>
     </div>
     <svg
       xmlns="http://www.w3.org/2000/svg"
@@ -59,5 +79,57 @@
     </div>
   {/if}
 
-  <Handle type="source" position={Position.Bottom} class="!bg-muted-foreground/60 !h-2 !w-2 !border-background" />
+  <Handle id="bottom-source" type="source" position={Position.Bottom} class="!bg-muted-foreground/60 !h-2 !w-2 !border-background" />
+
+  {#if data.dropTarget && data.dropPreview}
+    <div class="absolute -top-6 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full bg-primary px-2 py-0.5 text-[10px] font-medium text-primary-foreground shadow-lg">
+      + {data.dropPreview}
+    </div>
+  {/if}
 </div>
+
+<style>
+  /* Pulsing halo used while this node is the active pipeline step. */
+  :global(.node-pulsing) {
+    animation: node-pulse 1.6s ease-in-out infinite;
+  }
+  :global(.node-pulsing::before) {
+    content: "";
+    position: absolute;
+    inset: -4px;
+    border-radius: 0.85rem;
+    background: radial-gradient(
+      circle at center,
+      rgb(var(--primary-rgb, 99 102 241) / 0.25),
+      transparent 70%
+    );
+    pointer-events: none;
+    z-index: -1;
+    animation: node-halo 1.6s ease-in-out infinite;
+  }
+
+  /* Drop target: dashed outline + subtle bg shift during drag. */
+  :global(.node-drop-target) {
+    outline: 2px dashed hsl(var(--primary) / 0.7);
+    outline-offset: 2px;
+    background: hsl(var(--primary) / 0.06) !important;
+  }
+
+  @keyframes node-pulse {
+    0%, 100% {
+      box-shadow:
+        0 0 0 0 hsl(var(--primary) / 0.45),
+        0 10px 20px -10px hsl(var(--primary) / 0.2);
+    }
+    50% {
+      box-shadow:
+        0 0 0 6px hsl(var(--primary) / 0),
+        0 10px 30px -10px hsl(var(--primary) / 0.4);
+    }
+  }
+
+  @keyframes node-halo {
+    0%, 100% { opacity: 0.6; transform: scale(0.98); }
+    50%      { opacity: 1;   transform: scale(1.02); }
+  }
+</style>

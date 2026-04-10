@@ -6,11 +6,14 @@ export interface ToolDef {
   icon: string; // SVG path d attribute
 }
 
+// Sidebar categories — labels now match the canvas exactly so the
+// drag-source ↔ drop-target relationship is visually obvious. Accents
+// use the unified emerald capability tier.
 export const TOOL_CATEGORIES = [
-  { id: "web", label: "Web & Data", accent: "text-chart-2" },
-  { id: "code", label: "Code & Files", accent: "text-chart-3" },
-  { id: "memory", label: "Memory", accent: "text-chart-4" },
-  { id: "media", label: "Media", accent: "text-chart-5" },
+  { id: "web", label: "Web & Data", accent: "text-emerald-400" },
+  { id: "code", label: "Code & Files", accent: "text-emerald-400" },
+  { id: "memory", label: "Memory & Knowledge", accent: "text-emerald-400" },
+  { id: "media", label: "Media", accent: "text-emerald-400" },
 ] as const;
 
 export type ToolCategory = (typeof TOOL_CATEGORIES)[number]["id"];

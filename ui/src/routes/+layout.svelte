@@ -13,6 +13,10 @@
 
   let sidebarOpen = $state(false);
   let sidebarCollapsed = $state(false);
+  // Theme persists in localStorage. Default to dark when no preference
+  // exists, but respect a previously-chosen value across reloads.
+  // Reading happens lazily inside an onMount in the existing init effect
+  // so SSR doesn't crash on `localStorage`.
   let isDark = $state(true);
   let connectionError = $state(false);
 
@@ -61,6 +65,16 @@
 
   let conversationGroups = $derived(groupConversations(conversationStore.conversations));
 
+  // Load persisted theme preference once on the client. Default to dark
+  // (the previous hardcoded behaviour) when nothing is stored.
+  $effect(() => {
+    if (typeof localStorage === "undefined") return;
+    const stored = localStorage.getItem("oneshots_theme");
+    if (stored === "light") isDark = false;
+    else if (stored === "dark") isDark = true;
+    // First-time visitors keep the existing default (dark)
+  });
+
   $effect(() => {
     authStore.init().then(() => {
       if (!authStore.loading && !authStore.isAuthenticated) {
@@ -86,6 +100,10 @@
   $effect(() => {
     if (typeof document !== "undefined") {
       document.documentElement.classList.toggle("dark", isDark);
+    }
+    // Persist theme so it survives reloads. Skipped on SSR.
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem("oneshots_theme", isDark ? "dark" : "light");
     }
   });
 </script>
