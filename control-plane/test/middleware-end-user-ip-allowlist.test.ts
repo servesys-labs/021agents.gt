@@ -3,15 +3,18 @@ import { Hono } from "hono";
 import { createToken } from "../src/auth/jwt";
 import type { Env } from "../src/env";
 import type { CurrentUser } from "../src/auth/types";
+import { mockEnv, buildDbClientMock, type MockSqlFn } from "./helpers/test-env";
+
+// Shared tagged-template sql mock — individual tests replace its
+// implementation by assigning mockSql directly.
+let mockSql: MockSqlFn = (async () => []) as unknown as MockSqlFn;
+
+vi.mock("../src/db/client", () => buildDbClientMock(() => mockSql));
+
+// Middleware imports MUST come after the vi.mock call so the mocked
+// db/client is resolved when the middleware files load.
 import { authMiddleware } from "../src/middleware/auth";
 import { ipAllowlistMiddleware } from "../src/middleware/ip-allowlist";
-import { mockEnv } from "./helpers/test-env";
-
-vi.mock("../src/db/client", () => ({
-  getDb: vi.fn(),
-}));
-
-import { getDb } from "../src/db/client";
 
 type AppType = { Bindings: Env; Variables: { user: CurrentUser } };
 
@@ -23,7 +26,7 @@ function buildApp() {
   return app;
 }
 
-function makeSql(ipAllowlist: unknown) {
+function makeSql(ipAllowlist: unknown): MockSqlFn {
   return (async (strings: TemplateStringsArray) => {
     const query = strings.join("?");
     if (query.includes("FROM end_user_tokens")) {
@@ -41,7 +44,7 @@ function makeSql(ipAllowlist: unknown) {
       return [{ ip_allowlist: ipAllowlist }];
     }
     return [];
-  }) as any;
+  }) as unknown as MockSqlFn;
 }
 
 async function makeEndUserToken(secret: string): Promise<string> {
@@ -58,7 +61,7 @@ async function makeEndUserToken(secret: string): Promise<string> {
 
 describe("ip allowlist middleware with end-user tokens", () => {
   it("allows request when client IP matches parent API key allowlist", async () => {
-    vi.mocked(getDb).mockResolvedValue(makeSql(["203.0.113.10", "198.51.100.0/24"]));
+    mockSql = makeSql(["203.0.113.10", "198.51.100.0/24"]);
     const app = buildApp();
     const secret = "end-user-test-secret";
     const env = mockEnv({ AUTH_JWT_SECRET: secret });
@@ -82,7 +85,7 @@ describe("ip allowlist middleware with end-user tokens", () => {
   });
 
   it("rejects request when client IP is outside parent API key allowlist", async () => {
-    vi.mocked(getDb).mockResolvedValue(makeSql(["203.0.113.10"]));
+    mockSql = makeSql(["203.0.113.10"]);
     const app = buildApp();
     const secret = "end-user-test-secret";
     const env = mockEnv({ AUTH_JWT_SECRET: secret });

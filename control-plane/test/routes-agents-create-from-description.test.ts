@@ -2,13 +2,13 @@ import { describe, it, expect, vi } from "vitest";
 import { Hono } from "hono";
 import type { Env } from "../src/env";
 import type { CurrentUser } from "../src/auth/types";
-import { agentRoutes } from "../src/routes/agents";
-import { mockEnv } from "./helpers/test-env";
+import { mockEnv, buildDbClientMock, type MockSqlFn } from "./helpers/test-env";
 
-vi.mock("../src/db/client", () => ({
-  getDb: vi.fn(),
-  getDbForOrg: vi.fn(),
-}));
+// Shared tagged-template sql mock — individual tests replace its
+// implementation by assigning mockSql directly.
+let mockSql: MockSqlFn = (async () => []) as unknown as MockSqlFn;
+
+vi.mock("../src/db/client", () => buildDbClientMock(() => mockSql));
 
 vi.mock("../src/logic/meta-agent", () => ({
   defaultNoCodeGraph: () => ({ nodes: [{ id: "start", kind: "input" }], edges: [] }),
@@ -38,7 +38,9 @@ vi.mock("../src/logic/gate-pack", () => ({
   lintSuggestionsFromErrors: () => [],
 }));
 
-import { getDb, getDbForOrg } from "../src/db/client";
+// Route import MUST come after the vi.mock call so the mocked db/client
+// is resolved when the routes file loads.
+import { agentRoutes } from "../src/routes/agents";
 
 type AppType = { Bindings: Env; Variables: { user: CurrentUser } };
 
@@ -70,8 +72,7 @@ describe("agents create-from-description hold gate behavior", () => {
   it("returns error when create-from-description LLM is unavailable", async () => {
     // Graph lint removed — rollout gate no longer triggers on lint failure.
     // The endpoint now returns 422 when the LLM meta-agent fails (mocked).
-    vi.mocked(getDb).mockResolvedValue((async () => []) as any);
-    vi.mocked(getDbForOrg).mockResolvedValue((async () => []) as any);
+    mockSql = (async () => []) as unknown as MockSqlFn;
     const app = buildApp("org-a");
 
     const res = await app.request(
@@ -92,8 +93,7 @@ describe("agents create-from-description hold gate behavior", () => {
   });
 
   it("returns 422 when override is requested without reason", async () => {
-    vi.mocked(getDb).mockResolvedValue((async () => []) as any);
-    vi.mocked(getDbForOrg).mockResolvedValue((async () => []) as any);
+    mockSql = (async () => []) as unknown as MockSqlFn;
     const app = buildApp("org-a");
 
     const res = await app.request(

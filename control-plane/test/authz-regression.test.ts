@@ -16,14 +16,13 @@ import { Hono } from "hono";
 import type { Env } from "../src/env";
 import type { CurrentUser } from "../src/auth/types";
 import { createToken } from "../src/auth/jwt";
-import { mockEnv } from "./helpers/test-env";
+import { mockEnv, buildDbClientMock, type MockSqlFn } from "./helpers/test-env";
 
-vi.mock("../src/db/client", () => ({
-  getDb: vi.fn(),
-  getDbForOrg: vi.fn(),
-}));
+// Shared tagged-template sql mock — individual tests replace its
+// implementation by assigning mockSql directly.
+let mockSql: MockSqlFn = (async () => []) as unknown as MockSqlFn;
 
-import { getDb, getDbForOrg } from "../src/db/client";
+vi.mock("../src/db/client", () => buildDbClientMock(() => mockSql));
 
 const SECRET = "authz-test-secret";
 
@@ -46,14 +45,12 @@ function makeUser(orgId: string, role = "admin"): CurrentUser {
 
 describe("Finding 1: Meta-proposals IDOR", () => {
   it("rejects cross-org proposal listing", async () => {
-    const mockSql = (async (strings: TemplateStringsArray) => {
+    mockSql = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("COUNT(*) as cnt FROM sessions")) return [{ cnt: 0 }];
       if (query.includes("COUNT(*) as cnt FROM agents")) return [{ cnt: 0 }];
       return [];
-    }) as any;
-    vi.mocked(getDb).mockResolvedValue(mockSql);
-    vi.mocked(getDbForOrg).mockResolvedValue(mockSql);
+    }) as unknown as MockSqlFn;
 
     // Import the observability routes
     const { observabilityRoutes } = await import("../src/routes/observability");

@@ -2,15 +2,17 @@ import { describe, it, expect, vi } from "vitest";
 import { Hono } from "hono";
 import type { Env } from "../src/env";
 import type { CurrentUser } from "../src/auth/types";
+import { mockEnv, buildDbClientMock, type MockSqlFn } from "./helpers/test-env";
+
+// Shared tagged-template sql mock — individual tests replace its
+// implementation via vi.mocked(mockSql).mockImplementation(...).
+let mockSql: MockSqlFn = (async () => []) as unknown as MockSqlFn;
+
+vi.mock("../src/db/client", () => buildDbClientMock(() => mockSql));
+
+// sessionRoutes import MUST come after the vi.mock call so the mocked
+// db/client is resolved when the routes file loads.
 import { sessionRoutes } from "../src/routes/sessions";
-import { mockEnv } from "./helpers/test-env";
-
-vi.mock("../src/db/client", () => ({
-  getDb: vi.fn(),
-  getDbForOrg: vi.fn(),
-}));
-
-import { getDb, getDbForOrg } from "../src/db/client";
 
 type AppType = { Bindings: Env; Variables: { user: CurrentUser } };
 
@@ -40,26 +42,22 @@ function buildApp(orgId = "org-a") {
 
 describe("sessions route authz and input contracts", () => {
   it("denies session detail for non-owned session", async () => {
-    const mockSql = (async (strings: TemplateStringsArray) => {
+    mockSql = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("SELECT * FROM sessions WHERE session_id")) return [];
       return [];
-    }) as any;
-    vi.mocked(getDb).mockResolvedValue(mockSql);
-    vi.mocked(getDbForOrg).mockResolvedValue(mockSql);
+    }) as unknown as MockSqlFn;
     const app = buildApp("org-a");
     const res = await app.request("/sess-x", { method: "GET" }, mockEnv());
     expect(res.status).toBe(404);
   });
 
   it("denies turns for non-owned session", async () => {
-    const mockSql2 = (async (strings: TemplateStringsArray) => {
+    mockSql = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("SELECT 1 FROM sessions WHERE session_id")) return [];
       return [];
-    }) as any;
-    vi.mocked(getDb).mockResolvedValue(mockSql2);
-    vi.mocked(getDbForOrg).mockResolvedValue(mockSql2);
+    }) as unknown as MockSqlFn;
     const app = buildApp("org-a");
     const res = await app.request("/sess-x/turns", { method: "GET" }, mockEnv());
     expect(res.status).toBe(404);
@@ -74,7 +72,7 @@ describe("sessions route authz and input contracts", () => {
 
   it("accepts cleanup with before_days at minimum 7", async () => {
     let capturedCutoff: string | null = null;
-    const mockSql3 = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    mockSql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join("?");
       if (query.includes("DELETE FROM sessions WHERE created_at <")) {
         capturedCutoff = String(values[0]);
@@ -82,9 +80,7 @@ describe("sessions route authz and input contracts", () => {
       }
       if (query.includes("DELETE FROM turns WHERE session_id")) return { count: 0 };
       return [];
-    }) as any;
-    vi.mocked(getDb).mockResolvedValue(mockSql3);
-    vi.mocked(getDbForOrg).mockResolvedValue(mockSql3);
+    }) as unknown as MockSqlFn;
     const app = buildApp("org-a");
     const res = await app.request("/?before_days=7", { method: "DELETE" }, mockEnv());
     expect(res.status).toBe(200);
@@ -93,7 +89,7 @@ describe("sessions route authz and input contracts", () => {
   });
 
   it("returns trace response contract for owned session", async () => {
-    const mockSql4 = (async (strings: TemplateStringsArray) => {
+    mockSql = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("SELECT trace_id FROM sessions")) return [{ trace_id: "trace-1" }];
       if (query.includes("SELECT * FROM sessions WHERE trace_id")) {
@@ -103,9 +99,7 @@ describe("sessions route authz and input contracts", () => {
         return [{ total_cost: 1.23, total_input_tokens: 10, total_output_tokens: 20, records: 2 }];
       }
       return [];
-    }) as any;
-    vi.mocked(getDb).mockResolvedValue(mockSql4);
-    vi.mocked(getDbForOrg).mockResolvedValue(mockSql4);
+    }) as unknown as MockSqlFn;
     const app = buildApp("org-a");
     const res = await app.request("/sess-1/trace", { method: "GET" }, mockEnv());
     expect(res.status).toBe(200);
@@ -121,7 +115,7 @@ describe("sessions route authz and input contracts", () => {
   });
 
   it("returns runtime profile contract for owned session", async () => {
-    const mockSql5 = (async (strings: TemplateStringsArray) => {
+    mockSql = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("SELECT turn_number, execution_mode")) {
         return [
@@ -137,9 +131,7 @@ describe("sessions route authz and input contracts", () => {
       }
       if (query.includes("SELECT session_id FROM sessions")) return [{ session_id: "sess-1" }];
       return [];
-    }) as any;
-    vi.mocked(getDb).mockResolvedValue(mockSql5);
-    vi.mocked(getDbForOrg).mockResolvedValue(mockSql5);
+    }) as unknown as MockSqlFn;
     const app = buildApp("org-a");
     const res = await app.request("/sess-1/runtime", { method: "GET" }, mockEnv());
     expect(res.status).toBe(200);
@@ -154,14 +146,12 @@ describe("sessions route authz and input contracts", () => {
   });
 
   it("feedback submission returns contract for owned session", async () => {
-    const mockSql6 = (async (strings: TemplateStringsArray) => {
+    mockSql = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("SELECT session_id FROM sessions")) return [{ session_id: "sess-1" }];
       if (query.includes("INSERT INTO session_feedback")) return [];
       return [];
-    }) as any;
-    vi.mocked(getDb).mockResolvedValue(mockSql6);
-    vi.mocked(getDbForOrg).mockResolvedValue(mockSql6);
+    }) as unknown as MockSqlFn;
     const app = buildApp("org-a");
     const res = await app.request(
       "/sess-1/feedback",
@@ -179,7 +169,7 @@ describe("sessions route authz and input contracts", () => {
   });
 
   it("export returns turns with parsed tool calls/results", async () => {
-    const mockSql = (async (strings: TemplateStringsArray) => {
+    mockSql = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("SELECT * FROM sessions WHERE session_id")) {
         return [{ session_id: "sess-1", org_id: "org-a", agent_name: "a", status: "completed" }];
@@ -200,9 +190,7 @@ describe("sessions route authz and input contracts", () => {
         ];
       }
       return [];
-    }) as any;
-    vi.mocked(getDb).mockResolvedValue(mockSql);
-    vi.mocked(getDbForOrg).mockResolvedValue(mockSql);
+    }) as unknown as MockSqlFn;
 
     const app = buildApp("org-a");
     const res = await app.request("/sess-1/export?format=json", { method: "GET" }, mockEnv());

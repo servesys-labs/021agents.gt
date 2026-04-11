@@ -2,12 +2,13 @@ import { describe, it, expect, vi } from "vitest";
 import { Hono } from "hono";
 import type { Env } from "../src/env";
 import type { CurrentUser } from "../src/auth/types";
-import { mockEnv } from "./helpers/test-env";
+import { mockEnv, buildDbClientMock, type MockSqlFn } from "./helpers/test-env";
 
-vi.mock("../src/db/client", () => ({
-  getDb: vi.fn(),
-  getDbForOrg: vi.fn(),
-}));
+// Shared tagged-template sql mock — individual tests replace its
+// implementation by assigning mockSql directly.
+let mockSql: MockSqlFn = (async () => []) as unknown as MockSqlFn;
+
+vi.mock("../src/db/client", () => buildDbClientMock(() => mockSql));
 
 vi.mock("../src/auth/cf-access", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/auth/cf-access")>();
@@ -18,7 +19,8 @@ vi.mock("../src/auth/cf-access", async (importOriginal) => {
   };
 });
 
-import { getDb, getDbForOrg } from "../src/db/client";
+// Route import MUST come after the vi.mock call so the mocked db/client
+// is resolved when the routes file loads.
 import { verifyCfAccessToken } from "../src/auth/cf-access";
 import { authRoutes } from "../src/routes/auth";
 
@@ -45,7 +47,7 @@ describe("auth cf-access exchange parity", () => {
       exp: 9999999999,
     });
 
-    const mockSql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    mockSql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join("?");
       if (query.includes("SELECT user_id, email, name FROM users WHERE user_id")) return [];
       if (query.includes("SELECT user_id, email, name FROM users WHERE email")) return [];
@@ -58,9 +60,7 @@ describe("auth cf-access exchange parity", () => {
       }
       if (query.includes("INSERT INTO org_settings")) return [];
       return [];
-    }) as any;
-    vi.mocked(getDb).mockResolvedValue(mockSql);
-    vi.mocked(getDbForOrg).mockResolvedValue(mockSql);
+    }) as unknown as MockSqlFn;
 
     const app = buildApp();
     const env = mockEnv({
