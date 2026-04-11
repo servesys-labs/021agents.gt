@@ -20,7 +20,12 @@ export const widgetServeRoutes = new OpenAPIHono<WidgetEnv>();
 let cachedWidget: { script: string; etag: string; ts: number } | null = null;
 const CACHE_TTL = 300_000; // 5 min
 
-const STUB_SCRIPT = `(function(){console.error("[OneShots Widget] Widget bundle not deployed yet. Run: npx wrangler r2 object put agentos-storage/widget/widget.js --file widget/dist/widget.js")})();`;
+// Fallback script when the real widget bundle isn't in R2 yet.
+// The old version told end-user browsers to "Run: npx wrangler r2 object put ..."
+// which leaked the internal bucket name and CLI instructions to anyone with the
+// widget embedded on their site. Operators see the missing-bundle state via the
+// worker's own error log, not via their customers' browser consoles.
+const STUB_SCRIPT = `(function(){console.error("[OneShots Widget] Widget is temporarily unavailable. Please contact support if this persists.");})();`;
 
 function widgetHeaders(etag: string, maxAge = 3600): Record<string, string> {
   return {
@@ -83,7 +88,9 @@ widgetServeRoutes.openapi(widgetJsRoute, async (c): Promise<any> => {
     }
   } catch {}
 
-  // Fallback: serve stub
+  // Fallback: serve stub. Log server-side so operators notice the missing
+  // bundle — end users never see wrangler/bucket names in their console.
+  console.error("[widget-serve] widget/widget.js missing from R2 STORAGE — serving fallback stub");
   return new Response(STUB_SCRIPT, {
     headers: widgetHeaders('"stub"', 60),
   });

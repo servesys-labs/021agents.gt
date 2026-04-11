@@ -12,8 +12,26 @@ import { withOrgDb, withAdminDb } from "../db/client";
 import Stripe from "stripe";
 import { requireScope } from "../middleware/auth";
 import { addCredits } from "../logic/credits";
+import { failSafe } from "../lib/error-response";
 
 export const stripeRoutes = createOpenAPIRouter();
+
+/**
+ * Resolve the default portal URL for post-checkout / post-portal redirects.
+ * The old code hardcoded `http://localhost:3000/billing` which sent real
+ * users to a broken URL in production if the client forgot to pass the
+ * success/cancel/return_url in the request body. Now reads from
+ * PORTAL_BASE_URL env (set in wrangler vars) and falls back to a safe
+ * relative path rather than an absolute localhost URL.
+ */
+function portalBillingUrl(env: Env, suffix = ""): string {
+  const base = String((env as { PORTAL_BASE_URL?: string }).PORTAL_BASE_URL || "").replace(/\/+$/, "");
+  if (base) return `${base}/billing${suffix}`;
+  // Last-resort fallback: relative path. Browsers resolve it against the
+  // current origin, so a user hitting the API from app.example.com ends
+  // up on app.example.com/billing instead of a dead localhost URL.
+  return `/billing${suffix}`;
+}
 
 const PLAN_PRICES: Record<string, string> = {
   basic: "price_basic_monthly",
@@ -24,7 +42,11 @@ const PLAN_PRICES: Record<string, string> = {
 
 function getStripe(env: Env): Stripe {
   if (!env.STRIPE_SECRET_KEY) {
-    throw new Error("Stripe not configured. Set STRIPE_SECRET_KEY.");
+    // Use a structured error so route handlers can map this to a stable
+    // code without leaking the env var name into user-facing strings.
+    throw Object.assign(new Error("Stripe is not configured on this environment."), {
+      code: "stripe_not_configured",
+    });
   }
   return new Stripe(env.STRIPE_SECRET_KEY, { apiVersion: "2024-12-18.acacia" as any });
 }
@@ -62,14 +84,17 @@ stripeRoutes.openapi(checkoutRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const body = c.req.valid("json");
   const plan = String(body.plan || "standard");
-  const successUrl = String(body.success_url || "http://localhost:3000/billing?success=true");
-  const cancelUrl = String(body.cancel_url || "http://localhost:3000/billing?canceled=true");
+  const successUrl = String(body.success_url || portalBillingUrl(c.env, "?success=true"));
+  const cancelUrl = String(body.cancel_url || portalBillingUrl(c.env, "?canceled=true"));
 
   let stripe: Stripe;
   try {
     stripe = getStripe(c.env);
-  } catch (e: any) {
-    return c.json({ error: e.message }, 503);
+  } catch (e) {
+    return c.json(failSafe(e, "stripe/checkout:init", {
+      userMessage: "Payments are temporarily unavailable. Please try again later.",
+      code: "stripe_unavailable",
+    }), 503);
   }
 
   const priceId = PLAN_PRICES[plan];
@@ -134,13 +159,16 @@ const portalRoute = createRoute({
 stripeRoutes.openapi(portalRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const body = c.req.valid("json");
-  const returnUrl = String(body.return_url || "http://localhost:3000/billing");
+  const returnUrl = String(body.return_url || portalBillingUrl(c.env));
 
   let stripe: Stripe;
   try {
     stripe = getStripe(c.env);
-  } catch (e: any) {
-    return c.json({ error: e.message }, 503);
+  } catch (e) {
+    return c.json(failSafe(e, "stripe/portal:init", {
+      userMessage: "Payments are temporarily unavailable. Please try again later.",
+      code: "stripe_unavailable",
+    }), 503);
   }
 
   return await withOrgDb(c.env, user.org_id, async (sql) => {
@@ -176,15 +204,21 @@ stripeRoutes.openapi(webhookRoute, async (c): Promise<any> => {
   let stripe: Stripe;
   try {
     stripe = getStripe(c.env);
-  } catch (e: any) {
-    return c.json({ error: e.message }, 503);
+  } catch (e) {
+    return c.json(failSafe(e, "stripe/webhook:init", {
+      userMessage: "Webhook processing unavailable.",
+      code: "stripe_unavailable",
+    }), 503);
   }
 
   const body = await c.req.text();
   const sigHeader = c.req.header("stripe-signature") || "";
 
   if (!c.env.STRIPE_WEBHOOK_SECRET) {
-    return c.json({ error: "Webhook secret not configured" }, 503);
+    // Log the missing secret server-side (operators need to know) but
+    // return a generic message to Stripe's webhook retry pipeline.
+    console.error("[stripe/webhook] STRIPE_WEBHOOK_SECRET is not set — refusing to process webhook");
+    return c.json({ error: "Webhook processing unavailable." }, 503);
   }
 
   let event: any;
