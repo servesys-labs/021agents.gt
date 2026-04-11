@@ -304,14 +304,17 @@ securityRoutes.openapi(scanAgentRoute, async (c): Promise<any> => {
         `;
       }
 
-      // Upsert risk profile
+      // Upsert risk profile. ON CONFLICT must reference the
+      // (org_id, agent_name) scoped unique constraint on risk_profiles
+      // — two orgs can legitimately have agents with the same name, so
+      // agent_name alone would collide across tenants.
       await sql`
         INSERT INTO risk_profiles (agent_name, org_id, risk_score, risk_level, last_scan_id, findings_summary, updated_at)
         VALUES (
           ${agentName}, ${user.org_id}, ${result.risk_score}, ${result.risk_level},
           ${result.scan_id}, ${JSON.stringify(result.findings_summary)}, ${new Date().toISOString()}
         )
-        ON CONFLICT (agent_name) DO UPDATE SET
+        ON CONFLICT (org_id, agent_name) DO UPDATE SET
           risk_score = EXCLUDED.risk_score,
           risk_level = EXCLUDED.risk_level,
           last_scan_id = EXCLUDED.last_scan_id,

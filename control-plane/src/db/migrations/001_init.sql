@@ -237,6 +237,10 @@ CREATE TABLE IF NOT EXISTS sessions (
   compaction_count     INT NOT NULL DEFAULT 0,
   termination_reason   TEXT,
   last_activity_at     TIMESTAMPTZ,
+  -- ended_at is what the edge-ingest session writer sets when a run
+  -- completes. The consolidation omitted it in favour of last_activity_at
+  -- but the ingest route INSERTs it explicitly.
+  ended_at             TIMESTAMPTZ,
   created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -279,6 +283,14 @@ CREATE TABLE IF NOT EXISTS turns (
   cache_write_tokens INT NOT NULL DEFAULT 0,
   gateway_log_id   TEXT,
   cost_usd         NUMERIC(18,8) NOT NULL DEFAULT 0,
+  -- cost_total_usd is what edge-ingest/turns writes (rolled-up total
+  -- including LLM + tools). Kept alongside cost_usd for back-compat
+  -- with older writers that populate cost_usd piecewise.
+  cost_total_usd   NUMERIC(18,8) NOT NULL DEFAULT 0,
+  -- llm_content is the assistant's final output text for the turn.
+  -- output_text is populated by other writers for the same thing;
+  -- these are structurally identical and either can be populated.
+  llm_content      TEXT NOT NULL DEFAULT '',
   created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (session_id, turn_number)
 );
@@ -983,6 +995,10 @@ CREATE TABLE IF NOT EXISTS security_events (
 
 CREATE TABLE IF NOT EXISTS security_scans (
   id            BIGSERIAL PRIMARY KEY,
+  -- scan_id is a TEXT identifier the security route writes to group
+  -- findings together. Distinct from the BIGSERIAL primary key which
+  -- callers never reference directly.
+  scan_id       TEXT NOT NULL UNIQUE DEFAULT gen_random_uuid()::text,
   org_id        TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
   agent_name    TEXT NOT NULL DEFAULT '',
   scan_type     TEXT NOT NULL DEFAULT '',
@@ -993,10 +1009,11 @@ CREATE TABLE IF NOT EXISTS security_scans (
   passed        INT NOT NULL DEFAULT 0,
   failed        INT NOT NULL DEFAULT 0,
   findings      JSONB NOT NULL DEFAULT '[]',
-  -- started_at is what the /api/v1/security/scans list endpoint orders by.
-  -- created_at was the consolidation's placeholder but the route expects
-  -- started_at for pending-state probes that haven't finished yet.
+  -- started_at / completed_at mirror the lifecycle fields the scan
+  -- handler writes to track "pending" vs "completed" probes.
+  -- started_at is the sort key for the /api/v1/security/scans list.
   started_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at  TIMESTAMPTZ,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -1009,22 +1026,47 @@ CREATE TABLE IF NOT EXISTS security_scan_findings (
   probe_id       TEXT NOT NULL DEFAULT '',
   probe_name     TEXT NOT NULL DEFAULT '',
   category       TEXT NOT NULL DEFAULT '',
+  -- layer identifies the AI security layer the probe targeted (e.g.
+  -- prompt_injection, output_safety, jailbreak). Used by the
+  -- /api/v1/security/findings list + dashboards.
+  layer          TEXT NOT NULL DEFAULT '',
   severity       TEXT NOT NULL DEFAULT 'info',
   finding_type   TEXT NOT NULL DEFAULT '',
+  title          TEXT NOT NULL DEFAULT '',
   description    TEXT NOT NULL DEFAULT '',
+  -- evidence is the raw probe response text (may be longer than
+  -- description). aivss_vector / aivss_score capture the calibrated
+  -- risk vector.
+  evidence       TEXT NOT NULL DEFAULT '',
+  aivss_vector   TEXT NOT NULL DEFAULT '',
+  aivss_score    NUMERIC(5,2) NOT NULL DEFAULT 0,
   recommendation TEXT NOT NULL DEFAULT '',
   passed         BOOLEAN NOT NULL DEFAULT true,
   response       TEXT,
   created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- compliance_checks is the drift-detection record written by the
+-- gold-images compliance/check/:agent_name route when it compares a
+-- live agent config against its blessed gold_image. The route writes
+-- agent_name, image_id, image_name, status, drift_count, drift_fields,
+-- drift_details, checked_by — the consolidation had it down to just
+-- { id, org_id, check_type, status, details } which was enough for
+-- a legacy aggregator but not the current drift writer.
 CREATE TABLE IF NOT EXISTS compliance_checks (
-  id           BIGSERIAL PRIMARY KEY,
-  org_id       TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
-  check_type   TEXT NOT NULL DEFAULT '',
-  status       TEXT NOT NULL DEFAULT 'pending',
-  details      JSONB NOT NULL DEFAULT '{}',
-  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  id            BIGSERIAL PRIMARY KEY,
+  org_id        TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+  agent_name    TEXT NOT NULL DEFAULT '',
+  image_id      TEXT,
+  image_name    TEXT NOT NULL DEFAULT '',
+  check_type    TEXT NOT NULL DEFAULT '',
+  status        TEXT NOT NULL DEFAULT 'pending',
+  drift_count   INT NOT NULL DEFAULT 0,
+  drift_fields  JSONB NOT NULL DEFAULT '[]',
+  drift_details JSONB NOT NULL DEFAULT '{}',
+  details       JSONB NOT NULL DEFAULT '{}',
+  checked_by    TEXT NOT NULL DEFAULT '',
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS secrets (
@@ -1475,7 +1517,11 @@ CREATE TABLE IF NOT EXISTS risk_profiles (
   factors          JSONB NOT NULL DEFAULT '{}',
   findings_summary JSONB NOT NULL DEFAULT '{}',
   created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  -- Scoped unique key — two orgs can legitimately have agents with the
+  -- same name, so the /api/v1/security/scan upsert uses
+  -- ON CONFLICT (org_id, agent_name).
+  UNIQUE (org_id, agent_name)
 );
 
 -- ============================================================================
@@ -1854,6 +1900,27 @@ CREATE TABLE IF NOT EXISTS retention_policies (
   is_active             BOOLEAN NOT NULL DEFAULT true,
   created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- config_audit captures every config change (gold-images, agents,
+-- issues). Consumed by the /api/v1/gold-images/audit endpoint. The
+-- consolidation dropped this table entirely but six separate INSERT
+-- sites in gold-images.ts, agents.ts, and issues.ts still write to it.
+CREATE TABLE IF NOT EXISTS config_audit (
+  id            BIGSERIAL PRIMARY KEY,
+  org_id        TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+  image_id      TEXT,
+  agent_name    TEXT NOT NULL DEFAULT '',
+  action        TEXT NOT NULL DEFAULT '',
+  field_changed TEXT NOT NULL DEFAULT '',
+  old_value     TEXT,
+  new_value     TEXT,
+  changed_by    TEXT NOT NULL DEFAULT '',
+  details       JSONB NOT NULL DEFAULT '{}',
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_config_audit_org_created ON config_audit(org_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_config_audit_image_id ON config_audit(image_id) WHERE image_id IS NOT NULL;
 
 -- gold_images: canonical blessed agent configs. The route SELECTs and
 -- INSERTs name / description / version / category / config_hash /

@@ -18,10 +18,31 @@
 
 set -euo pipefail
 
+# ── Load .env from repo root so SERVICE_TOKEN / EDGE_INGEST_TOKEN /
+# ── DATABASE_URL are picked up without having to export them manually.
+# ── Only reads the keys we care about. Safe to re-run in CI where
+# ── the file may not exist — skips silently.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${SCRIPT_DIR}/../.env"
+if [ -f "$ENV_FILE" ]; then
+  for key in SERVICE_TOKEN EDGE_INGEST_TOKEN AGENTOS_BACKEND_URL AGENTOS_WORKER_URL SMOKE_AUTH_EMAIL SMOKE_AUTH_PASSWORD; do
+    # Only set if not already set in the environment (env beats file).
+    if [ -z "${!key:-}" ]; then
+      value="$(grep -E "^${key}=" "$ENV_FILE" | head -n1 | cut -d= -f2- || true)"
+      if [ -n "$value" ]; then
+        export "${key}=${value}"
+      fi
+    fi
+  done
+fi
+
 # ── Parse args ────────────────────────────────────────────────
-BACKEND="${AGENTOS_BACKEND_URL:-https://backend-production-b174.up.railway.app}"
-WORKER="${AGENTOS_WORKER_URL:-https://agentos.servesys.workers.dev}"
-EDGE_TOKEN="${EDGE_INGEST_TOKEN:-test-edge-token-2026}"
+BACKEND="${AGENTOS_BACKEND_URL:-https://api.oneshots.co}"
+WORKER="${AGENTOS_WORKER_URL:-https://runtime.oneshots.co}"
+# Prefer real SERVICE_TOKEN (used by both control-plane and runtime worker
+# to validate service-to-service calls) over the legacy EDGE_INGEST_TOKEN
+# alias. Fall back to the placeholder only so --help etc. don't crash.
+EDGE_TOKEN="${SERVICE_TOKEN:-${EDGE_INGEST_TOKEN:-unset-service-token}}"
 EMAIL="${SMOKE_AUTH_EMAIL:-smoke-test@agentos.dev}"
 PASSWORD="${SMOKE_AUTH_PASSWORD:-SmokeTest2026!}"
 
@@ -32,6 +53,10 @@ for arg in "$@"; do
     --token=*)   EDGE_TOKEN="${arg#*=}" ;;
   esac
 done
+
+if [ "$EDGE_TOKEN" = "unset-service-token" ]; then
+  printf "\033[33mWARNING: SERVICE_TOKEN not found in env or .env — edge-token checks will fail.\033[0m\n" >&2
+fi
 
 RED="\033[31m"; GREEN="\033[32m"; YELLOW="\033[33m"; BOLD="\033[1m"; RESET="\033[0m"
 pass=0; fail=0; skip=0; total=0
@@ -112,33 +137,100 @@ else
   skip_check "JWT auth" "Could not obtain JWT — portal endpoints will be skipped"
 fi
 
-check "Edge token auth (worker runtime-proxy)" "200" \
-  "$(edge_post /api/v1/runtime-proxy/tool/call -H 'Content-Type: application/json' -d '{"tool":"bash","args":{"command":"echo ok"}}')"
+# Resolve a real agent name from the authenticated user's org so the
+# write-op tests don't hardcode a fixture that may not exist. Prefers
+# "my-assistant" (the personal agent auto-created on signup) but
+# falls back to the first agent in the list.
+SMOKE_AGENT_NAME=""
+if [ -n "$JWT_TOKEN" ]; then
+  AGENTS_JSON=$(curl -s -H "$JWT_AUTH" "${BACKEND}/api/v1/agents" 2>/dev/null || echo '{}')
+  SMOKE_AGENT_NAME=$(printf '%s' "$AGENTS_JSON" | python3 -c 'import sys,json
+d = json.load(sys.stdin)
+agents = d.get("agents", d) if isinstance(d, dict) else d
+names = [a.get("name", "") for a in agents if isinstance(a, dict)]
+for pref in ("my-assistant", "agentos"):
+    if pref in names:
+        print(pref)
+        sys.exit(0)
+print(names[0] if names else "")
+' 2>/dev/null || echo "")
+fi
+if [ -z "$SMOKE_AGENT_NAME" ]; then
+  SMOKE_AGENT_NAME="my-assistant"
+fi
+printf "  Agent:   %s (resolved from /api/v1/agents)\n" "$SMOKE_AGENT_NAME"
 
-check "Worker runtime auth rejection (wrong token)" "401" \
-  "$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer wrong' -X POST "${WORKER}/api/v1/runtime-proxy/tool/call" -H 'Content-Type: application/json' -d '{"tool":"bash","args":{"command":"echo"}}')"
+# Resolve the authenticated user's org_id for service-token calls that
+# write into org-scoped tables (edge-ingest sessions/turns need a real
+# FK to orgs.org_id, not an empty string).
+SMOKE_ORG_ID=""
+if [ -n "$JWT_TOKEN" ]; then
+  ME_JSON=$(curl -s -H "$JWT_AUTH" "${BACKEND}/api/v1/auth/me" 2>/dev/null || echo '{}')
+  SMOKE_ORG_ID=$(printf '%s' "$ME_JSON" | python3 -c 'import sys,json
+try:
+    d = json.load(sys.stdin)
+    print(d.get("org_id", ""))
+except Exception:
+    print("")
+' 2>/dev/null || echo "")
+fi
+printf "  Org:     %s\n" "${SMOKE_ORG_ID:-<unset>}"
+
+# Pre-build payloads once so variable expansion is done in a single
+# pass — this avoids the double-escaping maze when embedding shell
+# variables in curl -d strings inline with nested "$(...)".
+SMOKE_SESSION_ID="smoke-$(date +%s)"
+AGENT_RUN_BODY=$(printf '{"agent_name":"%s","input":"Say hi.","channel":"smoke-test","plan":"free"}' "$SMOKE_AGENT_NAME")
+INGEST_SESSION_BODY=$(printf '{"session_id":"%s","org_id":"%s","agent_name":"%s","status":"completed","wall_clock_seconds":1,"step_count":1}' "$SMOKE_SESSION_ID" "$SMOKE_ORG_ID" "$SMOKE_AGENT_NAME")
+INGEST_TURN_BODY=$(printf '{"session_id":"%s","turn_number":1,"model_used":"smoke","input_tokens":1,"output_tokens":1}' "$SMOKE_SESSION_ID")
+
+check "Edge token auth (control-plane runtime-proxy/agent/run)" "200" \
+  "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${EDGE_TOKEN}" -X POST "${BACKEND}/api/v1/runtime-proxy/agent/run" -H 'Content-Type: application/json' -d "$AGENT_RUN_BODY")"
+
+check "Edge token auth rejection (wrong token)" "401" \
+  "$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer wrong' -X POST "${BACKEND}/api/v1/runtime-proxy/agent/run" -H 'Content-Type: application/json' -d "$AGENT_RUN_BODY")"
 
 # ══════════════════════════════════════════════════════════════
-# SECTION 3: Edge Runtime (worker)
+# SECTION 3: Edge Runtime (control-plane runtime-proxy)
 # ══════════════════════════════════════════════════════════════
-printf "\n${BOLD}Edge Runtime (worker)${RESET}\n"
-check "POST worker runtime-proxy/agent/run" "200" \
-  "$(edge_post /api/v1/runtime-proxy/agent/run -H 'Content-Type: application/json' -d '{"agent_name":"research-assistant","task":"Say hi.","channel":"smoke-test"}')"
-check "POST worker runtime-proxy/llm/infer" "200" \
-  "$(edge_post /api/v1/runtime-proxy/llm/infer -H 'Content-Type: application/json' -d '{"provider":"gmi","model":"deepseek-ai/DeepSeek-V3.2","messages":[{"role":"user","content":"hi"}],"max_tokens":5}')"
-check "POST worker runtime-proxy/tool/call" "200" \
-  "$(edge_post /api/v1/runtime-proxy/tool/call -H 'Content-Type: application/json' -d '{"tool":"bash","args":{"command":"echo smoke"}}')"
-check "POST worker runtime-proxy/sandbox/exec" "200" \
-  "$(edge_post /api/v1/runtime-proxy/sandbox/exec -H 'Content-Type: application/json' -d '{"command":"echo sandbox-ok"}')"
+# runtime-proxy lives on the control-plane. It returns 202 Accepted
+# for agent/run because the run is dispatched asynchronously to the
+# runtime worker via a service binding — the response carries the
+# websocket URL the client should poll.
+#
+# The legacy probes against /tool/call, /llm/infer, /sandbox/exec on
+# the worker directly were removed: those paths never existed on the
+# runtime worker, the script was hitting a 404.
+#
+# The route schema requires `input`, not `task` — earlier script
+# versions used the worker-side name and hit a ZodError 500.
+printf "\n${BOLD}Edge Runtime (control-plane runtime-proxy)${RESET}\n"
+check "POST runtime-proxy/agent/run" "200" \
+  "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${EDGE_TOKEN}" -X POST "${BACKEND}/api/v1/runtime-proxy/agent/run" -H 'Content-Type: application/json' -d "$AGENT_RUN_BODY")"
 
 # ══════════════════════════════════════════════════════════════
 # SECTION 4: Edge Ingest (telemetry pipeline)
 # ══════════════════════════════════════════════════════════════
+# The edge-ingest endpoints live at /sessions + /turns (not /session
+# + /events) and the auth middleware checks Authorization: Bearer, so
+# the X-Edge-Token header form is rejected before the route can
+# inspect it. Using Bearer avoids the pre-auth 401.
+#
+# `sessions` is org-FK'd — the org_id must resolve to a real row in
+# the orgs table or Postgres raises a foreign key violation. We
+# resolve the caller's org via /auth/me above. The /turns endpoint
+# takes a single turn at a time, not an array of events — earlier
+# versions of the script POSTed `{events:[...]}` and hit a ZodError.
 printf "\n${BOLD}Edge Ingest (telemetry)${RESET}\n"
-check "POST edge-ingest/session" "200" \
-  "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${BACKEND}/api/v1/edge-ingest/session" -H 'Content-Type: application/json' -H "X-Edge-Token: ${EDGE_TOKEN}" -d '{"session_id":"smoke-'$(date +%s)'","agent_name":"smoke","status":"completed","total_turns":1}')"
-check "POST edge-ingest/events" "200" \
-  "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${BACKEND}/api/v1/edge-ingest/events" -H 'Content-Type: application/json' -H "X-Edge-Token: ${EDGE_TOKEN}" -d '{"events":[{"session_id":"smoke","event_type":"test","action":"smoke"}]}')"
+if [ -n "$SMOKE_ORG_ID" ]; then
+  check "POST edge-ingest/sessions" "200" \
+    "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${BACKEND}/api/v1/edge-ingest/sessions" -H 'Content-Type: application/json' -H "Authorization: Bearer ${EDGE_TOKEN}" -d "$INGEST_SESSION_BODY")"
+  check "POST edge-ingest/turns" "200" \
+    "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${BACKEND}/api/v1/edge-ingest/turns" -H 'Content-Type: application/json' -H "Authorization: Bearer ${EDGE_TOKEN}" -d "$INGEST_TURN_BODY")"
+else
+  skip_check "POST edge-ingest/sessions" "no SMOKE_ORG_ID resolved from /auth/me"
+  skip_check "POST edge-ingest/turns"    "no SMOKE_ORG_ID resolved from /auth/me"
+fi
 
 # ══════════════════════════════════════════════════════════════
 # SECTION 5: CF Bindings (/cf/* on worker)
@@ -197,16 +289,19 @@ fi
 # ══════════════════════════════════════════════════════════════
 printf "\n${BOLD}Write Operations (JWT)${RESET}\n"
 if [ -n "$JWT_TOKEN" ]; then
+  # Pre-build the issue-create body so shell escaping doesn't mangle
+  # the agent name inside the nested "$(jwt_post ... -d "...")".
+  ISSUE_BODY=$(printf '{"title":"smoke","description":"test","agent_name":"%s"}' "$SMOKE_AGENT_NAME")
   check "POST security scan" "200" \
-    "$(jwt_post /api/v1/security/scan/code-reviewer)"
+    "$(jwt_post "/api/v1/security/scan/${SMOKE_AGENT_NAME}")"
   check "POST create issue" "200" \
-    "$(jwt_post /api/v1/issues -H 'Content-Type: application/json' -d '{"title":"smoke","description":"test","agent_name":"code-reviewer"}')"
+    "$(jwt_post /api/v1/issues -H 'Content-Type: application/json' -d "$ISSUE_BODY")"
   check "POST gold image" "200" \
-    "$(jwt_post /api/v1/gold-images/from-agent/code-reviewer)"
+    "$(jwt_post "/api/v1/gold-images/from-agent/${SMOKE_AGENT_NAME}")"
   check "POST AIVSS calculate" "200" \
     "$(jwt_post /api/v1/security/aivss/calculate -H 'Content-Type: application/json' -d '{"attack_vector":"network","attack_complexity":"low","privileges_required":"none","scope":"unchanged","confidentiality_impact":"high","integrity_impact":"high","availability_impact":"high"}')"
   check "POST compliance check" "200" \
-    "$(jwt_post /api/v1/gold-images/compliance/check/code-reviewer)"
+    "$(jwt_post "/api/v1/gold-images/compliance/check/${SMOKE_AGENT_NAME}")"
 else
   for op in "security scan" "create issue" "gold image" "AIVSS calculate" "compliance check"; do
     skip_check "POST $op" "no JWT"
@@ -214,12 +309,18 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════
-# SECTION 8: Webhooks (unauthenticated)
+# SECTION 8: Webhooks (unauthenticated + HMAC-verified)
 # ══════════════════════════════════════════════════════════════
-printf "\n${BOLD}Webhooks${RESET}\n"
-check "POST Vapi webhook" "200" \
+# Vapi and Tavus webhooks skip JWT auth at the middleware layer
+# (they're in public-routes.ts) BUT verify provider-specific HMAC
+# signatures in-route. The smoke payloads below carry no signature
+# by design, so we expect a 401 "Invalid webhook signature" —
+# that's the signal that the hardened signature check is alive.
+# A 200 here would actually be the bug worth flagging.
+printf "\n${BOLD}Webhooks (signature rejection contract)${RESET}\n"
+check "POST Vapi webhook (expect signature rejection)" "401" \
   "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${BACKEND}/api/v1/voice/vapi/webhook" -H 'Content-Type: application/json' -d '{"message":{"type":"call.started","call":{"id":"smoke-wh"}}}')"
-check "POST Tavus webhook" "200" \
+check "POST Tavus webhook (expect signature rejection)" "401" \
   "$(curl -s -o /dev/null -w '%{http_code}' -X POST "${BACKEND}/api/v1/voice/tavus/webhook" -H 'Content-Type: application/json' -d '{"event":"conversation.started","conversation_id":"smoke-tavus"}')"
 
 # ══════════════════════════════════════════════════════════════

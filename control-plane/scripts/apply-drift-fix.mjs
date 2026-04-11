@@ -86,6 +86,90 @@ const batches = [
     ],
   },
   {
+    label: "sessions: add ended_at (edge-ingest writes this)",
+    statements: [
+      `ALTER TABLE sessions ADD COLUMN IF NOT EXISTS ended_at TIMESTAMPTZ`,
+    ],
+  },
+  {
+    label: "turns: add llm_content + cost_total_usd (edge-ingest writes these)",
+    statements: [
+      `ALTER TABLE turns ADD COLUMN IF NOT EXISTS llm_content TEXT NOT NULL DEFAULT ''`,
+      `ALTER TABLE turns ADD COLUMN IF NOT EXISTS cost_total_usd NUMERIC(18,8) NOT NULL DEFAULT 0`,
+    ],
+  },
+  {
+    label: "security_scans: add scan_id text column",
+    statements: [
+      `ALTER TABLE security_scans ADD COLUMN IF NOT EXISTS scan_id TEXT DEFAULT ''`,
+      // Backfill existing rows with a uuid so the unique constraint holds.
+      `UPDATE security_scans SET scan_id = gen_random_uuid()::text WHERE scan_id IS NULL OR scan_id = ''`,
+      `ALTER TABLE security_scans ALTER COLUMN scan_id SET NOT NULL`,
+      `DO $$ BEGIN
+         CREATE UNIQUE INDEX security_scans_scan_id_key ON security_scans (scan_id);
+       EXCEPTION WHEN duplicate_table THEN NULL; WHEN duplicate_object THEN NULL; END $$`,
+    ],
+  },
+  {
+    label: "config_audit: create missing table",
+    statements: [
+      `CREATE TABLE IF NOT EXISTS config_audit (
+         id            BIGSERIAL PRIMARY KEY,
+         org_id        TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+         image_id      TEXT,
+         agent_name    TEXT NOT NULL DEFAULT '',
+         action        TEXT NOT NULL DEFAULT '',
+         field_changed TEXT NOT NULL DEFAULT '',
+         old_value     TEXT,
+         new_value     TEXT,
+         changed_by    TEXT NOT NULL DEFAULT '',
+         details       JSONB NOT NULL DEFAULT '{}',
+         created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+       )`,
+      `CREATE INDEX IF NOT EXISTS idx_config_audit_org_created ON config_audit(org_id, created_at DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_config_audit_image_id ON config_audit(image_id) WHERE image_id IS NOT NULL`,
+    ],
+  },
+  {
+    label: "security_scans: add completed_at",
+    statements: [
+      `ALTER TABLE security_scans ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ`,
+    ],
+  },
+  {
+    label: "security_scan_findings: add layer / title / evidence / aivss_*",
+    statements: [
+      `ALTER TABLE security_scan_findings ADD COLUMN IF NOT EXISTS layer TEXT NOT NULL DEFAULT ''`,
+      `ALTER TABLE security_scan_findings ADD COLUMN IF NOT EXISTS title TEXT NOT NULL DEFAULT ''`,
+      `ALTER TABLE security_scan_findings ADD COLUMN IF NOT EXISTS evidence TEXT NOT NULL DEFAULT ''`,
+      `ALTER TABLE security_scan_findings ADD COLUMN IF NOT EXISTS aivss_vector TEXT NOT NULL DEFAULT ''`,
+      `ALTER TABLE security_scan_findings ADD COLUMN IF NOT EXISTS aivss_score NUMERIC(5,2) NOT NULL DEFAULT 0`,
+    ],
+  },
+  {
+    label: "compliance_checks: add drift writer columns",
+    statements: [
+      `ALTER TABLE compliance_checks ADD COLUMN IF NOT EXISTS agent_name TEXT NOT NULL DEFAULT ''`,
+      `ALTER TABLE compliance_checks ADD COLUMN IF NOT EXISTS image_id TEXT`,
+      `ALTER TABLE compliance_checks ADD COLUMN IF NOT EXISTS image_name TEXT NOT NULL DEFAULT ''`,
+      `ALTER TABLE compliance_checks ADD COLUMN IF NOT EXISTS drift_count INT NOT NULL DEFAULT 0`,
+      `ALTER TABLE compliance_checks ADD COLUMN IF NOT EXISTS drift_fields JSONB NOT NULL DEFAULT '[]'`,
+      `ALTER TABLE compliance_checks ADD COLUMN IF NOT EXISTS drift_details JSONB NOT NULL DEFAULT '{}'`,
+      `ALTER TABLE compliance_checks ADD COLUMN IF NOT EXISTS checked_by TEXT NOT NULL DEFAULT ''`,
+    ],
+  },
+  {
+    label: "risk_profiles: add scoped unique key for security-scan upsert",
+    statements: [
+      // ON CONFLICT (org_id, agent_name) in security.ts needs a matching
+      // constraint. Wrap in DO so re-runs skip the "already exists" error.
+      `DO $$ BEGIN
+         CREATE UNIQUE INDEX risk_profiles_org_agent_key
+           ON risk_profiles (org_id, agent_name);
+       EXCEPTION WHEN duplicate_table THEN NULL; WHEN duplicate_object THEN NULL; END $$`,
+    ],
+  },
+  {
     label: "voice_calls: add platform columns + rename id → call_id",
     statements: [
       `ALTER TABLE voice_calls ADD COLUMN IF NOT EXISTS platform TEXT NOT NULL DEFAULT 'twilio'`,
