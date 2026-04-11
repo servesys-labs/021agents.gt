@@ -1246,13 +1246,16 @@ async function executeSingleTool(
       retryable: isExternalServiceError(err),
     });
 
+    // Do NOT bill failed tool calls. Users shouldn't pay for a 30s timeout
+    // on a broken endpoint that returned nothing. Cost is only charged on
+    // the success path above.
     return {
       tool: tc.name,
       tool_call_id: tc.id,
       result: "",
       error: toolErr.userMessage || toolErr.message,
       latency_ms: latencyMs,
-      cost_usd: calculateToolCost(tc.name, latencyMs),
+      cost_usd: 0,
     };
   }
 }
@@ -4240,11 +4243,14 @@ async function perplexitySearch(env: RuntimeEnv, args: Record<string, any>): Pro
   if (!query) return "web-search requires a query";
 
   // ── MVP: Local search ONLY — no paid fallbacks ──
-  // Fails loud so we can fix issues. No Perplexity, no Brave, no DuckDuckGo.
-  // TODO: Re-enable paid fallbacks when we have paying users.
+  // Internal errors are logged via log.error so operators can see what's
+  // wrong in wrangler tail, but user-facing tool results only contain
+  // generic messages — never infrastructure details like hostnames,
+  // binding names, or internal service names.
   const localSearchUrl = (env as any).LOCAL_SEARCH_URL;
   if (!localSearchUrl) {
-    return "ERROR: LOCAL_SEARCH_URL not configured. Set it in wrangler.jsonc vars to point to search.oneshots.co";
+    log.error("[perplexitySearch] LOCAL_SEARCH_URL is not configured");
+    return "Web search is not available right now. Please try again in a moment.";
   }
 
   try {
@@ -4262,18 +4268,21 @@ async function perplexitySearch(env: RuntimeEnv, args: Record<string, any>): Pro
 
     if (!resp.ok) {
       const errText = await resp.text().catch(() => "");
-      return `ERROR: Local search failed (HTTP ${resp.status}). URL: ${localSearchUrl}. Response: ${errText.slice(0, 200)}`;
+      log.error(`[perplexitySearch] local search HTTP ${resp.status} from ${localSearchUrl}: ${errText.slice(0, 200)}`);
+      return "Web search is temporarily unavailable. Please try again in a moment.";
     }
 
     const data = (await resp.json()) as any;
     const content = data.choices?.[0]?.message?.content || "";
     if (!content) {
-      return `ERROR: Local search returned empty content. Raw response: ${JSON.stringify(data).slice(0, 300)}`;
+      log.error(`[perplexitySearch] empty content from local search: ${JSON.stringify(data).slice(0, 300)}`);
+      return "Web search returned no results. Try rephrasing the query.";
     }
 
     return content;
   } catch (err: any) {
-    return `ERROR: Local search failed — ${err.message}. Is search.oneshots.co running? Check SearXNG + llama.cpp on your home server.`;
+    log.error(`[perplexitySearch] fetch failed for ${localSearchUrl}: ${err?.message || err}`);
+    return "Web search is temporarily unavailable. Please try again in a moment.";
   }
 }
 
