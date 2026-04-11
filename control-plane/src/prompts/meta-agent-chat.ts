@@ -122,8 +122,6 @@ For detailed explanations of any feature, use \`read_session_diagnostics\` on a 
 
 When updating an agent's tool list, pick **3-8 essential tools** for the agent's core job. The runtime uses progressive tool discovery — extra tools are available on-demand without being in the main list. More tools = more tokens per turn = higher cost per session. Only add tools the agent will use regularly.
 
-The full tool catalog (60+ tools across 16 categories: web, code, files, memory, db, scheduling, delegation, media, git, integrations, codemode, pipelines, platform ops, devops, voice, tasks) is available on demand — call \`read_tool_catalog\` when the user asks "what tools can I add" or "what tools exist for X". Don't load it eagerly; it's ~1,800 tokens you don't need on every turn.
-
 ## Skill selection (when configuring an agent)
 
 Skills are reusable prompt templates in \`skills/public/<name>/SKILL.md\`. Set \`enabled_skills: ["pdf", "research"]\` on an agent's config to grant a curated subset; empty/omitted = all available. Unknown names are dropped server-side with a \`warning\` field in the response. 21 skills in the bundled catalog.
@@ -306,33 +304,6 @@ Configs auto-migrate to latest schema version at runtime. config_version field i
 
 ### Cost Tracking
 Per-turn check + pre-execution batch estimate. Tools skipped if estimated cost would exceed remaining budget.`;
-
-// ══════════════════════════════════════════════════════════════════════
-// Tool Catalog — injected on-demand when the user asks about tool
-// selection or wants to add tools to an agent. Saves ~1,800 tokens on
-// every turn that doesn't need it (the vast majority).
-// ══════════════════════════════════════════════════════════════════════
-
-export const TOOL_CATALOG_DOCS = `## Available tools for agents (full catalog)
-
-When configuring an agent, pick 3-8 essential tools for the agent's core job. The runtime uses progressive tool discovery — extra tools are discoverable on-demand without being in the main list. More tools = more tokens per turn = higher cost per session.
-
-**Web & APIs:** web-search, browse, http-request, web-crawl, discover-api
-**Code execution:** python-exec, bash, execute-code, sandbox-exec
-**Files & projects:** read-file, write-file, edit-file, view-file, search-file, find-file, grep, glob, save-project, load-project, load-folder, list-project-versions
-**Memory & knowledge:** memory-save, memory-recall, memory-delete, knowledge-search, store-knowledge, team-fact-write, team-observation
-**Database:** db-query, db-batch, db-report
-**Scheduling:** create-schedule, list-schedules, delete-schedule
-**Delegation & multi-agent:** marketplace-search, a2a-send, run-agent, route-to-agent, share-artifact, create-agent, list-agents
-**Media:** image-generate, vision-analyze, text-to-speech, speech-to-text
-**Git:** git-init, git-status, git-diff, git-commit, git-log, git-branch, git-stash
-**Integrations:** mcp-call, mcp-wrap, feed-post, connector
-**Codemode (advanced):** run-codemode, codemode-transform, codemode-validate, codemode-test, codemode-generate-mcp
-**Data pipelines:** query-pipeline, send-to-pipeline
-**Platform ops:** eval-agent, evolve-agent, security-scan, conversation-intel, compliance, view-costs, view-traces, view-audit
-**DevOps:** manage-releases, manage-workflows, manage-rag, manage-secrets, manage-policies, manage-retention, manage-mcp, manage-projects, manage-slos, compare-agents
-**Voice:** manage-voice, make-voice-call
-**Task tracking:** todo, submit-feedback`;
 
 // ══════════════════════════════════════════════════════════════════════
 // Mode-Specific Instructions

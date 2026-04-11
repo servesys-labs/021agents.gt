@@ -37,7 +37,7 @@ vi.mock("../src/logic/meta-agent", () => ({
 // we test via the public runMetaChat or by re-implementing the tool execution.
 // For direct tool testing, we import the module and call executeTool via the chat runner.
 
-import { buildMetaAgentChatPrompt, RUNTIME_INFRASTRUCTURE_DOCS, TOOL_CATALOG_DOCS } from "../src/prompts/meta-agent-chat";
+import { buildMetaAgentChatPrompt, RUNTIME_INFRASTRUCTURE_DOCS } from "../src/prompts/meta-agent-chat";
 
 // ── Test Helpers ─────────────────────────────────────────────────
 
@@ -138,19 +138,6 @@ describe("progressive tool discovery — selectMetaTools", () => {
     expect(prompt).toContain("3-6");
     expect(prompt).not.toContain("10+");
     expect(prompt).not.toContain("8-12");
-  });
-
-  it("tool catalog docs include all current tool categories", () => {
-    // Tool categories live in TOOL_CATALOG_DOCS, which is injected
-    // on-demand when the user asks about tool selection — it's not
-    // part of the always-loaded system prompt (the original test
-    // was asserting against the wrong string).
-    expect(TOOL_CATALOG_DOCS).toContain("Git:");
-    expect(TOOL_CATALOG_DOCS).toContain("Codemode");
-    expect(TOOL_CATALOG_DOCS).toContain("Data pipelines:");
-    expect(TOOL_CATALOG_DOCS).toContain("Platform ops:");
-    expect(TOOL_CATALOG_DOCS).toContain("DevOps:");
-    expect(TOOL_CATALOG_DOCS).toContain("Voice:");
   });
 
   it("prompt documents new meta-agent tools", () => {
