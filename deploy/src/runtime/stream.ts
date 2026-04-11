@@ -496,7 +496,7 @@ export async function streamRun(
     if (!isVoiceChannel) {
       try {
         const skills = await loadSkills(hyperdrive, config.org_id || "", config.agent_name || agentName);
-        const skillsBlock = formatSkillsPrompt(skills, config.plan);
+        const skillsBlock = formatSkillsPrompt(skills, config.plan, config.enabled_skills);
         if (skillsBlock) sysPromptParts.push(skillsBlock);
       } catch {}
 
