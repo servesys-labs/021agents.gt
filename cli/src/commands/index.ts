@@ -9,7 +9,6 @@ export { deployCommand } from "./deploy.js";
 export { chatCommand } from "./chat.js";
 export { sandboxCommand } from "./sandbox.js";
 export { loginCommand, logoutCommand, whoamiCommand } from "./auth.js";
-export { codemapCommand } from "./codemap.js";
 
 // Extended commands
 export { evalCommand } from "./eval.js";

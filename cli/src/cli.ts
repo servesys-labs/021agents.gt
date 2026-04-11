@@ -43,7 +43,6 @@ import { deployCommand } from "./commands/deploy.js";
 import { chatCommand } from "./commands/chat.js";
 import { sandboxCommand } from "./commands/sandbox.js";
 import { loginCommand, logoutCommand, whoamiCommand } from "./commands/auth.js";
-import { codemapCommand } from "./commands/codemap.js";
 
 // Extended commands
 import { evalCommand } from "./commands/eval.js";
@@ -821,17 +820,6 @@ complianceCmd.command("delete-account <userId>")
   .option("-r, --reason <reason>", "Reason for deletion")
   .action((userId, opts) => complianceCommand.deleteAccount(userId, opts));
 complianceCmd.command("deletions").description("List deletion requests").action(complianceCommand.deletions);
-
-// ═════════════════════════════════════════════════════════════════════════════
-// Utility Commands
-// ═════════════════════════════════════════════════════════════════════════════
-
-program
-  .command("codemap")
-  .description("Generate visual code graph maps")
-  .option("-o, --output <path>", "Output file")
-  .option("--json", "Output as JSON")
-  .action(codemapCommand);
 
 // Parse arguments
 program.parse();

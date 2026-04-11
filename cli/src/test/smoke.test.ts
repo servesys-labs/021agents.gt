@@ -15,7 +15,6 @@ describe("CLI Module Imports", () => {
       import("../commands/chat.js"),
       import("../commands/sandbox.js"),
       import("../commands/auth.js"),
-      import("../commands/codemap.js"),
       import("../commands/eval.js"),
       import("../commands/evolve.js"),
       import("../commands/issues.js"),
@@ -34,7 +33,7 @@ describe("CLI Module Imports", () => {
       import("../commands/billing.js"),
     ]);
 
-    expect(commands.length).toBe(25);
+    expect(commands.length).toBe(24);
     commands.forEach((mod) => {
       expect(mod).toBeDefined();
     });
