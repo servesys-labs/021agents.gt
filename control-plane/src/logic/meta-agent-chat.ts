@@ -814,11 +814,12 @@ async function executeTool(
         WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}
       `;
 
-      // Snapshot version
+      // Snapshot version. agent_versions.org_id is NOT NULL; we're
+      // inside withOrgDb so ctx.orgId matches current_org_id().
       try {
         await sql`
-          INSERT INTO agent_versions (agent_name, version, config, created_by, created_at)
-          VALUES (${ctx.agentName}, ${newVersion}, ${JSON.stringify(config)}, ${"meta-agent"}, now())
+          INSERT INTO agent_versions (agent_name, org_id, version, config, created_by, created_at)
+          VALUES (${ctx.agentName}, ${ctx.orgId}, ${newVersion}, ${JSON.stringify(config)}, ${"meta-agent"}, now())
           ON CONFLICT (agent_name, version) DO UPDATE
           SET config = ${JSON.stringify(config)}, created_by = ${"meta-agent"}
         `;

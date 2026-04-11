@@ -432,12 +432,16 @@ authRoutes.openapi(signupRoute, async (c): Promise<any> => {
         VALUES (${projectId}, ${orgId}, ${`${projectSlug}'s project`}, ${projectSlug}, ${"Default project"}, ${"development"}, ${"standard"}, ${nowEpoch}, ${nowEpoch})
       `;
 
-      // Create default environments
+      // Create default environments.
+      // NOTE: environments.org_id is NOT NULL (required for the RLS
+      // policy org_id = current_org_id()). Historical signups that
+      // omitted org_id no longer work — include it here and in any
+      // other code path that inserts into environments.
       for (const envName of ["development", "staging", "production"]) {
         const envId = generateId();
         await tx`
-          INSERT INTO environments (env_id, project_id, name, is_active, created_at)
-          VALUES (${envId}, ${projectId}, ${envName}, ${true}, ${nowEpoch})
+          INSERT INTO environments (env_id, org_id, project_id, name, is_active, created_at)
+          VALUES (${envId}, ${orgId}, ${projectId}, ${envName}, ${true}, ${nowEpoch})
         `;
       }
     });
