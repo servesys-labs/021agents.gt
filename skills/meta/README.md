@@ -45,3 +45,43 @@ never surfaced to user-facing agents.
    hard-depends on the new key.
 5. Reference the key from the prompt builder via
    `META_SKILL_BODIES["<name>"]`.
+
+## Template placeholders
+
+Meta skill bodies are **plain markdown** — TypeScript template literal
+syntax like `${variable}` does **not** get interpolated when the bundled
+body is spliced back into the meta-agent prompt. If a skill body needs
+a runtime value (for example, the current agent name in a SQL query),
+use the `{{UPPERCASE_SNAKE}}` placeholder convention and substitute
+explicitly at splice time.
+
+**Why a placeholder rather than raw `${...}`?**
+
+- `${…}` in a SKILL.md body is just literal characters to the bundler.
+  At splice time the chars pass through unchanged and the model sees
+  a broken template — a silent failure the freshness gate cannot catch.
+- `{{PLACEHOLDER}}` matches the convention deploy's `getSkillPrompt`
+  already uses for public skills (`{{ARGS}}` / `{{INPUT}}` substitution
+  in `deploy/src/runtime/skills.ts`). Consistent mental model across
+  public and meta.
+- A future editor making markdown-only changes cannot accidentally
+  introduce a `${...}` that silently fails — there's nothing for the
+  TypeScript compiler to evaluate.
+
+**Currently in use:**
+
+| Placeholder | Substituted by | Consumers |
+|---|---|---|
+| `{{AGENT_NAME}}` | `buildMetaAgentChatPrompt`'s `agentName` parameter | `skills/meta/wf-cost-analysis/SKILL.md` |
+
+**Adding a new placeholder:**
+
+1. Document it in the table above.
+2. Add the `.replace(/\{\{NEW_NAME\}\}/g, value)` call in the prompt
+   builder where the meta skill body is spliced in. Substitution
+   happens on the concatenated workflow bundle AFTER
+   `META_SKILL_BODIES.join("")`, so it covers every meta skill in one
+   pass.
+3. The byte-identity test in `meta-agent-chat.test.ts` computes
+   `EXPECTED_SHA` against a fixed test value for each placeholder.
+   Update that fixture if a new placeholder is introduced.

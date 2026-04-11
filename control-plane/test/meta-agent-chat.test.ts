@@ -897,6 +897,70 @@ describe("Phase 7.2b — META_SKILL_BODIES['mode-demo'] byte identity", () => {
   });
 });
 
+describe("Phase 7.4 — workflows concatenation byte identity", () => {
+  // sha computed against the pre-extraction interpolated workflows slice
+  // at commit 40adb7f2 (the last commit that had "## Common workflows"
+  // inline). Target: WORKFLOW_ORDER.map(k => META_SKILL_BODIES[`wf-${k}`])
+  // .join("").replace(/\{\{AGENT_NAME\}\}/g, TEST_AGENT_NAME). If this
+  // drifts, the extraction is lossy OR the WORKFLOW_ORDER drifted OR the
+  // Path B regex fix was reverted OR the {{AGENT_NAME}} substitution
+  // was removed from the builder.
+  //
+  // Removed alongside the DEMO/LIVE byte-identity tests in the single
+  // Phase 7-exit commit once all three mechanical extractions (7.2b,
+  // 7.3, 7.4) have been validated by CI and the freshness gate takes
+  // over as the ongoing drift guard.
+  const TEST_AGENT_NAME = "test-agent-for-phase-7-4";
+  const EXPECTED_SHA = "42d5f6508f926a9484b9ddc69c38e51ff4a51d398db8992971e1d1706b835c9a";
+  const WORKFLOW_ORDER = [
+    "health-check", "improve", "bad-answers", "start-training",
+    "marketplace-publish", "test-suite", "add-connector", "delegate",
+    "mid-task-stop", "forgot-context", "truncated-results", "tool-blocked",
+    "audit-log", "feature-flags", "cost-analysis",
+  ] as const;
+
+  it("concatenated + substituted workflow bodies match pre-extraction slice", () => {
+    const bodies = WORKFLOW_ORDER.map((k) => META_SKILL_BODIES[`wf-${k}`]);
+    const missing = WORKFLOW_ORDER.filter((k) => !META_SKILL_BODIES[`wf-${k}`]);
+    if (missing.length > 0) {
+      throw new Error(
+        `META_SKILL_BODIES missing workflow entries: ${missing.join(", ")}\n` +
+        `Run 'node control-plane/scripts/bundle-skill-catalog.mjs' and ensure\n` +
+        `all 15 skills/meta/wf-*/SKILL.md files exist.`,
+      );
+    }
+
+    const concatenated = bodies.join("");
+    const substituted = concatenated.replace(/\{\{AGENT_NAME\}\}/g, TEST_AGENT_NAME);
+    const actual = createHash("sha256").update(substituted, "utf8").digest("hex");
+
+    if (actual !== EXPECTED_SHA) {
+      throw new Error(
+        `Phase 7.4 workflows concatenation drifted from pre-extraction slice.\n` +
+        `  expected sha256: ${EXPECTED_SHA}\n` +
+        `  actual sha256:   ${actual}\n` +
+        `  test agent name: ${TEST_AGENT_NAME}\n` +
+        `  concatenated length: ${concatenated.length}\n` +
+        `  substituted length:  ${substituted.length}\n` +
+        `  first 120 chars:     ${JSON.stringify(substituted.slice(0, 120))}\n` +
+        `  last  120 chars:     ${JSON.stringify(substituted.slice(-120))}\n` +
+        `  WORKFLOW_ORDER keys: ${JSON.stringify(WORKFLOW_ORDER)}\n` +
+        `\n` +
+        `Investigate, in order of likelihood:\n` +
+        `  1. One of the skills/meta/wf-*/SKILL.md files was edited\n` +
+        `  2. WORKFLOW_ORDER was reordered in control-plane/src/prompts/meta-agent-chat.ts\n` +
+        `  3. buildMetaAgentChatPrompt's {{AGENT_NAME}} .replace() was removed\n` +
+        `  4. control-plane/scripts/bundle-skill-catalog.mjs FRONTMATTER_RE\n` +
+        `     was reverted from '[ \\t]*\\n' back to '\\s*\\n' (Path B fix)\n` +
+        `  5. A new template placeholder like {{ORG_ID}} was added without\n` +
+        `     extending this test's substitution step\n` +
+        `  6. Run 'node control-plane/scripts/bundle-skill-catalog.mjs' and\n` +
+        `     inspect the diff on meta-skill-bodies.generated.ts\n`,
+      );
+    }
+  });
+});
+
 describe("Phase 7.3 — META_SKILL_BODIES['mode-live'] byte identity", () => {
   // sha computed against the pre-extraction LIVE_MODE_INSTRUCTIONS
   // constant at commit 910edd17 (last commit that had LIVE inline).

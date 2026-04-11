@@ -14,12 +14,53 @@
 
 import { META_SKILL_BODIES } from "../lib/meta-skill-bodies.generated";
 
+// Common workflow order for the "## Common workflows" prompt section.
+// Each slug maps to skills/meta/wf-<slug>/SKILL.md. Order is semantic —
+// starts with health check, ends with cost debugging — and reordering
+// affects the final prompt bytes. The concatenation + {{AGENT_NAME}}
+// substitution happens inside buildMetaAgentChatPrompt.
+const WORKFLOW_ORDER = [
+  "health-check",
+  "improve",
+  "bad-answers",
+  "start-training",
+  "marketplace-publish",
+  "test-suite",
+  "add-connector",
+  "delegate",
+  "mid-task-stop",
+  "forgot-context",
+  "truncated-results",
+  "tool-blocked",
+  "audit-log",
+  "feature-flags",
+  "cost-analysis",
+] as const;
+
 // Meta skills the prompt builder hard-depends on. Missing any of these
 // means the worker cannot produce a correct prompt, so fail loudly at
-// module-load rather than silently degrading at the first request.
-// Extend this tuple every time a new meta skill becomes a required
-// input to buildMetaAgentChatPrompt.
-const REQUIRED_META_SKILLS = ["mode-demo", "mode-live"] as const;
+// module-load rather than silently degrading at the first request. At
+// 17 entries this tuple is getting verbose — candidate for extraction
+// to a separate file in Phase 7.6/7.7 cleanup (not this commit).
+const REQUIRED_META_SKILLS = [
+  "mode-demo",
+  "mode-live",
+  "wf-health-check",
+  "wf-improve",
+  "wf-bad-answers",
+  "wf-start-training",
+  "wf-marketplace-publish",
+  "wf-test-suite",
+  "wf-add-connector",
+  "wf-delegate",
+  "wf-mid-task-stop",
+  "wf-forgot-context",
+  "wf-truncated-results",
+  "wf-tool-blocked",
+  "wf-audit-log",
+  "wf-feature-flags",
+  "wf-cost-analysis",
+] as const;
 for (const name of REQUIRED_META_SKILLS) {
   if (!META_SKILL_BODIES[name]) {
     throw new Error(
@@ -45,6 +86,16 @@ for (const name of REQUIRED_META_SKILLS) {
  */
 export function buildMetaAgentChatPrompt(agentName: string, mode: "demo" | "live" = "live"): string {
   const modeInstructions = META_SKILL_BODIES[`mode-${mode}`];
+  // Phase 7.4: common workflows are sourced from skills/meta/wf-*/SKILL.md
+  // and concatenated in WORKFLOW_ORDER. {{AGENT_NAME}} placeholders inside
+  // any workflow body (currently only wf-cost-analysis) are substituted
+  // here with the actual agentName — byte-identical to the pre-extraction
+  // template interpolation pattern, but parameterizable via markdown rather
+  // than TS template literals.
+  const workflowsBody = WORKFLOW_ORDER
+    .map((k) => META_SKILL_BODIES[`wf-${k}`])
+    .join("")
+    .replace(/\{\{AGENT_NAME\}\}/g, agentName);
 
   return `You are the Agent Manager for "${agentName}" on the OneShots platform. You help the owner understand, configure, monitor, and improve their agent through conversation.
 
@@ -164,91 +215,7 @@ Available strategies (set via reasoning_strategy field):
 
 ## Common workflows
 
-### "How is my agent doing?"
-1. \`read_observability\` — check error rate, latency, cost over 24h and 7d
-2. \`read_conversation_quality\` — check sentiment and resolution rates
-3. \`read_sessions\` — see recent session count and channels
-4. Summarize: health status, any concerning trends, recommended actions
-
-### "Improve my agent"
-1. \`read_agent_config\` — understand current setup
-2. \`read_observability\` — identify problem areas
-3. \`analyze_and_suggest\` — get AI-generated suggestions
-4. Apply the best suggestions via \`update_agent_config\`
-5. Briefly show what changed
-
-### "My agent gives bad answers about X"
-1. \`read_sessions\` — find relevant sessions
-2. \`read_session_messages\` — read the specific conversation
-3. \`read_agent_config\` — check system prompt
-4. \`update_agent_config\` — update system prompt to address the gap
-5. Show the change: "Added guidance about X to the system prompt"
-
-### "Start training"
-1. \`read_agent_config\` — check current config
-2. \`read_eval_results\` — check baseline performance
-3. \`start_training\` with algorithm="apo" (automatic prompt optimization)
-4. Tell user: "Training started. I'll monitor progress."
-5. When asked for status: \`read_training_status\`
-
-### "Publish to marketplace"
-1. \`read_agent_config\` — get name and description
-2. \`marketplace_publish\` with appropriate category and pricing
-3. Confirm: "Published! Your agent is now discoverable."
-
-### "Run my test suite" / "How's the quality?"
-1. \`run_eval\` — runs all test cases, returns pass/fail per case
-2. Summarize: "X/Y tests passed (Z%). Here are the failures: [list]"
-3. If failures exist: \`analyze_and_suggest\` for improvement recommendations
-4. Apply fixes, then \`run_eval\` again to measure improvement
-
-### "My agent needs to connect to Slack/HubSpot/Jira"
-1. \`manage_connectors\` action="add" app="slack" — add the connector
-2. Explain: "Added Slack connector. Your agent can now send/read messages via the mcp-call tool. OAuth will be prompted on first use."
-3. Ensure mcp-call is in the agent's tool list
-
-### "My agent needs to delegate tasks"
-1. \`create_sub_agent\` — for sub-agents that map to a known skill (pdf, research, chart, etc.), use \`enabled_skills: ["<name>"]\` + a 1-3 sentence \`system_prompt\` role + a \`tools\` array that supersets the skill's allowed_tools. Do NOT paste the skill's workflow into system_prompt.
-2. Ensure parent agent has run-agent tool
-3. Update parent's system prompt to mention the sub-agent: "For research tasks, delegate to the research_assistant agent using the run-agent tool."
-
-### "My agent stopped mid-task" / "Why did it stop?"
-1. \`read_sessions\` — find the session
-2. \`read_session_diagnostics\` — look for loop_detected, budget_exhausted, or circuit_breaker events
-3. Explain: "Your agent was stopped by [loop detection/budget guard/circuit breaker]. Here's what happened: [details]."
-4. If loop detection: check which tool was failing, fix the config or prompt
-5. If budget: suggest increasing budget_limit_usd or optimizing tool usage
-
-### "My agent forgot what we talked about earlier"
-1. \`read_session_diagnostics\` — look for context_compression events
-2. Explain: "The conversation got long and older messages were auto-summarized to fit the model's context window. This is normal for sessions with many turns."
-3. Suggest: start new sessions for distinct tasks, or use the memory tools (memory-save/memory-recall) for critical facts that must persist
-
-### "Why are my tool results cut off?"
-1. \`read_session_diagnostics\` — look for backpressure events
-2. Explain: "Tool results exceeding 30KB are auto-truncated. Very large results are stored in R2 with a preview. This prevents context overflow."
-3. Suggest: have the agent use more targeted queries/searches instead of fetching entire pages
-
-### "Why can't my agent use [tool X]?"
-1. \`read_session_diagnostics\` — look for circuit_breaker events on that tool
-2. \`read_agent_config\` — check if the tool is in blocked_tools or missing from tools list
-3. Explain based on findings: circuit breaker tripped, tool not configured, or tool was deferred
-
-### "Who changed my agent's config?"
-1. \`read_audit_log\` — shows config change history with actor, timestamp, and what changed
-2. Summarize the changes chronologically
-
-### "What features are enabled?"
-1. \`read_feature_flags\` — shows concurrent_tools, context_compression, deferred_tool_loading
-2. Explain each flag in simple terms
-3. If user wants to change one: \`set_feature_flag\`
-
-### "Why is this costing so much?" / "What is bash doing?"
-1. \`run_query\` — Find the most expensive turns: \`SELECT t.turn_number, t.tool_calls, t.tool_results, t.cost_total_usd FROM turns t JOIN sessions s ON t.session_id = s.session_id WHERE s.agent_name = '${agentName}' ORDER BY t.cost_total_usd DESC LIMIT 10\`
-2. \`run_query\` — Analyze tool usage frequency: \`SELECT tool_calls, COUNT(*) as cnt, SUM(cost_total_usd) as total_cost FROM turns t JOIN sessions s ON t.session_id = s.session_id WHERE s.agent_name = '${agentName}' GROUP BY tool_calls ORDER BY total_cost DESC LIMIT 20\`
-3. Diagnose: explain what tools are being called unnecessarily, what commands are being run
-4. \`update_agent_config\` — Fix the system prompt to stop the wasteful behavior
-
+${workflowsBody}
 ## Diagnostic Mindset
 
 When users report problems, always investigate before answering:
