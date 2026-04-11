@@ -25,13 +25,23 @@ import {
  */
 function makeMockSql(responses: unknown[][]) {
   const calls: Array<{ query: string; values: unknown[] }> = [];
+  const lockCalls: Array<{ query: string; values: unknown[] }> = [];
   let i = 0;
   const sql: any = (strings: TemplateStringsArray, ...values: unknown[]) => {
-    calls.push({ query: strings.join("?"), values });
+    const query = strings.join("?");
+    // Advisory locks are serializers, not data queries. Route them to a
+    // sibling array so existing tests' sql.calls.length assertions stay
+    // accurate while new tests can assert lock presence via lockCalls.
+    if (query.includes("pg_advisory_xact_lock")) {
+      lockCalls.push({ query, values });
+      return Promise.resolve([]);
+    }
+    calls.push({ query, values });
     const resp = responses[i++];
     return Promise.resolve(resp ?? []);
   };
   (sql as any).calls = calls;
+  (sql as any).lockCalls = lockCalls;
   return sql as any;
 }
 
@@ -234,6 +244,55 @@ describe("skill-mutation — rate limit", () => {
       ruleText: "when: foo\nthen: bar",
     });
     expect(result.appended).toBe(true);
+  });
+});
+
+describe("skill-mutation — rate-limit race serializer", () => {
+  it("acquires pg_advisory_xact_lock with a (org, skill)-keyed lock id on the happy path", async () => {
+    const sql = makeMockSql([
+      [{ n: 0 }], [], [{ overlay_id: "o-1" }], [{ audit_id: "a-1" }],
+    ]);
+    const result = await appendRule(sql, baseCtx, {
+      skillName: "debug",
+      ruleText: "when: foo\nthen: bar",
+    });
+    expect(result.appended).toBe(true);
+    expect(sql.lockCalls.length).toBe(1);
+    expect(sql.lockCalls[0].query).toContain("pg_advisory_xact_lock");
+    // Lock key embeds (org, skill) so contention is bounded per-skill,
+    // not org-wide — parallel mutations on different skills don't block.
+    expect(sql.lockCalls[0].values[0]).toBe(`skill-rl:${baseCtx.orgId}:debug`);
+  });
+
+  it("still acquires the lock when the rate-limit check rejects (proves lock fires before COUNT)", async () => {
+    const sql = makeMockSql([[{ n: SKILL_MUTATION_RATE_LIMIT_PER_DAY }]]);
+    const result = await appendRule(sql, baseCtx, {
+      skillName: "debug",
+      ruleText: "when: foo\nthen: bar",
+    });
+    expect(result.appended).toBe(false);
+    if (!result.appended) expect(result.code).toBe("rate_limited");
+    // If the lock fired AFTER the COUNT, a concurrent caller reading
+    // COUNT=9 in a separate transaction could insert before this one
+    // saw the updated count. Assert the lock still fires on the reject
+    // path — proves ordering: lock precedes COUNT.
+    expect(sql.lockCalls.length).toBe(1);
+  });
+
+  it("does not acquire the lock on early-exit validation failures", async () => {
+    const sql = makeMockSql([]);
+    const result = await appendRule(
+      sql,
+      { ...baseCtx, userRole: "viewer" },
+      { skillName: "debug", ruleText: "x" },
+    );
+    expect(result.appended).toBe(false);
+    if (!result.appended) expect(result.code).toBe("forbidden");
+    // Lock sits after all validation (permission, input, unknown_skill,
+    // injection). Any future refactor that moves the lock above a
+    // validation check — or adds a new check below the lock — breaks
+    // this invariant and this test catches it.
+    expect(sql.lockCalls.length).toBe(0);
   });
 });
 

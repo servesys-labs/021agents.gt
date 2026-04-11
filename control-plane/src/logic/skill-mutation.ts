@@ -163,6 +163,12 @@ export async function appendRule(
     };
   }
 
+  // Serialize concurrent (org, skill) mutations so the rate-limit
+  // COUNT→INSERT pair below is atomic. Held until transaction commit by
+  // withOrgDb's sql.begin() wrapper. Without this, parallel auto-fire
+  // invocations can both read COUNT=9 and both insert, overshooting 10/day.
+  await sql`SELECT pg_advisory_xact_lock(hashtextextended(${`skill-rl:${ctx.orgId}:${skillName}`}, 0))`;
+
   // Rate limit: 10 successful mutations per day per skill. RLS scopes the
   // count to the current org, so the effective limit is per-org-per-skill.
   const countRows = await sql`
