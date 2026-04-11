@@ -455,9 +455,10 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
         );
 
         if (!resp.ok) {
-          const errorText = await resp.text().catch(() => "Runtime error");
+          const errorText = await resp.text().catch(() => "");
+          console.error(`[a2a/tasks/send] runtime returned ${resp.status}: ${errorText.slice(0, 400)}`);
           task.status = { state: "FAILED", timestamp: new Date().toISOString() };
-          return c.json(jsonrpcError(id, -32000, `Runtime error: ${errorText}`), resp.status as 200);
+          return c.json(jsonrpcError(id, -32000, "Runtime execution failed. Please try again in a moment."), resp.status as 200);
         }
 
         const result = (await resp.json()) as {
@@ -963,9 +964,10 @@ a2aRoutes.openapi(taskSendRoute, async (c): Promise<any> => {
     );
 
     if (!resp.ok) {
-      const errorText = await resp.text().catch(() => "Runtime error");
+      const errorText = await resp.text().catch(() => "");
+      console.error(`[a2a/message/send] runtime returned ${resp.status}: ${errorText.slice(0, 400)}`);
       task.status = { state: "FAILED", timestamp: new Date().toISOString() };
-      return c.json(jsonrpcError(body.id || null, -32000, `Runtime error: ${errorText}`), resp.status as 200);
+      return c.json(jsonrpcError(body.id || null, -32000, "Runtime execution failed. Please try again in a moment."), resp.status as 200);
     }
 
     const result = (await resp.json()) as {

@@ -17,6 +17,7 @@ import { sendPasswordResetEmail, sendVerificationEmail, sendWelcomeEmail } from 
 import { buildPersonalAgentPrompt } from "../prompts/personal-agent";
 import { logSecurityEvent } from "../logic/security-events";
 import { createOpenAPIRouter } from "../lib/openapi";
+import { failSafe } from "../lib/error-response";
 import { ErrorSchema, RateLimitErrorSchema, AuthTokenResponse, UserProfile, TokenVerifyResponse, errorResponses } from "../schemas/openapi";
 
 export const authRoutes = createOpenAPIRouter();
@@ -249,9 +250,8 @@ authRoutes.openapi(signupRoute, async (c): Promise<any> => {
       if (existing.length > 0) {
         return c.json({ error: "Email already registered" }, 409);
       }
-    } catch (err: any) {
-      console.error("[auth/signup] User lookup failed:", err);
-      return c.json({ error: "Database query failed", detail: err.message }, 500);
+    } catch (err) {
+      return c.json(failSafe(err, "auth/signup:user-lookup"), 500);
     }
 
   // Validate AND consume invite code atomically BEFORE creating user/org.
@@ -288,9 +288,8 @@ authRoutes.openapi(signupRoute, async (c): Promise<any> => {
   let passwordHash: string;
   try {
     passwordHash = await hashPassword(password);
-  } catch (err: any) {
-    console.error("[auth/signup] Password hashing failed:", err);
-    return c.json({ error: "Password processing failed", detail: err.message }, 500);
+  } catch (err) {
+    return c.json(failSafe(err, "auth/signup:hash-password"), 500);
   }
   const nowEpoch = new Date().toISOString();
 
@@ -442,9 +441,8 @@ authRoutes.openapi(signupRoute, async (c): Promise<any> => {
         `;
       }
     });
-  } catch (err: any) {
-    console.error("[auth/signup] Transaction failed:", err);
-    return c.json({ error: "Failed to create account", detail: err.message }, 500);
+  } catch (err) {
+    return c.json(failSafe(err, "auth/signup:transaction", { userMessage: "We couldn't create your account right now. Please try again in a moment." }), 500);
   }
 
   const token = await createToken(c.env.AUTH_JWT_SECRET, userId, {
@@ -516,9 +514,8 @@ authRoutes.openapi(loginRoute, async (c): Promise<any> => {
     rows = await sql`
       SELECT user_id, email, name, password_hash FROM users WHERE email = ${email}
     `;
-  } catch (err: any) {
-    console.error("[auth/login] User lookup failed:", err);
-    return c.json({ error: "Database query failed", detail: err?.message || "Query failed" }, 500);
+  } catch (err) {
+    return c.json(failSafe(err, "auth/login:user-lookup"), 500);
   }
   if (rows.length === 0) {
     // Security event: login failed — unknown email

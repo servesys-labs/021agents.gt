@@ -10,6 +10,7 @@ import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { withOrgDb, withAdminDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
+import { failSafe } from "../lib/error-response";
 import {
   searchMarketplace,
   submitRating,
@@ -193,8 +194,8 @@ marketplaceRoutes.openapi(publishRoute, async (c): Promise<any> => {
         agent_card_url: baseUrl + '/.well-known/agent.json?agent=' + body.agent_name,
         a2a_endpoint_url: baseUrl + '/a2a?org=' + user.org_id + '&agent=' + body.agent_name,
       });
-    } catch (err: any) {
-      return c.json({ error: err.message }, 500);
+    } catch (err) {
+      return c.json(failSafe(err, "marketplace/publish", { userMessage: "Couldn't publish the agent to the marketplace. Please try again in a moment." }), 500);
     }
   });
 });

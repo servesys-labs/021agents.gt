@@ -9,6 +9,7 @@ import { requireScope } from "../middleware/auth";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, AgentCreateBody, AgentTemplate, AgentSummary, errorResponses } from "../schemas/openapi";
 import { withOrgDb, type OrgSql } from "../db/client";
+import { failSafe } from "../lib/error-response";
 import { latestEvalGate, rolloutRecommendation } from "../logic/gate-pack";
 import { buildFromDescription, recommendTools, expandEvalConfig, generateEvolutionSuggestions, type EvalTestCase, type EvalRubric } from "../logic/meta-agent";
 import { runMetaChat, type MetaChatMessage } from "../logic/meta-agent-chat";
@@ -1123,9 +1124,7 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
         orgProfile: orgProfile as any,
       });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[create-from-description] LLM build failed: ${msg}`);
-      return c.json({ error: "Agent generation failed", detail: msg }, 500);
+      return c.json(failSafe(err, "agents/create-from-description", { userMessage: "Couldn't generate the agent from that description. Please try rephrasing or contact support." }), 500);
     }
 
     if (req.name) config.name = req.name;
@@ -1755,12 +1754,8 @@ agentRoutes.openapi(metaChatRoute, async (c): Promise<any> => {
       model: result.model,
       model_path: result.model_path || model_path || "auto",
     });
-  } catch (err: any) {
-    console.error(`[meta-chat] Error for agent ${agentName}:`, err);
-    return c.json(
-      { error: err.message || "Meta-agent chat failed" },
-      500,
-    );
+  } catch (err) {
+    return c.json(failSafe(err, "agents/meta-chat", { userMessage: "The agent-builder chat is temporarily unavailable. Please try again in a moment." }), 500);
   }
 });
 

@@ -11,6 +11,7 @@ import { hasCredits, deductCredits } from "../logic/credits";
 import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import type { CurrentUser } from "../auth/types";
+import { failSafe } from "../lib/error-response";
 
 export const runtimeProxyRoutes = createOpenAPIRouter();
 
@@ -345,8 +346,8 @@ runtimeProxyRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
     }
 
     return c.json(result, resp.status as 200 | 400 | 401 | 403 | 404 | 500 | 502 | 503);
-  } catch (err: any) {
-    return c.json({ error: `Runtime execution failed: ${err.message || err}` }, 502);
+  } catch (err) {
+    return c.json(failSafe(err, "runtime-proxy/agent/run", { userMessage: "The runtime is temporarily unavailable. Please try again in a moment." }), 502);
   }
 });
 
@@ -970,8 +971,8 @@ runtimeProxyRoutes.post("/agent/run/queued", requireScope("agents:write"), async
       }));
       const data = await resp.json();
       return c.json(data, resp.status as any);
-    } catch (err: any) {
-      return c.json({ error: err.message }, 503);
+    } catch (err) {
+      return c.json(failSafe(err, "runtime-proxy/agent/run:direct", { userMessage: "The runtime is temporarily unavailable. Please try again in a moment." }), 503);
     }
   }
 
@@ -996,7 +997,16 @@ runtimeProxyRoutes.post("/agent/run/queued", requireScope("agents:write"), async
       setTimeout(() => reject(new Error("Queue timeout")), QUEUE_TIMEOUT_MS)
     ),
   ]).catch((err: any) => {
-    return { error: err.message, queued_position: position };
+    console.error(`[runtime-proxy/queue] queued request failed at position ${position}:`, err);
+    // Queue timeout is the only expected error here; everything else is
+    // a runtime problem users can't act on. Return a user-friendly message.
+    const isTimeout = err instanceof Error && /timeout/i.test(err.message);
+    return {
+      error: isTimeout
+        ? "The runtime is overloaded and your request couldn't be served within the queue window. Please try again in a moment."
+        : "The runtime is temporarily unavailable. Please try again in a moment.",
+      queued_position: position,
+    };
   });
 
   return c.json(result as any);

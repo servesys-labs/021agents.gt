@@ -2432,7 +2432,8 @@ async function setupEmailRouting(env: any, email: string, agentName: string): Pr
   const cfAccountId = env.CLOUDFLARE_ACCOUNT_ID || "";
 
   if (!cfApiToken || !cfAccountId) {
-    return { status: "error", message: "Cloudflare API not configured" };
+    console.error("[chat-platforms/email-routing] Cloudflare API credentials missing");
+    return { status: "error", message: "Email routing is not set up on this environment. Contact support." };
   }
 
   try {
@@ -2478,8 +2479,9 @@ async function setupEmailRouting(env: any, email: string, agentName: string): Pr
         { type: "TXT", name: domain, content: "v=spf1 include:_spf.mx.cloudflare.net ~all" },
       ],
     };
-  } catch (err: any) {
-    return { status: "error", message: err.message };
+  } catch (err) {
+    console.error("[chat-platforms/email-routing/setup] CF API call failed:", err);
+    return { status: "error", message: "Email routing setup is temporarily unavailable. Please try again in a moment." };
   }
 }
 
@@ -2489,7 +2491,8 @@ async function removeEmailRouting(env: any, email: string): Promise<Record<strin
   const cfAccountId = env.CLOUDFLARE_ACCOUNT_ID || "";
 
   if (!cfApiToken || !cfAccountId) {
-    return { status: "error", message: "Cloudflare API not configured" };
+    console.error("[chat-platforms/email-routing] Cloudflare API credentials missing");
+    return { status: "error", message: "Email routing is not set up on this environment. Contact support." };
   }
 
   try {
@@ -2522,9 +2525,11 @@ async function removeEmailRouting(env: any, email: string): Promise<Record<strin
     const delData = (await delResp.json()) as any;
 
     if (delData.success) return { status: "removed", message: `Routing rule for ${email} removed` };
-    return { status: "error", message: delData.errors?.[0]?.message || "Failed to remove rule" };
-  } catch (err: any) {
-    return { status: "error", message: err.message };
+    console.error("[chat-platforms/email-routing/remove] CF returned error:", delData.errors);
+    return { status: "error", message: "Failed to remove the email routing rule. Please try again." };
+  } catch (err) {
+    console.error("[chat-platforms/email-routing/remove] CF API call failed:", err);
+    return { status: "error", message: "Email routing removal is temporarily unavailable. Please try again in a moment." };
   }
 }
 

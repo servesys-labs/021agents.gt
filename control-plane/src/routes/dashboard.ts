@@ -6,6 +6,7 @@ import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
+import { failSafe } from "../lib/error-response";
 
 export const dashboardRoutes = createOpenAPIRouter();
 
@@ -295,7 +296,7 @@ dashboardRoutes.get("/stats/by-agent", requireScope("observability:read"), async
       `;
       return c.json({ agents: rows });
     } catch (err) {
-      return c.json({ agents: [], error: String(err) });
+      return c.json({ agents: [], ...failSafe(err, "dashboard/stats/by-agent") });
     }
   });
 });
@@ -323,7 +324,7 @@ dashboardRoutes.get("/stats/by-model", requireScope("observability:read"), async
       `;
       return c.json({ models: rows });
     } catch (err) {
-      return c.json({ models: [], error: String(err) });
+      return c.json({ models: [], ...failSafe(err, "dashboard/stats/by-model") });
     }
   });
 });
@@ -362,7 +363,7 @@ dashboardRoutes.get("/stats/tool-health", requireScope("observability:read"), as
       `;
       return c.json({ tools: rows });
     } catch (err) {
-      return c.json({ tools: [], error: String(err) });
+      return c.json({ tools: [], ...failSafe(err, "dashboard/stats/tool-health") });
     }
   });
 });
@@ -392,7 +393,7 @@ dashboardRoutes.get("/stats/routing", requireScope("observability:read"), async 
       `;
       return c.json({ routing: rows });
     } catch (err) {
-      return c.json({ routing: [], error: String(err) });
+      return c.json({ routing: [], ...failSafe(err, "dashboard/stats/routing") });
     }
   });
 });
@@ -419,7 +420,7 @@ dashboardRoutes.get("/stats/trends", requireScope("observability:read"), async (
       `;
       return c.json({ trends: rows, period_days: period });
     } catch (err) {
-      return c.json({ trends: [], error: String(err) });
+      return c.json({ trends: [], ...failSafe(err, "dashboard/stats/trends") });
     }
   });
 });

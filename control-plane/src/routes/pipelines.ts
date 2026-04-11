@@ -12,6 +12,7 @@ import type { Env } from "../env";
 import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { parseJsonColumn } from "../lib/parse-json-column";
+import { failSafe } from "../lib/error-response";
 
 export const pipelineRoutes = createOpenAPIRouter();
 
@@ -257,8 +258,8 @@ pipelineRoutes.openapi(sendToStreamRoute, async (c): Promise<any> => {
           return c.json({ error: `Ingest failed: ${resp.status}` }, 502);
         }
         return c.json({ sent: true, count: events.length });
-      } catch (err: unknown) {
-        return c.json({ error: `Ingest error: ${err instanceof Error ? err.message : String(err)}` }, 502);
+      } catch (err) {
+        return c.json(failSafe(err, "pipelines/ingest", { userMessage: "Ingest is temporarily unavailable. Please try again in a moment." }), 502);
       }
     }
 
@@ -268,8 +269,8 @@ pipelineRoutes.openapi(sendToStreamRoute, async (c): Promise<any> => {
       const data = events.map((e: unknown) => JSON.stringify(e)).join("\n");
       await c.env.STORAGE.put(key, data);
       return c.json({ sent: true, count: events.length, storage: "r2", key });
-    } catch (err: unknown) {
-      return c.json({ error: `Storage error: ${err instanceof Error ? err.message : String(err)}` }, 500);
+    } catch (err) {
+      return c.json(failSafe(err, "pipelines/storage-fallback", { userMessage: "Event storage is temporarily unavailable. Please try again in a moment." }), 500);
     }
   });
 });
@@ -862,10 +863,8 @@ pipelineRoutes.openapi(queryPipelineRoute, async (c): Promise<any> => {
       total: records.length,
       query: querySql,
     });
-  } catch (err: unknown) {
-    return c.json({
-      error: `Query failed: ${err instanceof Error ? err.message : String(err)}`,
-    }, 500);
+  } catch (err) {
+    return c.json(failSafe(err, "pipelines/query", { userMessage: "The pipeline query couldn't complete. Check the query syntax and try again." }), 500);
   }
   });
 });
@@ -935,11 +934,14 @@ pipelineRoutes.openapi(deployPipelineRoute, async (c): Promise<any> => {
       UPDATE pipelines SET status = 'draft', updated_at = ${nowEpoch()}
       WHERE id = ${pipelineId}
     `;
+    // Operators see the underlying reason in the logs; API consumers only
+    // see a generic "deployment pending" so we don't leak CLI instructions.
+    console.error(`[pipelines/deploy] CF Pipelines API unavailable, marking pipeline ${pipelineId} as draft: ${result.error}`);
     return c.json({
       deployed: false,
       id: pipelineId,
-      note: "CF Pipelines API unavailable. Deploy manually via wrangler CLI.",
-      error: result.error,
+      status: "draft",
+      note: "Pipeline deployment is pending. Contact support if this persists.",
     }, 202);
   });
 });

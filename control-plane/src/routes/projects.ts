@@ -157,9 +157,11 @@ projectRoutes.openapi(createProjectRoute, async (c): Promise<any> => {
     } else {
       metaAgent = { name: agentName, created: false };
     }
-  } catch (err: any) {
-    console.error("[projects] Meta-agent bootstrap failed:", err?.message || err);
-    metaAgent = { name: "", created: false, error: String(err?.message || "bootstrap_failed").slice(0, 200) };
+  } catch (err) {
+    console.error("[projects] Meta-agent bootstrap failed:", err);
+    // Don't leak the raw error message — the meta-agent row is optional
+    // and the user can keep using the project without it.
+    metaAgent = { name: "", created: false, error: "bootstrap_failed" };
   }
 
   // Audit

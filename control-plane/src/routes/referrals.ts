@@ -14,6 +14,7 @@ import { errorResponses } from "../schemas/openapi";
 import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { createReferralCode, applyReferralCode, getReferralStats } from "../logic/referrals";
+import { failSafe } from "../lib/error-response";
 
 export const referralRoutes = createOpenAPIRouter();
 
@@ -71,8 +72,16 @@ referralRoutes.openapi(createCodeRoute, async (c): Promise<any> => {
         max_uses: maxUses,
         share_url: `https://app.021agents.ai/login?ref=${encodeURIComponent(result.code)}`,
       });
-    } catch (err: any) {
-      return c.json({ error: err.message?.includes("duplicate") ? "Code already exists" : err.message }, 400);
+    } catch (err) {
+      // Duplicate key is the only error we can safely attribute to user
+      // input here. Everything else (constraint violations, disconnects,
+      // encoding errors) goes through failSafe so raw PG strings don't
+      // land in the portal toast.
+      const errStr = err instanceof Error ? err.message : String(err);
+      if (errStr.toLowerCase().includes("duplicate")) {
+        return c.json({ error: "Code already exists. Pick a different one." }, 400);
+      }
+      return c.json(failSafe(err, "referrals/create-code", { userMessage: "Couldn't create that referral code. Please try a different label." }), 400);
     }
   });
 });
