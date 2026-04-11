@@ -4,6 +4,12 @@ export interface QueryIntentProfile {
   max_tools_exposed: number;
   max_tokens_per_turn: number;
   include_deferred_tool_index: boolean;
+  use_minimal_system_context: boolean;
+  include_team_memory: boolean;
+  include_channel_guidelines: boolean;
+  include_reasoning_prompts: boolean;
+  max_tool_result_chars: number;
+  max_turn_result_chars: number;
 }
 
 export interface QueryRouteLike {
@@ -33,6 +39,12 @@ export function buildQueryIntentProfile(
       max_tools_exposed: explicitToolIntent ? 10 : 6,
       max_tokens_per_turn: explicitToolIntent ? 1000 : 700,
       include_deferred_tool_index: false,
+      use_minimal_system_context: true,
+      include_team_memory: false,
+      include_channel_guidelines: false,
+      include_reasoning_prompts: false,
+      max_tool_result_chars: explicitToolIntent ? 3500 : 1800,
+      max_turn_result_chars: explicitToolIntent ? 8000 : 4000,
     };
   }
 
@@ -43,6 +55,12 @@ export function buildQueryIntentProfile(
       max_tools_exposed: 24,
       max_tokens_per_turn: complexity === "complex" ? 3200 : 2400,
       include_deferred_tool_index: true,
+      use_minimal_system_context: false,
+      include_team_memory: true,
+      include_channel_guidelines: true,
+      include_reasoning_prompts: true,
+      max_tool_result_chars: 30000,
+      max_turn_result_chars: 200000,
     };
   }
 
@@ -53,6 +71,12 @@ export function buildQueryIntentProfile(
       max_tools_exposed: 20,
       max_tokens_per_turn: role === "planner" ? 1800 : 2600,
       include_deferred_tool_index: true,
+      use_minimal_system_context: role === "planner",
+      include_team_memory: role !== "planner",
+      include_channel_guidelines: true,
+      include_reasoning_prompts: role !== "planner",
+      max_tool_result_chars: role === "planner" ? 12000 : 25000,
+      max_turn_result_chars: role === "planner" ? 60000 : 180000,
     };
   }
 
@@ -62,6 +86,12 @@ export function buildQueryIntentProfile(
     max_tools_exposed: 16,
     max_tokens_per_turn: 1800,
     include_deferred_tool_index: true,
+    use_minimal_system_context: false,
+    include_team_memory: true,
+    include_channel_guidelines: true,
+    include_reasoning_prompts: true,
+    max_tool_result_chars: 20000,
+    max_turn_result_chars: 140000,
   };
 }
 

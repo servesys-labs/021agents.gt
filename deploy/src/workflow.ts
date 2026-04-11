@@ -348,6 +348,11 @@ const COMPACT_BEHAVIORAL_RULES = `## Behavioral Rules
 ### Communication
 - Lead with results, keep wording concise, and include file paths when relevant.`;
 
+const MINIMAL_BEHAVIORAL_RULES = `## Minimal Rules
+- Answer directly and concisely.
+- Use tools only when needed to complete the request.
+- Avoid long preambles, plans, or repeated context.`;
+
 // ── Workflow ─────────────────────────────────────────────────
 
 export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
@@ -633,6 +638,21 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       role: msg.role,
       content: sanitizeUnicode(msg.content),
     }));
+    const { resolvePlanRouting } = await memo("db", () => import("./runtime/db"));
+    const routerMod = await memo("router", () => import("./runtime/router"));
+    const planRouting = resolvePlanRouting(config.plan, config.routing as any);
+    const selectedRoute = await routerMod.selectModel(
+      p.input,
+      planRouting as any,
+      config.model,
+      config.provider,
+      {
+        ...(this.env as any),
+        __orgId: p.org_id || "",
+        __agentConfig: { org_id: p.org_id || "", agent_name: p.agent_name || "" },
+      } as any,
+    );
+    const queryProfile = buildQueryIntentProfile(selectedRoute as any, safeInput);
 
     // ── Phase 0 Security: Validate system prompt override ──
     // Size check runs AFTER sanitization so zero-width padding can't bypass the limit
@@ -656,12 +676,16 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     // after this block and changes per turn.
     // ── STATIC SECTION (single cacheable message) ──
     const staticParts: string[] = [];
-    if (effectiveSystemPrompt) {
+    if (effectiveSystemPrompt && !queryProfile.use_minimal_system_context) {
       staticParts.push(effectiveSystemPrompt);
     }
 
-    // Prompt diet: keep core guardrails but reduce static-token overhead.
-    staticParts.push(COMPACT_BEHAVIORAL_RULES);
+    // Prompt diet: simple/tool queries use a minimal static scaffold.
+    staticParts.push(
+      queryProfile.use_minimal_system_context
+        ? MINIMAL_BEHAVIORAL_RULES
+        : COMPACT_BEHAVIORAL_RULES,
+    );
 
     // Push the entire static block as ONE system message for optimal prompt caching
     messages.push({ role: "system", content: staticParts.join("\n\n") });
@@ -669,7 +693,9 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     // ── Team Memory: inject shared org knowledge ──
     try {
       const { buildTeamMemoryContext } = await memo("team-memory", () => import("./runtime/team-memory"));
-      const teamContext = await buildTeamMemoryContext(this.env as any, p.org_id, p.agent_name, 1500);
+      const teamContext = queryProfile.include_team_memory
+        ? await buildTeamMemoryContext(this.env as any, p.org_id, p.agent_name, 900)
+        : "";
       if (teamContext) {
         messages.push({ role: "system", content: teamContext });
       }
@@ -678,7 +704,10 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     // ── DYNAMIC SECTION (changes per turn — not cached) ──
 
     // Runtime context injection (like Claude Code's environment info)
-    messages.push({ role: "system", content: `## Environment
+    messages.push({ role: "system", content: queryProfile.use_minimal_system_context ? `## Environment
+- Agent: ${p.agent_name}
+- Session: ${sessionId}
+- Date: ${new Date().toISOString().slice(0, 10)}` : `## Environment
 - Agent: ${p.agent_name}
 - Model: ${config.model}
 - Plan: ${config.plan}
@@ -771,14 +800,14 @@ ALWAYS:
 
     const channel = (p.channel || "web").toLowerCase();
     const channelGuide = channelGuidelines[channel];
-    if (channelGuide) {
+    if (channelGuide && queryProfile.include_channel_guidelines) {
       messages.push({ role: "system", content: channelGuide });
     }
 
-    if (bootstrap.reasoning_prompt) {
+    if (bootstrap.reasoning_prompt && queryProfile.include_reasoning_prompts) {
       messages.push({ role: "system", content: bootstrap.reasoning_prompt });
     }
-    if (bootstrap.coordinator_prompt) {
+    if (bootstrap.coordinator_prompt && queryProfile.include_reasoning_prompts) {
       messages.push({ role: "system", content: bootstrap.coordinator_prompt });
     }
     for (const msg of safeHistory) {
@@ -919,22 +948,7 @@ ALWAYS:
 
     // Whether governance_pass has been emitted for this run (fires once at turn 1).
     let governanceEmitted = false;
-    // Route/model selection is stable for this run input; compute once.
-    const { resolvePlanRouting } = await memo("db", () => import("./runtime/db"));
-    const routerMod = await memo("router", () => import("./runtime/router"));
-    const planRouting = resolvePlanRouting(config.plan, config.routing as any);
-    const selectedRoute = await routerMod.selectModel(
-      p.input,
-      planRouting as any,
-      config.model,
-      config.provider,
-      {
-        ...(this.env as any),
-        __orgId: p.org_id || "",
-        __agentConfig: { org_id: p.org_id || "", agent_name: p.agent_name || "" },
-      } as any,
-    );
-    const queryProfile = buildQueryIntentProfile(selectedRoute as any, safeInput);
+    // Route/model selection and query profile are computed once above.
     const historyBudgeted = applyHistoryBudget(messages as any, queryProfile.max_history_messages);
     messages = historyBudgeted.messages as any;
     logger.info("query_profile_applied", {
@@ -1654,9 +1668,9 @@ ALWAYS:
       applyResultBackpressure(toolResultEntries);
 
       // ── Phase 2.1: Tool result size management ──
-      // Per-tool cap: 30K chars. Per-turn aggregate cap: 200K chars.
-      const MAX_RESULT_CHARS = 30_000;
-      const MAX_TURN_RESULT_CHARS = 200_000;
+      // Per-tool and per-turn caps are profile-aware for token control.
+      const MAX_RESULT_CHARS = Math.max(1200, queryProfile.max_tool_result_chars || 30_000);
+      const MAX_TURN_RESULT_CHARS = Math.max(MAX_RESULT_CHARS, queryProfile.max_turn_result_chars || 200_000);
       let turnResultChars = 0;
       for (const tr of toolResultEntries) {
         if (tr.result && tr.result.length > MAX_RESULT_CHARS) {
@@ -1678,7 +1692,7 @@ ALWAYS:
         const tr = toolResultEntries[i];
         await this.emit(p.progress_key, {
           type: "tool_result", name: tr.name, tool_call_id: tr.tool_call_id,
-          result: (tr.result || "").slice(0, 10000),
+          result: (tr.result || "").slice(0, Math.min(10_000, MAX_RESULT_CHARS)),
           error: tr.error, latency_ms: tr.latency_ms,
           cost_usd: tr.cost_usd || 0,
         });

@@ -22,6 +22,8 @@ describe("query profile routing behavior", () => {
     expect(profile.max_tools_exposed).toBe(6);
     expect(profile.max_tokens_per_turn).toBe(700);
     expect(profile.include_deferred_tool_index).toBe(false);
+    expect(profile.use_minimal_system_context).toBe(true);
+    expect(profile.max_tool_result_chars).toBe(1800);
   });
 
   it("uses tool-friendly simple profile when prompt asks for actions", () => {
@@ -32,6 +34,8 @@ describe("query profile routing behavior", () => {
     expect(profile.key).toBe("general_simple_tool");
     expect(profile.max_history_messages).toBe(10);
     expect(profile.max_tools_exposed).toBe(10);
+    expect(profile.use_minimal_system_context).toBe(true);
+    expect(profile.max_tool_result_chars).toBe(3500);
   });
 
   it("uses expanded profile for complex research", () => {
@@ -43,6 +47,8 @@ describe("query profile routing behavior", () => {
     expect(profile.max_history_messages).toBe(28);
     expect(profile.max_tools_exposed).toBe(24);
     expect(profile.max_tokens_per_turn).toBe(3200);
+    expect(profile.include_team_memory).toBe(true);
+    expect(profile.max_turn_result_chars).toBe(200000);
   });
 
   it("preserves system messages while trimming older history", () => {
