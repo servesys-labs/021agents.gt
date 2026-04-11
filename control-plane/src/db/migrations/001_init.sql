@@ -1269,6 +1269,51 @@ CREATE TABLE IF NOT EXISTS skills (
   UNIQUE (org_id, name)
 );
 
+-- Phase 6 (002_skill_learning.sql inlined) — overlays layer learned rules on
+-- top of BUILTIN (disk-based) SKILL.md at load time. Kept separate from the
+-- `skills` table so row semantics stay single-purpose and the shadow bug in
+-- formatSkillsPrompt (duplicate emit when a DB row shares a BUILTIN name)
+-- can't be triggered by overlays.
+CREATE TABLE IF NOT EXISTS skill_overlays (
+  overlay_id  TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  org_id      TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+  agent_name  TEXT NOT NULL DEFAULT '',
+  skill_name  TEXT NOT NULL,
+  rule_text   TEXT NOT NULL,
+  source      TEXT NOT NULL DEFAULT 'improve',
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_skill_overlays_lookup
+  ON skill_overlays(org_id, agent_name, skill_name);
+
+-- Append-only mutation log. Every skill_overlays insert (or revert) writes a
+-- row here. before_content/after_content hold the full skill body before and
+-- after the mutation; before_sha/after_sha are integrity cross-checks — the
+-- revert endpoint MUST assert sha256(before_content) === before_sha before
+-- restoring, and refuse if the row was tampered with.
+CREATE TABLE IF NOT EXISTS skill_audit (
+  audit_id        TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  org_id          TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+  skill_name      TEXT NOT NULL,
+  agent_name      TEXT NOT NULL DEFAULT '',
+  -- Nullable pointer at the overlay row this audit entry describes. Forward
+  -- mutations (append_rule) populate it; revert audit rows leave it NULL.
+  overlay_id      TEXT REFERENCES skill_overlays(overlay_id) ON DELETE SET NULL,
+  before_sha      TEXT NOT NULL,
+  after_sha       TEXT NOT NULL,
+  before_content  TEXT NOT NULL,
+  after_content   TEXT NOT NULL,
+  reason          TEXT NOT NULL DEFAULT '',
+  source          TEXT NOT NULL DEFAULT 'improve',
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_skill_audit_history
+  ON skill_audit(org_id, skill_name, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_skill_audit_ratelimit
+  ON skill_audit(skill_name, created_at);
+
 CREATE TABLE IF NOT EXISTS tool_registry (
   id             TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
   org_id         TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
@@ -2955,6 +3000,18 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 ALTER TABLE skills ENABLE ROW LEVEL SECURITY;
 ALTER TABLE skills FORCE ROW LEVEL SECURITY;
 DO $$ BEGIN CREATE POLICY skills_org_isolation ON skills
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE skill_overlays ENABLE ROW LEVEL SECURITY;
+ALTER TABLE skill_overlays FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY skill_overlays_org_isolation ON skill_overlays
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE skill_audit ENABLE ROW LEVEL SECURITY;
+ALTER TABLE skill_audit FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY skill_audit_org_isolation ON skill_audit
   FOR ALL USING (org_id = current_org_id());
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
