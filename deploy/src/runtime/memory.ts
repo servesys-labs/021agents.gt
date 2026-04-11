@@ -278,6 +278,104 @@ export async function storeProcedure(
   }
 }
 
+/**
+ * Export high-confidence procedures as human-readable markdown.
+ * Used for publishing procedural memory into workspace docs.
+ */
+export async function exportProceduresMarkdown(
+  hyperdrive: Hyperdrive,
+  opts: { agent_name: string; org_id: string; limit?: number },
+): Promise<{ markdown: string; count: number }> {
+  const { getDb } = await import("./db");
+  const sql = await getDb(hyperdrive);
+  const limit = Math.max(1, Math.min(Number(opts.limit) || 50, 200));
+  let rows: any[] = [];
+  try {
+    // Newer schema shape
+    rows = await sql`
+      SELECT
+        name,
+        description,
+        steps,
+        tool_sequence,
+        success_rate,
+        usage_count,
+        success_count,
+        failure_count,
+        updated_at,
+        last_used
+      FROM procedures
+      WHERE agent_name = ${opts.agent_name}
+        AND org_id = ${opts.org_id}
+      ORDER BY updated_at DESC
+      LIMIT ${limit}
+    `;
+  } catch {
+    try {
+      // Backward-compatible fallback query
+      rows = await sql`
+        SELECT name, description, steps, success_count, failure_count, last_used
+        FROM procedures
+        WHERE agent_name = ${opts.agent_name}
+        ORDER BY last_used DESC
+        LIMIT ${limit}
+      `;
+    } catch {
+      return { markdown: "", count: 0 };
+    }
+  }
+  if (!rows.length) return { markdown: "", count: 0 };
+
+  const renderSteps = (row: any): string[] => {
+    let arr: any[] = [];
+    const candidates = [row.steps, row.tool_sequence];
+    for (const raw of candidates) {
+      try {
+        const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          arr = parsed;
+          break;
+        }
+      } catch {}
+    }
+    if (!Array.isArray(arr) || arr.length === 0) return [];
+    return arr.slice(0, 12).map((step: any, i: number) => {
+      const tool = String(step?.tool || step?.name || step || "").trim();
+      const args = String(step?.args_summary || step?.args || "").trim();
+      return `${i + 1}. ${tool || "step"}${args ? ` — ${args}` : ""}`;
+    });
+  };
+
+  const out: string[] = [];
+  out.push(`# PROCEDURES (procedural memory)`);
+  out.push("");
+  out.push(`Generated: ${new Date().toISOString()}`);
+  out.push(`Agent: ${opts.agent_name}`);
+  out.push("");
+
+  for (const r of rows) {
+    const sc = Number(r.success_count || 0);
+    const fc = Number(r.failure_count || 0);
+    const sr = Number.isFinite(Number(r.success_rate))
+      ? Number(r.success_rate)
+      : sc / Math.max(1, sc + fc);
+    const usage = Number(r.usage_count || sc + fc || 0);
+    const steps = renderSteps(r);
+    out.push(`## ${String(r.name || "Unnamed procedure")}`);
+    out.push(`- Success rate: ${Math.round(sr * 100)}%`);
+    out.push(`- Usage: ${usage}`);
+    if (r.description) out.push(`- Notes: ${String(r.description).trim()}`);
+    if (steps.length > 0) {
+      out.push("");
+      out.push(`### Steps`);
+      out.push(...steps);
+    }
+    out.push("");
+  }
+
+  return { markdown: out.join("\n").trim() + "\n", count: rows.length };
+}
+
 // ── Semantic Memory (facts, Vectorize + Supabase) ─────────────
 
 interface MemoryFact {

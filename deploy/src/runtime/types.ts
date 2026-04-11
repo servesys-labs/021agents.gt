@@ -226,6 +226,12 @@ export interface RuntimeEnv {
   AI_GATEWAY_ID?: string;        // CF AI Gateway slug (e.g. "one-shots")
   AI_GATEWAY_TOKEN?: string;     // Gateway auth token (all providers, no BYOK needed)
   GPU_SERVICE_KEY?: string;      // Auth key for GPU box auth proxy (X-Service-Key)
+  /** Feature flag to enable optional external memory provider scaffold. */
+  EXTERNAL_MEMORY_PROVIDER_ENABLED?: string;
+  /** Base URL for external memory provider (e.g. https://memory.example.com). */
+  EXTERNAL_MEMORY_PROVIDER_URL?: string;
+  /** Optional bearer token for external memory provider auth. */
+  EXTERNAL_MEMORY_PROVIDER_API_KEY?: string;
   DEFAULT_PROVIDER: string;
   DEFAULT_MODEL: string;
   /** DO SQLite tagged template — passed from DO context for hibernation-safe file persistence. */
