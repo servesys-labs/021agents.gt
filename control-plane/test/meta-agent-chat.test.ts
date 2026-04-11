@@ -768,6 +768,70 @@ describe("consolidated schema — feature_flags, agent_versions, skills", () => 
 });
 
 // ══════════════════════════════════════════════════════════════════
+// 15. PHASE 6 — skill_overlays + skill_audit (learning loop migration)
+// ══════════════════════════════════════════════════════════════════
+
+describe("002_skill_learning — overlays + audit migration", () => {
+  // Deploy pattern: 002_skill_learning.sql is the standalone rollback unit
+  // (revertable with git revert + DROP TABLE), and the same DDL is inlined
+  // into 001_init.sql so deploys that only apply the consolidated schema
+  // still provision the tables. Both files MUST declare the same shape —
+  // these assertions run against both to keep them in sync.
+  const paths = [
+    "src/db/migrations/002_skill_learning.sql",
+    "src/db/migrations/001_init.sql",
+  ];
+
+  it("standalone migration file exists", async () => {
+    const fs = await import("fs");
+    expect(fs.existsSync(paths[0])).toBe(true);
+  });
+
+  it.each(paths)("%s declares skill_overlays with org FK and lookup index", async (path) => {
+    const fs = await import("fs");
+    const content = fs.readFileSync(path, "utf8");
+    expect(content).toContain("CREATE TABLE IF NOT EXISTS skill_overlays");
+    expect(content).toContain("rule_text");
+    expect(content).toContain("idx_skill_overlays_lookup");
+  });
+
+  it.each(paths)("%s declares skill_audit with both before_content and after_content", async (path) => {
+    const fs = await import("fs");
+    const content = fs.readFileSync(path, "utf8");
+    expect(content).toContain("CREATE TABLE IF NOT EXISTS skill_audit");
+    expect(content).toContain("before_sha");
+    expect(content).toContain("after_sha");
+    expect(content).toContain("before_content");
+    expect(content).toContain("after_content");
+  });
+
+  it.each(paths)("%s wires skill_audit.overlay_id → skill_overlays(overlay_id)", async (path) => {
+    const fs = await import("fs");
+    const content = fs.readFileSync(path, "utf8");
+    expect(content).toContain("overlay_id      TEXT REFERENCES skill_overlays(overlay_id) ON DELETE SET NULL");
+  });
+
+  it.each(paths)("%s declares rate-limit index on skill_audit(skill_name, created_at)", async (path) => {
+    const fs = await import("fs");
+    const content = fs.readFileSync(path, "utf8");
+    expect(content).toContain("idx_skill_audit_ratelimit");
+    expect(content).toMatch(/idx_skill_audit_ratelimit[\s\S]*skill_name[\s\S]*created_at/);
+  });
+
+  it.each(paths)("%s enables RLS with org_isolation policy on both tables", async (path) => {
+    const fs = await import("fs");
+    const content = fs.readFileSync(path, "utf8");
+    expect(content).toContain("ALTER TABLE skill_overlays ENABLE ROW LEVEL SECURITY");
+    expect(content).toContain("ALTER TABLE skill_overlays FORCE ROW LEVEL SECURITY");
+    expect(content).toContain("skill_overlays_org_isolation");
+    expect(content).toContain("ALTER TABLE skill_audit ENABLE ROW LEVEL SECURITY");
+    expect(content).toContain("ALTER TABLE skill_audit FORCE ROW LEVEL SECURITY");
+    expect(content).toContain("skill_audit_org_isolation");
+    expect(content).toContain("current_org_id()");
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
 // 12. PHASE 5 — enabled_skills validation + catalog wiring
 // ══════════════════════════════════════════════════════════════════
 //
