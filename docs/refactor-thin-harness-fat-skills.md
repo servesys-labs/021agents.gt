@@ -4,27 +4,45 @@ A comprehensive phased refactor to invert this repo from "fat harness, thin skil
 
 ## ▶︎ Resume here (2026-04-11)
 
-**Status:** Phases 0, 1, 2, 3 ✅ done. **Resume at Phase 4.**
+**Status:** Phases 0, 1, 2, 3, 4 ✅ done. **Resume at Phase 5.**
 
-**What was done (Phase 3):**
-- All 16 remaining `BUILTIN_SKILLS` inline literals extracted to `skills/public/<name>/SKILL.md`, one commit per skill: `batch, review, debug, verify, schedule, research, report, design, chart, pdf, spreadsheet, analyze, website, game, docx, pptx`.
-- `skills.ts` collapsed from 3,403 → **176** LoC. `BUILTIN_SKILLS` is now a derived array: a `BUILTIN_SKILL_ORDER` name list mapped through `BUNDLED_SKILLS_BY_NAME`. Insertion order load-bearing — the Phase 0 prompt snapshot is byte-identical.
-- `loc_budget.json` ceiling for `skills.ts` bumped from 3,627 to **180** (fixture-bump commit).
-- 21 SKILL.md files on disk (19 built-in + 2 pre-existing `code-review`/`deep-research`).
-- The one-off extraction helper `deploy/scripts/extract-skills-oneoff.mjs` was deleted after completing the seed.
+**What was done (Phase 4 — the clean half):**
+- Added `enabled_skills?: string[]` to `AgentConfig` (`deploy/src/runtime/types.ts`). Default undefined/empty = backward compatible (all skills available). Non-empty = only the listed names reach the model.
+- `formatSkillsPrompt(skills, plan, enabled?)` filters the `[...BUILTIN_SKILLS, ...dbSkills]` merge by the agent's allowlist, AFTER the merge, so insertion order is preserved and the Phase 0 snapshot stays byte-identical when called with no third arg. Independently verified: basic/standard/premium outputs = 5227/4731/4731 chars, all identical to the committed baseline.
+- `getSkillPrompt(name, args, skills, enabled?)` enforces the allowlist at activation time. Activations of non-allowed skills return null, even if the model emits a fabricated `<activate-skill>` tag.
+- Call sites wired: `stream.ts:498` + `workflow.ts:1430` now pass `config.enabled_skills` through.
+- New test file `deploy/test/refactor-phase4.test.ts` with 11 cases covering backward-compat, filter, order preservation, unknown names, and the activation allowlist guard.
+- Deleted 3 session artifacts: `dispatch-test-bot.json`, `meta-playbook-v2-1774484582.json`, `meta-playbook-v3-1774484657.json`.
+- Deduped **5 skill-agents** that had direct 1:1 BUILTIN matches (pilot `pdf-specialist` + mechanical sweep): `research-analyst`, `data-analyst`, `document-generator`, `app-builder`, `deep-research`. Each version bumped 1.0.0 → 1.1.0. Net prompt-bytes removed: ~10k chars.
+- Deduped **2 root agents**: `code-reviewer` (→ `review`), `research-assistant` (→ `research, report`). Versions bumped 0.1.0 → 0.2.0.
+- **Hygiene PR** landed first (commit 2fbc2d4) to close the memory-feature follow-up: extract `sessionSearch` + `memoryHealth` + `curatedMemoryHandler` to `deploy/src/runtime/memory-tools.ts`, fail-closed 3 new cross-tenant `org_id` fallback sites, ratchet `tools.ts` ceiling 7917 → 7801, ratchet `skills.ts` ceiling 183 → 180, add 16 unit tests for `scanMemoryContent` + the fail-closed org_id guards, delete `CLEANUP_REVIEW.md` + `data/demo-codemap.json`, gitignore `data/autoresearch/*/results.tsv`, strip orphan "Ported from agentos/..." lineage comments, rename `ceilings_chars` → `ceilings_code_units` in the prompt-budget fixture.
+
+**What was NOT done in Phase 4 (deliberately deferred):**
+- 13 domain-unique skill-agents (`calendar-manager`, `email-drafter`, `expense-tracker`, `fitness-coach`, `flight-search`, `legal-assistant`, `meal-planner`, `news-briefing`, `shopping-assistant`, `smart-home`, `social-media-manager`, `translator`, `travel-planner`) still have inlined prose. No BUILTIN skill matches their domain, so deduping them would require **creating new SKILL.md files first** — that's Phase 5 or a parallel "skill library expansion" PR. Their config is untouched, they remain fully functional.
+- `orchestrator.json` (10,206 chars), `coordinator.json`, `customer-support.json`, `my-assistant.json`, `personal-assistant.json` (programmatically generated) — none have clean BUILTIN matches. Phase 7 slims the meta-agent prompt separately.
 
 **Validation at handoff:**
-- Deploy tests: 414/414 green
-- oneshots CLI: `tsc --noEmit` clean, smoke 3/3
-- Phase 0 drift guards: 10/10 green (golden hashes, snapshots, LoC budget all tight)
-- Git: pushed to `origin/main` (commits `2ed0eb71` through `c3bae0e6`)
+- 19/19 skill hashes match (byte-identity preserved).
+- Phase 0 snapshot file untouched since `8e5710d` — formatSkillsPrompt output byte-identical for all 3 plan tiers, independently recomputed offline.
+- LoC budgets: `skills.ts` 175/180 (5-line headroom), `tools.ts` 7801/7801, `reasoning-strategies.ts` 223/223, `intent-router.ts` 246/246, `permission-classifier.ts` 140/140, `meta-agent-chat.ts` 30795/30795.
+- `deploy/test/memory-tools.test.ts`: 16 new tests (threat-scanner + fail-closed guards).
+- `deploy/test/refactor-phase4.test.ts`: 11 new tests (enabled_skills filter + allowlist).
+- Bundler regenerates manifest cleanly (git diff clean).
 
-**Pick up at Phase 4 — de-duplicate `agents/skill-agents/*.json`.** See the Phase 4 section below. The 20 specialist JSON configs currently inline their full skill bodies in `system_prompt`; replace each with a thin `enabled_skills: ["<name>"]` reference. Requires schema + DB migration + runtime wiring in `fast-agent.ts`.
+**Pick up at Phase 5 — meta-agent composes skills.** Two live entry points:
+1. **UI flow**: `control-plane/src/logic/meta-agent-chat.ts` (3,095 lines) with prompt from `control-plane/src/prompts/meta-agent-chat.ts` (30,795 code units, at ceiling).
+2. **CLI flow**: `cli/src/commands/create.ts` → `apiPost("/api/v1/agents", ...)` → control-plane.
+
+Both need to learn that `enabled_skills` exists on agent configs. Add a `SKILL_CATALOG_DOCS` resolver block to the meta-agent prompt (mirror the existing `TOOL_CATALOG_DOCS` / `RUNTIME_INFRASTRUCTURE_DOCS` deferred-loading pattern). When the meta-agent emits `create_sub_agent` or `update_agent_config`, the schema should accept `enabled_skills: string[]`; the control-plane should validate names against the bundled manifest before persisting.
+
+**Also for Phase 5 (parallel work):** extract domain SKILL.md files for the 13 skill-agents whose prose isn't in a BUILTIN skill yet. Candidates: `calendar-manage`, `email-draft`, `expense-track`, `fit-coach`, `flight-search`, `legal-draft`, `meal-plan`, `news-brief`, `shop-research`, `smart-home-control`, `social-post`, `translate`, `travel-plan`.
 
 **Before touching anything:**
-1. Run `cd deploy && pnpm test -- refactor-phase0` — must be 10/10 green.
+1. Run `cd deploy && pnpm test -- refactor-phase0 refactor-phase3 refactor-phase4 memory-tools` — must be green.
 2. Never modify the frontmatter schema or the bundler's trailing-newline trim logic — both are load-bearing for byte-identity.
-3. `BUILTIN_SKILLS` is still imported by `deploy/test/refactor-phase0.test.ts:35`. Do not rename or delete the export until Phase 4+ is done and the drift test is updated in lockstep.
+3. `BUILTIN_SKILLS` is still imported by `deploy/test/refactor-phase0.test.ts:35`. Do not rename or delete the export unless the drift test is updated in lockstep.
+4. `tools.ts` has **zero LoC headroom** at 7801. Any Phase 5 code that adds to `tools.ts` must extract something else first. Phase 8/9 are the right place for further reduction — if your change isn't Phase 8/9, put new code in a new file.
+5. `enabled_skills` defaults to "all" when empty/undefined. Don't change that default without a fixture bump.
 
 ---
 
