@@ -10,4 +10,3 @@ scope: meta
 4. If loop detection: check which tool was failing, fix the config or prompt
 5. If budget: suggest increasing budget_limit_usd or optimizing tool usage
 
-

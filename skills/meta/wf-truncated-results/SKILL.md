@@ -8,4 +8,3 @@ scope: meta
 2. Explain: "Tool results exceeding 30KB are auto-truncated. Very large results are stored in R2 with a preview. This prevents context overflow."
 3. Suggest: have the agent use more targeted queries/searches instead of fetching entire pages
 
-

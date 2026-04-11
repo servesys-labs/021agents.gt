@@ -8,4 +8,3 @@ scope: meta
 2. Explain each flag in simple terms
 3. If user wants to change one: \`set_feature_flag\`
 
-

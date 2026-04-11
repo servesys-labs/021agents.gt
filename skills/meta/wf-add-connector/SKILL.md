@@ -8,4 +8,3 @@ scope: meta
 2. Explain: "Added Slack connector. Your agent can now send/read messages via the mcp-call tool. OAuth will be prompted on first use."
 3. Ensure mcp-call is in the agent's tool list
 
-

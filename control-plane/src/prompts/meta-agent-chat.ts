@@ -39,9 +39,8 @@ const WORKFLOW_ORDER = [
 
 // Meta skills the prompt builder hard-depends on. Missing any of these
 // means the worker cannot produce a correct prompt, so fail loudly at
-// module-load rather than silently degrading at the first request. At
-// 17 entries this tuple is getting verbose — candidate for extraction
-// to a separate file in Phase 7.6/7.7 cleanup (not this commit).
+// module-load rather than silently degrading at the first request.
+// Extract to a sibling file when the next touch happens.
 const REQUIRED_META_SKILLS = [
   "mode-demo",
   "mode-live",
@@ -88,15 +87,14 @@ for (const name of REQUIRED_META_SKILLS) {
  */
 export function buildMetaAgentChatPrompt(agentName: string, mode: "demo" | "live" = "live"): string {
   const modeInstructions = META_SKILL_BODIES[`mode-${mode}`];
-  // Phase 7.4: common workflows are sourced from skills/meta/wf-*/SKILL.md
-  // and concatenated in WORKFLOW_ORDER. {{AGENT_NAME}} placeholders inside
-  // any workflow body (currently only wf-cost-analysis) are substituted
-  // here with the actual agentName — byte-identical to the pre-extraction
-  // template interpolation pattern, but parameterizable via markdown rather
-  // than TS template literals.
+  // Common workflows are sourced from skills/meta/wf-*/SKILL.md and
+  // concatenated in WORKFLOW_ORDER. Each body ends with a single \n;
+  // join("\n") produces the blank-line separator between subsections.
+  // {{AGENT_NAME}} is substituted with agentName so wf-cost-analysis
+  // can reference the agent in SQL queries without TS template literals.
   const workflowsBody = WORKFLOW_ORDER
     .map((k) => META_SKILL_BODIES[`wf-${k}`])
-    .join("")
+    .join("\n")
     .replace(/\{\{AGENT_NAME\}\}/g, agentName);
 
   return `You are the Agent Manager for "${agentName}" on the OneShots platform. You help the owner understand, configure, monitor, and improve their agent through conversation.
@@ -266,9 +264,4 @@ Configs auto-migrate to latest schema version at runtime. config_version field i
 
 ### Cost Tracking
 Per-turn check + pre-execution batch estimate. Tools skipped if estimated cost would exceed remaining budget.`;
-
-// Phase 7.3: DEMO_MODE_INSTRUCTIONS (→ skills/meta/mode-demo/) and
-// LIVE_MODE_INSTRUCTIONS (→ skills/meta/mode-live/) are both consumed
-// via META_SKILL_BODIES[`mode-${mode}`] at the pure lookup above,
-// guarded by the REQUIRED_META_SKILLS module-load assert.
 

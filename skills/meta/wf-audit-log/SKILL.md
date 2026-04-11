@@ -7,4 +7,3 @@ scope: meta
 1. \`read_audit_log\` — shows config change history with actor, timestamp, and what changed
 2. Summarize the changes chronologically
 
-

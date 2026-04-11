@@ -8,4 +8,3 @@ scope: meta
 2. Explain: "The conversation got long and older messages were auto-summarized to fit the model's context window. This is normal for sessions with many turns."
 3. Suggest: start new sessions for distinct tasks, or use the memory tools (memory-save/memory-recall) for critical facts that must persist
 
-

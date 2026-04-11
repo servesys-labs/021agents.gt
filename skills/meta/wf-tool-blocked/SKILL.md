@@ -8,4 +8,3 @@ scope: meta
 2. \`read_agent_config\` — check if the tool is in blocked_tools or missing from tools list
 3. Explain based on findings: circuit breaker tripped, tool not configured, or tool was deferred
 
-
