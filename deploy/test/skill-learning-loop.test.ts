@@ -88,6 +88,14 @@ function buildStatefulSql(orgId: string, agentName: string) {
   const sql: any = (strings: TemplateStringsArray, ...values: unknown[]) => {
     const query = strings.join("?").toLowerCase();
 
+    // Advisory lock — serialization primitive held until transaction commit,
+    // not a data query. Pass through so the mock doesn't throw on the
+    // Phase 6 race fix (skill-mutation.ts:168) that guards the rate-limit
+    // COUNT→INSERT pair against concurrent auto-fire mutations.
+    if (query.includes("pg_advisory_xact_lock")) {
+      return Promise.resolve([]);
+    }
+
     // appendRule: rate-limit check
     if (query.includes("count(*)") && query.includes("skill_audit")) {
       const skillName = String(values[0]);
