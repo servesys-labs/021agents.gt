@@ -1277,6 +1277,28 @@ function emitToolExecEvent(queue: any, toolName: string, latencyMs: number, stat
   }).catch(() => {});
 }
 
+function emitMemoryEvent(
+  queue: any,
+  eventType: "memory_write" | "memory_write_rejected" | "memory_read",
+  sessionId: string,
+  orgId: string,
+  details: Record<string, unknown>,
+): void {
+  if (!queue?.send) return;
+  queue.send({
+    type: "runtime_event",
+    payload: {
+      event_type: eventType,
+      session_id: sessionId,
+      org_id: orgId || "",
+      node_id: "memory",
+      status: eventType === "memory_write_rejected" ? "error" : "success",
+      duration_ms: 0,
+      details,
+    },
+  }).catch(() => {});
+}
+
 function isExternalServiceError(err: any): boolean {
   // Use structured error classification instead of fragile string matching.
   // classifyFetchError handles network, timeout, TLS, rate-limit, and HTTP errors.
@@ -1696,10 +1718,59 @@ async function dispatch(
       return memorySave(env, args);
 
     case "memory-recall":
-      return memoryRecall(env, args);
+      {
+        const result = await memoryRecall(env, args);
+        emitMemoryEvent(
+          (env as any).TELEMETRY_QUEUE,
+          "memory_read",
+          sessionId,
+          resolveTelemetryOrgId(env) || "",
+          { tool: "memory-recall", query: String(args.query || args.key || ""), type: String(args.type || "all") },
+        );
+        return result;
+      }
 
     case "memory-delete":
       return memoryDelete(env, args);
+
+    case "memory-health":
+      {
+        const result = await memoryHealth(env, args);
+        emitMemoryEvent(
+          (env as any).TELEMETRY_QUEUE,
+          "memory_read",
+          sessionId,
+          resolveTelemetryOrgId(env) || "",
+          { tool: "memory-health", limit: Number(args.limit || 20) },
+        );
+        return result;
+      }
+
+    case "memory": {
+      const { curatedMemoryTool } = await import("./curated-memory");
+      const result = await curatedMemoryTool(env, args);
+      const action = String(args.action || "");
+      const target = String(args.target || "memory");
+      const orgId = resolveTelemetryOrgId(env) || "";
+      try {
+        const parsed = JSON.parse(result);
+        if (parsed?.success) {
+          emitMemoryEvent((env as any).TELEMETRY_QUEUE, "memory_write", sessionId, orgId, {
+            action,
+            target,
+            usage: String(parsed?.usage || ""),
+            entry_count: Number(parsed?.entry_count || 0),
+          });
+        } else {
+          emitMemoryEvent((env as any).TELEMETRY_QUEUE, "memory_write_rejected", sessionId, orgId, {
+            action,
+            target,
+            error: String(parsed?.error || "unknown"),
+          });
+        }
+      } catch {}
+      return result;
+    }
 
     case "sync-workspace-memory":
       return syncWorkspaceMemory(env, sessionId);
@@ -4172,8 +4243,17 @@ return { mode: "codemode", total_tasks: tasks.length, results };
     case "parallel-web-search":
       return parallelWebSearch(env, args);
 
-    case "session-search":
-      return sessionSearch(env, args);
+    case "session-search": {
+      const result = await sessionSearch(env, args);
+      emitMemoryEvent(
+        (env as any).TELEMETRY_QUEUE,
+        "memory_read",
+        sessionId,
+        resolveTelemetryOrgId(env) || "",
+        { tool: "session-search", query: String(args.query || ""), limit: Number(args.limit || 5) },
+      );
+      return result;
+    }
 
     case "user-profile-save":
       return userProfileSave(env, args);
@@ -4392,47 +4472,67 @@ async function parallelWebSearch(env: RuntimeEnv, args: Record<string, any>): Pr
 
 async function sessionSearch(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
   const query = String(args.query || "").trim();
-  if (!query) return "session-search requires a query";
-  const limit = Math.min(args.limit || 10, 20);
+  const limit = Math.max(1, Math.min(Number(args.limit) || 5, 20));
 
   try {
     const { getDb } = await import("./db");
     const sql = await getDb(env.HYPERDRIVE);
     const agentName = (env as any).__agentConfig?.name || "";
-    const orgId = (env as any).__agentConfig?.orgId || "";
+    let orgId = (env as any).__agentConfig?.org_id || (env as any).__agentConfig?.orgId || "";
+    if (!orgId) {
+      const fallback = await sql`SELECT org_id FROM orgs LIMIT 1`;
+      orgId = String(fallback?.[0]?.org_id || "");
+    }
+    if (!orgId) return JSON.stringify({ success: false, error: "No org_id available for session-search." });
 
-    // Search across sessions input/output text
-    const keywords = query.toLowerCase().split(/\s+/).filter(Boolean).slice(0, 5);
-    const likePattern = `%${keywords[0]}%`;
+    const rows = query
+      ? await sql`
+          SELECT session_id, input_text, output_text, status, created_at, cost_total_usd, step_count
+          FROM sessions
+          WHERE org_id = ${orgId}
+            AND (${agentName} = '' OR agent_name = ${agentName})
+            AND (LOWER(input_text) LIKE ${"%" + query.toLowerCase() + "%"} OR LOWER(output_text) LIKE ${"%" + query.toLowerCase() + "%"})
+          ORDER BY created_at DESC
+          LIMIT ${limit}
+        `
+      : await sql`
+          SELECT session_id, input_text, output_text, status, created_at, cost_total_usd, step_count
+          FROM sessions
+          WHERE org_id = ${orgId}
+            AND (${agentName} = '' OR agent_name = ${agentName})
+          ORDER BY created_at DESC
+          LIMIT ${limit}
+        `;
 
-    const rows = await sql`
-      SELECT session_id, input_text, output_text, status, created_at,
-             cost_total_usd, turns_count
-      FROM sessions
-      WHERE org_id = ${orgId}
-        AND (${agentName} = '' OR agent_name = ${agentName})
-        AND (LOWER(input_text) LIKE ${likePattern} OR LOWER(output_text) LIKE ${likePattern})
-      ORDER BY created_at DESC
-      LIMIT ${limit}
-    `;
+    if (!rows.length) {
+      return JSON.stringify({
+        success: true,
+        mode: query ? "search" : "recent",
+        query: query || undefined,
+        count: 0,
+        results: [],
+      });
+    }
 
-    if (!rows.length) return `No sessions found matching "${query}"`;
+    const results = (rows as any[]).map((r: any) => ({
+      session_id: String(r.session_id || ""),
+      created_at: String(r.created_at || ""),
+      status: String(r.status || ""),
+      user_request: String(r.input_text || "").slice(0, 220),
+      outcome: String(r.output_text || "").slice(0, 260),
+      turns: Number(r.step_count || 0),
+      cost_usd: Number(r.cost_total_usd || 0),
+    }));
 
-    // Score and rank by keyword overlap
-    const scored = rows.map((r: any) => {
-      const text = `${r.input_text || ""} ${r.output_text || ""}`.toLowerCase();
-      const score = keywords.reduce((s: number, kw: string) => s + (text.includes(kw) ? 1 : 0), 0);
-      return { ...r, score };
-    }).sort((a: any, b: any) => b.score - a.score);
-
-    return scored.map((r: any, i: number) =>
-      `${i + 1}. [${r.session_id}] ${new Date(r.created_at).toISOString().slice(0, 10)} — ${r.status}\n` +
-      `   Input: ${(r.input_text || "").slice(0, 150)}...\n` +
-      `   Output: ${(r.output_text || "").slice(0, 150)}...\n` +
-      `   Turns: ${r.turns_count || 0} | Cost: $${(r.cost_total_usd || 0).toFixed(4)}`,
-    ).join("\n\n");
+    return JSON.stringify({
+      success: true,
+      mode: query ? "search" : "recent",
+      query: query || undefined,
+      count: results.length,
+      results,
+    });
   } catch (err: any) {
-    return `Session search failed: ${err.message}`;
+    return JSON.stringify({ success: false, error: `Session search failed: ${err?.message || String(err)}` });
   }
 }
 
@@ -5026,13 +5126,13 @@ async function memorySave(env: RuntimeEnv, args: Record<string, any>): Promise<s
   const content = String(args.content || args.value || "").trim();
   const memoryType = String(args.type || "semantic").trim();
   const key = String(args.key || args.name || "").trim();
-  if (!content) return "memory-save requires content";
+  if (!content) return JSON.stringify({ success: false, tool: "memory-save", error: "memory-save requires content" });
 
   const agentName = (env as any).__agentConfig?.name || "my-assistant";
   let orgId = (env as any).__agentConfig?.org_id || (env as any).__delegationLineage?.org_id || "";
   const hyperdrive = (env as any).HYPERDRIVE;
 
-  if (!hyperdrive) return "Memory not available (no database)";
+  if (!hyperdrive) return JSON.stringify({ success: false, tool: "memory-save", error: "Memory not available (no database)" });
 
   // Resolve org_id if empty — FK constraint requires valid org
   if (!orgId) {
@@ -5042,7 +5142,7 @@ async function memorySave(env: RuntimeEnv, args: Record<string, any>): Promise<s
       const fallback = await sql`SELECT org_id FROM orgs LIMIT 1`;
       orgId = fallback?.[0]?.org_id || "";
     } catch { /* ignore */ }
-    if (!orgId) return "Memory save failed: no org_id available";
+    if (!orgId) return JSON.stringify({ success: false, tool: "memory-save", error: "Memory save failed: no org_id available" });
   }
 
   const category = normalizeMemoryCategory(args.category);
@@ -5058,7 +5158,7 @@ async function memorySave(env: RuntimeEnv, args: Record<string, any>): Promise<s
         INSERT INTO episodes (id, agent_name, org_id, content, source, metadata, created_at)
         VALUES (${id}, ${agentName}, ${orgId}, ${content}, 'agent', ${JSON.stringify(key ? { key, category } : { category })}, ${now})
       `;
-      return JSON.stringify({ saved: true, type: "episodic", id });
+      return JSON.stringify({ success: true, tool: "memory-save", saved: true, type: "episodic", id });
     } else {
       const factKey = key || content.slice(0, 50);
       // Upsert: check if fact with same key exists for this agent, update if so
@@ -5076,10 +5176,10 @@ async function memorySave(env: RuntimeEnv, args: Record<string, any>): Promise<s
           VALUES (${id}, ${agentName}, ${orgId}, 'agent', ${factKey}, ${content}, ${category}, ${now})
         `;
       }
-      return JSON.stringify({ saved: true, type: "semantic", id, key: factKey, category });
+      return JSON.stringify({ success: true, tool: "memory-save", saved: true, type: "semantic", id, key: factKey, category });
     }
   } catch (err: any) {
-    return `Memory save failed: ${err.message}`;
+    return JSON.stringify({ success: false, tool: "memory-save", error: `Memory save failed: ${err.message}` });
   }
 }
 
@@ -5150,7 +5250,7 @@ async function memoryRecall(env: RuntimeEnv, args: Record<string, any>): Promise
   const agentName = (env as any).__agentConfig?.name || "my-assistant";
   const orgId = (env as any).__agentConfig?.org_id || "";
   const hyperdrive = (env as any).HYPERDRIVE;
-  if (!hyperdrive) return "Memory not available";
+  if (!hyperdrive) return JSON.stringify({ success: false, tool: "memory-recall", error: "Memory not available" });
 
   try {
     const { getDb } = await import("./db");
@@ -5171,10 +5271,15 @@ async function memoryRecall(env: RuntimeEnv, args: Record<string, any>): Promise
       results.push(...rows.map((r: any) => ({ type: "episodic", content: r.content, created: r.created_at })));
     }
 
-    if (results.length === 0) return "No memories found" + (query ? ` matching "${query}"` : "");
-    return JSON.stringify(results);
+    return JSON.stringify({
+      success: true,
+      tool: "memory-recall",
+      query: query || undefined,
+      count: results.length,
+      results,
+    });
   } catch (err: any) {
-    return `Memory recall failed: ${err.message}`;
+    return JSON.stringify({ success: false, tool: "memory-recall", error: `Memory recall failed: ${err.message}` });
   }
 }
 
@@ -5183,7 +5288,7 @@ async function memoryDelete(env: RuntimeEnv, args: Record<string, any>): Promise
   const agentName = (env as any).__agentConfig?.name || "my-assistant";
   const orgId = (env as any).__agentConfig?.org_id || "";
   const hyperdrive = (env as any).HYPERDRIVE;
-  if (!hyperdrive) return "Memory not available";
+  if (!hyperdrive) return JSON.stringify({ success: false, tool: "memory-delete", error: "Memory not available" });
 
   try {
     const { getDb } = await import("./db");
@@ -5194,11 +5299,62 @@ async function memoryDelete(env: RuntimeEnv, args: Record<string, any>): Promise
       } else {
         await sql`DELETE FROM facts WHERE key = ${args.key} AND agent_name = ${agentName} AND org_id = ${orgId}`;
       }
-      return JSON.stringify({ deleted: true, type: "semantic" });
+      return JSON.stringify({ success: true, tool: "memory-delete", deleted: true, type: "semantic" });
     }
-    return "memory-delete requires type and fact_id or key";
+    return JSON.stringify({ success: false, tool: "memory-delete", error: "memory-delete requires type and fact_id or key" });
   } catch (err: any) {
-    return `Memory delete failed: ${err.message}`;
+    return JSON.stringify({ success: false, tool: "memory-delete", error: `Memory delete failed: ${err.message}` });
+  }
+}
+
+async function memoryHealth(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
+  const agentName = (env as any).__agentConfig?.name || "my-assistant";
+  const hyperdrive = (env as any).HYPERDRIVE;
+  if (!hyperdrive) return JSON.stringify({ success: false, tool: "memory-health", error: "Memory not available" });
+  try {
+    const { getDb } = await import("./db");
+    const sql = await getDb(hyperdrive);
+    let orgId = String((env as any).__agentConfig?.org_id || "").trim();
+    if (!orgId) {
+      const fallback = await sql`SELECT org_id FROM orgs LIMIT 1`;
+      orgId = String(fallback?.[0]?.org_id || "");
+    }
+    if (!orgId) return JSON.stringify({ success: false, tool: "memory-health", error: "No org_id available" });
+    const limit = Math.max(1, Math.min(Number(args.limit) || 20, 100));
+    const [factsRows, episodesRows] = await Promise.all([
+      sql`
+        SELECT key, value, category, created_at
+        FROM facts
+        WHERE agent_name = ${agentName} AND org_id = ${orgId}
+        ORDER BY created_at DESC
+        LIMIT ${limit}
+      `,
+      sql`
+        SELECT content, created_at
+        FROM episodes
+        WHERE agent_name = ${agentName} AND org_id = ${orgId}
+        ORDER BY created_at DESC
+        LIMIT ${limit}
+      `,
+    ]);
+    const now = Date.now();
+    const dayMs = 86_400_000;
+    const staleFacts = (factsRows as any[]).filter((r) => {
+      const ts = Date.parse(String(r.created_at || ""));
+      return Number.isFinite(ts) && now - ts > dayMs * 30;
+    }).length;
+    return JSON.stringify({
+      success: true,
+      tool: "memory-health",
+      agent_name: agentName,
+      org_id: orgId,
+      semantic_facts_count: (factsRows as any[]).length,
+      episodic_entries_count: (episodesRows as any[]).length,
+      stale_facts_30d_count: staleFacts,
+      sample_limit: limit,
+    });
+  } catch (err: any) {
+    return JSON.stringify({ success: false, tool: "memory-health", error: `memory-health failed: ${err?.message || String(err)}` });
   }
 }
 
@@ -5692,7 +5848,7 @@ export function getToolDefinitions(enabledTools: string[], blockedTools: string[
 /** Tools always sent to the LLM regardless of query context. */
 const CORE_TOOLS = new Set([
   "web-search", "python-exec", "bash", "read-file", "write-file", "edit-file",
-  "memory-save", "memory-recall", "browse",
+  "memory", "memory-save", "memory-recall", "browse",
   "execute-code", "swarm",
   // Scheduling — always loaded so the model sees the tool definition and doesn't try bash
   "create-schedule", "list-schedules", "delete-schedule",
@@ -5716,8 +5872,11 @@ const TOOL_KEYWORDS: Record<string, string[]> = {
   "project|workspace|load project|save project": ["save-project", "load-project", "load-folder", "manage-projects"],
   // Memory & knowledge
   "remember|memory|recall|forget|save fact|take note|store fact|store this|MEMORY\\.md|sync memory": [
+    "memory",
     "memory-save",
     "memory-recall",
+    "memory-health",
+    "session-search",
     "memory-delete",
     "sync-workspace-memory",
     "team-fact-write",
@@ -5840,7 +5999,7 @@ export function buildDeferredToolIndex(
     return `- ${t.function.name}: ${desc}`;
   });
 
-  return `## Additional Tools (only if core tools are insufficient)\nThese are available via discover-tools but you should rarely need them. Your core tools (web-search, python-exec, bash, read-file, write-file, edit-file, browse, memory-save, memory-recall, execute-code, swarm) handle most tasks.\n${lines.join("\n")}`;
+  return `## Additional Tools (only if core tools are insufficient)\nThese are available via discover-tools but you should rarely need them. Your core tools (web-search, python-exec, bash, read-file, write-file, edit-file, browse, memory, memory-save, memory-recall, execute-code, swarm) handle most tasks.\n${lines.join("\n")}`;
 }
 
 /**
@@ -6112,6 +6271,33 @@ const TOOL_CATALOG: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "memory",
+      description:
+        "Manage bounded curated memory for cross-session continuity. Use action add/replace/remove with target memory or user. " +
+        "This memory is compact and designed for durable preferences, conventions, and stable facts.",
+      parameters: {
+        type: "object",
+        properties: {
+          action: {
+            type: "string",
+            description: "Memory action: add, replace, or remove.",
+            enum: ["add", "replace", "remove"],
+          },
+          target: {
+            type: "string",
+            description: "Memory store: memory (agent notes) or user (user profile).",
+            enum: ["memory", "user"],
+          },
+          content: { type: "string", description: "Entry content. Required for add/replace." },
+          old_text: { type: "string", description: "Unique substring used to identify entry for replace/remove." },
+        },
+        required: ["action", "target"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "memory-save",
       description:
         "Save a memory for later recall. Prefer category: user (profile/preferences), feedback (how to work with this user), project (goals/deadlines/non-obvious context), reference (links to external systems). Do not save what is already in /workspace files or easily derivable from the repo.",
@@ -6158,6 +6344,21 @@ const TOOL_CATALOG: ToolDefinition[] = [
           type: { type: "string", description: "Memory type: 'semantic' (default)" },
         },
         required: ["fact_id"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "memory-health",
+      description:
+        "Return lightweight memory health metrics for this agent (recent semantic facts, episodic entries, stale fact count).",
+      parameters: {
+        type: "object",
+        properties: {
+          limit: { type: "number", description: "Sampling limit for recent records (default 20, max 100)." },
+        },
+        required: [],
       },
     },
   },
@@ -7546,16 +7747,15 @@ const TOOL_CATALOG: ToolDefinition[] = [
     function: {
       name: "session-search",
       description:
-        "Search across past conversation sessions by keyword. " +
-        "Finds previous interactions matching the query, showing input, output, cost, and date. " +
-        "Useful for recalling past discussions, finding prior answers, or tracking patterns.",
+        "Search across past conversation sessions by keyword for cross-session continuity. " +
+        "Returns compact summaries (user request + outcome). If query is omitted, returns recent sessions.",
       parameters: {
         type: "object",
         properties: {
-          query: { type: "string", description: "Search keywords to match against past session content" },
-          limit: { type: "number", description: "Max results to return (default 10, max 20)" },
+          query: { type: "string", description: "Optional search phrase to match past session content." },
+          limit: { type: "number", description: "Max results to return (default 5, max 20)." },
         },
-        required: ["query"],
+        required: [],
       },
     },
   },

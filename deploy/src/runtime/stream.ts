@@ -21,7 +21,8 @@ import type { LLMMessage, LLMResponse, ToolCall, ToolDefinition, RuntimeEnv, Too
 import type { RuntimeEvent, TurnEndEvent, DoneEvent } from "./protocol";
 import { executeTools, getToolDefinitions } from "./tools";
 import { loadAgentConfig, resolvePlanRouting, writeSession, writeTurn, writeBillingRecord } from "./db";
-import { createWorkingMemory, buildMemoryContext, queueFactExtraction, queueSessionEpisodicNote } from "./memory";
+import { createWorkingMemory, queueFactExtraction, queueSessionEpisodicNote } from "./memory";
+import { createMemoryManager } from "./memory-manager";
 import { selectModel, type PlanRouting } from "./router";
 import { createLoopState, detectLoop, maybeSummarize } from "./middleware";
 import { serializeForWebSocket } from "./protocol";
@@ -465,6 +466,13 @@ export async function streamRun(
 
     // ── 3. STATE INITIALIZATION ─────────────────────────────
     const workingMemory = createWorkingMemory(100);
+  const memoryManager = createMemoryManager({
+    env,
+    hyperdrive,
+    workingMemory,
+    agentName: config.agent_name || agentName,
+    orgId: config.org_id || "",
+  });
     const loopState = createLoopState();
     const isVoiceChannel = opts?.channel === "voice";
 
@@ -513,7 +521,17 @@ export async function streamRun(
       } catch {}
     }
 
-    // 4d. Voice mode rules
+    // 4d. Frozen memory startup blocks (loaded once per session).
+    // Writes can happen mid-session, but prompt injection is intentionally stable
+    // until next run for deterministic behavior and better cache locality.
+    if (!isVoiceChannel) {
+      try {
+        const startupBlocks = await memoryManager.getStartupBlocks();
+        for (const block of startupBlocks) sysPromptParts.push(block);
+      } catch {}
+    }
+
+    // 4e. Voice mode rules
     if (isVoiceChannel) {
       sysPromptParts.push(`[VOICE MODE — The user is on a phone call. You MUST follow these rules:
 1. Keep every response to 1-2 sentences MAX. Be extremely concise.
@@ -532,9 +550,7 @@ export async function streamRun(
 
     // ── 5. MEMORY CONTEXT (working + episodic + semantic + procedural) ──
     try {
-      const memCtx = await buildMemoryContext(env, hyperdrive, input, workingMemory, {
-        agent_name: config.agent_name, org_id: config.org_id,
-      });
+      const memCtx = await memoryManager.getTurnContext(input);
       if (memCtx) messages.push({ role: "system", content: memCtx });
     } catch {}
 
