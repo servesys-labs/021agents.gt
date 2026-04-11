@@ -4,45 +4,67 @@ A comprehensive phased refactor to invert this repo from "fat harness, thin skil
 
 ## ▶︎ Resume here (2026-04-11)
 
-**Status:** Phases 0, 1, 2, 3, 4 ✅ done. **Resume at Phase 5.**
+**Status:** Phases 0, 1, 2, 3, 4, 5 ✅ done. **Resume at Phase 6.**
 
-**What was done (Phase 4 — the clean half):**
-- Added `enabled_skills?: string[]` to `AgentConfig` (`deploy/src/runtime/types.ts`). Default undefined/empty = backward compatible (all skills available). Non-empty = only the listed names reach the model.
-- `formatSkillsPrompt(skills, plan, enabled?)` filters the `[...BUILTIN_SKILLS, ...dbSkills]` merge by the agent's allowlist, AFTER the merge, so insertion order is preserved and the Phase 0 snapshot stays byte-identical when called with no third arg. Independently verified: basic/standard/premium outputs = 5227/4731/4731 chars, all identical to the committed baseline.
-- `getSkillPrompt(name, args, skills, enabled?)` enforces the allowlist at activation time. Activations of non-allowed skills return null, even if the model emits a fabricated `<activate-skill>` tag.
-- Call sites wired: `stream.ts:498` + `workflow.ts:1430` now pass `config.enabled_skills` through.
-- New test file `deploy/test/refactor-phase4.test.ts` with 11 cases covering backward-compat, filter, order preservation, unknown names, and the activation allowlist guard.
-- Deleted 3 session artifacts: `dispatch-test-bot.json`, `meta-playbook-v2-1774484582.json`, `meta-playbook-v3-1774484657.json`.
-- Deduped **5 skill-agents** that had direct 1:1 BUILTIN matches (pilot `pdf-specialist` + mechanical sweep): `research-analyst`, `data-analyst`, `document-generator`, `app-builder`, `deep-research`. Each version bumped 1.0.0 → 1.1.0. Net prompt-bytes removed: ~10k chars.
-- Deduped **2 root agents**: `code-reviewer` (→ `review`), `research-assistant` (→ `research, report`). Versions bumped 0.1.0 → 0.2.0.
-- **Hygiene PR** landed first (commit 2fbc2d4) to close the memory-feature follow-up: extract `sessionSearch` + `memoryHealth` + `curatedMemoryHandler` to `deploy/src/runtime/memory-tools.ts`, fail-closed 3 new cross-tenant `org_id` fallback sites, ratchet `tools.ts` ceiling 7917 → 7801, ratchet `skills.ts` ceiling 183 → 180, add 16 unit tests for `scanMemoryContent` + the fail-closed org_id guards, delete `CLEANUP_REVIEW.md` + `data/demo-codemap.json`, gitignore `data/autoresearch/*/results.tsv`, strip orphan "Ported from agentos/..." lineage comments, rename `ceilings_chars` → `ceilings_code_units` in the prompt-budget fixture.
+**What was done (Phase 5 — meta-agent composes skills):**
 
-**What was NOT done in Phase 4 (deliberately deferred):**
-- 13 domain-unique skill-agents (`calendar-manager`, `email-drafter`, `expense-tracker`, `fitness-coach`, `flight-search`, `legal-assistant`, `meal-planner`, `news-briefing`, `shopping-assistant`, `smart-home`, `social-media-manager`, `translator`, `travel-planner`) still have inlined prose. No BUILTIN skill matches their domain, so deduping them would require **creating new SKILL.md files first** — that's Phase 5 or a parallel "skill library expansion" PR. Their config is untouched, they remain fully functional.
-- `orchestrator.json` (10,206 chars), `coordinator.json`, `customer-support.json`, `my-assistant.json`, `personal-assistant.json` (programmatically generated) — none have clean BUILTIN matches. Phase 7 slims the meta-agent prompt separately.
+- **Skill catalog bundler for control-plane.** New script `control-plane/scripts/bundle-skill-catalog.mjs` reads every `skills/public/<name>/SKILL.md` frontmatter and emits `control-plane/src/lib/skill-catalog.generated.ts` with metadata only (name, description, when_to_use, min_plan, delegate_agent). Exports: `SKILL_CATALOG`, `SKILL_CATALOG_BY_NAME`, `SKILL_CATALOG_NAMES` (fast validation allowlist). Paired with `deploy/scripts/bundle-skills.mjs` — both read the same SKILL.md source of truth. Wired into control-plane `package.json` as `predev`/`predeploy`/`pretest` hooks.
+- **CI skill-catalog freshness gate** added to `.github/workflows/ci.yml` control-plane job, mirroring the existing gate in the deploy job.
+- **Tool schemas extended** (`control-plane/src/logic/meta-agent-chat.ts`):
+  - `update_agent_config` gained `enabled_skills: string[]` property.
+  - `create_sub_agent` gained `enabled_skills: string[]` property + the `system_prompt` description was tightened to "1-3 sentences. Prefer enabled_skills to load full workflows — don't duplicate skill bodies in prose here." + the `tools` description adds "Must be a superset of the enabled skills' allowed_tools".
+- **Handler validation.** New `normalizeEnabledSkills(raw)` helper (exported) that:
+  - coerces non-array input to empty
+  - drops names not in `SKILL_CATALOG_NAMES`
+  - de-dupes while preserving first-seen order
+  - trims whitespace, skips empty strings
+  - returns `{ valid, dropped }` so callers can surface warnings
+  Both `update_agent_config` and `create_sub_agent` handlers call it and surface dropped names as a `warning` + `dropped_skills` field in the JSON response so the LLM sees its own mistake.
+- **Prompt awareness** (`control-plane/src/prompts/meta-agent-chat.ts`):
+  - Runtime-infrastructure "Skills" bullet expanded from "slash commands: /batch..." to "reusable markdown templates in skills/public/<name>/SKILL.md, activated via /slash commands. Agents opt in via config.enabled_skills; empty = all available."
+  - New **Skill selection** section after Tool selection explaining enabled_skills semantics, unknown-name filtering, and the tool-superset invariant.
+  - "My agent needs to delegate tasks" workflow rewritten to lead with the `enabled_skills: ["pdf"]` pattern rather than the old inline-prose pattern.
+  - **prompt_budget.json ratcheted** 30795 → 31714 code units (+919). `-fixture-bump` label on the commit; `post_phase_5: 31714` added to phase_targets for audit trail. Phase 7 still targets 8000 (this addition is among the first blocks Phase 7 will extract to `skills/meta/`).
+- **17 new tests** in `control-plane/test/meta-agent-chat.test.ts`:
+  - 7 cases for `SKILL_CATALOG` shape (all 19 BUILTIN skills present, alphabetically sorted, min_plan ⇒ delegate_agent, delegate targets reference real skill-agents, etc.)
+  - 8 cases for `normalizeEnabledSkills` (non-array input, known/unknown mix, de-dup, whitespace, coercion, skill-AGENT vs skill-name confusion)
+  - 4 cases for tool schemas + prompt content (static source scans for `enabled_skills` property + anti-pattern nudges + Skill selection section)
+- **`normalizeEnabledSkills` exported** from `meta-agent-chat.ts` so the test can exercise it directly without a dispatch harness.
+
+**What's NOT in Phase 5 (deferred):**
+- **Domain SKILL.md files for the 13 untouched skill-agents** (calendar-manager, email-drafter, expense-tracker, fitness-coach, flight-search, legal-assistant, meal-planner, news-briefing, shopping-assistant, smart-home, social-media-manager, translator, travel-planner). Authoring those is orthogonal to Phase 5's "teach the meta-agent about enabled_skills" goal. Natural parallel Phase 5.b work — each skill is 1-3 hours, 13 × that is a separate sprint. Track as `SKILL-LIBRARY-EXPANSION` when ready.
+- **Fixture test for meta-agent prompt→enabled_skills fidelity** (Jaccard similarity on 20 prompts). The original plan wanted this as a Phase 5 exit item, but it requires either an LLM mock with canned outputs or a real model call — non-trivial scaffolding and high flake risk. Left for Phase 5 follow-up when we know the actual meta-agent model calibration.
+- **Phase 4.5 (R2 per-agent bundles with version-pinning)** — still held for after Phase 6 when the learning loop needs the substrate.
 
 **Validation at handoff:**
-- 19/19 skill hashes match (byte-identity preserved).
-- Phase 0 snapshot file untouched since `8e5710d` — formatSkillsPrompt output byte-identical for all 3 plan tiers, independently recomputed offline.
-- LoC budgets: `skills.ts` 175/180 (5-line headroom), `tools.ts` 7801/7801, `reasoning-strategies.ts` 223/223, `intent-router.ts` 246/246, `permission-classifier.ts` 140/140, `meta-agent-chat.ts` 30795/30795.
-- `deploy/test/memory-tools.test.ts`: 16 new tests (threat-scanner + fail-closed guards).
-- `deploy/test/refactor-phase4.test.ts`: 11 new tests (enabled_skills filter + allowlist).
-- Bundler regenerates manifest cleanly (git diff clean).
+- 19/19 skill hashes match (byte-identity preserved — Phase 5 touched zero SKILL.md files).
+- Phase 0 snapshot file untouched since `8e5710d`.
+- LoC budgets: `skills.ts` 175/180 (5-line headroom), `tools.ts` 8080/8080, `reasoning-strategies.ts` 223/223, `intent-router.ts` 246/246, `permission-classifier.ts` 140/140.
+- Prompt budget: `meta-agent-chat.ts` 31714/31714 (at ceiling, ratcheted in this phase).
+- `deploy/test/refactor-phase4.test.ts`: tool-superset invariant 8/8 deduped agents still pass.
+- `control-plane/test/meta-agent-chat.test.ts`: 17 new Phase 5 test cases alongside the existing suite.
+- Both bundlers regenerate clean (`bundle-skills.mjs` and `bundle-skill-catalog.mjs` both write files with zero git diff).
 
-**Pick up at Phase 5 — meta-agent composes skills.** Two live entry points:
-1. **UI flow**: `control-plane/src/logic/meta-agent-chat.ts` (3,095 lines) with prompt from `control-plane/src/prompts/meta-agent-chat.ts` (30,795 code units, at ceiling).
-2. **CLI flow**: `cli/src/commands/create.ts` → `apiPost("/api/v1/agents", ...)` → control-plane.
+**Pick up at Phase 6 — diarize + learning loop.** The article's central missing primitive: read multiple sources about one subject, write a structured profile (SAYS / ACTUALLY DOES / CHANGED / CONTRADICTIONS), wire the `/improve` loop to append learned rules back into SKILL.md via `manage_skills`.
 
-Both need to learn that `enabled_skills` exists on agent configs. Add a `SKILL_CATALOG_DOCS` resolver block to the meta-agent prompt (mirror the existing `TOOL_CATALOG_DOCS` / `RUNTIME_INFRASTRUCTURE_DOCS` deferred-loading pattern). When the meta-agent emits `create_sub_agent` or `update_agent_config`, the schema should accept `enabled_skills: string[]`; the control-plane should validate names against the bundled manifest before persisting.
+Specific Phase 6 work items:
+1. **Create `skills/public/diarize/SKILL.md`** with params `{SUBJECT, SOURCES, RUBRIC}`. Structured profile output. This creates the first SKILL.md with real `{{ARGS}}` parameters, so Phase 6 also validates the skill-as-method-call primitive end-to-end.
+2. **Create `skills/public/improve/SKILL.md`** with params `{FEEDBACK_SOURCE, TARGET_SKILL}`. Diarizes mediocre responses → extracts patterns → appends rules to the target skill → bumps version.
+3. **Add `skill_audit` table** — append-only log: `{id, skill, before_sha, after_sha, reason, agent_id, created_at}`. Migration in `control-plane/src/db/migrations/`.
+4. **Wire `evolve-agent` and `autoresearch` tools** in `deploy/src/runtime/tools.ts` to call `manage_skills` when they detect a "second-ask" pattern. Append to the relevant SKILL.md, bump skill version, log audit row.
+5. **Rate limit**: max 10 mutations / day / skill. Enforced in `manage_skills` RPC.
+6. **Admin revert endpoint** — reads `before_sha` from audit, restores. Not exposed to agents, only to human admins.
+7. **Round-trip regression test**: known-failing eval case → `/improve` → SKILL.md changed → eval passes.
 
-**Also for Phase 5 (parallel work):** extract domain SKILL.md files for the 13 skill-agents whose prose isn't in a BUILTIN skill yet. Candidates: `calendar-manage`, `email-draft`, `expense-track`, `fit-coach`, `flight-search`, `legal-draft`, `meal-plan`, `news-brief`, `shop-research`, `smart-home-control`, `social-post`, `translate`, `travel-plan`.
+**Phase 6 requires rebuilding the bundler + catalog when new SKILL.md files land**, so the existing `predev`/`pretest` hooks will cover it automatically. No new infrastructure needed — Phase 5 built the catalog pipeline; Phase 6 adds entries.
 
-**Before touching anything:**
-1. Run `cd deploy && pnpm test -- refactor-phase0 refactor-phase3 refactor-phase4 memory-tools` — must be green.
-2. Never modify the frontmatter schema or the bundler's trailing-newline trim logic — both are load-bearing for byte-identity.
-3. `BUILTIN_SKILLS` is still imported by `deploy/test/refactor-phase0.test.ts:35`. Do not rename or delete the export unless the drift test is updated in lockstep.
-4. `tools.ts` has **zero LoC headroom** at 7801. Any Phase 5 code that adds to `tools.ts` must extract something else first. Phase 8/9 are the right place for further reduction — if your change isn't Phase 8/9, put new code in a new file.
-5. `enabled_skills` defaults to "all" when empty/undefined. Don't change that default without a fixture bump.
+**Before touching Phase 6:**
+1. Run `cd control-plane && npm test && cd ../deploy && pnpm test -- refactor-phase0 refactor-phase4 memory-tools skills` — must be green.
+2. **Never modify the frontmatter schema or the bundler's trailing-newline trim logic** — both are load-bearing for byte-identity across 19 existing skills.
+3. When adding skills to `skills/public/`, **do NOT add them to `BUILTIN_SKILL_ORDER`** unless you also plan to extend the Phase 0 hash fixture — new skills default to "bundled but not in BUILTIN" (same as `code-review` and `deep-research` on the `NON_BUILTIN_ALLOWLIST`). Agents can still reference them via `enabled_skills`; they just don't show up in `formatSkillsPrompt([], plan)` by default.
+4. `tools.ts` has **zero LoC headroom** at 8080. Phase 6 tool additions (for `manage_skills`, rate limiter, audit log writer) need to live in a new file like `deploy/src/runtime/skill-mutation.ts`.
+5. `meta-agent-chat.ts` has **zero code-unit headroom** at 31714. Any Phase 6 prompt additions need a `-fixture-bump` commit + a corresponding `_post_phase_6_note` in `prompt_budget.json`.
+6. `normalizeEnabledSkills` is exported from `control-plane/src/logic/meta-agent-chat.ts` — Phase 6 can reuse it for `manage_skills` input validation.
 
 ---
 
