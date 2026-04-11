@@ -62,6 +62,23 @@ export interface ChannelCallbacks {
    * @param step Current step description
    */
   onProgress?: (step: string) => void | Promise<void>;
+
+  /**
+   * Called right before a fast-path tool executes so channels can show
+   * the same per-tool activity UI as the full pipeline.
+   */
+  onToolCall?: (info: { name: string; tool_call_id: string; args_preview: string }) => void | Promise<void>;
+
+  /**
+   * Called after a fast-path tool finishes with its result or error.
+   */
+  onToolResult?: (info: {
+    name: string;
+    tool_call_id: string;
+    result: string;
+    error?: string;
+    latency_ms: number;
+  }) => void | Promise<void>;
 }
 
 export interface ChannelTurnOpts {
@@ -124,6 +141,10 @@ export async function channelAgentTurn(
     channel,
     session_id: opts.session_id,
     history: opts.history,
+    // Forward tool-activity callbacks so channels (voice, Telegram, etc.)
+    // can surface the same per-tool UI cards the full pipeline emits.
+    onToolCall: callbacks?.onToolCall,
+    onToolResult: callbacks?.onToolResult,
   });
 
   // Step 2: If not escalated, return the fast result

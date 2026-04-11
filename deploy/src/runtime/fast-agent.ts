@@ -44,6 +44,24 @@ export interface FastAgentOpts {
   channel: string;
   session_id?: string;
   history?: Array<{ role: string; content: string }>;
+  /**
+   * Optional callback fired right before a tool executes. Lets the channel
+   * router surface per-tool activity to the UI (otherwise fast-path runs
+   * look like opaque LLM-only turns).
+   */
+  onToolCall?: (info: { name: string; tool_call_id: string; args_preview: string }) => void | Promise<void>;
+  /**
+   * Optional callback fired after a tool finishes, with its result.
+   * Mirrors the workflow path's tool_result events so the UI can show
+   * the same kind of tool cards.
+   */
+  onToolResult?: (info: {
+    name: string;
+    tool_call_id: string;
+    result: string;
+    error?: string;
+    latency_ms: number;
+  }) => void | Promise<void>;
 }
 
 // ── Execution Profile ─────────────────────────────────────────
@@ -402,7 +420,12 @@ async function executeToolFast(
     }
 
     case "memory-delete": {
-      return "Memory deleted.";
+      // Intentionally NOT implemented on the fast path — returning a fake
+      // "Memory deleted." would let the LLM confidently tell the user the
+      // operation succeeded when nothing actually happened. Return an
+      // honest error so the LLM either apologises or escalates to the
+      // full pipeline where memory-delete is really wired up.
+      return "Error: memory-delete is not supported on the fast path. Please ask again in the main chat interface to delete memories.";
     }
 
     case "store-knowledge": {
@@ -425,7 +448,11 @@ async function executeToolFast(
 
     case "text-to-speech":
     case "speech-to-text":
-      return "Voice operation completed.";
+      // Unimplemented on the fast path. Don't lie — returning "Voice
+      // operation completed." would let the LLM tell users it worked
+      // when the audio was never generated. Fail honestly so the LLM
+      // surfaces the problem or escalates.
+      return `Error: ${toolName} is not supported on the fast path. This channel cannot perform voice operations right now.`;
 
     default:
       return `Tool '${toolName}' is not available in fast mode. Try asking in web chat for complex tasks.`;
@@ -703,9 +730,37 @@ export async function fastAgentTurn(
     for (const tc of toolCalls) {
       const toolName = tc.function?.name || "";
       const toolArgs = tc.function?.arguments || "{}";
+      const toolCallId = String(tc.id || "");
+      // Build a short args preview so the UI card shows what's happening.
+      let argsPreview = "";
+      try {
+        const parsed = JSON.parse(toolArgs || "{}");
+        argsPreview = parsed.query || parsed.url || parsed.path || (typeof parsed.content === "string" ? parsed.content.slice(0, 120) : "") || "";
+      } catch {}
+      if (opts.onToolCall) {
+        try { await opts.onToolCall({ name: toolName, tool_call_id: toolCallId, args_preview: String(argsPreview) }); }
+        catch (cbErr) { log.warn(`[fast-agent] onToolCall callback failed: ${cbErr}`); }
+      }
+      const toolStartedAt = Date.now();
       const result = await executeToolFast(env, toolName, toolArgs, { ...opts, agent_name: agentName });
+      const toolLatencyMs = Date.now() - toolStartedAt;
       toolCallResults.push({ name: toolName, result });
       messages.push({ role: "tool", tool_call_id: tc.id, content: result });
+      if (opts.onToolResult) {
+        // executeToolFast returns a plain string; if it starts with "Error:"
+        // or "ERROR:" we surface it as an error on the callback so the UI
+        // can show a failure state.
+        const isErrorResult = /^\s*(?:ERROR:|Error:)/i.test(result);
+        try {
+          await opts.onToolResult({
+            name: toolName,
+            tool_call_id: toolCallId,
+            result: isErrorResult ? "" : result,
+            error: isErrorResult ? result : undefined,
+            latency_ms: toolLatencyMs,
+          });
+        } catch (cbErr) { log.warn(`[fast-agent] onToolResult callback failed: ${cbErr}`); }
+      }
     }
 
     // Second LLM call with tool results (no tools — just synthesis)
