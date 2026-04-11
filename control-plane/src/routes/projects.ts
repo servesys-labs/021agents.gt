@@ -103,11 +103,15 @@ projectRoutes.openapi(createProjectRoute, async (c): Promise<any> => {
     VALUES (${projectId}, ${user.org_id}, ${name}, ${slug}, ${description}, ${plan})
   `;
 
-  // Create default environments
+  // Create default environments.
+  // environments.org_id is NOT NULL — required for the RLS policy
+  // org_id = current_org_id(). Omitting it now errors with a
+  // not-null constraint violation (it used to silently store NULL).
   for (const envName of ["development", "staging", "production"]) {
     const envId = genId();
     await sql`
-      INSERT INTO environments (env_id, project_id, name) VALUES (${envId}, ${projectId}, ${envName})
+      INSERT INTO environments (env_id, org_id, project_id, name)
+      VALUES (${envId}, ${user.org_id}, ${projectId}, ${envName})
     `;
   }
 
