@@ -6,7 +6,7 @@ import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { parseJsonColumn } from "../lib/parse-json-column";
 
@@ -45,11 +45,14 @@ const listPoliciesRoute = createRoute({
 
 policyRoutes.openapi(listPoliciesRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const rows = await sql`
-    SELECT * FROM policy_templates WHERE org_id = ${user.org_id} OR org_id = '' ORDER BY name
-  `;
-  return c.json({ policies: rows });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // policy_templates is NOT RLS-enforced; keep the explicit WHERE clause
+    // (also includes built-in templates with org_id = '').
+    const rows = await sql`
+      SELECT * FROM policy_templates WHERE org_id = ${user.org_id} OR org_id = '' ORDER BY name
+    `;
+    return c.json({ policies: rows });
+  });
 });
 
 // ── POST / ──────────────────────────────────────────────────────
@@ -87,25 +90,26 @@ policyRoutes.openapi(createPolicyRoute, async (c): Promise<any> => {
     max_turns: maxTurns,
   };
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const policyId = genId();
   const policyJson = JSON.stringify(policy);
 
-  await sql`
-    INSERT INTO policy_templates (policy_id, org_id, name, policy)
-    VALUES (${policyId}, ${user.org_id}, ${name}, ${policyJson})
-  `;
-
-  // Audit
-  const now = new Date().toISOString();
-  try {
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
     await sql`
-      INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
-      VALUES (${user.org_id}, ${user.user_id}, 'policy.create', 'policy', ${policyId}, ${JSON.stringify({ name })}, ${now})
+      INSERT INTO policy_templates (policy_id, org_id, name, policy)
+      VALUES (${policyId}, ${user.org_id}, ${name}, ${policyJson})
     `;
-  } catch {}
 
-  return c.json({ policy_id: policyId, name, policy });
+    // Audit
+    const now = new Date().toISOString();
+    try {
+      await sql`
+        INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
+        VALUES (${user.org_id}, ${user.user_id}, 'policy.create', 'policy', ${policyId}, ${JSON.stringify({ name })}, ${now})
+      `;
+    } catch {}
+
+    return c.json({ policy_id: policyId, name, policy });
+  });
 });
 
 // ── GET /:policy_id ─────────────────────────────────────────────
@@ -128,13 +132,14 @@ const getPolicyRoute = createRoute({
 policyRoutes.openapi(getPolicyRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { policy_id: policyId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const rows = await sql`SELECT * FROM policy_templates WHERE policy_id = ${policyId} AND (org_id = ${user.org_id} OR org_id = '')`;
-  if (rows.length === 0) return c.json({ error: "Policy not found" }, 404);
-  const d: any = { ...rows[0] };
-  d.policy = parseJsonColumn(d.policy);
-  delete d.policy;
-  return c.json(d);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`SELECT * FROM policy_templates WHERE policy_id = ${policyId} AND (org_id = ${user.org_id} OR org_id = '')`;
+    if (rows.length === 0) return c.json({ error: "Policy not found" }, 404);
+    const d: any = { ...rows[0] };
+    d.policy = parseJsonColumn(d.policy);
+    delete d.policy;
+    return c.json(d);
+  });
 });
 
 // ── DELETE /:policy_id ──────────────────────────────────────────
@@ -157,7 +162,8 @@ const deletePolicyRoute = createRoute({
 policyRoutes.openapi(deletePolicyRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { policy_id: policyId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  await sql`DELETE FROM policy_templates WHERE policy_id = ${policyId} AND org_id = ${user.org_id}`;
-  return c.json({ deleted: policyId });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    await sql`DELETE FROM policy_templates WHERE policy_id = ${policyId} AND org_id = ${user.org_id}`;
+    return c.json({ deleted: policyId });
+  });
 });

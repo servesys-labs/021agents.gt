@@ -10,7 +10,7 @@ import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses, ApprovalRequest } from "../schemas/openapi";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb, type OrgSql } from "../db/client";
 import { normalizeSteps, validateWorkflow, deriveRunMetadata } from "../logic/workflow-validator";
 import { requireScope } from "../middleware/auth";
 import { parseJsonColumn } from "../lib/parse-json-column";
@@ -59,7 +59,7 @@ function parseEpochSeconds(raw: unknown): number | null {
   return null;
 }
 
-async function ensureApprovalTable(sql: Awaited<ReturnType<typeof getDbForOrg>>): Promise<void> {
+async function ensureApprovalTable(sql: OrgSql): Promise<void> {
   await sql`
     CREATE TABLE IF NOT EXISTS workflow_approvals (
       approval_id text PRIMARY KEY,
@@ -207,13 +207,13 @@ workflowRoutes.openapi(approvalStartRoute, async (c): Promise<any> => {
     return c.json({ error: "deadline_at must be in the future" }, 400);
   }
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
   await ensureApprovalTable(sql);
 
   if (idempotencyKey) {
     const existingRows = await sql`
       SELECT * FROM workflow_approvals
-      WHERE org_id = ${user.org_id} AND idempotency_key = ${idempotencyKey}
+      WHERE idempotency_key = ${idempotencyKey}
       LIMIT 1
     `;
     if (existingRows.length > 0) {
@@ -259,7 +259,7 @@ workflowRoutes.openapi(approvalStartRoute, async (c): Promise<any> => {
   `;
 
   const rows = await sql`
-    SELECT * FROM workflow_approvals WHERE approval_id = ${approvalId} AND org_id = ${user.org_id} LIMIT 1
+    SELECT * FROM workflow_approvals WHERE approval_id = ${approvalId} LIMIT 1
   `;
   return c.json(
     {
@@ -284,6 +284,7 @@ workflowRoutes.openapi(approvalStartRoute, async (c): Promise<any> => {
     },
     201,
   );
+  });
 });
 
 // ── GET /workflows/approval/:approval_id ────────────────────────────────
@@ -308,13 +309,14 @@ const getApprovalRoute = createRoute({
 workflowRoutes.openapi(getApprovalRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { approval_id: approvalId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  await ensureApprovalTable(sql);
-  const rows = await sql`
-    SELECT * FROM workflow_approvals WHERE approval_id = ${approvalId} AND org_id = ${user.org_id} LIMIT 1
-  `;
-  if (rows.length === 0) return c.json({ error: "Approval workflow not found" }, 404);
-  return c.json(decodeApprovalRow(rows[0] as ApprovalRow));
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    await ensureApprovalTable(sql);
+    const rows = await sql`
+      SELECT * FROM workflow_approvals WHERE approval_id = ${approvalId} LIMIT 1
+    `;
+    if (rows.length === 0) return c.json({ error: "Approval workflow not found" }, 404);
+    return c.json(decodeApprovalRow(rows[0] as ApprovalRow));
+  });
 });
 
 // ── POST /workflows/approval/:approval_id/decision ──────────────────────
@@ -359,11 +361,11 @@ workflowRoutes.openapi(approvalDecisionRoute, async (c): Promise<any> => {
     return c.json({ error: "decision must be 'approved' or 'rejected'" }, 400);
   }
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
   await ensureApprovalTable(sql);
 
   const rows = await sql`
-    SELECT * FROM workflow_approvals WHERE approval_id = ${approvalId} AND org_id = ${user.org_id} LIMIT 1
+    SELECT * FROM workflow_approvals WHERE approval_id = ${approvalId} LIMIT 1
   `;
   if (rows.length === 0) return c.json({ error: "Approval workflow not found" }, 404);
 
@@ -380,7 +382,7 @@ workflowRoutes.openapi(approvalDecisionRoute, async (c): Promise<any> => {
     await sql`
       UPDATE workflow_approvals
       SET status = ${"expired"}, updated_at = ${now}
-      WHERE approval_id = ${approvalId} AND org_id = ${user.org_id}
+      WHERE approval_id = ${approvalId}
     `;
     return c.json({ error: "Approval deadline has expired", status: "expired" }, 409);
   }
@@ -393,7 +395,7 @@ workflowRoutes.openapi(approvalDecisionRoute, async (c): Promise<any> => {
         review_comment = ${comment},
         decided_at = ${now},
         updated_at = ${now}
-    WHERE approval_id = ${approvalId} AND org_id = ${user.org_id}
+    WHERE approval_id = ${approvalId}
   `;
 
   // Best-effort notification to runtime edge; do not block client success.
@@ -421,7 +423,7 @@ workflowRoutes.openapi(approvalDecisionRoute, async (c): Promise<any> => {
   }
 
   const updatedRows = await sql`
-    SELECT * FROM workflow_approvals WHERE approval_id = ${approvalId} AND org_id = ${user.org_id} LIMIT 1
+    SELECT * FROM workflow_approvals WHERE approval_id = ${approvalId} LIMIT 1
   `;
   return c.json(
     updatedRows.length > 0
@@ -437,6 +439,7 @@ workflowRoutes.openapi(approvalDecisionRoute, async (c): Promise<any> => {
         updated_at: now,
       },
   );
+  });
 });
 
 // ── GET /workflows ──────────────────────────────────────────────────────
@@ -456,17 +459,18 @@ const listWorkflowsRoute = createRoute({
 });
 workflowRoutes.openapi(listWorkflowsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const rows = await sql`
-    SELECT * FROM workflows WHERE org_id = ${user.org_id} ORDER BY created_at DESC
-  `;
-  const result = rows.map((r: any) => {
-    const d = { ...r };
-    d.steps = parseJsonColumn(d.steps, []);
-    delete d.steps;
-    return d;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT * FROM workflows ORDER BY created_at DESC
+    `;
+    const result = rows.map((r: any) => {
+      const d = { ...r };
+      d.steps = parseJsonColumn(d.steps, []);
+      delete d.steps;
+      return d;
+    });
+    return c.json({ workflows: result });
   });
-  return c.json({ workflows: result });
 });
 
 // ── POST /workflows ─────────────────────────────────────────────────────
@@ -507,17 +511,18 @@ workflowRoutes.openapi(createWorkflowRoute, async (c): Promise<any> => {
 
   if (!name) return c.json({ error: "name is required" }, 400);
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const workflowId = genId();
   const normalizedSteps = normalizeSteps(steps as any);
   const stepsJson = JSON.stringify(normalizedSteps);
 
-  await sql`
-    INSERT INTO workflows (workflow_id, org_id, name, description, steps)
-    VALUES (${workflowId}, ${user.org_id}, ${name}, ${description}, ${stepsJson})
-  `;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    await sql`
+      INSERT INTO workflows (workflow_id, org_id, name, description, steps)
+      VALUES (${workflowId}, ${user.org_id}, ${name}, ${description}, ${stepsJson})
+    `;
 
-  return c.json({ workflow_id: workflowId, name, steps: normalizedSteps.length });
+    return c.json({ workflow_id: workflowId, name, steps: normalizedSteps.length });
+  });
 });
 
 // ── POST /workflows/:workflow_id/run ────────────────────────────────────
@@ -575,18 +580,18 @@ workflowRoutes.openapi(listRunsRoute, async (c): Promise<any> => {
   const { workflow_id: workflowId } = c.req.valid("param");
   const query = c.req.valid("query");
   const limit = Math.min(200, Math.max(1, Number(query.limit) || 20));
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const wf = await sql`
+      SELECT workflow_id FROM workflows WHERE workflow_id = ${workflowId}
+    `;
+    if (wf.length === 0) return c.json({ error: "Workflow not found" }, 404);
 
-  const wf = await sql`
-    SELECT workflow_id FROM workflows WHERE workflow_id = ${workflowId} AND org_id = ${user.org_id}
-  `;
-  if (wf.length === 0) return c.json({ error: "Workflow not found" }, 404);
-
-  const rows = await sql`
-    SELECT * FROM workflow_runs WHERE workflow_id = ${workflowId}
-    ORDER BY started_at DESC LIMIT ${limit}
-  `;
-  return c.json({ runs: rows.map(decodeRunRow) });
+    const rows = await sql`
+      SELECT * FROM workflow_runs WHERE workflow_id = ${workflowId}
+      ORDER BY started_at DESC LIMIT ${limit}
+    `;
+    return c.json({ runs: rows.map(decodeRunRow) });
+  });
 });
 
 // ── GET /workflows/:workflow_id/runs/:run_id ────────────────────────────
@@ -614,18 +619,18 @@ const getRunRoute = createRoute({
 workflowRoutes.openapi(getRunRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { workflow_id: workflowId, run_id: runId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const wf = await sql`
+      SELECT workflow_id FROM workflows WHERE workflow_id = ${workflowId}
+    `;
+    if (wf.length === 0) return c.json({ error: "Workflow not found" }, 404);
 
-  const wf = await sql`
-    SELECT workflow_id FROM workflows WHERE workflow_id = ${workflowId} AND org_id = ${user.org_id}
-  `;
-  if (wf.length === 0) return c.json({ error: "Workflow not found" }, 404);
-
-  const rows = await sql`
-    SELECT * FROM workflow_runs WHERE run_id = ${runId} AND workflow_id = ${workflowId}
-  `;
-  if (rows.length === 0) return c.json({ error: "Workflow run not found" }, 404);
-  return c.json(decodeRunRow(rows[0]));
+    const rows = await sql`
+      SELECT * FROM workflow_runs WHERE run_id = ${runId} AND workflow_id = ${workflowId}
+    `;
+    if (rows.length === 0) return c.json({ error: "Workflow run not found" }, 404);
+    return c.json(decodeRunRow(rows[0]));
+  });
 });
 
 // ── POST /workflows/:workflow_id/runs/:run_id/cancel ────────────────────
@@ -653,26 +658,26 @@ const cancelRunRoute = createRoute({
 workflowRoutes.openapi(cancelRunRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { workflow_id: workflowId, run_id: runId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const wf = await sql`
+      SELECT workflow_id FROM workflows WHERE workflow_id = ${workflowId}
+    `;
+    if (wf.length === 0) return c.json({ error: "Workflow not found" }, 404);
 
-  const wf = await sql`
-    SELECT workflow_id FROM workflows WHERE workflow_id = ${workflowId} AND org_id = ${user.org_id}
-  `;
-  if (wf.length === 0) return c.json({ error: "Workflow not found" }, 404);
+    const rows = await sql`
+      SELECT status FROM workflow_runs WHERE run_id = ${runId} AND workflow_id = ${workflowId}
+    `;
+    if (rows.length === 0) return c.json({ error: "Workflow run not found" }, 404);
+    if (!["running", "pending"].includes(rows[0].status)) {
+      return c.json({ error: `Cannot cancel run with status '${rows[0].status}'` }, 409);
+    }
 
-  const rows = await sql`
-    SELECT status FROM workflow_runs WHERE run_id = ${runId} AND workflow_id = ${workflowId}
-  `;
-  if (rows.length === 0) return c.json({ error: "Workflow run not found" }, 404);
-  if (!["running", "pending"].includes(rows[0].status)) {
-    return c.json({ error: `Cannot cancel run with status '${rows[0].status}'` }, 409);
-  }
-
-  const now = new Date().toISOString();
-  await sql`
-    UPDATE workflow_runs SET status = 'cancelled', completed_at = ${now} WHERE run_id = ${runId}
-  `;
-  return c.json({ cancelled: runId });
+    const now = new Date().toISOString();
+    await sql`
+      UPDATE workflow_runs SET status = 'cancelled', completed_at = ${now} WHERE run_id = ${runId}
+    `;
+    return c.json({ cancelled: runId });
+  });
 });
 
 // ── POST /workflows/validate ────────────────────────────────────────────
@@ -729,11 +734,11 @@ const deleteWorkflowRoute = createRoute({
 workflowRoutes.openapi(deleteWorkflowRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { workflow_id: workflowId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  const result = await sql`
-    DELETE FROM workflows WHERE workflow_id = ${workflowId} AND org_id = ${user.org_id}
-  `;
-  if (result.count === 0) return c.json({ error: "Workflow not found" }, 404);
-  return c.json({ deleted: workflowId });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const result = await sql`
+      DELETE FROM workflows WHERE workflow_id = ${workflowId}
+    `;
+    if (result.count === 0) return c.json({ error: "Workflow not found" }, 404);
+    return c.json({ deleted: workflowId });
+  });
 });

@@ -9,6 +9,8 @@
  * using a temporary query-time projection (lower quality but functional).
  */
 
+import { log } from "./log";
+
 export interface EmbeddingResult {
   vectors: number[][];
   model: string;
@@ -87,7 +89,7 @@ export async function embed(
 
   // Qwen3 failed — DO NOT fall back to BGE for ingest (wrong dimensions).
   // BGE is only safe for query-time search where vectors aren't stored.
-  console.error(`[embeddings] Qwen3-Embedding failed for ${texts.length} texts. EMBEDDING_URL=${embeddingUrl || "(not set)"}`);
+  log.error(`[embeddings] Qwen3-Embedding failed for ${texts.length} texts. EMBEDDING_URL=${embeddingUrl || "(not set)"}`);
   throw new Error(`Embedding failed: Qwen3-Embedding on GPU box is unavailable or returned errors for ${texts.length} texts. Check embed.oneshots.co health and ubatch-size config.`);
 }
 

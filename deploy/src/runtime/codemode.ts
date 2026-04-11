@@ -34,6 +34,7 @@ import {
 } from "@cloudflare/codemode";
 import type { RuntimeEnv, ToolDefinition, RuntimeEvent } from "./types";
 import { executeTools } from "./tools";
+import { log } from "./log";
 // pushRuntimeEvent removed with edge_graph.ts — no-op stub for codemode audit events
 function pushRuntimeEvent(_events: any, _type: string, _turn: number, _data: any) {}
 
@@ -434,7 +435,7 @@ export async function executeScopedCode(
   if (pendingExecutions >= MAX_CONCURRENT_EXECUTIONS) {
     concurrencyRejectionsTotal += 1;
     lastConcurrencyRejectionAtMs = Date.now();
-    console.warn(
+    log.warn(
       `[codemode] concurrency limit reached: pending=${pendingExecutions} max=${MAX_CONCURRENT_EXECUTIONS} scope=${options.scope} session=${sessionId}`,
     );
     return {

@@ -8,7 +8,7 @@
  * calls the same SQL/APIs the control-plane routes use.
  */
 
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { generateEvolutionSuggestions } from "./meta-agent";
 import { parseJsonColumn } from "../lib/parse-json-column";
 
@@ -690,7 +690,7 @@ async function executeTool(
   args: Record<string, unknown>,
   ctx: MetaChatContext,
 ): Promise<string> {
-  const sql = await getDbForOrg(ctx.hyperdrive, ctx.orgId);
+  return await withOrgDb({ HYPERDRIVE: ctx.hyperdrive }, ctx.orgId, async (sql) => {
 
   switch (name) {
     case "read_agent_config": {
@@ -2610,6 +2610,7 @@ async function executeTool(
     default:
       return JSON.stringify({ error: `Unknown tool: ${name}` });
   }
+  });
 }
 
 /* ── System prompt ──────────────────────────────────────────────── */
@@ -2810,15 +2811,15 @@ export async function runMetaChat(
   // ── Plan-based model selection: free/basic → Gemma, standard/premium → Sonnet ──
   let agentPlan = "free";
   try {
-    const sql = await getDbForOrg(ctx.hyperdrive, ctx.orgId);
-    const [row] = await sql`
-      SELECT config FROM agents
-      WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId} LIMIT 1
-    `;
-    if (row) {
+    agentPlan = await withOrgDb({ HYPERDRIVE: ctx.hyperdrive }, ctx.orgId, async (sql) => {
+      // RLS on agents filters to current org — no WHERE org_id needed.
+      const [row] = await sql`
+        SELECT config FROM agents WHERE name = ${ctx.agentName} LIMIT 1
+      `;
+      if (!row) return "free";
       const cfg = typeof row.config === "string" ? JSON.parse(row.config) : row.config ?? {};
-      agentPlan = cfg.plan || "free";
-    }
+      return cfg.plan || "free";
+    });
   } catch { /* fail open — default to free/Gemma */ }
 
   const selectedModelPath = ctx.modelPath || "auto";
@@ -3014,62 +3015,64 @@ export async function runMetaChat(
   // Same comprehensive telemetry as runtime agents
   const userInput = messages.find(m => m.role === "user")?.content || "";
   try {
-    const sql = await getDbForOrg(ctx.hyperdrive, ctx.orgId);
-    const now = new Date().toISOString();
+    await withOrgDb({ HYPERDRIVE: ctx.hyperdrive }, ctx.orgId, async (sql) => {
+      const now = new Date().toISOString();
 
-    // Write session record
-    await sql`
-      INSERT INTO sessions (session_id, org_id, agent_name, model, status, input_text, output_text,
-        step_count, action_count, cost_total_usd, wall_clock_seconds, created_at, ended_at)
-      VALUES (
-        ${sessionId}, ${ctx.orgId}, ${'meta:' + ctx.agentName}, 'anthropic/claude-sonnet-4-6',
-        'success', ${userInput.slice(0, 2000)}, ${(lastAssistant?.content || "").slice(0, 5000)},
-        ${round}, ${totalToolCalls}, ${totalCost}, ${0}, ${now}, ${now}
-      )
-      ON CONFLICT (session_id) DO NOTHING
-    `;
-
-    // Write per-turn records
-    for (const t of turnRecords) {
+      // Write session record
       await sql`
-        INSERT INTO turns (session_id, turn_number, model_used, llm_content,
-          tool_calls, tool_results, errors,
-          input_tokens, output_tokens, cost_usd, latency_ms, execution_mode, started_at)
+        INSERT INTO sessions (session_id, org_id, agent_name, model, status, input_text, output_text,
+          step_count, action_count, cost_total_usd, wall_clock_seconds, created_at, ended_at)
         VALUES (
-          ${sessionId}, ${t.turn}, ${t.model}, ${t.content.slice(0, 10000)},
-          ${JSON.stringify(t.tool_calls)}, ${JSON.stringify(t.tool_results)}, '[]',
-          ${t.input_tokens}, ${t.output_tokens}, ${t.cost_usd}, ${0},
-          'meta-agent', ${now}
+          ${sessionId}, ${ctx.orgId}, ${'meta:' + ctx.agentName}, 'anthropic/claude-sonnet-4-6',
+          'success', ${userInput.slice(0, 2000)}, ${(lastAssistant?.content || "").slice(0, 5000)},
+          ${round}, ${totalToolCalls}, ${totalCost}, ${0}, ${now}, ${now}
         )
+        ON CONFLICT (session_id) DO NOTHING
       `;
-    }
 
-    // Write billing record for meta-agent usage (Sonnet 4.6 is paid)
-    if (totalCost > 0) {
-      await sql`
-        INSERT INTO billing_records (
-          org_id, customer_id, agent_name, cost_type, description,
-          model, provider, input_tokens, output_tokens,
-          inference_cost_usd, total_cost_usd, session_id, created_at
-        ) VALUES (
-          ${ctx.orgId}, ${ctx.userId}, ${'meta:' + ctx.agentName}, 'inference',
-          ${'Meta-agent: ' + round + ' turns, ' + totalToolCalls + ' tool calls'},
-          'anthropic/claude-sonnet-4-6', 'anthropic',
-          ${totalInputTokens}, ${totalOutputTokens},
-          ${totalCost}, ${totalCost}, ${sessionId}, ${now}
-        )
-      `.catch((e: any) => console.warn(`[meta-chat] billing_record write failed: ${e.message}`));
+      // Write per-turn records
+      for (const t of turnRecords) {
+        await sql`
+          INSERT INTO turns (session_id, turn_number, model_used, llm_content,
+            tool_calls, tool_results, errors,
+            input_tokens, output_tokens, cost_usd, latency_ms, execution_mode, started_at)
+          VALUES (
+            ${sessionId}, ${t.turn}, ${t.model}, ${t.content.slice(0, 10000)},
+            ${JSON.stringify(t.tool_calls)}, ${JSON.stringify(t.tool_results)}, '[]',
+            ${t.input_tokens}, ${t.output_tokens}, ${t.cost_usd}, ${0},
+            'meta-agent', ${now}
+          )
+        `;
+      }
 
-      // Deduct credits
-      await sql`
-        INSERT INTO credit_transactions (org_id, type, amount_usd, description, reference_id, reference_type, created_at)
-        VALUES (${ctx.orgId}, 'burn', ${-totalCost}, ${'meta-agent: ' + ctx.agentName + ' (' + round + ' turns, ' + totalToolCalls + ' tools)'}, ${sessionId}, 'meta_agent', ${now})
-      `;
-      await sql`
-        UPDATE org_credit_balance SET balance_usd = balance_usd - ${totalCost}, updated_at = ${now}
-        WHERE org_id = ${ctx.orgId}
-      `.catch(() => {});
-    }
+      // Write billing record for meta-agent usage (Sonnet 4.6 is paid).
+      // RLS filters by current_org_id() so no WHERE org_id needed on
+      // the UPDATE to org_credit_balance.
+      if (totalCost > 0) {
+        await sql`
+          INSERT INTO billing_records (
+            org_id, customer_id, agent_name, cost_type, description,
+            model, provider, input_tokens, output_tokens,
+            inference_cost_usd, total_cost_usd, session_id, created_at
+          ) VALUES (
+            ${ctx.orgId}, ${ctx.userId}, ${'meta:' + ctx.agentName}, 'inference',
+            ${'Meta-agent: ' + round + ' turns, ' + totalToolCalls + ' tool calls'},
+            'anthropic/claude-sonnet-4-6', 'anthropic',
+            ${totalInputTokens}, ${totalOutputTokens},
+            ${totalCost}, ${totalCost}, ${sessionId}, ${now}
+          )
+        `.catch((e: any) => console.warn(`[meta-chat] billing_record write failed: ${e.message}`));
+
+        // Deduct credits
+        await sql`
+          INSERT INTO credit_transactions (org_id, type, amount_usd, description, reference_id, reference_type, created_at)
+          VALUES (${ctx.orgId}, 'burn', ${-totalCost}, ${'meta-agent: ' + ctx.agentName + ' (' + round + ' turns, ' + totalToolCalls + ' tools)'}, ${sessionId}, 'meta_agent', ${now})
+        `;
+        await sql`
+          UPDATE org_credit_balance SET balance_usd = balance_usd - ${totalCost}, updated_at = ${now}
+        `.catch(() => {});
+      }
+    });
   } catch (err) {
     console.error("[meta-agent] Telemetry write failed:", err);
   }

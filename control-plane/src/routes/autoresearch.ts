@@ -8,7 +8,7 @@
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 export const autoresearchRoutes = createOpenAPIRouter();
@@ -214,27 +214,28 @@ autoresearchRoutes.openapi(createRunRoute, async (c): Promise<any> => {
 
   if (!agentName) return c.json({ error: "agent_name is required" }, 400);
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const runId = crypto.randomUUID();
-  const now = new Date().toISOString();
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const runId = crypto.randomUUID();
+    const now = new Date().toISOString();
 
-  try {
-    await sql`
-      INSERT INTO autoresearch_runs (
-        run_id, agent_name, status, config, workspace,
-        iteration, best_bpb, total_experiments, kept, discarded, crashed,
-        org_id, created_at, updated_at
-      ) VALUES (
-        ${runId}, ${agentName}, ${status}, ${configJson}, ${workspace},
-        ${0}, ${null}, ${0}, ${0}, ${0}, ${0},
-        ${user.org_id}, ${now}, ${now}
-      )
-    `;
-  } catch (err: any) {
-    return c.json({ error: `Failed to create run: ${err.message}` }, 500);
-  }
+    try {
+      await sql`
+        INSERT INTO autoresearch_runs (
+          run_id, agent_name, status, config, workspace,
+          iteration, best_bpb, total_experiments, kept, discarded, crashed,
+          org_id, created_at, updated_at
+        ) VALUES (
+          ${runId}, ${agentName}, ${status}, ${configJson}, ${workspace},
+          ${0}, ${null}, ${0}, ${0}, ${0}, ${0},
+          ${user.org_id}, ${now}, ${now}
+        )
+      `;
+    } catch (err: any) {
+      return c.json({ error: `Failed to create run: ${err.message}` }, 500);
+    }
 
-  return c.json({ run_id: runId, agent_name: agentName, status, created: true }, 201);
+    return c.json({ run_id: runId, agent_name: agentName, status, created: true }, 201);
+  });
 });
 
 // ── PUT /runs/:run_id — update run status/metrics ───────────────────
@@ -276,23 +277,24 @@ autoresearchRoutes.openapi(updateRunRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { run_id: runId } = c.req.valid("param");
   const body = c.req.valid("json");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const now = new Date().toISOString();
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const now = new Date().toISOString();
 
-  await sql`
-    UPDATE autoresearch_runs SET
-      status = COALESCE(${body.status ?? null}, status),
-      iteration = COALESCE(${body.iteration ?? null}, iteration),
-      best_bpb = COALESCE(${body.best_bpb ?? null}, best_bpb),
-      total_experiments = COALESCE(${body.total_experiments ?? null}, total_experiments),
-      kept = COALESCE(${body.kept ?? null}, kept),
-      discarded = COALESCE(${body.discarded ?? null}, discarded),
-      crashed = COALESCE(${body.crashed ?? null}, crashed),
-      updated_at = ${now}
-    WHERE run_id = ${runId}
-  `;
+    await sql`
+      UPDATE autoresearch_runs SET
+        status = COALESCE(${body.status ?? null}, status),
+        iteration = COALESCE(${body.iteration ?? null}, iteration),
+        best_bpb = COALESCE(${body.best_bpb ?? null}, best_bpb),
+        total_experiments = COALESCE(${body.total_experiments ?? null}, total_experiments),
+        kept = COALESCE(${body.kept ?? null}, kept),
+        discarded = COALESCE(${body.discarded ?? null}, discarded),
+        crashed = COALESCE(${body.crashed ?? null}, crashed),
+        updated_at = ${now}
+      WHERE run_id = ${runId}
+    `;
 
-  return c.json({ run_id: runId, updated: true });
+    return c.json({ run_id: runId, updated: true });
+  });
 });
 
 // ── POST /runs/:run_id/experiments — record an experiment ───────────
@@ -342,25 +344,26 @@ autoresearchRoutes.openapi(createExperimentRoute, async (c): Promise<any> => {
 
   if (!experimentName) return c.json({ error: "experiment_name is required" }, 400);
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const experimentId = crypto.randomUUID();
-  const now = new Date().toISOString();
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const experimentId = crypto.randomUUID();
+    const now = new Date().toISOString();
 
-  try {
-    await sql`
-      INSERT INTO autoresearch_experiments (
-        experiment_id, run_id, agent_name, experiment_name, status,
-        bpb, config, results, org_id, created_at
-      ) VALUES (
-        ${experimentId}, ${runId}, ${agentName}, ${experimentName}, ${status},
-        ${bpb}, ${configJson}, ${resultsJson}, ${user.org_id}, ${now}
-      )
-    `;
-  } catch (err: any) {
-    return c.json({ error: `Failed to create experiment: ${err.message}` }, 500);
-  }
+    try {
+      await sql`
+        INSERT INTO autoresearch_experiments (
+          experiment_id, run_id, agent_name, experiment_name, status,
+          bpb, config, results, org_id, created_at
+        ) VALUES (
+          ${experimentId}, ${runId}, ${agentName}, ${experimentName}, ${status},
+          ${bpb}, ${configJson}, ${resultsJson}, ${user.org_id}, ${now}
+        )
+      `;
+    } catch (err: any) {
+      return c.json({ error: `Failed to create experiment: ${err.message}` }, 500);
+    }
 
-  return c.json({ experiment_id: experimentId, run_id: runId, created: true }, 201);
+    return c.json({ experiment_id: experimentId, run_id: runId, created: true }, 201);
+  });
 });
 
 // ── GET /runs — List autoresearch runs ──────────────────────────────
@@ -390,20 +393,20 @@ autoresearchRoutes.openapi(listRunsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name: agentName, limit: rawLimit } = c.req.valid("query");
   const limit = Math.min(200, Math.max(1, Number(rawLimit) || 50));
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  let rows;
-  if (agentName) {
-    rows = await sql`
-      SELECT * FROM autoresearch_runs WHERE agent_name = ${agentName}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  } else {
-    rows = await sql`
-      SELECT * FROM autoresearch_runs ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  }
-  return c.json(rows);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    let rows;
+    if (agentName) {
+      rows = await sql`
+        SELECT * FROM autoresearch_runs WHERE agent_name = ${agentName}
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    } else {
+      rows = await sql`
+        SELECT * FROM autoresearch_runs ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    }
+    return c.json(rows);
+  });
 });
 
 // ── GET /runs/:run_id — Get a specific autoresearch run ─────────────
@@ -429,17 +432,17 @@ const getRunRoute = createRoute({
 autoresearchRoutes.openapi(getRunRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { run_id: runId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const runs = await sql`SELECT * FROM autoresearch_runs WHERE run_id = ${runId}`;
+    if (runs.length === 0) return c.json({ error: "Autoresearch run not found" }, 404);
 
-  const runs = await sql`SELECT * FROM autoresearch_runs WHERE run_id = ${runId}`;
-  if (runs.length === 0) return c.json({ error: "Autoresearch run not found" }, 404);
+    const experiments = await sql`
+      SELECT * FROM autoresearch_experiments WHERE run_id = ${runId}
+      ORDER BY created_at LIMIT 500
+    `;
 
-  const experiments = await sql`
-    SELECT * FROM autoresearch_experiments WHERE run_id = ${runId}
-    ORDER BY created_at LIMIT 500
-  `;
-
-  return c.json({ ...runs[0], experiments });
+    return c.json({ ...runs[0], experiments });
+  });
 });
 
 // ── GET /runs/:run_id/experiments — List experiments for a run ──────
@@ -470,13 +473,13 @@ autoresearchRoutes.openapi(listExperimentsRoute, async (c): Promise<any> => {
   const { run_id: runId } = c.req.valid("param");
   const { limit: rawLimit } = c.req.valid("query");
   const limit = Math.min(500, Math.max(1, Number(rawLimit) || 100));
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  const rows = await sql`
-    SELECT * FROM autoresearch_experiments WHERE run_id = ${runId}
-    ORDER BY created_at LIMIT ${limit}
-  `;
-  return c.json(rows);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT * FROM autoresearch_experiments WHERE run_id = ${runId}
+      ORDER BY created_at LIMIT ${limit}
+    `;
+    return c.json(rows);
+  });
 });
 
 // ── GET /agent/:agent_name/history — Agent experiment history ───────
@@ -507,23 +510,23 @@ autoresearchRoutes.openapi(agentHistoryRoute, async (c): Promise<any> => {
   const { agent_name: agentName } = c.req.valid("param");
   const { limit: rawLimit } = c.req.valid("query");
   const limit = Math.min(200, Math.max(1, Number(rawLimit) || 20));
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const runs = await sql`
+      SELECT * FROM autoresearch_runs WHERE agent_name = ${agentName}
+      ORDER BY created_at DESC LIMIT ${limit}
+    `;
 
-  const runs = await sql`
-    SELECT * FROM autoresearch_runs WHERE agent_name = ${agentName}
-    ORDER BY created_at DESC LIMIT ${limit}
-  `;
+    const experiments = await sql`
+      SELECT * FROM autoresearch_experiments WHERE agent_name = ${agentName}
+      ORDER BY created_at DESC LIMIT ${limit * 10}
+    `;
 
-  const experiments = await sql`
-    SELECT * FROM autoresearch_experiments WHERE agent_name = ${agentName}
-    ORDER BY created_at DESC LIMIT ${limit * 10}
-  `;
-
-  return c.json({
-    agent_name: agentName,
-    total_runs: runs.length,
-    runs,
-    total_experiments: experiments.length,
-    experiments,
+    return c.json({
+      agent_name: agentName,
+      total_runs: runs.length,
+      runs,
+      total_experiments: experiments.length,
+      experiments,
+    });
   });
 });

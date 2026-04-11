@@ -8,7 +8,7 @@ import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import type { CurrentUser } from "../auth/types";
-import { getDb, getDbForOrg } from "../db/client";
+import { withOrgDb, withAdminDb } from "../db/client";
 
 export const auditRoutes = createOpenAPIRouter();
 
@@ -45,36 +45,36 @@ auditRoutes.openapi(auditLogRoute, async (c): Promise<any> => {
   const limit = Math.min(10000, Math.max(1, Number(query.limit) || 100));
   const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    let rows;
+    if (action && userId) {
+      rows = await sql`
+        SELECT * FROM audit_log
+        WHERE action = ${action} AND user_id = ${userId} AND created_at >= ${since}
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    } else if (action) {
+      rows = await sql`
+        SELECT * FROM audit_log
+        WHERE action = ${action} AND created_at >= ${since}
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    } else if (userId) {
+      rows = await sql`
+        SELECT * FROM audit_log
+        WHERE user_id = ${userId} AND created_at >= ${since}
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    } else {
+      rows = await sql`
+        SELECT * FROM audit_log
+        WHERE created_at >= ${since}
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    }
 
-  let rows;
-  if (action && userId) {
-    rows = await sql`
-      SELECT * FROM audit_log
-      WHERE org_id = ${user.org_id} AND action = ${action} AND user_id = ${userId} AND created_at >= ${since}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  } else if (action) {
-    rows = await sql`
-      SELECT * FROM audit_log
-      WHERE org_id = ${user.org_id} AND action = ${action} AND created_at >= ${since}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  } else if (userId) {
-    rows = await sql`
-      SELECT * FROM audit_log
-      WHERE org_id = ${user.org_id} AND user_id = ${userId} AND created_at >= ${since}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  } else {
-    rows = await sql`
-      SELECT * FROM audit_log
-      WHERE org_id = ${user.org_id} AND created_at >= ${since}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  }
-
-  return c.json({ entries: rows, total: rows.length });
+    return c.json({ entries: rows, total: rows.length });
+  });
 });
 
 // ── GET /export — Export audit log with hash chain ────────────────────────
@@ -101,33 +101,34 @@ auditRoutes.openapi(auditExportRoute, async (c): Promise<any> => {
   const limit = Math.min(10000, Math.max(1, Number(query.limit) || 10000));
   const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const entries = await sql`
-    SELECT * FROM audit_log
-    WHERE org_id = ${user.org_id} AND created_at >= ${since}
-    ORDER BY created_at ASC LIMIT ${limit}
-  `;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const entries = await sql`
+      SELECT * FROM audit_log
+      WHERE created_at >= ${since}
+      ORDER BY created_at ASC LIMIT ${limit}
+    `;
 
-  // Build hash chain for tamper evidence
-  const chain: any[] = [];
-  let prevHash = "genesis";
-  for (const entry of entries) {
-    const entryJson = JSON.stringify(entry, Object.keys(entry as any).sort());
-    const currentHash = await sha256Hex(`${prevHash}:${entryJson}`);
-    chain.push({ ...entry, chain_hash: currentHash });
-    prevHash = currentHash;
-  }
+    // Build hash chain for tamper evidence
+    const chain: any[] = [];
+    let prevHash = "genesis";
+    for (const entry of entries) {
+      const entryJson = JSON.stringify(entry, Object.keys(entry as any).sort());
+      const currentHash = await sha256Hex(`${prevHash}:${entryJson}`);
+      chain.push({ ...entry, chain_hash: currentHash });
+      prevHash = currentHash;
+    }
 
-  // Final integrity hash
-  const allHashes = JSON.stringify(chain.map((e: any) => e.chain_hash));
-  const integrityHash = await sha256Hex(allHashes);
+    // Final integrity hash
+    const allHashes = JSON.stringify(chain.map((e: any) => e.chain_hash));
+    const integrityHash = await sha256Hex(allHashes);
 
-  return c.json({
-    entries: chain,
-    total: chain.length,
-    exported_at: Date.now() / 1000,
-    integrity_hash: integrityHash,
-    org_id: user.org_id,
+    return c.json({
+      entries: chain,
+      total: chain.length,
+      exported_at: Date.now() / 1000,
+      integrity_hash: integrityHash,
+      org_id: user.org_id,
+    });
   });
 });
 
@@ -149,37 +150,37 @@ const deleteAuditLogRoute = createRoute({
 });
 auditRoutes.openapi(deleteAuditLogRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  // Check immutable_audit setting
-  try {
-    const settingsRows = await sql`
-      SELECT settings FROM org_settings WHERE org_id = ${user.org_id} LIMIT 1
-    `;
-    if (settingsRows.length > 0) {
-      const settings = typeof settingsRows[0].settings === "string"
-        ? JSON.parse(settingsRows[0].settings)
-        : settingsRows[0].settings ?? {};
-      if (settings.immutable_audit === true) {
-        return c.json({ error: "Audit log is in immutable mode" }, 403);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Check immutable_audit setting
+    try {
+      const settingsRows = await sql`
+        SELECT settings FROM org_settings LIMIT 1
+      `;
+      if (settingsRows.length > 0) {
+        const settings = typeof settingsRows[0].settings === "string"
+          ? JSON.parse(settingsRows[0].settings)
+          : settingsRows[0].settings ?? {};
+        if (settings.immutable_audit === true) {
+          return c.json({ error: "Audit log is in immutable mode" }, 403);
+        }
       }
+    } catch {
+      // If we can't verify, deny by default for safety
+      return c.json({ error: "Unable to verify audit immutability setting" }, 500);
     }
-  } catch {
-    // If we can't verify, deny by default for safety
-    return c.json({ error: "Unable to verify audit immutability setting" }, 500);
-  }
 
-  // If not immutable, allow deletion with filters
-  const query = c.req.valid("query");
-  const sinceDays = Math.max(1, Math.min(365, Number(query.since_days) || 30));
-  const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
+    // If not immutable, allow deletion with filters
+    const query = c.req.valid("query");
+    const sinceDays = Math.max(1, Math.min(365, Number(query.since_days) || 30));
+    const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
 
-  const result = await sql`
-    DELETE FROM audit_log
-    WHERE org_id = ${user.org_id} AND created_at < ${since}
-  `;
+    const result = await sql`
+      DELETE FROM audit_log
+      WHERE created_at < ${since}
+    `;
 
-  return c.json({ deleted: result.count ?? 0 });
+    return c.json({ deleted: result.count ?? 0 });
+  });
 });
 
 // ── DELETE /log/{entry_id} — Delete a single audit entry (immutable guard)
@@ -199,31 +200,31 @@ const deleteAuditEntryRoute = createRoute({
 auditRoutes.openapi(deleteAuditEntryRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { entry_id: entryId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  // Check immutable_audit setting
-  try {
-    const settingsRows = await sql`
-      SELECT settings FROM org_settings WHERE org_id = ${user.org_id} LIMIT 1
-    `;
-    if (settingsRows.length > 0) {
-      const settings = typeof settingsRows[0].settings === "string"
-        ? JSON.parse(settingsRows[0].settings)
-        : settingsRows[0].settings ?? {};
-      if (settings.immutable_audit === true) {
-        return c.json({ error: "Audit log is in immutable mode" }, 403);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Check immutable_audit setting
+    try {
+      const settingsRows = await sql`
+        SELECT settings FROM org_settings LIMIT 1
+      `;
+      if (settingsRows.length > 0) {
+        const settings = typeof settingsRows[0].settings === "string"
+          ? JSON.parse(settingsRows[0].settings)
+          : settingsRows[0].settings ?? {};
+        if (settings.immutable_audit === true) {
+          return c.json({ error: "Audit log is in immutable mode" }, 403);
+        }
       }
+    } catch {
+      return c.json({ error: "Unable to verify audit immutability setting" }, 500);
     }
-  } catch {
-    return c.json({ error: "Unable to verify audit immutability setting" }, 500);
-  }
 
-  const result = await sql`
-    DELETE FROM audit_log
-    WHERE org_id = ${user.org_id} AND id = ${entryId}
-  `;
+    const result = await sql`
+      DELETE FROM audit_log
+      WHERE id = ${entryId}
+    `;
 
-  return c.json({ deleted: result.count ?? 0 });
+    return c.json({ deleted: result.count ?? 0 });
+  });
 });
 
 // ── GET /events — List event types ────────────────────────────────────────
@@ -237,11 +238,13 @@ const eventTypesRoute = createRoute({
   },
 });
 auditRoutes.openapi(eventTypesRoute, async (c): Promise<any> => {
-  const sql = await getDb(c.env.HYPERDRIVE);
-  try {
-    const rows = await sql`SELECT * FROM event_types ORDER BY category, event_type`;
-    return c.json({ event_types: rows });
-  } catch {
-    return c.json({ event_types: [] });
-  }
+  // event_types is a global catalog table — use admin connection.
+  return await withAdminDb(c.env, async (sql) => {
+    try {
+      const rows = await sql`SELECT * FROM event_types ORDER BY category, event_type`;
+      return c.json({ event_types: rows });
+    } catch {
+      return c.json({ event_types: [] });
+    }
+  });
 });

@@ -1,11 +1,14 @@
 /**
  * MCP control plane router — register, monitor, and sync MCP servers.
  * Ported from agentos/api/routers/mcp_control.py
+ *
+ * RLS: mcp_servers is org-scoped under withOrgDb. Redundant
+ * `WHERE org_id = ${user.org_id}` clauses removed.
  */
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 export const mcpControlRoutes = createOpenAPIRouter();
@@ -51,12 +54,13 @@ const listServersRoute = createRoute({
 });
 mcpControlRoutes.openapi(listServersRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const rows = await sql`
-    SELECT server_id, name, url, transport, status, last_health_at, created_at
-    FROM mcp_servers WHERE org_id = ${user.org_id} ORDER BY name
-  `;
-  return c.json({ servers: rows });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT server_id, name, url, transport, status, last_health_at, created_at
+      FROM mcp_servers ORDER BY name
+    `;
+    return c.json({ servers: rows });
+  });
 });
 
 // ── POST /mcp/servers ──────────────────────────────────────────────────
@@ -105,16 +109,17 @@ mcpControlRoutes.openapi(createServerRoute, async (c): Promise<any> => {
   const urlError = validateRemoteUrl(url);
   if (urlError) return c.json({ error: urlError }, 400);
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const serverId = genId();
   const now = new Date().toISOString();
 
-  await sql`
-    INSERT INTO mcp_servers (server_id, org_id, name, url, transport, auth_token, metadata, status, created_at)
-    VALUES (${serverId}, ${user.org_id}, ${name}, ${url}, ${transport}, ${authToken}, ${JSON.stringify(metadata)}, 'registered', ${now})
-  `;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    await sql`
+      INSERT INTO mcp_servers (server_id, org_id, name, url, transport, auth_token, metadata, status, created_at)
+      VALUES (${serverId}, ${user.org_id}, ${name}, ${url}, ${transport}, ${authToken}, ${JSON.stringify(metadata)}, 'registered', ${now})
+    `;
 
-  return c.json({ server_id: serverId, name, status: "registered" });
+    return c.json({ server_id: serverId, name, status: "registered" });
+  });
 });
 
 // ── GET /mcp/servers/{server_id}/status ────────────────────────────────
@@ -149,36 +154,37 @@ const getServerStatusRoute = createRoute({
 mcpControlRoutes.openapi(getServerStatusRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { server_id: serverId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  const rows = await sql`
-    SELECT * FROM mcp_servers WHERE server_id = ${serverId} AND org_id = ${user.org_id}
-  `;
-  if (rows.length === 0) return c.json({ error: "MCP server not found" }, 404);
-  const server = rows[0] as any;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT * FROM mcp_servers WHERE server_id = ${serverId}
+    `;
+    if (rows.length === 0) return c.json({ error: "MCP server not found" }, 404);
+    const server = rows[0] as any;
 
-  // Lightweight health check
-  let healthy = false;
-  let error = "";
-  try {
-    const resp = await fetch(server.url.replace(/\/+$/, "") + "/health", {
-      signal: AbortSignal.timeout(5000),
+    // Lightweight health check
+    let healthy = false;
+    let error = "";
+    try {
+      const resp = await fetch(server.url.replace(/\/+$/, "") + "/health", {
+        signal: AbortSignal.timeout(5000),
+      });
+      healthy = resp.status < 400;
+    } catch (e: any) {
+      error = e.message || "Health check failed";
+    }
+
+    const status = healthy ? "healthy" : "unhealthy";
+    const now = new Date().toISOString();
+    await sql`UPDATE mcp_servers SET status = ${status}, last_health_at = ${now} WHERE server_id = ${serverId}`;
+
+    return c.json({
+      server_id: serverId,
+      name: server.name,
+      status,
+      healthy,
+      error: error || null,
     });
-    healthy = resp.status < 400;
-  } catch (e: any) {
-    error = e.message || "Health check failed";
-  }
-
-  const status = healthy ? "healthy" : "unhealthy";
-  const now = new Date().toISOString();
-  await sql`UPDATE mcp_servers SET status = ${status}, last_health_at = ${now} WHERE server_id = ${serverId}`;
-
-  return c.json({
-    server_id: serverId,
-    name: server.name,
-    status,
-    healthy,
-    error: error || null,
   });
 });
 
@@ -214,38 +220,39 @@ const syncServerRoute = createRoute({
 mcpControlRoutes.openapi(syncServerRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { server_id: serverId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  const rows = await sql`
-    SELECT * FROM mcp_servers WHERE server_id = ${serverId} AND org_id = ${user.org_id}
-  `;
-  if (rows.length === 0) return c.json({ error: "MCP server not found" }, 404);
-  const server = rows[0] as any;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT * FROM mcp_servers WHERE server_id = ${serverId}
+    `;
+    if (rows.length === 0) return c.json({ error: "MCP server not found" }, 404);
+    const server = rows[0] as any;
 
-  let tools: any[] = [];
-  let error = "";
-  try {
-    const resp = await fetch(server.url.replace(/\/+$/, "") + "/tools", {
-      signal: AbortSignal.timeout(10000),
-    });
-    if (resp.status < 400) {
-      const data = await resp.json() as any;
-      tools = data.tools || (Array.isArray(data) ? data : []);
+    let tools: any[] = [];
+    let error = "";
+    try {
+      const resp = await fetch(server.url.replace(/\/+$/, "") + "/tools", {
+        signal: AbortSignal.timeout(10000),
+      });
+      if (resp.status < 400) {
+        const data = await resp.json() as any;
+        tools = data.tools || (Array.isArray(data) ? data : []);
+      }
+    } catch (e: any) {
+      error = e.message || "Sync failed";
     }
-  } catch (e: any) {
-    error = e.message || "Sync failed";
-  }
 
-  const now = new Date().toISOString();
-  const newStatus = error ? "sync_failed" : "synced";
-  await sql`UPDATE mcp_servers SET last_health_at = ${now}, status = ${newStatus} WHERE server_id = ${serverId}`;
+    const now = new Date().toISOString();
+    const newStatus = error ? "sync_failed" : "synced";
+    await sql`UPDATE mcp_servers SET last_health_at = ${now}, status = ${newStatus} WHERE server_id = ${serverId}`;
 
-  return c.json({
-    server_id: serverId,
-    synced_tools: tools.length,
-    tools,
-    error: error || null,
-    synced_at: now,
+    return c.json({
+      server_id: serverId,
+      synced_tools: tools.length,
+      tools,
+      error: error || null,
+      synced_at: now,
+    });
   });
 });
 
@@ -271,11 +278,12 @@ const deleteServerRoute = createRoute({
 mcpControlRoutes.openapi(deleteServerRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { server_id: serverId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  const result = await sql`
-    DELETE FROM mcp_servers WHERE server_id = ${serverId} AND org_id = ${user.org_id}
-  `;
-  if (result.count === 0) return c.json({ error: "MCP server not found" }, 404);
-  return c.json({ deleted: serverId });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const result = await sql`
+      DELETE FROM mcp_servers WHERE server_id = ${serverId}
+    `;
+    if (result.count === 0) return c.json({ error: "MCP server not found" }, 404);
+    return c.json({ deleted: serverId });
+  });
 });

@@ -6,7 +6,7 @@ import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { parseJsonColumn } from "../lib/parse-json-column";
 import {
@@ -64,7 +64,7 @@ observabilityRoutes.openapi(summaryRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { since_days: sinceDays } = c.req.valid("query");
   const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   const [sessions] = await sql`
     SELECT COUNT(*) as total, COALESCE(SUM(cost_total_usd), 0) as cost,
@@ -158,6 +158,7 @@ observabilityRoutes.openapi(summaryRoute, async (c): Promise<any> => {
     daily: dailySessions.map((d: any) => ({ day: d.day, sessions: Number(d.sessions), steps: Number(d.steps), cost: Number(d.cost) })),
     since_days: sinceDays,
   });
+  });
 });
 
 // ── GET /integrity/breaches ─────────────────────────────────────
@@ -182,8 +183,8 @@ const integrityBreachesRoute = createRoute({
 
 observabilityRoutes.openapi(integrityBreachesRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const { limit, trace_id: traceId } = c.req.valid("query");
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   const rows = traceId
     ? await sql`
@@ -241,6 +242,7 @@ observabilityRoutes.openapi(integrityBreachesRoute, async (c): Promise<any> => {
     hottest_traces: hottestTraces,
     entries,
   });
+  });
 });
 
 // ── GET /incidents ──────────────────────────────────────────────
@@ -271,7 +273,7 @@ const incidentsRoute = createRoute({
 
 observabilityRoutes.openapi(incidentsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   const { since_hours: sinceHours, limit, dedupe_window_sec: dedupeWindowSec, include_suppressed: includeSuppressedRaw, min_severity: minSeverity, kinds: kindsParam } = c.req.valid("query");
   const includeSuppressed = includeSuppressedRaw !== "false";
@@ -456,6 +458,7 @@ observabilityRoutes.openapi(incidentsRoute, async (c): Promise<any> => {
     },
     incidents,
   });
+  });
 });
 
 // ── GET /daily-cost ─────────────────────────────────────────────
@@ -481,11 +484,11 @@ observabilityRoutes.openapi(dailyCostRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { days } = c.req.valid("query");
   const since = new Date(Date.now() - days * 86400 * 1000).toISOString();
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   const rows = await sql`
     SELECT created_at, total_cost_usd FROM billing_records
-    WHERE org_id = ${user.org_id} AND created_at >= ${since}
+    WHERE created_at >= ${since}
     ORDER BY created_at
   `;
 
@@ -499,6 +502,7 @@ observabilityRoutes.openapi(dailyCostRoute, async (c): Promise<any> => {
 
   return c.json({
     days: Object.keys(daily).sort().map((day) => ({ day, cost: daily[day] })),
+  });
   });
 });
 
@@ -518,7 +522,7 @@ const costLedgerRoute = createRoute({
 
 observabilityRoutes.openapi(costLedgerRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   let entries: Array<{
     agent_name: string;
@@ -537,7 +541,6 @@ observabilityRoutes.openapi(costLedgerRoute, async (c): Promise<any> => {
         COALESCE(SUM(input_tokens), 0) as input_tokens,
         COALESCE(SUM(output_tokens), 0) as output_tokens
       FROM billing_records
-      WHERE org_id = ${user.org_id}
       GROUP BY agent_name, model
       ORDER BY cost_usd DESC
     `;
@@ -551,6 +554,7 @@ observabilityRoutes.openapi(costLedgerRoute, async (c): Promise<any> => {
   } catch {}
 
   return c.json({ entries });
+  });
 });
 
 // ── GET /trace/:trace_id ────────────────────────────────────────
@@ -574,23 +578,24 @@ const getTraceRoute = createRoute({
 observabilityRoutes.openapi(getTraceRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { trace_id: traceId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
-  // Verify org ownership
+  // RLS verifies org ownership automatically.
   const check = await sql`
-    SELECT COUNT(*) as cnt FROM sessions WHERE trace_id = ${traceId} AND org_id = ${user.org_id}
+    SELECT COUNT(*) as cnt FROM sessions WHERE trace_id = ${traceId}
   `;
   if (Number(check[0]?.cnt) === 0) return c.json({ error: "Trace not found" }, 404);
 
   const sessions = await sql`
-    SELECT * FROM sessions WHERE trace_id = ${traceId} AND org_id = ${user.org_id} ORDER BY created_at LIMIT 100
+    SELECT * FROM sessions WHERE trace_id = ${traceId} ORDER BY created_at LIMIT 100
   `;
 
   const events = await sql`
-    SELECT * FROM runtime_events WHERE trace_id = ${traceId} AND org_id = ${user.org_id} ORDER BY created_at
+    SELECT * FROM runtime_events WHERE trace_id = ${traceId} ORDER BY created_at
   `.catch(() => []);
 
   return c.json({ trace_id: traceId, sessions, events });
+  });
 });
 
 // ── GET /trace/:trace_id/integrity ──────────────────────────────
@@ -621,12 +626,12 @@ observabilityRoutes.openapi(traceIntegrityRoute, async (c): Promise<any> => {
   const { strict: strictRaw, alert_on_breach: alertOnBreachRaw } = c.req.valid("query");
   const strict = strictRaw === "true";
   const alertOnBreach = alertOnBreachRaw === "true";
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   const sessions = await sql`
     SELECT session_id, status, created_at
     FROM sessions
-    WHERE trace_id = ${traceId} AND org_id = ${user.org_id}
+    WHERE trace_id = ${traceId}
     ORDER BY created_at
   `;
   if (sessions.length === 0) return c.json({ error: "Trace not found" }, 404);
@@ -641,14 +646,14 @@ observabilityRoutes.openapi(traceIntegrityRoute, async (c): Promise<any> => {
   // Batch queries instead of N+1 per session
   const [turnRows, eventRows, billingRows, lifecycleRows] = await Promise.all([
     sql`SELECT session_id, COUNT(*) as cnt FROM turns WHERE session_id = ANY(${sessionIds}) GROUP BY session_id`.catch(() => []),
-    sql`SELECT session_id, COUNT(*) as cnt FROM runtime_events WHERE session_id = ANY(${sessionIds}) AND org_id = ${user.org_id} GROUP BY session_id`.catch(() => []),
-    sql`SELECT session_id, COUNT(*) as cnt FROM billing_records WHERE session_id = ANY(${sessionIds}) AND org_id = ${user.org_id} GROUP BY session_id`.catch(() => []),
+    sql`SELECT session_id, COUNT(*) as cnt FROM runtime_events WHERE session_id = ANY(${sessionIds}) GROUP BY session_id`.catch(() => []),
+    sql`SELECT session_id, COUNT(*) as cnt FROM billing_records WHERE session_id = ANY(${sessionIds}) GROUP BY session_id`.catch(() => []),
     sql`SELECT session_id,
         SUM(CASE WHEN event_type = 'turn_start' THEN 1 ELSE 0 END) AS turn_start,
         SUM(CASE WHEN event_type = 'turn_end' THEN 1 ELSE 0 END) AS turn_end,
         SUM(CASE WHEN event_type = 'session_end' THEN 1 ELSE 0 END) AS session_end
       FROM runtime_events
-      WHERE session_id = ANY(${sessionIds}) AND org_id = ${user.org_id}
+      WHERE session_id = ANY(${sessionIds})
       GROUP BY session_id`.catch(() => []),
   ]);
 
@@ -733,6 +738,7 @@ observabilityRoutes.openapi(traceIntegrityRoute, async (c): Promise<any> => {
     },
     warnings,
   });
+  });
 });
 
 // ── POST /annotations ───────────────────────────────────────────
@@ -782,16 +788,17 @@ observabilityRoutes.openapi(postAnnotationsRoute, async (c): Promise<any> => {
   if (!traceId) return c.json({ error: "trace_id is required" }, 400);
   if (!message) return c.json({ error: "message is required" }, 400);
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const annotationId = genId();
   const now = new Date().toISOString();
 
-  await sql`
-    INSERT INTO trace_annotations (annotation_id, trace_id, org_id, user_id, annotation_type, message, severity, span_id, node_id, turn, metadata, created_at)
-    VALUES (${annotationId}, ${traceId}, ${user.org_id}, ${user.user_id}, ${annotationType}, ${message}, ${severity}, ${spanId}, ${nodeId}, ${turn}, ${JSON.stringify(metadata)}, ${now})
-  `;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    await sql`
+      INSERT INTO trace_annotations (annotation_id, trace_id, org_id, user_id, annotation_type, message, severity, span_id, node_id, turn, metadata, created_at)
+      VALUES (${annotationId}, ${traceId}, ${user.org_id}, ${user.user_id}, ${annotationType}, ${message}, ${severity}, ${spanId}, ${nodeId}, ${turn}, ${JSON.stringify(metadata)}, ${now})
+    `;
 
-  return c.json({ annotation_id: annotationId, created: true });
+    return c.json({ annotation_id: annotationId, created: true });
+  });
 });
 
 // ── POST /feedback ──────────────────────────────────────────────
@@ -840,16 +847,17 @@ observabilityRoutes.openapi(postFeedbackRoute, async (c): Promise<any> => {
 
   if (!spanId) return c.json({ error: "span_id is required" }, 400);
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const feedbackId = genId();
   const now = new Date().toISOString();
 
-  await sql`
-    INSERT INTO span_feedback (feedback_id, span_id, org_id, user_id, rating, score, comment, labels_json, session_id, turn, source, created_at)
-    VALUES (${feedbackId}, ${spanId}, ${user.org_id}, ${user.user_id}, ${rating}, ${score}, ${comment}, ${JSON.stringify(labels)}, ${sessionId}, ${turn}, ${source}, ${now})
-  `;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    await sql`
+      INSERT INTO span_feedback (feedback_id, span_id, org_id, user_id, rating, score, comment, labels_json, session_id, turn, source, created_at)
+      VALUES (${feedbackId}, ${spanId}, ${user.org_id}, ${user.user_id}, ${rating}, ${score}, ${comment}, ${JSON.stringify(labels)}, ${sessionId}, ${turn}, ${source}, ${now})
+    `;
 
-  return c.json({ feedback_id: feedbackId, created: true });
+    return c.json({ feedback_id: feedbackId, created: true });
+  });
 });
 
 // ── POST /lineage ───────────────────────────────────────────────
@@ -892,21 +900,22 @@ observabilityRoutes.openapi(postLineageRoute, async (c): Promise<any> => {
   const traceId = body.trace_id.trim();
   if (!traceId) return c.json({ error: "trace_id is required" }, 400);
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const now = new Date().toISOString();
 
-  await sql`
-    INSERT INTO trace_lineage (trace_id, org_id, session_id, agent_version, model, prompt_hash, eval_run_id, experiment_id, dataset_id, commit_sha, metadata, created_at)
-    VALUES (${traceId}, ${user.org_id}, ${body.session_id}, ${body.agent_version}, ${body.model}, ${body.prompt_hash}, ${body.eval_run_id}, ${body.experiment_id}, ${body.dataset_id}, ${body.commit_sha}, ${JSON.stringify(body.metadata)}, ${now})
-    ON CONFLICT (trace_id) DO UPDATE SET
-      session_id = EXCLUDED.session_id,
-      agent_version = EXCLUDED.agent_version,
-      model = EXCLUDED.model,
-      prompt_hash = EXCLUDED.prompt_hash,
-      metadata = EXCLUDED.metadata
-  `;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    await sql`
+      INSERT INTO trace_lineage (trace_id, org_id, session_id, agent_version, model, prompt_hash, eval_run_id, experiment_id, dataset_id, commit_sha, metadata, created_at)
+      VALUES (${traceId}, ${user.org_id}, ${body.session_id}, ${body.agent_version}, ${body.model}, ${body.prompt_hash}, ${body.eval_run_id}, ${body.experiment_id}, ${body.dataset_id}, ${body.commit_sha}, ${JSON.stringify(body.metadata)}, ${now})
+      ON CONFLICT (trace_id) DO UPDATE SET
+        session_id = EXCLUDED.session_id,
+        agent_version = EXCLUDED.agent_version,
+        model = EXCLUDED.model,
+        prompt_hash = EXCLUDED.prompt_hash,
+        metadata = EXCLUDED.metadata
+    `;
 
-  return c.json({ trace_id: traceId, updated: true });
+    return c.json({ trace_id: traceId, updated: true });
+  });
 });
 
 // ── GET /agents/:agent_name/meta-control-plane ──────────────────
@@ -929,7 +938,7 @@ const metaControlPlaneRoute = createRoute({
 observabilityRoutes.openapi(metaControlPlaneRoute, async (c): Promise<any> => {
   const { agent_name: agentName } = c.req.valid("param");
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   // Gather signals
   const since = new Date(Date.now() - 7 * 86400 * 1000).toISOString();
@@ -938,7 +947,7 @@ observabilityRoutes.openapi(metaControlPlaneRoute, async (c): Promise<any> => {
     SELECT COUNT(*) as total, COALESCE(AVG(step_count), 0) as avg_turns,
            COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END)::float / NULLIF(COUNT(*), 0), 0) as success_rate,
            COALESCE(AVG(cost_total_usd), 0) as avg_cost
-    FROM sessions WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND created_at >= ${since}
+    FROM sessions WHERE agent_name = ${agentName} AND created_at >= ${since}
   `.catch(() => [{ total: 0, avg_turns: 0, success_rate: 0, avg_cost: 0 }]);
 
   const evalRows = await sql`
@@ -984,6 +993,7 @@ observabilityRoutes.openapi(metaControlPlaneRoute, async (c): Promise<any> => {
     agent_name: agentName,
     signals,
     entrypoints,
+  });
   });
 });
 
@@ -1127,7 +1137,7 @@ const getMetaProposalsRoute = createRoute({
 observabilityRoutes.openapi(getMetaProposalsRoute, async (c): Promise<any> => {
   const { agent_name: agentName } = c.req.valid("param");
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   if (!(await agentIsOwned(sql, agentName, user.org_id))) {
     return c.json({ error: "Agent not found" }, 404);
@@ -1136,10 +1146,11 @@ observabilityRoutes.openapi(getMetaProposalsRoute, async (c): Promise<any> => {
   const { status, limit } = c.req.valid("query");
 
   const rows = status
-    ? await sql`SELECT * FROM meta_proposals WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND status = ${status} ORDER BY created_at DESC LIMIT ${limit}`.catch(() => [])
-    : await sql`SELECT * FROM meta_proposals WHERE agent_name = ${agentName} AND org_id = ${user.org_id} ORDER BY created_at DESC LIMIT ${limit}`.catch(() => []);
+    ? await sql`SELECT * FROM meta_proposals WHERE agent_name = ${agentName} AND status = ${status} ORDER BY created_at DESC LIMIT ${limit}`.catch(() => [])
+    : await sql`SELECT * FROM meta_proposals WHERE agent_name = ${agentName} ORDER BY created_at DESC LIMIT ${limit}`.catch(() => []);
 
   return c.json({ agent_name: agentName, proposals: rows });
+  });
 });
 
 // ── POST /agents/:agent_name/meta-proposals/generate ────────────
@@ -1173,7 +1184,7 @@ const generateMetaProposalsRoute = createRoute({
 observabilityRoutes.openapi(generateMetaProposalsRoute, async (c): Promise<any> => {
   const { agent_name: agentName } = c.req.valid("param");
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   if (!(await agentIsOwned(sql, agentName, user.org_id))) {
     return c.json({ error: "Agent not found" }, 404);
@@ -1191,11 +1202,11 @@ observabilityRoutes.openapi(generateMetaProposalsRoute, async (c): Promise<any> 
       SELECT COUNT(*) as total,
              COALESCE(AVG(step_count), 0) as avg_turns,
              COALESCE(SUM(CASE WHEN status IN ('error','timeout') THEN 1 ELSE 0 END)::float / NULLIF(COUNT(*), 0), 0) as error_rate
-      FROM sessions WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND created_at >= ${since}
+      FROM sessions WHERE agent_name = ${agentName} AND created_at >= ${since}
     `;
     const evalRows = await sql`
       SELECT pass_rate, total_trials FROM eval_runs
-      WHERE agent_name = ${agentName} AND org_id = ${user.org_id}
+      WHERE agent_name = ${agentName}
       ORDER BY created_at DESC LIMIT 1
     `.catch(() => []);
     signals = {
@@ -1228,6 +1239,7 @@ observabilityRoutes.openapi(generateMetaProposalsRoute, async (c): Promise<any> 
     persisted: persist,
     proposals,
   });
+  });
 });
 
 // ── GET /agents/:agent_name/meta-report ─────────────────────────
@@ -1251,7 +1263,7 @@ const metaReportRoute = createRoute({
 observabilityRoutes.openapi(metaReportRoute, async (c): Promise<any> => {
   const { agent_name: agentName } = c.req.valid("param");
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   if (!(await agentIsOwned(sql, agentName, user.org_id))) {
     return c.json({ error: "Agent not found" }, 404);
@@ -1267,12 +1279,12 @@ observabilityRoutes.openapi(metaReportRoute, async (c): Promise<any> => {
            COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END)::float / NULLIF(COUNT(*), 0), 0) as success_rate,
            COALESCE(SUM(CASE WHEN status IN ('error','timeout') THEN 1 ELSE 0 END)::float / NULLIF(COUNT(*), 0), 0) as error_rate,
            COALESCE(AVG(step_count), 0) as avg_turns
-    FROM sessions WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND created_at >= ${since}
+    FROM sessions WHERE agent_name = ${agentName} AND created_at >= ${since}
   `.catch(() => [{ total_sessions: 0, total_turns: 0, total_cost_usd: 0, avg_latency_ms: 0, success_rate: 0, error_rate: 0, avg_turns: 0 }]);
 
   const evalRows = await sql`
     SELECT pass_rate, total_trials FROM eval_runs
-    WHERE agent_name = ${agentName} AND org_id = ${user.org_id}
+    WHERE agent_name = ${agentName}
     ORDER BY created_at DESC LIMIT 1
   `.catch(() => []);
 
@@ -1296,6 +1308,7 @@ observabilityRoutes.openapi(metaReportRoute, async (c): Promise<any> => {
       error_rate: Number(summary.error_rate),
     },
     signals,
+  });
   });
 });
 
@@ -1330,7 +1343,7 @@ const reviewProposalRoute = createRoute({
 observabilityRoutes.openapi(reviewProposalRoute, async (c): Promise<any> => {
   const { agent_name: agentName, proposal_id: proposalId } = c.req.valid("param");
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   if (!(await agentIsOwned(sql, agentName, user.org_id))) {
     return c.json({ error: "Agent not found" }, 404);
@@ -1350,6 +1363,7 @@ observabilityRoutes.openapi(reviewProposalRoute, async (c): Promise<any> => {
   if (rows.length === 0) return c.json({ error: "Meta proposal not found" }, 404);
 
   return c.json({ proposal_id: proposalId, status });
+  });
 });
 
 // ── Trace Replay (Time Travel) ──────────────────────────────────────
@@ -1379,11 +1393,11 @@ const traceReplayRoute = createRoute({
 observabilityRoutes.openapi(traceReplayRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { trace_id: traceId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
-  // Verify org ownership
+  // RLS verifies org ownership automatically.
   const check = await sql`
-    SELECT COUNT(*) as cnt FROM sessions WHERE trace_id = ${traceId} AND org_id = ${user.org_id}
+    SELECT COUNT(*) as cnt FROM sessions WHERE trace_id = ${traceId}
   `;
   if (Number(check[0]?.cnt) === 0) return c.json({ error: "Trace not found" }, 404);
 
@@ -1395,7 +1409,7 @@ observabilityRoutes.openapi(traceReplayRoute, async (c): Promise<any> => {
     SELECT e.id, e.session_id, e.turn AS turn_number, e.event_type, e.details, e.created_at, s.trace_id
     FROM otel_events e
     INNER JOIN sessions s ON s.session_id = e.session_id
-    WHERE s.trace_id = ${traceId} AND s.org_id = ${user.org_id}
+    WHERE s.trace_id = ${traceId}
     ORDER BY e.id ASC
   `.catch(() => []);
 
@@ -1477,6 +1491,7 @@ observabilityRoutes.openapi(traceReplayRoute, async (c): Promise<any> => {
         }))
       : [],
   });
+  });
 });
 
 // ── GET /trace/:trace_id/run-tree ───────────────────────────────
@@ -1500,11 +1515,11 @@ const runTreeRoute = createRoute({
 observabilityRoutes.openapi(runTreeRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { trace_id: traceId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
-  // Verify org ownership
+  // RLS verifies org ownership automatically.
   const check = await sql`
-    SELECT COUNT(*) as cnt FROM sessions WHERE trace_id = ${traceId} AND org_id = ${user.org_id}
+    SELECT COUNT(*) as cnt FROM sessions WHERE trace_id = ${traceId}
   `;
   if (Number(check[0]?.cnt) === 0) return c.json({ error: "Trace not found" }, 404);
 
@@ -1512,7 +1527,7 @@ observabilityRoutes.openapi(runTreeRoute, async (c): Promise<any> => {
     SELECT e.id, e.session_id, e.turn AS turn_number, e.event_type, e.details, e.created_at
     FROM otel_events e
     INNER JOIN sessions s ON s.session_id = e.session_id
-    WHERE s.trace_id = ${traceId} AND s.org_id = ${user.org_id}
+    WHERE s.trace_id = ${traceId}
     ORDER BY e.id ASC
   `.catch(() => []);
 
@@ -1540,6 +1555,7 @@ observabilityRoutes.openapi(runTreeRoute, async (c): Promise<any> => {
   }));
 
   return c.json({ trace_id: traceId, tree });
+  });
 });
 
 // ── POST /agents/:agent_name/autonomous-maintenance-run ─────────
@@ -1577,7 +1593,7 @@ const autonomousMaintenanceRoute = createRoute({
 observabilityRoutes.openapi(autonomousMaintenanceRoute, async (c): Promise<any> => {
   const { agent_name: agentName } = c.req.valid("param");
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   // Strict org ownership
   if (!(await agentIsOwned(sql, agentName, user.org_id))) {
@@ -1602,11 +1618,11 @@ observabilityRoutes.openapi(autonomousMaintenanceRoute, async (c): Promise<any> 
              COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END)::float / NULLIF(COUNT(*), 0), 0) as success_rate,
              COALESCE(AVG(cost_total_usd), 0) as avg_cost,
              COALESCE(SUM(CASE WHEN status IN ('error','timeout') THEN 1 ELSE 0 END)::float / NULLIF(COUNT(*), 0), 0) as error_rate
-      FROM sessions WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND created_at >= ${since}
+      FROM sessions WHERE agent_name = ${agentName} AND created_at >= ${since}
     `;
     const evalRows = await sql`
       SELECT pass_rate, total_trials FROM eval_runs
-      WHERE agent_name = ${agentName} AND org_id = ${user.org_id}
+      WHERE agent_name = ${agentName}
       ORDER BY created_at DESC LIMIT 1
     `.catch(() => []);
     signals = {
@@ -1712,6 +1728,7 @@ observabilityRoutes.openapi(autonomousMaintenanceRoute, async (c): Promise<any> 
       "Promote only if rollout decision is promote_candidate",
     ],
   });
+  });
 });
 
 // ── OTLP Trace Export ─────────────────────────────────────────────────
@@ -1724,11 +1741,11 @@ observabilityRoutes.get("/export/otlp", requireScope("observability:read"), asyn
     return c.json({ error: "trace_id query parameter is required" }, 400);
   }
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
-  // Verify org ownership
+  // RLS verifies org ownership automatically.
   const check = await sql`
-    SELECT COUNT(*) as cnt FROM sessions WHERE trace_id = ${traceId} AND org_id = ${user.org_id}
+    SELECT COUNT(*) as cnt FROM sessions WHERE trace_id = ${traceId}
   `;
   if (Number(check[0]?.cnt) === 0) {
     return c.json({ error: "Trace not found" }, 404);
@@ -1738,7 +1755,7 @@ observabilityRoutes.get("/export/otlp", requireScope("observability:read"), asyn
   const sessions = await sql`
     SELECT session_id, agent_name, status, version, wall_clock_seconds, created_at, trace_id
     FROM sessions
-    WHERE trace_id = ${traceId} AND org_id = ${user.org_id}
+    WHERE trace_id = ${traceId}
     ORDER BY created_at
   `;
 
@@ -1748,7 +1765,7 @@ observabilityRoutes.get("/export/otlp", requireScope("observability:read"), asyn
            event_type, event_name, status_code, start_time, end_time,
            attributes_json, resource_json
     FROM runtime_events
-    WHERE trace_id = ${traceId} AND org_id = ${user.org_id}
+    WHERE trace_id = ${traceId}
     ORDER BY start_time
   `.catch(() => []);
 
@@ -1918,6 +1935,7 @@ observabilityRoutes.get("/export/otlp", requireScope("observability:read"), asyn
   return c.json({
     resourceSpans,
   });
+  });
 });
 
 // ══════════════════════════════════════════════════════════════════
@@ -1941,12 +1959,12 @@ const delegationTreeRoute = createRoute({
 observabilityRoutes.openapi(delegationTreeRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { session_id } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   // Get all delegation events in the chain (up to 100)
   const events = await sql`
     WITH RECURSIVE chain AS (
-      SELECT * FROM delegation_events WHERE parent_session_id = ${session_id} AND org_id = ${user.org_id}
+      SELECT * FROM delegation_events WHERE parent_session_id = ${session_id}
       UNION ALL
       SELECT d.* FROM delegation_events d JOIN chain c ON d.parent_session_id = c.child_session_id
     )
@@ -1976,6 +1994,7 @@ observabilityRoutes.openapi(delegationTreeRoute, async (c): Promise<any> => {
       completed_at: e.completed_at,
     })),
   });
+  });
 });
 
 // GET /a2a-transactions — A2A transaction history for the org
@@ -2001,7 +2020,7 @@ const a2aTransactionsRoute = createRoute({
 observabilityRoutes.openapi(a2aTransactionsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { direction, limit, agent_name } = c.req.valid("query");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   let rows: any[];
   if (direction === "incoming") {
@@ -2040,6 +2059,7 @@ observabilityRoutes.openapi(a2aTransactionsRoute, async (c): Promise<any> => {
       completed_at: r.completed_at,
     })),
   });
+  });
 });
 
 // GET /a2a-revenue/:agent_name — Revenue summary for an agent
@@ -2059,7 +2079,7 @@ const a2aRevenueRoute = createRoute({
 observabilityRoutes.openapi(a2aRevenueRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   const [summary] = await sql`
     SELECT
@@ -2081,5 +2101,6 @@ observabilityRoutes.openapi(a2aRevenueRoute, async (c): Promise<any> => {
     total_revenue_usd: Number(summary.total_revenue_usd || 0),
     avg_revenue_per_task: Number(summary.avg_revenue_per_task || 0),
     unique_callers: Number(summary.unique_callers || 0),
+  });
   });
 });

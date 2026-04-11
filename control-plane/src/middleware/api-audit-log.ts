@@ -7,7 +7,7 @@
 import { createMiddleware } from "hono/factory";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { withOrgDb, withAdminDb } from "../db/client";
 
 /**
  * Extract the agent name from a /v1/agents/:name/... path.
@@ -97,10 +97,12 @@ export const apiAuditLogMiddleware = createMiddleware<{
     }
   }
 
-  // Fire-and-forget insert using waitUntil if available
+  // Fire-and-forget insert using waitUntil if available. If we have a
+  // resolved org use withOrgDb (audit row belongs to that tenant under
+  // RLS). If not (unauthenticated 401 path, for example), fall back to
+  // withAdminDb so the audit still lands.
   const insertLog = async () => {
-    try {
-      const sql = await getDb(c.env.HYPERDRIVE);
+    const writer = async (sql: any) => {
       await sql`
         INSERT INTO api_access_log (
           request_id, org_id, api_key_id, end_user_id,
@@ -121,6 +123,13 @@ export const apiAuditLogMiddleware = createMiddleware<{
           ${logEntry.idempotency_key}
         )
       `;
+    };
+    try {
+      if (logEntry.org_id) {
+        await withOrgDb(c.env, logEntry.org_id, writer);
+      } else {
+        await withAdminDb(c.env, writer);
+      }
     } catch {
       // Audit logging is fire-and-forget — never fail the request
     }

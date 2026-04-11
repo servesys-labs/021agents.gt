@@ -6,6 +6,7 @@
  */
 
 import type { ToolDefinition, ToolResult } from "./types";
+import { log } from "./log";
 
 // ── External Tool Interface ─────────────────────────────────────────
 
@@ -156,7 +157,7 @@ export async function convertExternalTools(
       });
       
       if (!response.ok) {
-        console.warn(`Failed to fetch tool from ${url}: ${response.status}`);
+        log.warn(`Failed to fetch tool from ${url}: ${response.status}`);
         continue;
       }
       
@@ -177,7 +178,7 @@ export async function convertExternalTools(
         externalEndpoint: manifest.endpoint || url,
       });
     } catch (err) {
-      console.warn(`Failed to load tool from ${url}:`, err);
+      log.warn(`Failed to load tool from ${url}:`, err);
     }
   }
   
@@ -241,7 +242,7 @@ export async function autoRegisterTools(
 ): Promise<void> {
   // Register built-in tools based on environment
   // This is a placeholder - actual implementation would scan for available tools
-  console.log("Auto-registering tools...");
+  log.info("Auto-registering tools...");
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────

@@ -9,6 +9,7 @@
  */
 
 import { parseJsonColumn } from "./parse-json-column";
+import { log } from "./log";
 
 // ── Types ─────────────────────────────────────────────────────
 
@@ -183,12 +184,12 @@ export function saveFileToSQLite(
   let dbSize = getSQLiteDbSize(sql);
   if (dbSize >= SQLITE_MAX_BYTES) {
     const evicted = evictOldestFiles(sql);
-    console.warn(
+    log.warn(
       `[workspace] SQLite at ${(dbSize / 1024 / 1024).toFixed(1)}MB — evicted ${evicted} old files`,
     );
     dbSize = getSQLiteDbSize(sql);
     if (dbSize >= SQLITE_MAX_BYTES) {
-      console.warn(
+      log.warn(
         `[workspace] SQLite still at ${(dbSize / 1024 / 1024).toFixed(1)}MB after eviction — skipping write for ${file.path}`,
       );
       return;

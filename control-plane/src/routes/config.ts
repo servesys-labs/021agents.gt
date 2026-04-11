@@ -7,7 +7,7 @@
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { parseJsonColumn } from "../lib/parse-json-column";
 
 export const configRoutes = createOpenAPIRouter();
@@ -36,18 +36,18 @@ const getConfigRoute = createRoute({
 });
 configRoutes.openapi(getConfigRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  try {
-    const rows = await sql`
-      SELECT config FROM project_configs WHERE org_id = ${user.org_id} LIMIT 1
-    `;
-    if (rows.length === 0) return c.json({ config: {}, exists: false });
-    const config = parseJsonColumn(rows[0].config);
-    return c.json({ config, exists: true });
-  } catch {
-    return c.json({ config: {}, exists: false });
-  }
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    try {
+      const rows = await sql`
+        SELECT config FROM project_configs LIMIT 1
+      `;
+      if (rows.length === 0) return c.json({ config: {}, exists: false });
+      const config = parseJsonColumn(rows[0].config);
+      return c.json({ config, exists: true });
+    } catch {
+      return c.json({ config: {}, exists: false });
+    }
+  });
 });
 
 // ── PUT /yaml — update project config ───────────────────────────────────
@@ -81,29 +81,30 @@ configRoutes.openapi(updateConfigRoute, async (c): Promise<any> => {
   const body = c.req.valid("json");
   const updates = body.updates || body;
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const now = new Date().toISOString();
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const now = new Date().toISOString();
 
-  // Get existing config
-  let existing: any = {};
-  try {
-    const rows = await sql`
-      SELECT config FROM project_configs WHERE org_id = ${user.org_id} LIMIT 1
+    // Get existing config
+    let existing: any = {};
+    try {
+      const rows = await sql`
+        SELECT config FROM project_configs LIMIT 1
+      `;
+      if (rows.length > 0) existing = parseJsonColumn(rows[0].config);
+    } catch {}
+
+    // Merge updates
+    const merged = { ...existing, ...updates };
+    const configJson = JSON.stringify(merged);
+
+    await sql`
+      INSERT INTO project_configs (org_id, config, updated_at)
+      VALUES (${user.org_id}, ${configJson}, ${now})
+      ON CONFLICT (org_id) DO UPDATE SET config = EXCLUDED.config, updated_at = EXCLUDED.updated_at
     `;
-    if (rows.length > 0) existing = parseJsonColumn(rows[0].config);
-  } catch {}
 
-  // Merge updates
-  const merged = { ...existing, ...updates };
-  const configJson = JSON.stringify(merged);
-
-  await sql`
-    INSERT INTO project_configs (org_id, config, updated_at)
-    VALUES (${user.org_id}, ${configJson}, ${now})
-    ON CONFLICT (org_id) DO UPDATE SET config = EXCLUDED.config, updated_at = EXCLUDED.updated_at
-  `;
-
-  return c.json({ updated: true });
+    return c.json({ updated: true });
+  });
 });
 
 // ── GET /a2a/remotes — list A2A remote agents ───────────────────────────
@@ -123,18 +124,18 @@ const listA2aRemotesRoute = createRoute({
 });
 configRoutes.openapi(listA2aRemotesRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  try {
-    const rows = await sql`
-      SELECT config FROM project_configs WHERE org_id = ${user.org_id} LIMIT 1
-    `;
-    if (rows.length === 0) return c.json({ remotes: [] });
-    const config = parseJsonColumn(rows[0].config);
-    return c.json({ remotes: config.a2a_remotes || [] });
-  } catch {
-    return c.json({ remotes: [] });
-  }
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    try {
+      const rows = await sql`
+        SELECT config FROM project_configs LIMIT 1
+      `;
+      if (rows.length === 0) return c.json({ remotes: [] });
+      const config = parseJsonColumn(rows[0].config);
+      return c.json({ remotes: config.a2a_remotes || [] });
+    } catch {
+      return c.json({ remotes: [] });
+    }
+  });
 });
 
 // ── POST /a2a/test — test connectivity to a remote A2A agent ────────────

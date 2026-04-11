@@ -5,7 +5,7 @@
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDb, getDbForOrg } from "../db/client";
+import { withOrgDb, withAdminDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import {
   isVoiceGenericPlatform,
@@ -167,10 +167,9 @@ const getVoiceConfigRoute = createRoute({
 voiceRoutes.openapi(getVoiceConfigRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name: agentName } = c.req.valid("query");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
   const rows = await sql`
-    SELECT config FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id} LIMIT 1
+    SELECT config FROM agents WHERE name = ${agentName} LIMIT 1
   `;
   if (rows.length === 0) {
     return c.json({ error: `Agent '${agentName}' not found` }, 404);
@@ -219,6 +218,7 @@ voiceRoutes.openapi(getVoiceConfigRoute, async (c): Promise<any> => {
     vapi_phone_number_id: String(voice.vapi_phone_number_id ?? ""),
     calls: callRows.map((r) => mapVoiceCallRow(r)),
   });
+  });
 });
 
 const putVoiceConfigRoute = createRoute({
@@ -257,10 +257,9 @@ voiceRoutes.openapi(putVoiceConfigRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const body = c.req.valid("json");
   const agentName = body.agent_name;
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
   const rows = await sql`
-    SELECT config FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id} LIMIT 1
+    SELECT config FROM agents WHERE name = ${agentName} LIMIT 1
   `;
   if (rows.length === 0) {
     return c.json({ error: `Agent '${agentName}' not found` }, 404);
@@ -286,7 +285,7 @@ voiceRoutes.openapi(putVoiceConfigRoute, async (c): Promise<any> => {
 
   await sql`
     UPDATE agents SET config = ${JSON.stringify(cfg)}, updated_at = now()
-    WHERE name = ${agentName} AND org_id = ${user.org_id}
+    WHERE name = ${agentName}
   `;
 
   // Auto-configure Vapi assistant with Server URL when linking
@@ -308,6 +307,7 @@ voiceRoutes.openapi(putVoiceConfigRoute, async (c): Promise<any> => {
     agent_name: agentName,
     vapi_configured: vapiConfigResult?.ok ?? false,
     vapi_config_error: vapiConfigResult?.error,
+  });
   });
 });
 
@@ -418,15 +418,14 @@ const allSummaryRoute = createRoute({
 });
 voiceRoutes.openapi(allSummaryRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
   let vapiSummary: any = { total_calls: 0, total_cost_usd: 0, total_duration_seconds: 0 };
   try {
     const [vapi] = await sql`
       SELECT COUNT(*) as total_calls,
              COALESCE(SUM(cost_usd), 0) as total_cost_usd,
              COALESCE(SUM(duration_seconds), 0) as total_duration_seconds
-      FROM voice_calls WHERE platform = 'vapi' AND org_id = ${user.org_id}
+      FROM voice_calls WHERE platform = 'vapi'
     `;
     vapiSummary = vapi;
   } catch {
@@ -439,7 +438,7 @@ voiceRoutes.openapi(allSummaryRoute, async (c): Promise<any> => {
       SELECT COUNT(*) as total_calls,
              COALESCE(SUM(cost_usd), 0) as total_cost_usd,
              COALESCE(SUM(duration_seconds), 0) as total_duration_seconds
-      FROM voice_calls WHERE platform != 'vapi' AND org_id = ${user.org_id}
+      FROM voice_calls WHERE platform != 'vapi'
     `;
     platformSummary = all;
   } catch {
@@ -460,6 +459,7 @@ voiceRoutes.openapi(allSummaryRoute, async (c): Promise<any> => {
           Number(platformSummary.total_duration_seconds)) *
           10,
       ) / 10,
+  });
   });
 });
 
@@ -491,14 +491,21 @@ voiceRoutes.openapi(vapiWebhookRoute, async (c): Promise<any> => {
   } catch {
     return c.json({ error: "Invalid JSON" }, 400);
   }
-  const sql = await getDb(c.env.HYPERDRIVE);
+  // Webhook is unauthenticated — resolve tenant via admin lookup, then write
+  // through an org-scoped transaction so RLS still applies on the mutation path.
   const { assistantId, phoneNumberId } = extractVapiCallIds(payload);
-  const resolved = await resolveVapiVoiceTenant(sql, assistantId, phoneNumberId);
+  const resolved = await withAdminDb(c.env, (sql) => resolveVapiVoiceTenant(sql, assistantId, phoneNumberId));
   const tenant = {
     org_id: resolved?.org_id ?? "",
     agent_name: resolved?.agent_name ?? "",
   };
-  const out = await processVapiWebhook(payload, sql, tenant);
+  if (tenant.org_id) {
+    const out = await withOrgDb(c.env, tenant.org_id, (sql) => processVapiWebhook(payload, sql, tenant));
+    return c.json(out);
+  }
+  // No tenant resolved — fall back to admin connection so the helper can still
+  // write to the global voice_call_events table (shared across orgs).
+  const out = await withAdminDb(c.env, (sql) => processVapiWebhook(payload, sql, tenant));
   return c.json(out);
 });
 
@@ -538,10 +545,9 @@ voiceRoutes.openapi(vapiServerUrlRoute, async (c): Promise<any> => {
   const message = (payload.message ?? payload) as Record<string, unknown>;
   const eventType = String(message.type ?? payload.type ?? "");
 
-  // Resolve which agent this call belongs to
+  // Resolve which agent this call belongs to (admin lookup — no org context yet)
   const { assistantId, phoneNumberId } = extractVapiCallIds(payload);
-  const sql = await getDb(c.env.HYPERDRIVE);
-  const tenant = await resolveVapiVoiceTenant(sql, assistantId, phoneNumberId);
+  const tenant = await withAdminDb(c.env, (sql) => resolveVapiVoiceTenant(sql, assistantId, phoneNumberId));
 
   if (!tenant) {
     // Can't resolve agent — return minimal assistant config
@@ -555,11 +561,11 @@ voiceRoutes.openapi(vapiServerUrlRoute, async (c): Promise<any> => {
     });
   }
 
-  // Load agent config
-  const agentRows = await sql`
+  // Load agent config under the resolved tenant's org context
+  const agentRows = await withOrgDb(c.env, tenant.org_id, (sql) => sql`
     SELECT config FROM agents
-    WHERE name = ${tenant.agent_name} AND org_id = ${tenant.org_id} LIMIT 1
-  `;
+    WHERE name = ${tenant.agent_name} LIMIT 1
+  `);
   if (agentRows.length === 0) {
     return c.json({
       messageResponse: {
@@ -665,9 +671,9 @@ voiceRoutes.openapi(vapiServerUrlRoute, async (c): Promise<any> => {
     }
   }
 
-  // ── end-of-call-report + other events: process normally ──
+  // ── end-of-call-report + other events: process under tenant's org RLS ──
   const tenantCtx = { org_id: tenant.org_id, agent_name: tenant.agent_name };
-  const out = await processVapiWebhook(payload, sql, tenantCtx);
+  const out = await withOrgDb(c.env, tenant.org_id, (sql) => processVapiWebhook(payload, sql, tenantCtx));
   return c.json(out);
 });
 
@@ -881,34 +887,34 @@ const vapiCallsListRoute = createRoute({
 voiceRoutes.openapi(vapiCallsListRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name: agentName, status, limit } = c.req.valid("query");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  let rows;
-  if (agentName && status) {
-    rows = await sql`
-      SELECT * FROM voice_calls WHERE platform = 'vapi' AND org_id = ${user.org_id}
-        AND agent_name = ${agentName} AND status = ${status}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  } else if (agentName) {
-    rows = await sql`
-      SELECT * FROM voice_calls WHERE platform = 'vapi' AND org_id = ${user.org_id}
-        AND agent_name = ${agentName}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  } else if (status) {
-    rows = await sql`
-      SELECT * FROM voice_calls WHERE platform = 'vapi' AND org_id = ${user.org_id}
-        AND status = ${status}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  } else {
-    rows = await sql`
-      SELECT * FROM voice_calls WHERE platform = 'vapi' AND org_id = ${user.org_id}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  }
-  return c.json({ calls: rows });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    let rows;
+    if (agentName && status) {
+      rows = await sql`
+        SELECT * FROM voice_calls WHERE platform = 'vapi'
+          AND agent_name = ${agentName} AND status = ${status}
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    } else if (agentName) {
+      rows = await sql`
+        SELECT * FROM voice_calls WHERE platform = 'vapi'
+          AND agent_name = ${agentName}
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    } else if (status) {
+      rows = await sql`
+        SELECT * FROM voice_calls WHERE platform = 'vapi'
+          AND status = ${status}
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    } else {
+      rows = await sql`
+        SELECT * FROM voice_calls WHERE platform = 'vapi'
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    }
+    return c.json({ calls: rows });
+  });
 });
 
 // ── Vapi Calls Summary ─────────────────────────────────────────────────
@@ -936,18 +942,19 @@ const vapiCallsSummaryRoute = createRoute({
 });
 voiceRoutes.openapi(vapiCallsSummaryRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  try {
-    const [summary] = await sql`
-      SELECT COUNT(*) as total_calls,
-             COALESCE(SUM(cost_usd), 0) as total_cost_usd,
-             COALESCE(SUM(duration_seconds), 0) as total_duration_seconds
-      FROM voice_calls WHERE platform = 'vapi' AND org_id = ${user.org_id}
-    `;
-    return c.json(summary);
-  } catch {
-    return c.json({ total_calls: 0, total_cost_usd: 0, total_duration_seconds: 0 });
-  }
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    try {
+      const [summary] = await sql`
+        SELECT COUNT(*) as total_calls,
+               COALESCE(SUM(cost_usd), 0) as total_cost_usd,
+               COALESCE(SUM(duration_seconds), 0) as total_duration_seconds
+        FROM voice_calls WHERE platform = 'vapi'
+      `;
+      return c.json(summary);
+    } catch {
+      return c.json({ total_calls: 0, total_cost_usd: 0, total_duration_seconds: 0 });
+    }
+  });
 });
 
 // ── POST Vapi Calls (initiate outbound) ────────────────────────────────
@@ -1048,9 +1055,8 @@ voiceRoutes.openapi(vapiCallsCreateRoute, async (c): Promise<any> => {
     return c.json({ error: "Vapi API response missing call id" }, 400);
   }
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   try {
-    await sql`
+    await withOrgDb(c.env, user.org_id, (sql) => sql`
       INSERT INTO voice_calls (
         call_id, platform, org_id, agent_name, phone_number, direction, status,
         platform_agent_id, started_at
@@ -1064,7 +1070,7 @@ voiceRoutes.openapi(vapiCallsCreateRoute, async (c): Promise<any> => {
         phone_number = EXCLUDED.phone_number,
         status = EXCLUDED.status,
         platform_agent_id = EXCLUDED.platform_agent_id
-    `;
+    `);
   } catch {
     /* best-effort */
   }
@@ -1105,12 +1111,11 @@ voiceRoutes.openapi(vapiCallDeleteRoute, async (c): Promise<any> => {
   if (![200, 204].includes(res.status)) {
     return c.json({ error: `Vapi API error: ${res.status}` }, 400);
   }
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   try {
-    await sql`
+    await withOrgDb(c.env, user.org_id, (sql) => sql`
       UPDATE voice_calls SET status = 'ended', ended_at = ${nowSec()}
       WHERE call_id = ${callId} AND platform = 'vapi'
-    `;
+    `);
   } catch {
     /* best-effort */
   }
@@ -1139,13 +1144,14 @@ const vapiCallDetailRoute = createRoute({
 voiceRoutes.openapi(vapiCallDetailRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { call_id: callId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const rows = await sql`
-    SELECT * FROM voice_calls
-    WHERE call_id = ${callId} AND platform = 'vapi' AND org_id = ${user.org_id}
-  `;
-  if (rows.length === 0) return c.json({ error: "Call not found" }, 404);
-  return c.json(rows[0]);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT * FROM voice_calls
+      WHERE call_id = ${callId} AND platform = 'vapi'
+    `;
+    if (rows.length === 0) return c.json({ error: "Call not found" }, 404);
+    return c.json(rows[0]);
+  });
 });
 
 // ── GET Vapi Call Events ───────────────────────────────────────────────
@@ -1170,20 +1176,21 @@ const vapiCallEventsRoute = createRoute({
 voiceRoutes.openapi(vapiCallEventsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { call_id: callId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const own = await sql`
-    SELECT 1 FROM voice_calls
-    WHERE call_id = ${callId} AND platform = 'vapi' AND org_id = ${user.org_id}
-    LIMIT 1
-  `;
-  if (own.length === 0) return c.json({ error: "Call not found" }, 404);
-  const rows = await sql`
-    SELECT e.* FROM voice_call_events e
-    INNER JOIN voice_calls vc ON vc.call_id = e.call_id
-    WHERE e.call_id = ${callId} AND vc.org_id = ${user.org_id} AND vc.platform = 'vapi'
-    ORDER BY e.created_at
-  `;
-  return c.json({ events: rows });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const own = await sql`
+      SELECT 1 FROM voice_calls
+      WHERE call_id = ${callId} AND platform = 'vapi'
+      LIMIT 1
+    `;
+    if (own.length === 0) return c.json({ error: "Call not found" }, 404);
+    const rows = await sql`
+      SELECT e.* FROM voice_call_events e
+      INNER JOIN voice_calls vc ON vc.call_id = e.call_id
+      WHERE e.call_id = ${callId} AND vc.platform = 'vapi'
+      ORDER BY e.created_at
+    `;
+    return c.json({ events: rows });
+  });
 });
 
 // ── Generic platform webhook (e.g. Tavus) ──────────────────────────────
@@ -1223,9 +1230,11 @@ voiceRoutes.openapi(platformWebhookRoute, async (c): Promise<any> => {
   } catch {
     return c.json({ error: "Invalid JSON" }, 400);
   }
-  const sql = await getDb(c.env.HYPERDRIVE);
+  // Tavus webhook is unauthenticated — processTavusWebhook does its own org
+  // resolution from the payload, so use admin connection (BYPASSRLS) to allow
+  // the helper to look up the call_id across orgs and update the right row.
   if (platform === "tavus") {
-    const out = await processTavusWebhook(payload, sql, "");
+    const out = await withAdminDb(c.env, (sql) => processTavusWebhook(payload, sql, ""));
     return c.json(out);
   }
   return c.json({ error: "Unsupported platform" }, 400);
@@ -1264,18 +1273,19 @@ voiceRoutes.openapi(platformCallsSummaryRoute, async (c): Promise<any> => {
     return c.json({ error: `Unknown platform: ${platform}` }, 404);
   }
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  try {
-    const [summary] = await sql`
-      SELECT COUNT(*) as total_calls,
-             COALESCE(SUM(cost_usd), 0) as total_cost_usd,
-             COALESCE(SUM(duration_seconds), 0) as total_duration_seconds
-      FROM voice_calls WHERE platform = ${platform} AND org_id = ${user.org_id}
-    `;
-    return c.json(summary);
-  } catch {
-    return c.json({ total_calls: 0, total_cost_usd: 0, total_duration_seconds: 0 });
-  }
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    try {
+      const [summary] = await sql`
+        SELECT COUNT(*) as total_calls,
+               COALESCE(SUM(cost_usd), 0) as total_cost_usd,
+               COALESCE(SUM(duration_seconds), 0) as total_duration_seconds
+        FROM voice_calls WHERE platform = ${platform}
+      `;
+      return c.json(summary);
+    } catch {
+      return c.json({ total_calls: 0, total_cost_usd: 0, total_duration_seconds: 0 });
+    }
+  });
 });
 
 // ── Generic Platform Calls List ────────────────────────────────────────
@@ -1308,34 +1318,33 @@ voiceRoutes.openapi(platformCallsListRoute, async (c): Promise<any> => {
     // Not a known platform — treat as agent_name and return call history
     const user = c.get("user");
     const limit = Number(c.req.query("limit") || 50);
-    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-    const rows = await sql`SELECT * FROM voice_calls WHERE org_id = ${user.org_id} AND agent_name = ${platform} ORDER BY created_at DESC LIMIT ${limit}`;
+    const rows = await withOrgDb(c.env, user.org_id, (sql) => sql`SELECT * FROM voice_calls WHERE agent_name = ${platform} ORDER BY created_at DESC LIMIT ${limit}`);
     return c.json({ calls: rows, platform: "all" });
   }
   const user = c.get("user");
   const { agent_name: agentName, status, limit } = c.req.valid("query");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  let rows;
-  if (agentName && status) {
-    rows = await sql`
-      SELECT * FROM voice_calls WHERE platform = ${platform} AND org_id = ${user.org_id}
-        AND agent_name = ${agentName} AND status = ${status}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  } else if (agentName) {
-    rows = await sql`
-      SELECT * FROM voice_calls WHERE platform = ${platform} AND org_id = ${user.org_id}
-        AND agent_name = ${agentName}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  } else {
-    rows = await sql`
-      SELECT * FROM voice_calls WHERE platform = ${platform} AND org_id = ${user.org_id}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  }
-  return c.json({ calls: rows, platform });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    let rows;
+    if (agentName && status) {
+      rows = await sql`
+        SELECT * FROM voice_calls WHERE platform = ${platform}
+          AND agent_name = ${agentName} AND status = ${status}
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    } else if (agentName) {
+      rows = await sql`
+        SELECT * FROM voice_calls WHERE platform = ${platform}
+          AND agent_name = ${agentName}
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    } else {
+      rows = await sql`
+        SELECT * FROM voice_calls WHERE platform = ${platform}
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    }
+    return c.json({ calls: rows, platform });
+  });
 });
 
 // ── Generic Platform Create Call ───────────────────────────────────────
@@ -1422,9 +1431,8 @@ voiceRoutes.openapi(platformCallCreateRoute, async (c): Promise<any> => {
     return c.json({ error: "Tavus API response missing conversation id" }, 400);
   }
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   try {
-    await sql`
+    await withOrgDb(c.env, user.org_id, (sql) => sql`
       INSERT INTO voice_calls (
         call_id, platform, org_id, agent_name, phone_number, direction, status,
         platform_agent_id, started_at
@@ -1437,7 +1445,7 @@ voiceRoutes.openapi(platformCallCreateRoute, async (c): Promise<any> => {
         agent_name = EXCLUDED.agent_name,
         status = EXCLUDED.status,
         platform_agent_id = EXCLUDED.platform_agent_id
-    `;
+    `);
   } catch {
     /* best-effort */
   }
@@ -1474,13 +1482,14 @@ voiceRoutes.openapi(platformCallDetailRoute, async (c): Promise<any> => {
     return c.json({ error: `Unknown platform: ${platform}` }, 404);
   }
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const rows = await sql`
-    SELECT * FROM voice_calls
-    WHERE call_id = ${callId} AND platform = ${platform} AND org_id = ${user.org_id}
-  `;
-  if (rows.length === 0) return c.json({ error: "Call not found" }, 404);
-  return c.json(rows[0]);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT * FROM voice_calls
+      WHERE call_id = ${callId} AND platform = ${platform}
+    `;
+    if (rows.length === 0) return c.json({ error: "Call not found" }, 404);
+    return c.json(rows[0]);
+  });
 });
 
 // ── Generic Platform Call Events ───────────────────────────────────────
@@ -1508,20 +1517,21 @@ voiceRoutes.openapi(platformCallEventsRoute, async (c): Promise<any> => {
     return c.json({ error: `Unknown platform: ${platform}` }, 404);
   }
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const own = await sql`
-    SELECT 1 FROM voice_calls
-    WHERE call_id = ${callId} AND platform = ${platform} AND org_id = ${user.org_id}
-    LIMIT 1
-  `;
-  if (own.length === 0) return c.json({ error: "Call not found" }, 404);
-  const rows = await sql`
-    SELECT e.* FROM voice_call_events e
-    INNER JOIN voice_calls vc ON vc.call_id = e.call_id
-    WHERE e.call_id = ${callId} AND vc.org_id = ${user.org_id} AND vc.platform = ${platform}
-    ORDER BY e.created_at
-  `;
-  return c.json({ events: rows, platform });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const own = await sql`
+      SELECT 1 FROM voice_calls
+      WHERE call_id = ${callId} AND platform = ${platform}
+      LIMIT 1
+    `;
+    if (own.length === 0) return c.json({ error: "Call not found" }, 404);
+    const rows = await sql`
+      SELECT e.* FROM voice_call_events e
+      INNER JOIN voice_calls vc ON vc.call_id = e.call_id
+      WHERE e.call_id = ${callId} AND vc.platform = ${platform}
+      ORDER BY e.created_at
+    `;
+    return c.json({ events: rows, platform });
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1575,10 +1585,10 @@ voiceRoutes.openapi(twilioProvisionRoute, async (c): Promise<any> => {
     return c.json({ error: "TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN not configured" }, 500);
   }
 
-  // Verify agent exists
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  // Verify agent exists (RLS via withOrgDb)
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
   const agentRows = await sql`
-    SELECT name FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id} LIMIT 1
+    SELECT name FROM agents WHERE name = ${agentName} LIMIT 1
   `;
   if (agentRows.length === 0) {
     return c.json({ error: `Agent '${agentName}' not found` }, 400);
@@ -1661,6 +1671,7 @@ voiceRoutes.openapi(twilioProvisionRoute, async (c): Promise<any> => {
     agent_name: agentName,
     provider_sid: buyData.sid,
   });
+  });
 });
 
 // ── POST /twilio/incoming — TwiML webhook for incoming calls (PUBLIC) ──
@@ -1697,13 +1708,14 @@ voiceRoutes.openapi(twilioIncomingRoute, async (c): Promise<any> => {
     );
   }
 
-  // Look up which agent owns this number
-  const sql = await getDb(c.env.HYPERDRIVE);
-  const rows = await sql`
+  // Look up which agent owns this number — incoming call is unauthenticated so
+  // resolve tenant via admin connection first, then load the agent config under
+  // that tenant's org RLS context.
+  const rows = await withAdminDb(c.env, (sql) => sql`
     SELECT org_id, agent_name FROM voice_numbers
     WHERE phone_number = ${calledNumber} AND provider = 'twilio' AND status = 'active'
     LIMIT 1
-  `;
+  `);
 
   if (rows.length === 0) {
     return c.text(
@@ -1715,10 +1727,10 @@ voiceRoutes.openapi(twilioIncomingRoute, async (c): Promise<any> => {
 
   const { org_id: orgId, agent_name: agentName } = rows[0] as { org_id: string; agent_name: string };
 
-  // Load agent's voice config to determine STT/TTS mode
-  const agentRows = await sql`
-    SELECT config FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1
-  `;
+  // Load agent's voice config to determine STT/TTS mode (org-scoped via RLS)
+  const agentRows = await withOrgDb(c.env, orgId, (sql) => sql`
+    SELECT config FROM agents WHERE name = ${agentName} LIMIT 1
+  `);
   const agentCfg = agentRows.length > 0
     ? (typeof (agentRows[0] as any).config === "string"
         ? JSON.parse((agentRows[0] as any).config)
@@ -1800,26 +1812,26 @@ const twilioNumbersRoute = createRoute({
 voiceRoutes.openapi(twilioNumbersRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name: agentName } = c.req.valid("query");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    let rows;
+    if (agentName) {
+      rows = await sql`
+        SELECT id, phone_number, agent_name, provider, provider_sid, status, created_at
+        FROM voice_numbers
+        WHERE provider = 'twilio' AND agent_name = ${agentName}
+        ORDER BY created_at DESC
+      `;
+    } else {
+      rows = await sql`
+        SELECT id, phone_number, agent_name, provider, provider_sid, status, created_at
+        FROM voice_numbers
+        WHERE provider = 'twilio'
+        ORDER BY created_at DESC
+      `;
+    }
 
-  let rows;
-  if (agentName) {
-    rows = await sql`
-      SELECT id, phone_number, agent_name, provider, provider_sid, status, created_at
-      FROM voice_numbers
-      WHERE org_id = ${user.org_id} AND provider = 'twilio' AND agent_name = ${agentName}
-      ORDER BY created_at DESC
-    `;
-  } else {
-    rows = await sql`
-      SELECT id, phone_number, agent_name, provider, provider_sid, status, created_at
-      FROM voice_numbers
-      WHERE org_id = ${user.org_id} AND provider = 'twilio'
-      ORDER BY created_at DESC
-    `;
-  }
-
-  return c.json({ numbers: rows });
+    return c.json({ numbers: rows });
+  });
 });
 
 // ── DELETE /twilio/numbers/:number_sid — Release a Twilio number ──
@@ -1851,12 +1863,11 @@ voiceRoutes.openapi(twilioDeleteNumberRoute, async (c): Promise<any> => {
     return c.json({ error: "TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN not configured" }, 500);
   }
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  // Verify ownership
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+  // Verify ownership (RLS handles org isolation)
   const rows = await sql`
     SELECT phone_number FROM voice_numbers
-    WHERE provider_sid = ${numberSid} AND org_id = ${user.org_id} AND provider = 'twilio'
+    WHERE provider_sid = ${numberSid} AND provider = 'twilio'
     LIMIT 1
   `;
   if (rows.length === 0) {
@@ -1881,10 +1892,11 @@ voiceRoutes.openapi(twilioDeleteNumberRoute, async (c): Promise<any> => {
   // Remove from DB
   await sql`
     DELETE FROM voice_numbers
-    WHERE provider_sid = ${numberSid} AND org_id = ${user.org_id} AND provider = 'twilio'
+    WHERE provider_sid = ${numberSid} AND provider = 'twilio'
   `;
 
   return c.json({ ok: true, released: numberSid });
+  });
 });
 
 // ── GET /twilio/integration-status — Check Twilio config ──
@@ -2140,11 +2152,10 @@ voiceRoutes.openapi(twilioBuyRoute, async (c): Promise<any> => {
     return c.json({ error: "TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN not configured" }, 500);
   }
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  // Verify agent exists
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+  // Verify agent exists (RLS handles org isolation)
   const agentRows = await sql`
-    SELECT name FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id} LIMIT 1
+    SELECT name FROM agents WHERE name = ${agentName} LIMIT 1
   `;
   if (agentRows.length === 0) {
     return c.json({ error: `Agent '${agentName}' not found` }, 400);
@@ -2153,7 +2164,7 @@ voiceRoutes.openapi(twilioBuyRoute, async (c): Promise<any> => {
   // Check if number is already owned
   const existing = await sql`
     SELECT id FROM voice_numbers
-    WHERE phone_number = ${phoneNumber} AND org_id = ${user.org_id} AND provider = 'twilio'
+    WHERE phone_number = ${phoneNumber} AND provider = 'twilio'
     LIMIT 1
   `;
   if (existing.length > 0) {
@@ -2229,6 +2240,7 @@ voiceRoutes.openapi(twilioBuyRoute, async (c): Promise<any> => {
     provider_sid: buyData.sid,
     status: "active",
   });
+  });
 });
 
 // ── POST /twilio/test-call — Initiate outbound test call from agent's number ──
@@ -2276,11 +2288,11 @@ voiceRoutes.openapi(twilioTestCallRoute, async (c): Promise<any> => {
     return c.json({ error: "TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN not configured" }, 500);
   }
 
-  // Verify the from number belongs to this org
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+  // Verify the from number belongs to this org (RLS handles isolation)
   const numRows = await sql`
     SELECT agent_name FROM voice_numbers
-    WHERE phone_number = ${fromNumber} AND org_id = ${user.org_id} AND provider = 'twilio' AND status = 'active'
+    WHERE phone_number = ${fromNumber} AND provider = 'twilio' AND status = 'active'
     LIMIT 1
   `;
   if (numRows.length === 0) {
@@ -2338,6 +2350,7 @@ voiceRoutes.openapi(twilioTestCallRoute, async (c): Promise<any> => {
   }
 
   return c.json({ call_sid: callData.sid, status: "initiated" });
+  });
 });
 
 // ── PUT /twilio/numbers/:number_sid/assign — Reassign number to different agent ──
@@ -2373,33 +2386,33 @@ voiceRoutes.openapi(twilioReassignNumberRoute, async (c): Promise<any> => {
   const { number_sid: numberSid } = c.req.valid("param");
   const { agent_name: agentName } = c.req.valid("json");
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Verify agent exists (RLS handles isolation)
+    const agentRows = await sql`
+      SELECT name FROM agents WHERE name = ${agentName} LIMIT 1
+    `;
+    if (agentRows.length === 0) {
+      return c.json({ error: `Agent '${agentName}' not found` }, 400);
+    }
 
-  // Verify agent exists
-  const agentRows = await sql`
-    SELECT name FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id} LIMIT 1
-  `;
-  if (agentRows.length === 0) {
-    return c.json({ error: `Agent '${agentName}' not found` }, 400);
-  }
+    // Verify number ownership
+    const numRows = await sql`
+      SELECT id FROM voice_numbers
+      WHERE provider_sid = ${numberSid} AND provider = 'twilio'
+      LIMIT 1
+    `;
+    if (numRows.length === 0) {
+      return c.json({ error: "Number not found or not owned by this org" }, 404);
+    }
 
-  // Verify number ownership
-  const numRows = await sql`
-    SELECT id FROM voice_numbers
-    WHERE provider_sid = ${numberSid} AND org_id = ${user.org_id} AND provider = 'twilio'
-    LIMIT 1
-  `;
-  if (numRows.length === 0) {
-    return c.json({ error: "Number not found or not owned by this org" }, 404);
-  }
+    // Update assignment
+    await sql`
+      UPDATE voice_numbers SET agent_name = ${agentName}
+      WHERE provider_sid = ${numberSid} AND provider = 'twilio'
+    `;
 
-  // Update assignment
-  await sql`
-    UPDATE voice_numbers SET agent_name = ${agentName}
-    WHERE provider_sid = ${numberSid} AND org_id = ${user.org_id} AND provider = 'twilio'
-  `;
-
-  return c.json({ updated: true, agent_name: agentName });
+    return c.json({ updated: true, agent_name: agentName });
+  });
 });
 
 // ── GET /voices — List available voices for a TTS engine ─────────────────
@@ -2616,14 +2629,15 @@ const listClonesRoute = createRoute({
 voiceRoutes.openapi(listClonesRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const agentName = c.req.query("agent_name") || "";
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Try DB first
   let clones: any[] = [];
   try {
-    const rows = agentName
-      ? await sql`SELECT id, agent_name, name, r2_key, size_bytes, status, created_at FROM voice_clones WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND status != 'deleted' ORDER BY created_at DESC`
-      : await sql`SELECT id, agent_name, name, r2_key, size_bytes, status, created_at FROM voice_clones WHERE org_id = ${user.org_id} AND status != 'deleted' ORDER BY created_at DESC`;
+    const rows = await withOrgDb(c.env, user.org_id, (sql) =>
+      agentName
+        ? sql`SELECT id, agent_name, name, r2_key, size_bytes, status, created_at FROM voice_clones WHERE agent_name = ${agentName} AND status != 'deleted' ORDER BY created_at DESC`
+        : sql`SELECT id, agent_name, name, r2_key, size_bytes, status, created_at FROM voice_clones WHERE status != 'deleted' ORDER BY created_at DESC`
+    );
     clones = rows.map((r: any) => ({
       clone_id: r.id, name: r.name || r.id, clone_url: r.r2_key,
       size_bytes: r.size_bytes || 0, created_at: r.created_at || "",
@@ -2661,13 +2675,16 @@ const deleteCloneRoute = createRoute({
 voiceRoutes.openapi(deleteCloneRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { clone_id } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  // Try DB first
-  const rows = await sql`SELECT r2_key FROM voice_clones WHERE id = ${clone_id} AND org_id = ${user.org_id}`.catch(() => []);
+  // Try DB first (RLS handles isolation)
+  const rows = await withOrgDb(c.env, user.org_id, (sql) =>
+    sql`SELECT r2_key FROM voice_clones WHERE id = ${clone_id}`.catch(() => [] as any[]),
+  );
 
   if (rows.length > 0) {
-    await sql`UPDATE voice_clones SET status = 'deleted' WHERE id = ${clone_id}`.catch(() => {});
+    await withOrgDb(c.env, user.org_id, (sql) =>
+      sql`UPDATE voice_clones SET status = 'deleted' WHERE id = ${clone_id}`.catch(() => ({} as any)),
+    );
     try { await c.env.STORAGE.delete((rows[0] as any).r2_key); } catch {}
   } else {
     // Fallback: try R2 directly (for clones created before DB tracking)
@@ -2716,18 +2733,18 @@ voiceRoutes.openapi(agentCallsRoute, async (c): Promise<any> => {
   const agentName = c.req.query("agent_name") || "";
   const status = c.req.query("status") || "";
   const limit = Number(c.req.query("limit") || 50);
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    let rows;
+    if (agentName && status) {
+      rows = await sql`SELECT * FROM voice_calls WHERE agent_name = ${agentName} AND status = ${status} ORDER BY created_at DESC LIMIT ${limit}`;
+    } else if (agentName) {
+      rows = await sql`SELECT * FROM voice_calls WHERE agent_name = ${agentName} ORDER BY created_at DESC LIMIT ${limit}`;
+    } else {
+      rows = await sql`SELECT * FROM voice_calls ORDER BY created_at DESC LIMIT ${limit}`;
+    }
 
-  let rows;
-  if (agentName && status) {
-    rows = await sql`SELECT * FROM voice_calls WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND status = ${status} ORDER BY created_at DESC LIMIT ${limit}`;
-  } else if (agentName) {
-    rows = await sql`SELECT * FROM voice_calls WHERE org_id = ${user.org_id} AND agent_name = ${agentName} ORDER BY created_at DESC LIMIT ${limit}`;
-  } else {
-    rows = await sql`SELECT * FROM voice_calls WHERE org_id = ${user.org_id} ORDER BY created_at DESC LIMIT ${limit}`;
-  }
-
-  return c.json({ calls: rows });
+    return c.json({ calls: rows });
+  });
 });
 
 // ── GET /clone/list — List cloned voices for an agent ────────────────────

@@ -5,7 +5,7 @@ import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { detectPii, redactPii, scanAndRedact, PII_CATEGORIES } from "../logic/pii-detector";
 import { detectInjection } from "../logic/prompt-injection";
@@ -91,94 +91,92 @@ guardrailRoutes.openapi(scanRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { text, scan_type, agent_name, system_prompt } = c.req.valid("json");
 
-  // Load agent-specific policy if agent_name is provided, otherwise use defaults
-  let policy = DEFAULT_GUARDRAIL_POLICY;
-  if (agent_name) {
-    try {
-      const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-      const rows = await sql`
-        SELECT policy FROM guardrail_policies
-        WHERE org_id = ${user.org_id}
-          AND (agent_name = ${agent_name} OR agent_name IS NULL)
-        ORDER BY agent_name DESC NULLS LAST
-        LIMIT 1
-      `;
-      if (rows.length) {
-        const row = rows[0] as Record<string, unknown>;
-        policy = {
-          ...DEFAULT_GUARDRAIL_POLICY,
-          ...(typeof row.policy === "string"
-            ? JSON.parse(row.policy)
-            : row.policy ?? {}),
-        };
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Load agent-specific policy if agent_name is provided, otherwise use defaults
+    let policy = DEFAULT_GUARDRAIL_POLICY;
+    if (agent_name) {
+      try {
+        const rows = await sql`
+          SELECT policy FROM guardrail_policies
+          WHERE (agent_name = ${agent_name} OR agent_name IS NULL)
+          ORDER BY agent_name DESC NULLS LAST
+          LIMIT 1
+        `;
+        if (rows.length) {
+          const row = rows[0] as Record<string, unknown>;
+          policy = {
+            ...DEFAULT_GUARDRAIL_POLICY,
+            ...(typeof row.policy === "string"
+              ? JSON.parse(row.policy)
+              : row.policy ?? {}),
+          };
+        }
+      } catch {
+        // Fall back to defaults
       }
-    } catch {
-      // Fall back to defaults
     }
-  }
 
-  const piiMatches = detectPii(text);
-  const injectionResult = detectInjection(text);
-  const safetyResult = scan_type === "output" ? scanOutput(text, system_prompt) : null;
+    const piiMatches = detectPii(text);
+    const injectionResult = detectInjection(text);
+    const safetyResult = scan_type === "output" ? scanOutput(text, system_prompt) : null;
 
-  const result =
-    scan_type === "input"
-      ? evaluateInput(text, policy)
-      : evaluateOutput(text, policy, system_prompt);
+    const result =
+      scan_type === "input"
+        ? evaluateInput(text, policy)
+        : evaluateOutput(text, policy, system_prompt);
 
-  // Log event asynchronously (best-effort)
-  try {
-    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-    await sql`
-      INSERT INTO guardrail_events (
-        id, org_id, agent_name, event_type, action,
-        text_preview, matches, created_at
-      ) VALUES (
-        ${genId()}, ${user.org_id}, ${agent_name ?? "unknown"},
-        ${scan_type}, ${result.action},
-        ${textPreview(text)}, ${JSON.stringify({
-          pii: piiMatches.length,
-          injection_score: injectionResult.score,
-          safety_issues: safetyResult?.issues.length ?? 0,
-        })},
-        ${Date.now()}
-      )
-    `;
-  } catch {
-    // Best-effort logging
-  }
-
-  // Security event: guardrail triggered or blocked
-  if (result.action === "block" || result.action === "warn") {
+    // Log event asynchronously (best-effort)
     try {
-      const sqlSec = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-      logSecurityEvent(sqlSec, {
-        org_id: user.org_id,
-        event_type: result.action === "block" ? "guardrail.blocked" : "guardrail.triggered",
-        actor_id: user.user_id,
-        actor_type: "user",
-        severity: "high",
-        details: {
-          scan_type,
-          action: result.action,
-          agent_name: agent_name ?? "unknown",
-          pii_count: piiMatches.length,
-          injection_score: injectionResult.score,
-          reasons: result.reasons,
-        },
-      });
+      await sql`
+        INSERT INTO guardrail_events (
+          id, org_id, agent_name, event_type, action,
+          text_preview, matches, created_at
+        ) VALUES (
+          ${genId()}, ${user.org_id}, ${agent_name ?? "unknown"},
+          ${scan_type}, ${result.action},
+          ${textPreview(text)}, ${JSON.stringify({
+            pii: piiMatches.length,
+            injection_score: injectionResult.score,
+            safety_issues: safetyResult?.issues.length ?? 0,
+          })},
+          ${Date.now()}
+        )
+      `;
     } catch {
-      // Best-effort
+      // Best-effort logging
     }
-  }
 
-  return c.json({
-    safe: result.action === "allow",
-    action: result.action,
-    pii_matches: piiMatches,
-    injection_result: injectionResult,
-    safety_issues: safetyResult?.issues ?? [],
-    redacted_text: result.redacted_text,
+    // Security event: guardrail triggered or blocked
+    if (result.action === "block" || result.action === "warn") {
+      try {
+        logSecurityEvent(sql, {
+          org_id: user.org_id,
+          event_type: result.action === "block" ? "guardrail.blocked" : "guardrail.triggered",
+          actor_id: user.user_id,
+          actor_type: "user",
+          severity: "high",
+          details: {
+            scan_type,
+            action: result.action,
+            agent_name: agent_name ?? "unknown",
+            pii_count: piiMatches.length,
+            injection_score: injectionResult.score,
+            reasons: result.reasons,
+          },
+        });
+      } catch {
+        // Best-effort
+      }
+    }
+
+    return c.json({
+      safe: result.action === "allow",
+      action: result.action,
+      pii_matches: piiMatches,
+      injection_result: injectionResult,
+      safety_issues: safetyResult?.issues ?? [],
+      redacted_text: result.redacted_text,
+    });
   });
 });
 
@@ -233,27 +231,26 @@ const listPoliciesRoute = createRoute({
 
 guardrailRoutes.openapi(listPoliciesRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT id, name, agent_name, policy, created_at, updated_at
+      FROM guardrail_policies
+      ORDER BY created_at DESC
+    `;
 
-  const rows = await sql`
-    SELECT id, name, agent_name, policy, created_at, updated_at
-    FROM guardrail_policies
-    WHERE org_id = ${user.org_id}
-    ORDER BY created_at DESC
-  `;
+    const policies = rows.map((r: Record<string, unknown>) => ({
+      id: r.id,
+      name: r.name,
+      agent_name: r.agent_name,
+      ...(typeof r.policy === "string"
+        ? JSON.parse(r.policy as string)
+        : r.policy ?? {}),
+      created_at: r.created_at,
+      updated_at: r.updated_at,
+    }));
 
-  const policies = rows.map((r: Record<string, unknown>) => ({
-    id: r.id,
-    name: r.name,
-    agent_name: r.agent_name,
-    ...(typeof r.policy === "string"
-      ? JSON.parse(r.policy as string)
-      : r.policy ?? {}),
-    created_at: r.created_at,
-    updated_at: r.updated_at,
-  }));
-
-  return c.json({ policies });
+    return c.json({ policies });
+  });
 });
 
 // ── POST /policies ──────────────────────────────────────────────
@@ -281,13 +278,14 @@ guardrailRoutes.openapi(createPolicyRoute, async (c): Promise<any> => {
     allowed_pii_categories: [],
   });
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  await sql`
-    INSERT INTO guardrail_policies (id, org_id, name, agent_name, policy, created_at, updated_at)
-    VALUES (${id}, ${user.org_id}, ${name}, ${agent_name ?? null}, ${policyJson}, ${now}, ${now})
-  `;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    await sql`
+      INSERT INTO guardrail_policies (id, org_id, name, agent_name, policy, created_at, updated_at)
+      VALUES (${id}, ${user.org_id}, ${name}, ${agent_name ?? null}, ${policyJson}, ${now}, ${now})
+    `;
 
-  return c.json({ id, name, agent_name, ...policyFields, created_at: now }, 201);
+    return c.json({ id, name, agent_name, ...policyFields, created_at: now }, 201);
+  });
 });
 
 // ── PUT /policies/:policy_id ────────────────────────────────────
@@ -318,19 +316,20 @@ guardrailRoutes.openapi(updatePolicyRoute, async (c): Promise<any> => {
     allowed_pii_categories: [],
   });
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const result = await sql`
-    UPDATE guardrail_policies
-    SET name = ${name}, agent_name = ${agent_name ?? null},
-        policy = ${policyJson}, updated_at = ${now}
-    WHERE id = ${policyId} AND org_id = ${user.org_id}
-  `;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const result = await sql`
+      UPDATE guardrail_policies
+      SET name = ${name}, agent_name = ${agent_name ?? null},
+          policy = ${policyJson}, updated_at = ${now}
+      WHERE id = ${policyId}
+    `;
 
-  if (!result.count) {
-    return c.json({ error: "Policy not found" }, 404);
-  }
+    if (!result.count) {
+      return c.json({ error: "Policy not found" }, 404);
+    }
 
-  return c.json({ id: policyId, name, agent_name, ...policyFields, updated_at: now });
+    return c.json({ id: policyId, name, agent_name, ...policyFields, updated_at: now });
+  });
 });
 
 // ── DELETE /policies/:policy_id ─────────────────────────────────
@@ -353,18 +352,18 @@ const deletePolicyRoute = createRoute({
 guardrailRoutes.openapi(deletePolicyRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { policy_id: policyId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const result = await sql`
+      DELETE FROM guardrail_policies
+      WHERE id = ${policyId}
+    `;
 
-  const result = await sql`
-    DELETE FROM guardrail_policies
-    WHERE id = ${policyId} AND org_id = ${user.org_id}
-  `;
+    if (!result.count) {
+      return c.json({ error: "Policy not found" }, 404);
+    }
 
-  if (!result.count) {
-    return c.json({ error: "Policy not found" }, 404);
-  }
-
-  return c.json({ deleted: true });
+    return c.json({ deleted: true });
+  });
 });
 
 // ── GET /events ─────────────────────────────────────────────────
@@ -388,39 +387,39 @@ guardrailRoutes.openapi(listEventsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name: agentName, event_type: eventType, since_days: sinceDays, limit } = c.req.valid("query");
   const sinceMs = Date.now() - sinceDays * 86_400_000;
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    let rows;
+    if (agentName && eventType) {
+      rows = await sql`
+        SELECT * FROM guardrail_events
+        WHERE agent_name = ${agentName}
+          AND event_type = ${eventType} AND created_at >= ${sinceMs}
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    } else if (agentName) {
+      rows = await sql`
+        SELECT * FROM guardrail_events
+        WHERE agent_name = ${agentName}
+          AND created_at >= ${sinceMs}
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    } else if (eventType) {
+      rows = await sql`
+        SELECT * FROM guardrail_events
+        WHERE event_type = ${eventType}
+          AND created_at >= ${sinceMs}
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    } else {
+      rows = await sql`
+        SELECT * FROM guardrail_events
+        WHERE created_at >= ${sinceMs}
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    }
 
-  let rows;
-  if (agentName && eventType) {
-    rows = await sql`
-      SELECT * FROM guardrail_events
-      WHERE org_id = ${user.org_id} AND agent_name = ${agentName}
-        AND event_type = ${eventType} AND created_at >= ${sinceMs}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  } else if (agentName) {
-    rows = await sql`
-      SELECT * FROM guardrail_events
-      WHERE org_id = ${user.org_id} AND agent_name = ${agentName}
-        AND created_at >= ${sinceMs}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  } else if (eventType) {
-    rows = await sql`
-      SELECT * FROM guardrail_events
-      WHERE org_id = ${user.org_id} AND event_type = ${eventType}
-        AND created_at >= ${sinceMs}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  } else {
-    rows = await sql`
-      SELECT * FROM guardrail_events
-      WHERE org_id = ${user.org_id} AND created_at >= ${sinceMs}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  }
-
-  return c.json({ events: rows });
+    return c.json({ events: rows });
+  });
 });
 
 // ── GET /stats ──────────────────────────────────────────────────
@@ -439,51 +438,49 @@ const statsRoute = createRoute({
 
 guardrailRoutes.openapi(statsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const totals = await sql`
+      SELECT
+        COUNT(*)::int AS total_scans,
+        COUNT(*) FILTER (WHERE action = 'block')::int AS blocked_count,
+        COUNT(*) FILTER (WHERE action = 'warn')::int AS warned_count
+      FROM guardrail_events
+    `;
 
-  const totals = await sql`
-    SELECT
-      COUNT(*)::int AS total_scans,
-      COUNT(*) FILTER (WHERE action = 'block')::int AS blocked_count,
-      COUNT(*) FILTER (WHERE action = 'warn')::int AS warned_count
-    FROM guardrail_events
-    WHERE org_id = ${user.org_id}
-  `;
+    // PII and injection stats from the matches JSON column
+    const eventRows = await sql`
+      SELECT matches FROM guardrail_events
+      ORDER BY created_at DESC LIMIT 1000
+    `;
 
-  // PII and injection stats from the matches JSON column
-  const eventRows = await sql`
-    SELECT matches FROM guardrail_events
-    WHERE org_id = ${user.org_id}
-    ORDER BY created_at DESC LIMIT 1000
-  `;
+    let piiDetected = 0;
+    let injectionsDetected = 0;
+    const byCategory: Record<string, number> = {};
 
-  let piiDetected = 0;
-  let injectionsDetected = 0;
-  const byCategory: Record<string, number> = {};
-
-  for (const row of eventRows) {
-    const r = row as Record<string, unknown>;
-    try {
-      const m =
-        typeof r.matches === "string"
-          ? JSON.parse(r.matches as string)
-          : r.matches ?? {};
-      if (m.pii && m.pii > 0) piiDetected += m.pii as number;
-      if (m.injection_score && (m.injection_score as number) > 0.25) injectionsDetected++;
-    } catch {
-      // skip malformed
+    for (const row of eventRows) {
+      const r = row as Record<string, unknown>;
+      try {
+        const m =
+          typeof r.matches === "string"
+            ? JSON.parse(r.matches as string)
+            : r.matches ?? {};
+        if (m.pii && m.pii > 0) piiDetected += m.pii as number;
+        if (m.injection_score && (m.injection_score as number) > 0.25) injectionsDetected++;
+      } catch {
+        // skip malformed
+      }
     }
-  }
 
-  const t = (totals[0] ?? {}) as Record<string, number>;
+    const t = (totals[0] ?? {}) as Record<string, number>;
 
-  return c.json({
-    total_scans: t.total_scans ?? 0,
-    blocked_count: t.blocked_count ?? 0,
-    warned_count: t.warned_count ?? 0,
-    pii_detected: piiDetected,
-    injections_detected: injectionsDetected,
-    by_category: byCategory,
+    return c.json({
+      total_scans: t.total_scans ?? 0,
+      blocked_count: t.blocked_count ?? 0,
+      warned_count: t.warned_count ?? 0,
+      pii_detected: piiDetected,
+      injections_detected: injectionsDetected,
+      by_category: byCategory,
+    });
   });
 });
 
@@ -505,44 +502,44 @@ const testRoute = createRoute({
 guardrailRoutes.openapi(testRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { text, policy_id } = c.req.valid("json");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT policy FROM guardrail_policies
+      WHERE id = ${policy_id}
+      LIMIT 1
+    `;
 
-  const rows = await sql`
-    SELECT policy FROM guardrail_policies
-    WHERE id = ${policy_id} AND org_id = ${user.org_id}
-    LIMIT 1
-  `;
+    if (!rows.length) {
+      return c.json({ error: "Policy not found" }, 404);
+    }
 
-  if (!rows.length) {
-    return c.json({ error: "Policy not found" }, 404);
-  }
+    const row = rows[0] as Record<string, unknown>;
+    const policy: GuardrailPolicy = {
+      ...DEFAULT_GUARDRAIL_POLICY,
+      ...(typeof row.policy === "string"
+        ? JSON.parse(row.policy as string)
+        : row.policy ?? {}),
+    };
 
-  const row = rows[0] as Record<string, unknown>;
-  const policy: GuardrailPolicy = {
-    ...DEFAULT_GUARDRAIL_POLICY,
-    ...(typeof row.policy === "string"
-      ? JSON.parse(row.policy as string)
-      : row.policy ?? {}),
-  };
+    // Run both input and output evaluation and return the stricter result
+    const inputResult = evaluateInput(text, policy);
+    const outputResult = evaluateOutput(text, policy);
 
-  // Run both input and output evaluation and return the stricter result
-  const inputResult = evaluateInput(text, policy);
-  const outputResult = evaluateOutput(text, policy);
+    // Merge: take the stricter action
+    const actionOrder = { allow: 0, warn: 1, block: 2 } as const;
+    const finalAction =
+      actionOrder[outputResult.action] > actionOrder[inputResult.action]
+        ? outputResult.action
+        : inputResult.action;
 
-  // Merge: take the stricter action
-  const actionOrder = { allow: 0, warn: 1, block: 2 } as const;
-  const finalAction =
-    actionOrder[outputResult.action] > actionOrder[inputResult.action]
-      ? outputResult.action
-      : inputResult.action;
-
-  return c.json({
-    result: {
-      action: finalAction,
-      reasons: [...inputResult.reasons, ...outputResult.reasons],
-      pii_matches: inputResult.pii_matches,
-      injection_score: inputResult.injection_score,
-      redacted_text: inputResult.redacted_text ?? outputResult.redacted_text,
-    },
+    return c.json({
+      result: {
+        action: finalAction,
+        reasons: [...inputResult.reasons, ...outputResult.reasons],
+        pii_matches: inputResult.pii_matches,
+        injection_score: inputResult.injection_score,
+        redacted_text: inputResult.redacted_text ?? outputResult.redacted_text,
+      },
+    });
   });
 });

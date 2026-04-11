@@ -5,7 +5,7 @@
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { latestEvalGate, rolloutRecommendation } from "../logic/gate-pack";
 import { getThresholds } from "../logic/policies";
@@ -35,11 +35,12 @@ const listChannelsRoute = createRoute({
 releaseRoutes.openapi(listChannelsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name: agentName } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const rows = await sql`
-    SELECT * FROM release_channels WHERE agent_name = ${agentName} AND org_id = ${user.org_id} ORDER BY channel
-  `;
-  return c.json({ channels: rows });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT * FROM release_channels WHERE agent_name = ${agentName} ORDER BY channel
+    `;
+    return c.json({ channels: rows });
+  });
 });
 
 // ── POST /releases/:agent_name/promote ──────────────────────────────────
@@ -83,12 +84,12 @@ releaseRoutes.openapi(promoteRoute, async (c): Promise<any> => {
   const override = body.override === true;
   const approvedBy = typeof body.approved_by === "string" ? body.approved_by : undefined;
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   // Get source channel config
   const source = await sql`
     SELECT * FROM release_channels
-    WHERE agent_name = ${agentName} AND channel = ${fromChannel} AND org_id = ${user.org_id}
+    WHERE agent_name = ${agentName} AND channel = ${fromChannel}
   `;
 
   let configJson: string;
@@ -97,7 +98,7 @@ releaseRoutes.openapi(promoteRoute, async (c): Promise<any> => {
   if (source.length === 0) {
     // Try getting from agents table
     const agents = await sql`
-      SELECT config, version FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id}
+      SELECT config, version FROM agents WHERE name = ${agentName}
     `;
     if (agents.length === 0) return c.json({ error: `Agent '${agentName}' not found` }, 404);
     configJson = agents[0].config || "{}";
@@ -128,7 +129,7 @@ releaseRoutes.openapi(promoteRoute, async (c): Promise<any> => {
 
   // ── Eval enforcement for production promotion ──
   if (toChannel === "production") {
-    const thresholds = await getThresholds(c.env.HYPERDRIVE, user.org_id, agentName);
+    const thresholds = await getThresholds(c.env, user.org_id, agentName);
     const evalGate = await latestEvalGate(sql, agentName, {
       minEvalPassRate: thresholds.eval_pass_rate,
       minEvalTrials: thresholds.eval_min_trials,
@@ -157,7 +158,7 @@ releaseRoutes.openapi(promoteRoute, async (c): Promise<any> => {
       try {
         const policyRows = await sql`
           SELECT config FROM agent_policies
-          WHERE org_id = ${user.org_id} AND policy_type = 'thresholds'
+          WHERE policy_type = 'thresholds'
             AND (agent_name = ${agentName} OR agent_name IS NULL)
           ORDER BY agent_name DESC NULLS LAST LIMIT 1
         `;
@@ -206,6 +207,7 @@ releaseRoutes.openapi(promoteRoute, async (c): Promise<any> => {
   const now = new Date().toISOString();
   // Org-scoped upsert only: never use ON CONFLICT(agent_name, channel) when the unique
   // index may omit org_id (would cross-tenant overwrite). Update this org's row, then insert if missing.
+  // RLS scopes the update to the current org automatically.
   const updated = await sql`
     UPDATE release_channels
     SET
@@ -213,7 +215,7 @@ releaseRoutes.openapi(promoteRoute, async (c): Promise<any> => {
       config = ${configJson},
       promoted_by = ${user.user_id},
       promoted_at = ${now}
-    WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND channel = ${toChannel}
+    WHERE agent_name = ${agentName} AND channel = ${toChannel}
   `;
   const touched = Number((updated as { count?: number }).count ?? 0);
   if (touched === 0) {
@@ -233,6 +235,7 @@ releaseRoutes.openapi(promoteRoute, async (c): Promise<any> => {
   } catch {}
 
   return c.json({ promoted: agentName, from: fromChannel, to: toChannel, version });
+  });
 });
 
 // ── GET /releases/:agent_name/canary ────────────────────────────────────
@@ -256,13 +259,14 @@ const getCanaryRoute = createRoute({
 releaseRoutes.openapi(getCanaryRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name: agentName } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const rows = await sql`
-    SELECT * FROM canary_splits
-    WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = true
-  `;
-  if (rows.length === 0) return c.json({ canary: null });
-  return c.json({ canary: rows[0] });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT * FROM canary_splits
+      WHERE agent_name = ${agentName} AND is_active = true
+    `;
+    if (rows.length === 0) return c.json({ canary: null });
+    return c.json({ canary: rows[0] });
+  });
 });
 
 // ── POST /releases/:agent_name/canary ───────────────────────────────────
@@ -307,22 +311,23 @@ releaseRoutes.openapi(createCanaryRoute, async (c): Promise<any> => {
     return c.json({ error: "canary_weight must be 0.0-1.0" }, 400);
   }
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  await sql`
-    UPDATE canary_splits
-    SET is_active = false
-    WHERE agent_name = ${agentName} AND org_id = ${user.org_id}
-  `;
-  await sql`
-    INSERT INTO canary_splits (org_id, agent_name, primary_version, canary_version, canary_weight, is_active)
-    VALUES (${user.org_id}, ${agentName}, ${primaryVersion}, ${canaryVersion}, ${canaryWeight}, true)
-  `;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    await sql`
+      UPDATE canary_splits
+      SET is_active = false
+      WHERE agent_name = ${agentName}
+    `;
+    await sql`
+      INSERT INTO canary_splits (org_id, agent_name, primary_version, canary_version, canary_weight, is_active)
+      VALUES (${user.org_id}, ${agentName}, ${primaryVersion}, ${canaryVersion}, ${canaryWeight}, true)
+    `;
 
-  return c.json({
-    agent: agentName,
-    primary: primaryVersion,
-    canary: canaryVersion,
-    weight: canaryWeight,
+    return c.json({
+      agent: agentName,
+      primary: primaryVersion,
+      canary: canaryVersion,
+      weight: canaryWeight,
+    });
   });
 });
 
@@ -347,13 +352,14 @@ const deleteCanaryRoute = createRoute({
 releaseRoutes.openapi(deleteCanaryRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name: agentName } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  await sql`
-    UPDATE canary_splits
-    SET is_active = false
-    WHERE agent_name = ${agentName} AND org_id = ${user.org_id}
-  `;
-  return c.json({ removed: true });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    await sql`
+      UPDATE canary_splits
+      SET is_active = false
+      WHERE agent_name = ${agentName}
+    `;
+    return c.json({ removed: true });
+  });
 });
 
 // ── POST /releases/:agent_name/canary/validate ──────────────────────────
@@ -378,12 +384,12 @@ const validateCanaryRoute = createRoute({
 releaseRoutes.openapi(validateCanaryRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name: agentName } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   // Get active canary split
   const splits = await sql`
     SELECT * FROM canary_splits
-    WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = true
+    WHERE agent_name = ${agentName} AND is_active = true
     LIMIT 1
   `;
   if (splits.length === 0) {
@@ -403,7 +409,7 @@ releaseRoutes.openapi(validateCanaryRoute, async (c): Promise<any> => {
       COALESCE(AVG(cost_total_usd), 0) AS avg_cost,
       COALESCE(AVG(wall_clock_seconds), 0) AS avg_latency
     FROM sessions
-    WHERE agent_name = ${agentName} AND org_id = ${user.org_id}
+    WHERE agent_name = ${agentName}
       AND version = ${primaryVersion} AND created_at > ${since}
   `;
 
@@ -415,7 +421,7 @@ releaseRoutes.openapi(validateCanaryRoute, async (c): Promise<any> => {
       COALESCE(AVG(cost_total_usd), 0) AS avg_cost,
       COALESCE(AVG(wall_clock_seconds), 0) AS avg_latency
     FROM sessions
-    WHERE agent_name = ${agentName} AND org_id = ${user.org_id}
+    WHERE agent_name = ${agentName}
       AND version = ${canaryVersion} AND created_at > ${since}
   `;
 
@@ -464,6 +470,7 @@ releaseRoutes.openapi(validateCanaryRoute, async (c): Promise<any> => {
     reason: `Canary error rate (${(canaryErrorRate * 100).toFixed(1)}%) is within tolerance of primary (${(primaryErrorRate * 100).toFixed(1)}%)`,
     metrics,
   });
+  });
 });
 
 // ── POST /releases/:agent_name/canary/rollback ──────────────────────────
@@ -500,12 +507,12 @@ releaseRoutes.openapi(rollbackCanaryRoute, async (c): Promise<any> => {
   const body = c.req.valid("json");
   const reason = String(body.reason || "canary auto-rollback");
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   // Get active canary split before deactivating
   const splits = await sql`
     SELECT * FROM canary_splits
-    WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = true
+    WHERE agent_name = ${agentName} AND is_active = true
     LIMIT 1
   `;
   if (splits.length === 0) {
@@ -518,13 +525,13 @@ releaseRoutes.openapi(rollbackCanaryRoute, async (c): Promise<any> => {
   await sql`
     UPDATE canary_splits
     SET is_active = false
-    WHERE agent_name = ${agentName} AND org_id = ${user.org_id}
+    WHERE agent_name = ${agentName}
   `;
 
   // Revert production channel to primary_version config
   const primaryConfig = await sql`
     SELECT config FROM release_channels
-    WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND channel = 'production'
+    WHERE agent_name = ${agentName} AND channel = 'production'
     LIMIT 1
   `;
   const configJson = primaryConfig.length > 0 ? primaryConfig[0].config : "{}";
@@ -534,7 +541,7 @@ releaseRoutes.openapi(rollbackCanaryRoute, async (c): Promise<any> => {
   const updated = await sql`
     UPDATE release_channels
     SET version = ${primaryVersion}, promoted_at = ${now}
-    WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND channel = 'production'
+    WHERE agent_name = ${agentName} AND channel = 'production'
   `;
   const touched = Number((updated as { count?: number }).count ?? 0);
   if (touched === 0) {
@@ -573,6 +580,7 @@ releaseRoutes.openapi(rollbackCanaryRoute, async (c): Promise<any> => {
     reverted_to: primaryVersion,
     reason,
   });
+  });
 });
 
 // ── Canary Auto-Promote ─────────────────────────────────────
@@ -580,12 +588,12 @@ releaseRoutes.openapi(rollbackCanaryRoute, async (c): Promise<any> => {
 releaseRoutes.post("/:agent_name/auto-promote", requireScope("releases:write"), async (c) => {
   const user = c.get("user");
   const agentName = c.req.param("agent_name");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   // 1. Read the canary_splits for the agent
   const splits = await sql`
     SELECT * FROM canary_splits
-    WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = true
+    WHERE agent_name = ${agentName} AND is_active = true
     LIMIT 1
   `;
   if (splits.length === 0) {
@@ -610,7 +618,7 @@ releaseRoutes.post("/:agent_name/auto-promote", requireScope("releases:write"), 
       COALESCE(AVG(cost_total_usd), 0) AS avg_cost,
       COALESCE(AVG(wall_clock_seconds), 0) AS avg_latency
     FROM sessions
-    WHERE agent_name = ${agentName} AND org_id = ${user.org_id}
+    WHERE agent_name = ${agentName}
       AND version = ${primaryVersion} AND created_at > ${since}
   `;
   const canaryRows = await sql`
@@ -620,7 +628,7 @@ releaseRoutes.post("/:agent_name/auto-promote", requireScope("releases:write"), 
       COALESCE(AVG(cost_total_usd), 0) AS avg_cost,
       COALESCE(AVG(wall_clock_seconds), 0) AS avg_latency
     FROM sessions
-    WHERE agent_name = ${agentName} AND org_id = ${user.org_id}
+    WHERE agent_name = ${agentName}
       AND version = ${canaryVersion} AND created_at > ${since}
   `;
 
@@ -652,7 +660,7 @@ releaseRoutes.post("/:agent_name/auto-promote", requireScope("releases:write"), 
   // 3. Check SLO targets if defined
   const sloTargets = await sql`
     SELECT metric, target FROM slo_definitions
-    WHERE agent_name = ${agentName} AND org_id = ${user.org_id}
+    WHERE agent_name = ${agentName}
   `.catch(() => []);
 
   let canaryMeetsSlos = true;
@@ -695,14 +703,14 @@ releaseRoutes.post("/:agent_name/auto-promote", requireScope("releases:write"), 
     await sql`
       UPDATE canary_splits
       SET canary_weight = 1.0
-      WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = true
+      WHERE agent_name = ${agentName} AND is_active = true
     `;
 
     // Update production channel to canary version
     const updated = await sql`
       UPDATE release_channels
       SET version = ${canaryVersion}, promoted_at = ${now}, promoted_by = ${user.user_id}
-      WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND channel = 'production'
+      WHERE agent_name = ${agentName} AND channel = 'production'
     `;
     const touched = Number((updated as { count?: number }).count ?? 0);
     if (touched === 0) {
@@ -734,7 +742,7 @@ releaseRoutes.post("/:agent_name/auto-promote", requireScope("releases:write"), 
     await sql`
       UPDATE canary_splits
       SET canary_weight = 0.0, is_active = false
-      WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = true
+      WHERE agent_name = ${agentName} AND is_active = true
     `;
 
     // Record rollback in evolution_ledger
@@ -765,6 +773,7 @@ releaseRoutes.post("/:agent_name/auto-promote", requireScope("releases:write"), 
       slo_results: sloResults,
     });
   }
+  });
 });
 
 // ── Explicit Auto-Rollback ─────────────────────────────────────
@@ -775,12 +784,12 @@ releaseRoutes.post("/:agent_name/auto-rollback", requireScope("releases:write"),
   const body = await c.req.json().catch(() => ({}));
   const reason = String(body.reason || "explicit auto-rollback requested");
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   // Get active canary split
   const splits = await sql`
     SELECT * FROM canary_splits
-    WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = true
+    WHERE agent_name = ${agentName} AND is_active = true
     LIMIT 1
   `;
   if (splits.length === 0) {
@@ -794,7 +803,7 @@ releaseRoutes.post("/:agent_name/auto-rollback", requireScope("releases:write"),
   await sql`
     UPDATE canary_splits
     SET canary_weight = 0.0, is_active = false
-    WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = true
+    WHERE agent_name = ${agentName} AND is_active = true
   `;
 
   // Ensure production channel reflects primary version
@@ -802,7 +811,7 @@ releaseRoutes.post("/:agent_name/auto-rollback", requireScope("releases:write"),
   const updated = await sql`
     UPDATE release_channels
     SET version = ${primaryVersion}, promoted_at = ${now}, promoted_by = ${user.user_id}
-    WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND channel = 'production'
+    WHERE agent_name = ${agentName} AND channel = 'production'
   `;
   const touched = Number((updated as { count?: number }).count ?? 0);
   if (touched === 0) {
@@ -833,5 +842,6 @@ releaseRoutes.post("/:agent_name/auto-rollback", requireScope("releases:write"),
     reverted_to: primaryVersion,
     canary_weight: 0.0,
     reason,
+  });
   });
 });

@@ -1,9 +1,12 @@
 -- ============================================================================
--- 001_init.sql — OneShots/AgentOS consolidated schema (v2)
--- Generated: 2026-04-07
--- Changes: removed RLS, deduplicated columns, merged tables, fixed FKs,
---          dropped _json suffixes, widened NUMERIC to (18,8)
--- Target: Supabase Postgres (fresh database, zero users)
+-- 001_init.sql — OneShots/AgentOS consolidated schema (v3)
+-- Generated: 2026-04-10
+-- Single-file canonical schema. Folds in prior migrations 003–009. RLS is
+-- enabled with FORCE on every org-scoped table, enforced via the
+-- app.current_org_id GUC set by withOrgDb() in the application layer.
+-- Cross-org queries use withAdminDb() which connects as a role granted
+-- BYPASSRLS or via a superuser binding (HYPERDRIVE_ADMIN).
+-- Target: Supabase Postgres (fresh database, zero users — nukable).
 -- ============================================================================
 
 -- ============================================================================
@@ -19,6 +22,14 @@ BEGIN
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
+
+-- RLS helper: reads the per-transaction org_id GUC set by withOrgDb().
+-- Returns '' if unset, which matches no real org row — fail-closed default.
+CREATE OR REPLACE FUNCTION current_org_id() RETURNS TEXT AS $$
+BEGIN
+  RETURN COALESCE(current_setting('app.current_org_id', true), '');
+END;
+$$ LANGUAGE plpgsql STABLE;
 
 -- ============================================================================
 -- SECTION 2: Core Entities
@@ -85,7 +96,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_agents_name_org
 
 CREATE TABLE IF NOT EXISTS agent_versions (
   id          BIGSERIAL PRIMARY KEY,
-  org_id      TEXT,
+  org_id      TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
   agent_name  TEXT NOT NULL,
   version     TEXT NOT NULL,
   config      JSONB NOT NULL DEFAULT '{}',
@@ -624,7 +635,7 @@ CREATE TABLE IF NOT EXISTS marketplace_ratings (
 CREATE TABLE IF NOT EXISTS marketplace_featured (
   id          BIGSERIAL PRIMARY KEY,
   listing_id  TEXT NOT NULL REFERENCES marketplace_listings(id) ON DELETE CASCADE,
-  org_id      TEXT,
+  org_id      TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
   cost_usd    NUMERIC(18,8) NOT NULL DEFAULT 0,
   featured_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   starts_at   TIMESTAMPTZ,
@@ -637,11 +648,11 @@ CREATE TABLE IF NOT EXISTS marketplace_featured (
 
 CREATE TABLE IF NOT EXISTS marketplace_queries (
   id                 BIGSERIAL PRIMARY KEY,
-  querier_org_id     TEXT,
+  querier_org_id     TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
   querier_agent_name TEXT NOT NULL DEFAULT '',
   query_text         TEXT NOT NULL DEFAULT '',
   category_filter    TEXT NOT NULL DEFAULT '',
-  org_id             TEXT,
+  org_id             TEXT,  -- target org (nullable for global searches)
   results_count      INT NOT NULL DEFAULT 0,
   created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -863,7 +874,7 @@ CREATE TABLE IF NOT EXISTS batch_tasks (
   id              BIGSERIAL PRIMARY KEY,
   task_id         TEXT,
   batch_id        TEXT NOT NULL REFERENCES batch_jobs(batch_id) ON DELETE CASCADE,
-  org_id          TEXT,
+  org_id          TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
   task_index      INT NOT NULL DEFAULT 0,
   input           TEXT NOT NULL DEFAULT '',
   output          TEXT,
@@ -2341,3 +2352,897 @@ CREATE TABLE IF NOT EXISTS autoresearch_experiments (
 -- ============================================================================
 
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM anon;
+
+-- ============================================================================
+-- SECTION 25: Hardening — CHECK constraints, missing FKs, missing indexes
+-- Folded in from old 003_rls_and_hardening.sql.
+-- ============================================================================
+
+-- Confidence/quality scores must be 0.0–1.0
+DO $$ BEGIN
+  ALTER TABLE facts ADD CONSTRAINT chk_facts_confidence
+    CHECK (confidence >= 0 AND confidence <= 1);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  ALTER TABLE dlp_classifications ADD CONSTRAINT chk_dlp_confidence
+    CHECK (confidence >= 0 AND confidence <= 1);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  ALTER TABLE slo_error_budgets ADD CONSTRAINT chk_slo_budget_pct
+    CHECK (budget_remaining_pct >= 0 AND budget_remaining_pct <= 100);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  ALTER TABLE eval_runs ADD CONSTRAINT chk_eval_pass_rate
+    CHECK (pass_rate >= 0 AND pass_rate <= 1);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- transfer_pairs: FKs to orgs (RESTRICT — never delete an org with open transfers)
+DO $$ BEGIN
+  ALTER TABLE transfer_pairs ADD CONSTRAINT fk_transfer_from_org
+    FOREIGN KEY (from_org_id) REFERENCES orgs(org_id) ON DELETE RESTRICT;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  ALTER TABLE transfer_pairs ADD CONSTRAINT fk_transfer_to_org
+    FOREIGN KEY (to_org_id) REFERENCES orgs(org_id) ON DELETE RESTRICT;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- Index supplements
+CREATE INDEX IF NOT EXISTS idx_secrets_org_name
+  ON secrets(org_id, name);
+CREATE INDEX IF NOT EXISTS idx_channel_configs_org_channel_active
+  ON channel_configs(org_id, channel) WHERE is_active = true;
+CREATE INDEX IF NOT EXISTS idx_billing_records_org_agent
+  ON billing_records(org_id, agent_name);
+CREATE INDEX IF NOT EXISTS idx_agent_versions_name
+  ON agent_versions(agent_name);
+CREATE INDEX IF NOT EXISTS idx_otel_events_session_created
+  ON otel_events(session_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_eval_runs_org_created
+  ON eval_runs(org_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_rag_chunks_pipeline
+  ON rag_chunks(pipeline);
+
+-- ============================================================================
+-- SECTION 26: Row-Level Security — org isolation on every org-scoped table
+-- ============================================================================
+-- Model
+-- -----
+-- All org-scoped tables have RLS enabled AND FORCED. Application code must
+-- use withOrgDb(env, orgId, async sql => ...) which opens a transaction and
+-- calls set_config('app.current_org_id', $orgId, true) before the first
+-- query. current_org_id() reads that GUC and policies gate every row.
+--
+-- Cross-org queries (admin dashboards, marketplace discovery, webhook
+-- dispatch, background workers) must use withAdminDb(env, async sql => ...)
+-- which connects via HYPERDRIVE_ADMIN. That binding points to a role with
+-- BYPASSRLS (or, in prototype mode, the same superuser as HYPERDRIVE —
+-- the branded TypeScript types are the audit boundary).
+--
+-- FORCE is the critical bit: without it, the table owner (the Supabase
+-- `postgres` role) bypasses RLS regardless of policies. FORCE makes RLS
+-- apply to everyone except explicit BYPASSRLS roles.
+--
+-- Policies use `FOR ALL USING (...)`. For INSERT, Postgres falls back to
+-- USING when WITH CHECK is omitted, so new rows must also satisfy the
+-- predicate — nobody can insert rows belonging to a different org.
+--
+-- Multi-org tables (A2A tasks / artifacts, credit transfers) allow either
+-- side of the relationship to read the row.
+--
+-- Tables legitimately NOT covered: orgs, users, org_members, org_settings
+-- (user/membership tables — handled at the application layer, see audit);
+-- turns, session_progress, conversation_messages, eval_trials,
+-- training_iterations, training_rewards, secrets_key_rotations,
+-- webhook_deliveries, prompt_versions, api_key_agent_scopes (inherit
+-- isolation via FK parent); pricing_catalog, credit_packages,
+-- stripe_events_processed, connector_tools, policy_templates, event_types,
+-- network_stats, idempotency_cache, do_conversation_messages (global or
+-- transient, not org-scoped).
+-- ============================================================================
+
+-- Helper macro expanded below per table.
+-- Pattern: ALTER TABLE x ENABLE ROW LEVEL SECURITY;
+--          ALTER TABLE x FORCE ROW LEVEL SECURITY;
+--          CREATE POLICY x_org_isolation ON x FOR ALL USING (...);
+
+-- ── Tier 1: Credentials, sessions, billing ────────────────────────────────
+
+ALTER TABLE secrets ENABLE ROW LEVEL SECURITY;
+ALTER TABLE secrets FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY secrets_org_isolation ON secrets
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE api_keys ENABLE ROW LEVEL SECURITY;
+ALTER TABLE api_keys FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY api_keys_org_isolation ON api_keys
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sessions FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY sessions_org_isolation ON sessions
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE billing_records ENABLE ROW LEVEL SECURITY;
+ALTER TABLE billing_records FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY billing_records_org_isolation ON billing_records
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE credit_transactions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE credit_transactions FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY credit_transactions_org_isolation ON credit_transactions
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE org_credit_balance ENABLE ROW LEVEL SECURITY;
+ALTER TABLE org_credit_balance FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY org_credit_balance_org_isolation ON org_credit_balance
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE cost_ledger ENABLE ROW LEVEL SECURITY;
+ALTER TABLE cost_ledger FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY cost_ledger_org_isolation ON cost_ledger
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE billing_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE billing_events FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY billing_events_org_isolation ON billing_events
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE end_user_tokens ENABLE ROW LEVEL SECURITY;
+ALTER TABLE end_user_tokens FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY end_user_tokens_org_isolation ON end_user_tokens
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE end_user_usage ENABLE ROW LEVEL SECURITY;
+ALTER TABLE end_user_usage FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY end_user_usage_org_isolation ON end_user_usage
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE connector_tokens ENABLE ROW LEVEL SECURITY;
+ALTER TABLE connector_tokens FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY connector_tokens_org_isolation ON connector_tokens
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ── Tier 2: Core agent config + versions + projects ───────────────────────
+
+ALTER TABLE orgs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE orgs FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY orgs_self_isolation ON orgs
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE org_settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE org_settings FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY org_settings_org_isolation ON org_settings
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
+ALTER TABLE projects FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY projects_org_isolation ON projects
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE project_configs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE project_configs FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY project_configs_org_isolation ON project_configs
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE environments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE environments FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY environments_org_isolation ON environments
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE agents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE agents FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY agents_org_isolation ON agents
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE agent_versions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE agent_versions FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY agent_versions_org_isolation ON agent_versions
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE agent_policies ENABLE ROW LEVEL SECURITY;
+ALTER TABLE agent_policies FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY agent_policies_org_isolation ON agent_policies
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE conversations FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY conversations_org_isolation ON conversations
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE conversation_analytics ENABLE ROW LEVEL SECURITY;
+ALTER TABLE conversation_analytics FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY conversation_analytics_org_isolation ON conversation_analytics
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE conversation_scores ENABLE ROW LEVEL SECURITY;
+ALTER TABLE conversation_scores FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY conversation_scores_org_isolation ON conversation_scores
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE session_feedback ENABLE ROW LEVEL SECURITY;
+ALTER TABLE session_feedback FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY session_feedback_org_isolation ON session_feedback
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ── Tier 3: Training, eval, compliance, security ──────────────────────────
+
+ALTER TABLE eval_runs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE eval_runs FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY eval_runs_org_isolation ON eval_runs
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE eval_test_cases ENABLE ROW LEVEL SECURITY;
+ALTER TABLE eval_test_cases FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY eval_test_cases_org_isolation ON eval_test_cases
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE training_jobs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE training_jobs FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY training_jobs_org_isolation ON training_jobs
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE training_resources ENABLE ROW LEVEL SECURITY;
+ALTER TABLE training_resources FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY training_resources_org_isolation ON training_resources
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE security_scans ENABLE ROW LEVEL SECURITY;
+ALTER TABLE security_scans FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY security_scans_org_isolation ON security_scans
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE security_scan_findings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE security_scan_findings FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY security_scan_findings_org_isolation ON security_scan_findings
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE security_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE security_events FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY security_events_org_isolation ON security_events
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE compliance_checks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE compliance_checks FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY compliance_checks_org_isolation ON compliance_checks
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE dlp_classifications ENABLE ROW LEVEL SECURITY;
+ALTER TABLE dlp_classifications FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY dlp_classifications_org_isolation ON dlp_classifications
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE dlp_agent_policies ENABLE ROW LEVEL SECURITY;
+ALTER TABLE dlp_agent_policies FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY dlp_agent_policies_org_isolation ON dlp_agent_policies
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE audit_log ENABLE ROW LEVEL SECURITY;
+ALTER TABLE audit_log FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY audit_log_org_isolation ON audit_log
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE audit_log_archive ENABLE ROW LEVEL SECURITY;
+ALTER TABLE audit_log_archive FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY audit_log_archive_org_isolation ON audit_log_archive
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE api_access_log ENABLE ROW LEVEL SECURITY;
+ALTER TABLE api_access_log FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY api_access_log_org_isolation ON api_access_log
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE account_deletion_requests ENABLE ROW LEVEL SECURITY;
+ALTER TABLE account_deletion_requests FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY account_deletion_requests_org_isolation ON account_deletion_requests
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE data_export_requests ENABLE ROW LEVEL SECURITY;
+ALTER TABLE data_export_requests FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY data_export_requests_org_isolation ON data_export_requests
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ── Tier 4: Observability ─────────────────────────────────────────────────
+
+ALTER TABLE otel_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE otel_events FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY otel_events_org_isolation ON otel_events
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE runtime_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE runtime_events FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY runtime_events_org_isolation ON runtime_events
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE span_feedback ENABLE ROW LEVEL SECURITY;
+ALTER TABLE span_feedback FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY span_feedback_org_isolation ON span_feedback
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE trace_annotations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE trace_annotations FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY trace_annotations_org_isolation ON trace_annotations
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE middleware_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE middleware_events FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY middleware_events_org_isolation ON middleware_events
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE tool_executions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tool_executions FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY tool_executions_org_isolation ON tool_executions
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE run_artifacts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE run_artifacts FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY run_artifacts_org_isolation ON run_artifacts
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ── Tier 5: Jobs, schedules, workflows ────────────────────────────────────
+
+ALTER TABLE schedules ENABLE ROW LEVEL SECURITY;
+ALTER TABLE schedules FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY schedules_org_isolation ON schedules
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE job_queue ENABLE ROW LEVEL SECURITY;
+ALTER TABLE job_queue FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY job_queue_org_isolation ON job_queue
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE batch_jobs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE batch_jobs FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY batch_jobs_org_isolation ON batch_jobs
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE batch_tasks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE batch_tasks FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY batch_tasks_org_isolation ON batch_tasks
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE workflows ENABLE ROW LEVEL SECURITY;
+ALTER TABLE workflows FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY workflows_org_isolation ON workflows
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE workflow_runs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE workflow_runs FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY workflow_runs_org_isolation ON workflow_runs
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE workflow_approvals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE workflow_approvals FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY workflow_approvals_org_isolation ON workflow_approvals
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ── Tier 6: Agent memory, skills, tools ───────────────────────────────────
+
+ALTER TABLE user_profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_profiles FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY user_profiles_org_isolation ON user_profiles
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE facts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE facts FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY facts_org_isolation ON facts
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE episodes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE episodes FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY episodes_org_isolation ON episodes
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE procedures ENABLE ROW LEVEL SECURITY;
+ALTER TABLE procedures FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY procedures_org_isolation ON procedures
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE skills ENABLE ROW LEVEL SECURITY;
+ALTER TABLE skills FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY skills_org_isolation ON skills
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE tool_registry ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tool_registry FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY tool_registry_org_isolation ON tool_registry
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE mcp_servers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mcp_servers FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY mcp_servers_org_isolation ON mcp_servers
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE codemode_snippets ENABLE ROW LEVEL SECURITY;
+ALTER TABLE codemode_snippets FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY codemode_snippets_org_isolation ON codemode_snippets
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE codemode_executions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE codemode_executions FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY codemode_executions_org_isolation ON codemode_executions
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE feature_flags ENABLE ROW LEVEL SECURITY;
+ALTER TABLE feature_flags FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY feature_flags_org_isolation ON feature_flags
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ── Tier 7: Channels, voice, autopilot ────────────────────────────────────
+
+ALTER TABLE channel_configs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE channel_configs FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY channel_configs_org_isolation ON channel_configs
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE autopilot_sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE autopilot_sessions FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY autopilot_sessions_org_isolation ON autopilot_sessions
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE voice_calls ENABLE ROW LEVEL SECURITY;
+ALTER TABLE voice_calls FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY voice_calls_org_isolation ON voice_calls
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE voice_numbers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE voice_numbers FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY voice_numbers_org_isolation ON voice_numbers
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE voice_clones ENABLE ROW LEVEL SECURITY;
+ALTER TABLE voice_clones FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY voice_clones_org_isolation ON voice_clones
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ── Tier 8: Evolution, governance, guardrails ─────────────────────────────
+
+ALTER TABLE evolution_proposals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE evolution_proposals FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY evolution_proposals_org_isolation ON evolution_proposals
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE evolution_ledger ENABLE ROW LEVEL SECURITY;
+ALTER TABLE evolution_ledger FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY evolution_ledger_org_isolation ON evolution_ledger
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE evolution_reports ENABLE ROW LEVEL SECURITY;
+ALTER TABLE evolution_reports FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY evolution_reports_org_isolation ON evolution_reports
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE evolution_schedules ENABLE ROW LEVEL SECURITY;
+ALTER TABLE evolution_schedules FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY evolution_schedules_org_isolation ON evolution_schedules
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE guardrail_policies ENABLE ROW LEVEL SECURITY;
+ALTER TABLE guardrail_policies FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY guardrail_policies_org_isolation ON guardrail_policies
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE guardrail_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE guardrail_events FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY guardrail_events_org_isolation ON guardrail_events
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE risk_profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE risk_profiles FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY risk_profiles_org_isolation ON risk_profiles
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ── Tier 9: SLOs, alerts, monitoring ──────────────────────────────────────
+
+ALTER TABLE slo_definitions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slo_definitions FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY slo_definitions_org_isolation ON slo_definitions
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE slo_evaluations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slo_evaluations FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY slo_evaluations_org_isolation ON slo_evaluations
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE slo_error_budgets ENABLE ROW LEVEL SECURITY;
+ALTER TABLE slo_error_budgets FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY slo_error_budgets_org_isolation ON slo_error_budgets
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE alert_configs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE alert_configs FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY alert_configs_org_isolation ON alert_configs
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE alert_history ENABLE ROW LEVEL SECURITY;
+ALTER TABLE alert_history FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY alert_history_org_isolation ON alert_history
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ── Tier 10: Marketplace, feed, community ─────────────────────────────────
+
+ALTER TABLE marketplace_listings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE marketplace_listings FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY marketplace_listings_org_isolation ON marketplace_listings
+  FOR ALL USING (org_id = current_org_id() OR is_published = true);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE marketplace_ratings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE marketplace_ratings FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY marketplace_ratings_org_isolation ON marketplace_ratings
+  FOR ALL USING (rater_org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE marketplace_featured ENABLE ROW LEVEL SECURITY;
+ALTER TABLE marketplace_featured FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY marketplace_featured_org_isolation ON marketplace_featured
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE marketplace_queries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE marketplace_queries FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY marketplace_queries_org_isolation ON marketplace_queries
+  FOR ALL USING (querier_org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE feed_posts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE feed_posts FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY feed_posts_org_isolation ON feed_posts
+  FOR ALL USING (org_id = current_org_id() OR is_promoted = true);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ── Tier 11: A2A (multi-org, two-sided access) ────────────────────────────
+
+ALTER TABLE a2a_agents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE a2a_agents FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY a2a_agents_org_isolation ON a2a_agents
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE a2a_tasks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE a2a_tasks FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY a2a_tasks_org_isolation ON a2a_tasks
+  FOR ALL USING (caller_org_id = current_org_id() OR callee_org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE a2a_artifacts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE a2a_artifacts FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY a2a_artifacts_org_isolation ON a2a_artifacts
+  FOR ALL USING (sender_org_id = current_org_id() OR receiver_org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE delegation_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE delegation_events FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY delegation_events_org_isolation ON delegation_events
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ── Tier 12: Credit transfers, referrals ──────────────────────────────────
+
+ALTER TABLE transfer_pairs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE transfer_pairs FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY transfer_pairs_org_isolation ON transfer_pairs
+  FOR ALL USING (from_org_id = current_org_id() OR to_org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE transfer_rate_limits ENABLE ROW LEVEL SECURITY;
+ALTER TABLE transfer_rate_limits FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY transfer_rate_limits_org_isolation ON transfer_rate_limits
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE referrals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE referrals FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY referrals_org_isolation ON referrals
+  FOR ALL USING (referrer_org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE referral_codes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE referral_codes FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY referral_codes_org_isolation ON referral_codes
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE referral_earnings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE referral_earnings FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY referral_earnings_org_isolation ON referral_earnings
+  FOR ALL USING (earner_org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ── Tier 13: Webhooks, domains, integrations, files ───────────────────────
+
+ALTER TABLE webhooks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE webhooks FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY webhooks_org_isolation ON webhooks
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE github_webhook_subscriptions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE github_webhook_subscriptions FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY github_webhook_subscriptions_org_isolation ON github_webhook_subscriptions
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE custom_domains ENABLE ROW LEVEL SECURITY;
+ALTER TABLE custom_domains FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY custom_domains_org_isolation ON custom_domains
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE file_uploads ENABLE ROW LEVEL SECURITY;
+ALTER TABLE file_uploads FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY file_uploads_org_isolation ON file_uploads
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE issues ENABLE ROW LEVEL SECURITY;
+ALTER TABLE issues FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY issues_org_isolation ON issues
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ── Tier 14: Meta / governance / release ──────────────────────────────────
+
+ALTER TABLE meta_proposals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE meta_proposals FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY meta_proposals_org_isolation ON meta_proposals
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE canary_splits ENABLE ROW LEVEL SECURITY;
+ALTER TABLE canary_splits FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY canary_splits_org_isolation ON canary_splits
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE release_channels ENABLE ROW LEVEL SECURITY;
+ALTER TABLE release_channels FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY release_channels_org_isolation ON release_channels
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE retention_policies ENABLE ROW LEVEL SECURITY;
+ALTER TABLE retention_policies FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY retention_policies_org_isolation ON retention_policies
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE gold_images ENABLE ROW LEVEL SECURITY;
+ALTER TABLE gold_images FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY gold_images_org_isolation ON gold_images
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE gpu_endpoints ENABLE ROW LEVEL SECURITY;
+ALTER TABLE gpu_endpoints FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY gpu_endpoints_org_isolation ON gpu_endpoints
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE pipelines ENABLE ROW LEVEL SECURITY;
+ALTER TABLE pipelines FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY pipelines_org_isolation ON pipelines
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ── Tier 15: Graph components, snippets, checkpoints ──────────────────────
+
+ALTER TABLE components ENABLE ROW LEVEL SECURITY;
+ALTER TABLE components FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY components_org_isolation ON components
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE component_usage ENABLE ROW LEVEL SECURITY;
+ALTER TABLE component_usage FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY component_usage_org_isolation ON component_usage
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE subgraph_definitions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE subgraph_definitions FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY subgraph_definitions_org_isolation ON subgraph_definitions
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE graph_snapshots ENABLE ROW LEVEL SECURITY;
+ALTER TABLE graph_snapshots FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY graph_snapshots_org_isolation ON graph_snapshots
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE node_checkpoints ENABLE ROW LEVEL SECURITY;
+ALTER TABLE node_checkpoints FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY node_checkpoints_org_isolation ON node_checkpoints
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE langchain_tools ENABLE ROW LEVEL SECURITY;
+ALTER TABLE langchain_tools FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY langchain_tools_org_isolation ON langchain_tools
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE schema_validation_errors ENABLE ROW LEVEL SECURITY;
+ALTER TABLE schema_validation_errors FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY schema_validation_errors_org_isolation ON schema_validation_errors
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ── Tier 16: RAG, AutoResearch ────────────────────────────────────────────
+
+-- rag_chunks: org_id='' means global/unscoped (system-wide RAG). Allow that.
+ALTER TABLE rag_chunks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE rag_chunks FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY rag_chunks_org_isolation ON rag_chunks
+  FOR ALL USING (org_id = current_org_id() OR org_id = '');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE autoresearch_runs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE autoresearch_runs FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY autoresearch_runs_org_isolation ON autoresearch_runs
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE autoresearch_experiments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE autoresearch_experiments FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY autoresearch_experiments_org_isolation ON autoresearch_experiments
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ============================================================================
+-- SECTION 27: Column comments (denormalization decisions)
+-- ============================================================================
+
+COMMENT ON COLUMN sessions.agent_name IS 'Denormalized from agents.name for query performance. Agent names are immutable — do not rename agents.';
+COMMENT ON COLUMN sessions.org_id IS 'Denormalized from agents.org_id for RLS filtering without JOIN.';
+COMMENT ON COLUMN turns.cost_usd IS 'Per-turn cost in USD.';
+COMMENT ON COLUMN eval_runs.config IS 'eval_name, source, and run parameters.';
+COMMENT ON COLUMN eval_runs.results IS 'total_tasks, pass_count, avg_score, avg_latency_ms, total_cost_usd.';
+COMMENT ON TABLE rag_chunks IS 'BM25 full-text search index. Parallel to Vectorize (dense vectors). org_id='''' means global/unscoped — readable by any org.';
+
+-- ============================================================================
+-- SECTION 28: Application roles — RLS enforcement boundary
+-- ============================================================================
+-- The Supabase `postgres` role is a superuser and bypasses RLS even with
+-- FORCE ROW LEVEL SECURITY. To make policies actually enforce, the
+-- application connects as `app_user` — a non-owner, non-superuser role
+-- that has DML on every table in public but is NOT granted BYPASSRLS.
+--
+-- Use for production:
+--   1. After running this migration, set a password:
+--      ALTER ROLE app_user LOGIN PASSWORD '<strong-random>';
+--   2. Create a Cloudflare Hyperdrive config whose connection string
+--      authenticates as app_user, e.g.
+--      postgresql://app_user:PASSWORD@host:port/postgres
+--   3. Point the HYPERDRIVE binding in control-plane/wrangler.jsonc at
+--      that Hyperdrive config. Leave HYPERDRIVE_ADMIN pointing at the
+--      superuser binding — withAdminDb keeps its BYPASSRLS semantics.
+--
+-- For the RLS smoke test (scripts/rls-smoke-test.mjs), the role is
+-- created with NOLOGIN and the test uses `SET ROLE app_user` from the
+-- superuser session — no password needed, and no persistent credentials
+-- are exposed to the test environment.
+-- ============================================================================
+
+DO $$ BEGIN
+  CREATE ROLE app_user NOLOGIN;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- Ensure app_user is NOT granted BYPASSRLS (defaults to NOBYPASSRLS but
+-- this is an explicit belt-and-suspenders reset in case a prior schema
+-- state granted it).
+ALTER ROLE app_user NOBYPASSRLS;
+
+-- Schema-level access
+GRANT USAGE ON SCHEMA public TO app_user;
+
+-- DML on every table currently in the schema. Tables created after this
+-- migration inherit these grants via the default privileges below.
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_user;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app_user;
+
+-- The current_org_id() helper is called by every RLS policy USING clause.
+GRANT EXECUTE ON FUNCTION current_org_id() TO app_user;
+GRANT EXECUTE ON FUNCTION update_updated_at_column() TO app_user;
+
+-- Default privileges for tables/sequences created by future migrations.
+-- Must be run as the role that will own those future tables — here that's
+-- `postgres` (the migration runner). If migrations run under a different
+-- owner in the future, repeat these ALTER DEFAULT PRIVILEGES statements
+-- under that owner.
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app_user;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT USAGE, SELECT ON SEQUENCES TO app_user;
+
+COMMENT ON ROLE app_user IS 'Application connection role. Non-superuser, non-owner, NOBYPASSRLS. RLS policies actually enforce for this role. Set a password via ALTER ROLE before using in a Hyperdrive connection string.';

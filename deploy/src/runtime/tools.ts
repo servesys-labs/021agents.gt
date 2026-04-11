@@ -17,6 +17,7 @@ import { ToolError, CircuitBreakerError, classifyFetchError } from "./errors";
 import { createChildAbortController, createSiblingGroup } from "./abort";
 import { parseJsonColumn } from "./parse-json-column";
 import { uint8ArrayToBase64 } from "./binary-enc";
+import { log } from "./log";
 
 const MAX_SANDBOX_TIMEOUT_SECONDS = 300; // 5 min — npm install/build on basic instance needs time
 const DEFAULT_SANDBOX_TIMEOUT_SECONDS = 30;
@@ -348,7 +349,7 @@ function getSafeSandbox(env: RuntimeEnv, sandboxId: string) {
       try {
         return await raw.exec(cmd, normalizedOpts);
       } catch (err: any) {
-        console.error(`[sandbox] exec failed (${sandboxId}): ${err.message?.slice(0, 200)}`);
+        log.error(`[sandbox] exec failed (${sandboxId}): ${err.message?.slice(0, 200)}`);
         // If the underlying shell/session died, clear warm cache so next call re-probes.
         const msg = String(err?.message || "").toLowerCase();
         if (msg.includes("session is not ready") || msg.includes("shell has died")) {
@@ -362,7 +363,7 @@ function getSafeSandbox(env: RuntimeEnv, sandboxId: string) {
         await ensureSandboxReady();
         return await raw.writeFile(path, content);
       } catch (err: any) {
-        console.error(`[sandbox] writeFile failed (${sandboxId}): ${err.message?.slice(0, 200)}`);
+        log.error(`[sandbox] writeFile failed (${sandboxId}): ${err.message?.slice(0, 200)}`);
         throw err;
       }
     },
@@ -682,7 +683,7 @@ function recordSuccess(toolName: string, telemetryQueue?: any): void {
     state.state = "closed";
     state.failures = 0;
     state.successes = 0;
-    console.log(`[circuit-breaker] ${toolName}: CLOSED (healthy)`);
+    log.info(`[circuit-breaker] ${toolName}: CLOSED (healthy)`);
     telemetryQueue?.send?.({ type: "circuit_breaker", tool_name: toolName, from_state: prevState, to_state: "closed", failure_count: 0, timestamp: Date.now() });
   }
   persistCircuitState(toolName, state);
@@ -697,7 +698,7 @@ function recordFailure(toolName: string, telemetryQueue?: any): void {
 
   if (state.state === "closed" && state.failures >= CIRCUIT_CONFIG.failureThreshold) {
     state.state = "open";
-    console.warn(`[circuit-breaker] ${toolName}: OPEN (too many failures)`);
+    log.warn(`[circuit-breaker] ${toolName}: OPEN (too many failures)`);
     telemetryQueue?.send?.({ type: "circuit_breaker", tool_name: toolName, from_state: prevState, to_state: "open", failure_count: state.failures, timestamp: Date.now() });
   }
   persistCircuitState(toolName, state);
@@ -714,7 +715,7 @@ function canExecute(toolName: string, telemetryQueue?: any): { allowed: boolean;
       const prevState = state.state;
       state.state = "half-open";
       state.successes = 0;
-      console.log(`[circuit-breaker] ${toolName}: HALF-OPEN (testing)`);
+      log.info(`[circuit-breaker] ${toolName}: HALF-OPEN (testing)`);
       telemetryQueue?.send?.({ type: "circuit_breaker", tool_name: toolName, from_state: prevState, to_state: "half-open", failure_count: state.failures, timestamp: Date.now() });
       persistCircuitState(toolName, state);
       return { allowed: true };
@@ -4521,7 +4522,7 @@ async function browse(args: Record<string, any>, env?: RuntimeEnv, sessionId?: s
         }
       });
     } catch (err: any) {
-      console.error(`[browse] Puppeteer failed, falling back to fetch: ${err.message?.slice(0, 100)}`);
+      log.error(`[browse] Puppeteer failed, falling back to fetch: ${err.message?.slice(0, 100)}`);
     }
   }
 
@@ -5517,7 +5518,7 @@ async function browserRender(env: RuntimeEnv, args: Record<string, any>, session
         }
       });
     } catch (err: any) {
-      console.error(`[browserRender] Puppeteer failed, falling back to HTTP API: ${err.message?.slice(0, 100)}`);
+      log.error(`[browserRender] Puppeteer failed, falling back to HTTP API: ${err.message?.slice(0, 100)}`);
     }
   }
 
@@ -5787,6 +5788,26 @@ export function selectToolsForQuery(
   if (!hasDiscover) {
     selected.push(DISCOVER_TOOLS_DEF);
   }
+
+  // Keep execution/scaffolding tools near the front so profile caps (e.g. max_tools_exposed)
+  // do not accidentally drop code-mode/terminal capabilities on project setup tasks.
+  const TOOL_PRIORITY = new Map<string, number>([
+    ["execute-code", 0],
+    ["bash", 1],
+    ["python-exec", 2],
+    ["read-file", 3],
+    ["write-file", 4],
+    ["edit-file", 5],
+    ["discover-api", 6],
+    ["browse", 7],
+    ["web-search", 8],
+    ["discover-tools", 9],
+  ]);
+  selected.sort((a, b) => {
+    const aPriority = TOOL_PRIORITY.get(a.function.name) ?? 1000;
+    const bPriority = TOOL_PRIORITY.get(b.function.name) ?? 1000;
+    return aPriority - bPriority;
+  });
 
   return selected;
 }

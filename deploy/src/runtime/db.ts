@@ -8,6 +8,7 @@
 
 import type { AgentConfig, TurnResult, RuntimeEvent } from "./types";
 import { applyDeployPolicyToConfigJson } from "./deploy-policy-contract";
+import { log } from "./log";
 import type postgres from "postgres";
 
 type Sql = ReturnType<typeof postgres>;
@@ -32,7 +33,7 @@ function recordDbFailure(): void {
   _breakerFailures++;
   if (_breakerFailures >= BREAKER_THRESHOLD && _breakerOpenedAt === 0) {
     _breakerOpenedAt = Date.now();
-    console.warn(`[DB:breaker] OPEN after ${_breakerFailures} consecutive failures — shedding non-critical ops for ${BREAKER_COOLDOWN_MS / 1000}s`);
+    log.warn(`[DB:breaker] OPEN after ${_breakerFailures} consecutive failures — shedding non-critical ops for ${BREAKER_COOLDOWN_MS / 1000}s`);
   }
 }
 
@@ -46,7 +47,7 @@ function isBreakerOpen(): boolean {
   if (_breakerFailures < BREAKER_THRESHOLD) return false;
   if (_breakerOpenedAt > 0 && Date.now() - _breakerOpenedAt > BREAKER_COOLDOWN_MS) {
     // Half-open: allow one attempt through
-    console.info("[DB:breaker] HALF-OPEN — allowing next non-critical op through");
+    log.info("[DB:breaker] HALF-OPEN — allowing next non-critical op through");
     _breakerFailures = BREAKER_THRESHOLD - 1; // one more failure re-opens
     _breakerOpenedAt = 0;
     return false;
@@ -54,74 +55,118 @@ function isBreakerOpen(): boolean {
   return true;
 }
 
-// ── RLS Context ──────────────────────────────────────────────
-// Workers don't have AsyncLocalStorage, so we use a module-level
-// context that each request boundary sets before any DB calls.
-// This is safe because Workers are single-threaded — only one
-// request is active per isolate at a time.
+// ── Connection factories ──────────────────────────────────────
 //
-// Set at three boundaries:
-//   1. HTTP fetch handler (after auth extracts org_id from JWT/service token)
-//   2. Queue consumer (from message payload.org_id)
-//   3. DO/Workflow (from this.state.config.orgId / p.org_id)
+// Trust boundary: the runtime worker is a TRUSTED BACKEND. It is called
+// only by the control-plane (which is the user-facing RLS enforcement
+// point) and by queue consumers / DO handlers that already filter by
+// org_id at query construction time. The runtime connects via
+// HYPERDRIVE_ADMIN and BYPASSES RLS.
 //
-// Every getDb() call reads this context and sets app.current_org_id
-// via SET LOCAL, which Postgres scopes to the current transaction.
-// Hyperdrive transaction-mode pooling clears it on COMMIT/ROLLBACK.
+// This is deliberate: the runtime processes events across many orgs
+// per isolate (queue consumers iterate tenants) and wrapping every
+// query in a per-org transaction would force the runtime to flush and
+// re-open connections on every message. For now, the RLS audit boundary
+// is "user-facing routes in control-plane" — not the runtime.
+//
+// New code may still use withOrgDb() below for explicit per-org scoping
+// when that's the cleaner pattern. All existing helpers (writeSession,
+// writeTurn, loadAgentConfig, etc.) use the admin path.
 
-let _currentOrgId = "";
+// Raw postgres.js Sql type — private to this module.
+type RawSql = Sql;
 
-/** Set the org_id for all subsequent DB calls in this request. */
-export function setDbOrgContext(orgId: string): void {
-  _currentOrgId = (orgId || "").trim();
-}
+declare const orgBrand: unique symbol;
+declare const adminBrand: unique symbol;
 
-/** Clear the org context (call at request end or in finally blocks). */
-export function clearDbOrgContext(): void {
-  _currentOrgId = "";
-}
-
-/** Get the current org context (for debugging/logging). */
-export function getDbOrgContext(): string {
-  return _currentOrgId;
-}
+export type OrgSql = RawSql & { readonly [orgBrand]: true };
+export type AdminSql = RawSql & { readonly [adminBrand]: true };
 
 /**
- * Get a Postgres connection via Hyperdrive.
- *
- * If org_id context is set (via setDbOrgContext), automatically sets
- * app.current_org_id for RLS row-level security policies.
- *
- * Connection lifecycle is managed by Hyperdrive (transaction-mode pooling).
- * SET LOCAL is scoped to the current transaction and automatically
- * cleared on COMMIT/ROLLBACK — no cross-request leakage.
+ * Open a raw Postgres connection via the given Hyperdrive binding.
+ * Private helper — callers should use getDb(), withOrgDb(), or withAdminDb().
  */
-export async function getDb(hyperdrive: Hyperdrive): Promise<Sql> {
+async function openConnection(hyperdrive: Hyperdrive): Promise<Sql> {
   const pg = (await import("postgres")).default;
-  const sql = pg(hyperdrive.connectionString, {
+  return pg(hyperdrive.connectionString, {
     max: 1,
     fetch_types: false,
-    prepare: false,  // Hyperdrive requires prepare:false (transaction-mode pooling)
+    prepare: false,  // Hyperdrive transaction-mode pooling requires this
     idle_timeout: 5,
     connect_timeout: 3,
   });
+}
 
-  // Set RLS context if an org_id is in scope
-  if (_currentOrgId) {
-    try {
-      await sql.unsafe(`SELECT set_config('app.current_org_id', $1, true)`, [_currentOrgId]);
-    } catch {
-      // Non-fatal: RLS context failed to set. Queries will be filtered by
-      // application-level WHERE clauses as before. Log for visibility.
-      console.warn(`[DB:rls] Failed to set app.current_org_id=${_currentOrgId}`);
-    }
+/**
+ * Runtime connection factory — returns an admin connection that bypasses
+ * RLS. All existing helpers in this file call this.
+ *
+ * Takes a Hyperdrive (not an env) for backwards compatibility with the
+ * dozens of call sites inside this file. For new code, prefer withOrgDb
+ * or withAdminDb which take the RuntimeEnv and make intent explicit.
+ */
+export async function getDb(hyperdrive: Hyperdrive): Promise<Sql> {
+  return openConnection(hyperdrive);
+}
+
+/**
+ * Open an org-scoped transaction with app.current_org_id set for RLS.
+ * Use this when the runtime wants to query on behalf of a single org
+ * under RLS enforcement (rare — usually the runtime is trusted and uses
+ * the admin path). Opens a transaction so the GUC is transaction-local
+ * and cleared automatically on COMMIT/ROLLBACK.
+ */
+export async function withOrgDb<T>(
+  env: Pick<import("./types").RuntimeEnv, "HYPERDRIVE">,
+  orgId: string,
+  fn: (sql: OrgSql) => Promise<T>,
+): Promise<T> {
+  if (!orgId || typeof orgId !== "string") {
+    throw new TypeError("withOrgDb: orgId is required and must be a non-empty string");
   }
+  const sql = await openConnection(env.HYPERDRIVE);
+  return (await sql.begin(async (tx) => {
+    // TransactionSql loses its call signature in postgres.js's type defs
+    // (Omit on an interface with call signatures strips them). Cast back
+    // to RawSql so the tagged template works.
+    const txSql = tx as unknown as RawSql;
+    await txSql`SELECT set_config('app.current_org_id', ${orgId}, true)`;
+    return await fn(txSql as OrgSql);
+  })) as T;
+}
 
-  return sql;
+/**
+ * Open an admin (BYPASSRLS) connection. Grep for withAdminDb to audit
+ * every cross-org code path in the runtime.
+ */
+export async function withAdminDb<T>(
+  env: Pick<import("./types").RuntimeEnv, "HYPERDRIVE_ADMIN">,
+  fn: (sql: AdminSql) => Promise<T>,
+): Promise<T> {
+  const sql = await openConnection(env.HYPERDRIVE_ADMIN);
+  return (await sql.begin(async (tx) => {
+    const txSql = tx as unknown as RawSql;
+    return await fn(txSql as AdminSql);
+  })) as T;
 }
 
 /** No-op — Hyperdrive manages connection lifecycle. */
 export async function closeDb(): Promise<void> {}
+
+// ────────────────────────────────────────────────────────────────────────
+// DEPRECATED — kept as no-ops for callers in workflow.ts and index.ts.
+// The runtime uses the admin connection path, so setting an org context
+// was never actually enforcing RLS. Delete these stubs once the callers
+// are updated (see deploy/src/workflow.ts:375 and deploy/src/index.ts:838,
+// 3865, 5946).
+// ────────────────────────────────────────────────────────────────────────
+
+/** @deprecated no-op — runtime uses admin connection. */
+export function setDbOrgContext(_orgId: string): void {}
+/** @deprecated no-op — runtime uses admin connection. */
+export function clearDbOrgContext(): void {}
+/** @deprecated always returns "" — runtime has no per-request org context. */
+export function getDbOrgContext(): string { return ""; }
 
 // ── Agent Config Loading ──────────────────────────────────────
 
@@ -169,14 +214,14 @@ export async function loadAgentConfig(
         `;
   } catch (err) {
     dbFailed = true;
-    console.error(`[DB] loadAgentConfig failed for ${agentName}: ${err instanceof Error ? err.message : err}`);
+    log.error(`[DB] loadAgentConfig failed for ${agentName}: ${err instanceof Error ? err.message : err}`);
   }
 
   if (rows.length === 0) {
     if (dbFailed) {
       // DB error — return MINIMAL tools to prevent privilege escalation.
       // A restricted agent must not gain full access because of a transient DB failure.
-      console.warn(`[DB] Returning restricted defaults for ${agentName} due to DB error`);
+      log.warn(`[DB] Returning restricted defaults for ${agentName} due to DB error`);
       return {
         agent_name: agentName,
         system_prompt: "You are a helpful AI assistant. Note: your configuration could not be loaded from the database. Some features may be limited.",
@@ -229,7 +274,7 @@ export async function loadAgentConfig(
   const enableWorkspaceCheckpoints = harness?.enable_checkpoints !== false;
   const policyAttach = applyDeployPolicyToConfigJson(cfgRec, { fallbackStripOverlay: true });
   if (!policyAttach.ok) {
-    console.warn(
+    log.warn(
       `[DB] deploy_policy could not be attached for ${agentName}: ${policyAttach.errors.join("; ")}`,
     );
   }
@@ -249,15 +294,15 @@ export async function loadAgentConfig(
   const resolvedProvider = String(cfg.provider || defaults.provider);
   const resolvedModel = String(cfg.model || defaults.model);
   if (resolvedProvider && !KNOWN_PROVIDERS.has(resolvedProvider) && !resolvedProvider.includes("/")) {
-    console.warn(`[config:${agentName}] Unknown provider '${resolvedProvider}' — may fail at LLM call`);
+    log.warn(`[config:${agentName}] Unknown provider '${resolvedProvider}' — may fail at LLM call`);
   }
   if (resolvedModel && !resolvedModel.includes("/") && !resolvedModel.startsWith("@cf/")) {
-    console.warn(`[config:${agentName}] Model '${resolvedModel}' missing provider prefix (e.g. 'openai/gpt-5.4-mini') — may fail at LLM call`);
+    log.warn(`[config:${agentName}] Model '${resolvedModel}' missing provider prefix (e.g. 'openai/gpt-5.4-mini') — may fail at LLM call`);
   }
   const VALID_PLANS = new Set(["free", "basic", "standard", "premium"]);
   const resolvedPlan = String(cfg.plan || defaults.plan);
   if (resolvedPlan && !VALID_PLANS.has(resolvedPlan)) {
-    console.warn(`[config:${agentName}] Unknown plan '${resolvedPlan}' — falling back to 'standard' routing`);
+    log.warn(`[config:${agentName}] Unknown plan '${resolvedPlan}' — falling back to 'standard' routing`);
   }
 
   const hasExplicitCodeMode =
@@ -452,7 +497,7 @@ export async function writeSession(
   },
 ): Promise<void> {
   if (isBreakerOpen()) {
-    console.warn(`[DB:breaker] Skipping writeSession for ${session.session_id}`);
+    log.warn(`[DB:breaker] Skipping writeSession for ${session.session_id}`);
     return;
   }
   try {
@@ -483,7 +528,7 @@ export async function writeSession(
     recordDbSuccess();
   } catch (err) {
     recordDbFailure();
-    console.error(`[DB:breaker] writeSession failed: ${err instanceof Error ? err.message : err}`);
+    log.error(`[DB:breaker] writeSession failed: ${err instanceof Error ? err.message : err}`);
   }
 }
 
@@ -505,7 +550,7 @@ export async function writeTurn(
   },
 ): Promise<void> {
   if (isBreakerOpen()) {
-    console.warn(`[DB:breaker] Skipping writeTurn for session ${turn.session_id} turn ${turn.turn_number}`);
+    log.warn(`[DB:breaker] Skipping writeTurn for session ${turn.session_id} turn ${turn.turn_number}`);
     return;
   }
   try {
@@ -527,7 +572,7 @@ export async function writeTurn(
     recordDbSuccess();
   } catch (err) {
     recordDbFailure();
-    console.error(`[DB:breaker] writeTurn failed: ${err instanceof Error ? err.message : err}`);
+    log.error(`[DB:breaker] writeTurn failed: ${err instanceof Error ? err.message : err}`);
   }
 }
 
@@ -552,7 +597,7 @@ export async function writeEvent(
   },
 ): Promise<void> {
   if (isBreakerOpen()) {
-    console.warn(`[DB:breaker] Skipping writeEvent for session ${event.session_id}`);
+    log.warn(`[DB:breaker] Skipping writeEvent for session ${event.session_id}`);
     return;
   }
   try {
@@ -575,7 +620,7 @@ export async function writeEvent(
     recordDbSuccess();
   } catch (err) {
     recordDbFailure();
-    console.error(`[DB:breaker] writeEvent failed: ${err instanceof Error ? err.message : err}`);
+    log.error(`[DB:breaker] writeEvent failed: ${err instanceof Error ? err.message : err}`);
   }
 }
 
@@ -637,7 +682,7 @@ export async function writeBillingRecord(
       )
     `;
   } catch (err) {
-    console.error("[writeBillingRecord] billing_records insert failed, retrying...", err);
+    log.error("[writeBillingRecord] billing_records insert failed, retrying...", err);
     // Retry once after 1s — billing records are critical for revenue
     try {
       await new Promise(r => setTimeout(r, 1000));
@@ -659,14 +704,14 @@ export async function writeBillingRecord(
         )
       `;
     } catch (retryErr) {
-      console.error("[writeBillingRecord] RETRY ALSO FAILED — writing to KV dead-letter queue", retryErr);
+      log.error("[writeBillingRecord] RETRY ALSO FAILED — writing to KV dead-letter queue", retryErr);
       if (kv) {
         try {
           const dlqKey = `billing-dlq:${orgId}:${sessionId || crypto.randomUUID()}:${Date.now()}`;
           await kv.put(dlqKey, JSON.stringify(record), { expirationTtl: 7 * 86400 }); // 7-day TTL
-          console.log(`[writeBillingRecord] Stored failed record in KV: ${dlqKey}`);
+          log.info(`[writeBillingRecord] Stored failed record in KV: ${dlqKey}`);
         } catch (kvErr) {
-          console.error("[writeBillingRecord] KV dead-letter write also failed — billing record lost", kvErr);
+          log.error("[writeBillingRecord] KV dead-letter write also failed — billing record lost", kvErr);
         }
       }
     }
@@ -699,13 +744,13 @@ export async function replayBillingDLQ(
       await kv.delete(key.name);
       replayed++;
     } catch (err) {
-      console.error(`[replayBillingDLQ] Failed to replay ${key.name}:`, err);
+      log.error(`[replayBillingDLQ] Failed to replay ${key.name}:`, err);
       failed++;
     }
   }
 
   if (replayed > 0 || failed > 0) {
-    console.log(`[replayBillingDLQ] replayed=${replayed} failed=${failed}`);
+    log.info(`[replayBillingDLQ] replayed=${replayed} failed=${failed}`);
   }
   return { replayed, failed };
 }
@@ -732,7 +777,7 @@ export async function writeEvalRun(
   },
 ): Promise<string> {
   if (isBreakerOpen()) {
-    console.warn(`[DB:breaker] Skipping writeEvalRun for ${run.agent_name}`);
+    log.warn(`[DB:breaker] Skipping writeEvalRun for ${run.agent_name}`);
     return "";
   }
   try {
@@ -763,7 +808,7 @@ export async function writeEvalRun(
       `;
     }
     if (!orgId) {
-      console.error(`[DB:breaker] writeEvalRun skipped: no valid org_id and no fallback org`);
+      log.error(`[DB:breaker] writeEvalRun skipped: no valid org_id and no fallback org`);
       return "";
     }
 
@@ -805,7 +850,7 @@ export async function writeEvalRun(
     return evalRunId;
   } catch (err) {
     recordDbFailure();
-    console.error(`[DB:breaker] writeEvalRun failed: ${err instanceof Error ? err.message : err}`);
+    log.error(`[DB:breaker] writeEvalRun failed: ${err instanceof Error ? err.message : err}`);
     return "";
   }
 }
@@ -829,7 +874,7 @@ export async function writeEvalTrial(
   },
 ): Promise<void> {
   if (isBreakerOpen()) {
-    console.warn(`[DB:breaker] Skipping writeEvalTrial for ${trial.agent_name}`);
+    log.warn(`[DB:breaker] Skipping writeEvalTrial for ${trial.agent_name}`);
     return;
   }
   try {
@@ -850,7 +895,7 @@ export async function writeEvalTrial(
     recordDbSuccess();
   } catch (err) {
     recordDbFailure();
-    console.error(`[DB:breaker] writeEvalTrial failed: ${err instanceof Error ? err.message : err}`);
+    log.error(`[DB:breaker] writeEvalTrial failed: ${err instanceof Error ? err.message : err}`);
   }
 }
 

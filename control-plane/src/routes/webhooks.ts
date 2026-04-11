@@ -5,7 +5,7 @@
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses, WebhookCreateBody } from "../schemas/openapi";
-import { getDb, getDbForOrg } from "../db/client";
+import { withOrgDb, withAdminDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { parseJsonColumn } from "../lib/parse-json-column";
 
@@ -53,20 +53,21 @@ const listWebhooksRoute = createRoute({
 });
 webhookRoutes.openapi(listWebhooksRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const rows = await sql`
-    SELECT * FROM webhooks WHERE org_id = ${user.org_id} ORDER BY created_at DESC
-  `;
-  return c.json(
-    rows.map((r: any) => ({
-      webhook_id: r.webhook_id,
-      url: r.url,
-      events: (() => { try { return JSON.parse(r.events); } catch { return []; } })(),
-      is_active: Boolean(r.is_active),
-      failure_count: Number(r.failure_count || 0),
-      last_triggered_at: r.last_triggered_at || null,
-    })),
-  );
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT * FROM webhooks ORDER BY created_at DESC
+    `;
+    return c.json(
+      rows.map((r: any) => ({
+        webhook_id: r.webhook_id,
+        url: r.url,
+        events: (() => { try { return JSON.parse(r.events); } catch { return []; } })(),
+        is_active: Boolean(r.is_active),
+        failure_count: Number(r.failure_count || 0),
+        last_triggered_at: r.last_triggered_at || null,
+      })),
+    );
+  });
 });
 
 // ── POST /webhooks ──────────────────────────────────────────────────────
@@ -105,17 +106,18 @@ webhookRoutes.openapi(createWebhookRoute, async (c): Promise<any> => {
     if (urlError) return c.json({ error: urlError }, 400);
   }
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const webhookId = genId();
   const secret = genId() + genId();
   const eventsJson = JSON.stringify(events);
 
-  await sql`
-    INSERT INTO webhooks (webhook_id, org_id, url, secret, events, codemode_handler_id)
-    VALUES (${webhookId}, ${user.org_id}, ${url || ''}, ${secret}, ${eventsJson}, ${codemodeHandlerId})
-  `;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    await sql`
+      INSERT INTO webhooks (webhook_id, org_id, url, secret, events, codemode_handler_id)
+      VALUES (${webhookId}, ${user.org_id}, ${url || ''}, ${secret}, ${eventsJson}, ${codemodeHandlerId})
+    `;
 
-  return c.json({ webhook_id: webhookId, url: url || null, events, codemode_handler_id: codemodeHandlerId });
+    return c.json({ webhook_id: webhookId, url: url || null, events, codemode_handler_id: codemodeHandlerId });
+  });
 });
 
 // ── PUT /webhooks/:webhook_id ───────────────────────────────────────────
@@ -156,22 +158,22 @@ webhookRoutes.openapi(updateWebhookRoute, async (c): Promise<any> => {
   const events = body.events;
   const isActive = body.is_active;
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    if (url) {
+      const urlError = validateCallbackUrl(url);
+      if (urlError) return c.json({ error: urlError }, 400);
+      await sql`UPDATE webhooks SET url = ${url} WHERE webhook_id = ${webhookId}`;
+    }
+    if (events !== undefined) {
+      const eventsJson = JSON.stringify(events);
+      await sql`UPDATE webhooks SET events = ${eventsJson} WHERE webhook_id = ${webhookId}`;
+    }
+    if (isActive !== undefined) {
+      await sql`UPDATE webhooks SET is_active = ${isActive ? 1 : 0} WHERE webhook_id = ${webhookId}`;
+    }
 
-  if (url) {
-    const urlError = validateCallbackUrl(url);
-    if (urlError) return c.json({ error: urlError }, 400);
-    await sql`UPDATE webhooks SET url = ${url} WHERE webhook_id = ${webhookId} AND org_id = ${user.org_id}`;
-  }
-  if (events !== undefined) {
-    const eventsJson = JSON.stringify(events);
-    await sql`UPDATE webhooks SET events = ${eventsJson} WHERE webhook_id = ${webhookId} AND org_id = ${user.org_id}`;
-  }
-  if (isActive !== undefined) {
-    await sql`UPDATE webhooks SET is_active = ${isActive ? 1 : 0} WHERE webhook_id = ${webhookId} AND org_id = ${user.org_id}`;
-  }
-
-  return c.json({ updated: webhookId });
+    return c.json({ updated: webhookId });
+  });
 });
 
 // ── DELETE /webhooks/:webhook_id ────────────────────────────────────────
@@ -196,13 +198,13 @@ const deleteWebhookRoute = createRoute({
 webhookRoutes.openapi(deleteWebhookRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { webhook_id: webhookId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  const result = await sql`
-    DELETE FROM webhooks WHERE webhook_id = ${webhookId} AND org_id = ${user.org_id}
-  `;
-  if (result.count === 0) return c.json({ error: "Webhook not found" }, 404);
-  return c.json({ deleted: webhookId });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const result = await sql`
+      DELETE FROM webhooks WHERE webhook_id = ${webhookId}
+    `;
+    if (result.count === 0) return c.json({ error: "Webhook not found" }, 404);
+    return c.json({ deleted: webhookId });
+  });
 });
 
 // ── POST /webhooks/:webhook_id/test ─────────────────────────────────────
@@ -227,43 +229,43 @@ const testWebhookRoute = createRoute({
 webhookRoutes.openapi(testWebhookRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { webhook_id: webhookId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  const rows = await sql`
-    SELECT * FROM webhooks WHERE webhook_id = ${webhookId} AND org_id = ${user.org_id}
-  `;
-  if (rows.length === 0) return c.json({ error: "Webhook not found" }, 404);
-  const webhook = rows[0] as any;
-
-  const payload = {
-    event: "test",
-    timestamp: Date.now() / 1000,
-    data: { message: "This is a test webhook delivery from OneShots" },
-  };
-
-  try {
-    const start = performance.now();
-    const resp = await fetch(webhook.url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-AgentOS-Secret": webhook.secret,
-      },
-      body: JSON.stringify(payload),
-    });
-    const duration = performance.now() - start;
-    const respText = await resp.text().catch(() => "");
-
-    // Log delivery
-    await sql`
-      INSERT INTO webhook_deliveries (webhook_id, event_type, payload, status_code, response_body, duration_ms, success)
-      VALUES (${webhookId}, 'test', ${JSON.stringify(payload)}, ${resp.status}, ${respText.slice(0, 500)}, ${duration}, ${resp.status < 400})
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT * FROM webhooks WHERE webhook_id = ${webhookId}
     `;
+    if (rows.length === 0) return c.json({ error: "Webhook not found" }, 404);
+    const webhook = rows[0] as any;
 
-    return c.json({ status: resp.status, duration_ms: Math.round(duration * 10) / 10, success: resp.status < 400 });
-  } catch (e: any) {
-    return c.json({ status: 0, error: e.message, success: false });
-  }
+    const payload = {
+      event: "test",
+      timestamp: Date.now() / 1000,
+      data: { message: "This is a test webhook delivery from OneShots" },
+    };
+
+    try {
+      const start = performance.now();
+      const resp = await fetch(webhook.url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-AgentOS-Secret": webhook.secret,
+        },
+        body: JSON.stringify(payload),
+      });
+      const duration = performance.now() - start;
+      const respText = await resp.text().catch(() => "");
+
+      // Log delivery (webhook_deliveries is NOT RLS — relies on FK to webhooks)
+      await sql`
+        INSERT INTO webhook_deliveries (webhook_id, event_type, payload, status_code, response_body, duration_ms, success)
+        VALUES (${webhookId}, 'test', ${JSON.stringify(payload)}, ${resp.status}, ${respText.slice(0, 500)}, ${duration}, ${resp.status < 400})
+      `;
+
+      return c.json({ status: resp.status, duration_ms: Math.round(duration * 10) / 10, success: resp.status < 400 });
+    } catch (e: any) {
+      return c.json({ status: 0, error: e.message, success: false });
+    }
+  });
 });
 
 // ── GET /webhooks/:webhook_id/deliveries ────────────────────────────────
@@ -293,18 +295,20 @@ webhookRoutes.openapi(listDeliveriesRoute, async (c): Promise<any> => {
   const { webhook_id: webhookId } = c.req.valid("param");
   const query = c.req.valid("query");
   const limit = Math.min(200, Math.max(1, Number(query.limit) || 50));
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Verify webhook ownership via RLS
+    const wh = await sql`
+      SELECT webhook_id FROM webhooks WHERE webhook_id = ${webhookId}
+    `;
+    if (wh.length === 0) return c.json({ error: "Webhook not found" }, 404);
 
-  const wh = await sql`
-    SELECT webhook_id FROM webhooks WHERE webhook_id = ${webhookId} AND org_id = ${user.org_id}
-  `;
-  if (wh.length === 0) return c.json({ error: "Webhook not found" }, 404);
-
-  const rows = await sql`
-    SELECT * FROM webhook_deliveries WHERE webhook_id = ${webhookId}
-    ORDER BY created_at DESC LIMIT ${limit}
-  `;
-  return c.json({ deliveries: rows });
+    // webhook_deliveries is NOT RLS — gated above by the webhooks RLS check
+    const rows = await sql`
+      SELECT * FROM webhook_deliveries WHERE webhook_id = ${webhookId}
+      ORDER BY created_at DESC LIMIT ${limit}
+    `;
+    return c.json({ deliveries: rows });
+  });
 });
 
 // ── POST /webhooks/:webhook_id/deliveries/:delivery_id/replay ───────────
@@ -332,50 +336,50 @@ const replayDeliveryRoute = createRoute({
 webhookRoutes.openapi(replayDeliveryRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { webhook_id: webhookId, delivery_id: deliveryId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  const wh = await sql`
-    SELECT * FROM webhooks WHERE webhook_id = ${webhookId} AND org_id = ${user.org_id}
-  `;
-  if (wh.length === 0) return c.json({ error: "Webhook not found" }, 404);
-  const webhook = wh[0] as any;
-
-  const deliveries = await sql`
-    SELECT * FROM webhook_deliveries WHERE id = ${deliveryId} AND webhook_id = ${webhookId}
-  `;
-  if (deliveries.length === 0) return c.json({ error: "Delivery not found" }, 404);
-  const delivery = deliveries[0] as any;
-
-  let payload: any;
-  payload = parseJsonColumn(delivery.payload);
-
-  try {
-    const start = performance.now();
-    const resp = await fetch(webhook.url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-AgentOS-Secret": webhook.secret,
-      },
-      body: JSON.stringify(payload),
-    });
-    const duration = performance.now() - start;
-    const respText = await resp.text().catch(() => "");
-
-    await sql`
-      INSERT INTO webhook_deliveries (webhook_id, event_type, payload, status_code, response_body, duration_ms, success)
-      VALUES (${webhookId}, ${delivery.event_type || "replay"}, ${JSON.stringify(payload)}, ${resp.status}, ${respText.slice(0, 500)}, ${duration}, ${resp.status < 400})
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const wh = await sql`
+      SELECT * FROM webhooks WHERE webhook_id = ${webhookId}
     `;
+    if (wh.length === 0) return c.json({ error: "Webhook not found" }, 404);
+    const webhook = wh[0] as any;
 
-    return c.json({
-      replayed: deliveryId,
-      status: resp.status,
-      duration_ms: Math.round(duration * 10) / 10,
-      success: resp.status < 400,
-    });
-  } catch (e: any) {
-    return c.json({ replayed: deliveryId, status: 0, error: e.message, success: false });
-  }
+    const deliveries = await sql`
+      SELECT * FROM webhook_deliveries WHERE id = ${deliveryId} AND webhook_id = ${webhookId}
+    `;
+    if (deliveries.length === 0) return c.json({ error: "Delivery not found" }, 404);
+    const delivery = deliveries[0] as any;
+
+    let payload: any;
+    payload = parseJsonColumn(delivery.payload);
+
+    try {
+      const start = performance.now();
+      const resp = await fetch(webhook.url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-AgentOS-Secret": webhook.secret,
+        },
+        body: JSON.stringify(payload),
+      });
+      const duration = performance.now() - start;
+      const respText = await resp.text().catch(() => "");
+
+      await sql`
+        INSERT INTO webhook_deliveries (webhook_id, event_type, payload, status_code, response_body, duration_ms, success)
+        VALUES (${webhookId}, ${delivery.event_type || "replay"}, ${JSON.stringify(payload)}, ${resp.status}, ${respText.slice(0, 500)}, ${duration}, ${resp.status < 400})
+      `;
+
+      return c.json({
+        replayed: deliveryId,
+        status: resp.status,
+        duration_ms: Math.round(duration * 10) / 10,
+        success: resp.status < 400,
+      });
+    } catch (e: any) {
+      return c.json({ replayed: deliveryId, status: 0, error: e.message, success: false });
+    }
+  });
 });
 
 // ── POST /webhooks/:webhook_id/incoming ─────────────────────────────────
@@ -398,13 +402,18 @@ const incomingWebhookRoute = createRoute({
 });
 webhookRoutes.openapi(incomingWebhookRoute, async (c): Promise<any> => {
   const { webhook_id: webhookId } = c.req.valid("param");
-  const sql = await getDb(c.env.HYPERDRIVE);
 
-  const rows = await sql`
-    SELECT * FROM webhooks WHERE webhook_id = ${webhookId} AND is_active = true
-  `;
-  if (rows.length === 0) return c.json({ error: "Webhook not found or inactive" }, 404);
-  const webhook = rows[0] as any;
+  // Incoming webhook is unauthenticated — look up the webhook + secret via
+  // admin connection so we can find ANY org's webhook by id, then verify
+  // secret before doing any side effects.
+  const webhook = await withAdminDb(c.env, async (sql) => {
+    const rows = await sql`
+      SELECT * FROM webhooks WHERE webhook_id = ${webhookId} AND is_active = true
+    `;
+    return rows.length > 0 ? (rows[0] as any) : null;
+  });
+
+  if (!webhook) return c.json({ error: "Webhook not found or inactive" }, 404);
 
   // Verify secret
   const providedSecret = c.req.header("X-AgentOS-Secret") || c.req.header("x-agentos-secret") || "";
@@ -413,6 +422,7 @@ webhookRoutes.openapi(incomingWebhookRoute, async (c): Promise<any> => {
   }
 
   const payload = await c.req.json().catch(() => ({}));
+  const webhookOrgId = String(webhook.org_id || "");
 
   // If webhook has a codemode handler, process via codemode
   if (webhook.codemode_handler_id) {
@@ -430,7 +440,7 @@ webhookRoutes.openapi(incomingWebhookRoute, async (c): Promise<any> => {
           },
           body: JSON.stringify({
             snippet_id: webhook.codemode_handler_id,
-            org_id: webhook.org_id,
+            org_id: webhookOrgId,
             payload,
             headers,
           }),
@@ -438,11 +448,13 @@ webhookRoutes.openapi(incomingWebhookRoute, async (c): Promise<any> => {
       );
       const result = await resp.json() as Record<string, unknown>;
 
-      // Log delivery
-      await sql`
-        INSERT INTO webhook_deliveries (webhook_id, event_type, payload, status_code, response_body, duration_ms, success)
-        VALUES (${webhookId}, 'codemode', ${JSON.stringify(payload)}, ${resp.status}, ${JSON.stringify(result).slice(0, 500)}, ${0}, ${Boolean(result.processed)})
-      `.catch(() => {});
+      // Log delivery under the webhook owner's org RLS context
+      if (webhookOrgId) {
+        await withOrgDb(c.env, webhookOrgId, (sql) => sql`
+          INSERT INTO webhook_deliveries (webhook_id, event_type, payload, status_code, response_body, duration_ms, success)
+          VALUES (${webhookId}, 'codemode', ${JSON.stringify(payload)}, ${resp.status}, ${JSON.stringify(result).slice(0, 500)}, ${0}, ${Boolean(result.processed)})
+        `).catch(() => {});
+      }
 
       return c.json(result);
     } catch (err) {
@@ -464,10 +476,12 @@ webhookRoutes.openapi(incomingWebhookRoute, async (c): Promise<any> => {
     const duration = performance.now() - start;
     const respText = await resp.text().catch(() => "");
 
-    await sql`
-      INSERT INTO webhook_deliveries (webhook_id, event_type, payload, status_code, response_body, duration_ms, success)
-      VALUES (${webhookId}, 'incoming', ${JSON.stringify(payload)}, ${resp.status}, ${respText.slice(0, 500)}, ${duration}, ${resp.status < 400})
-    `.catch(() => {});
+    if (webhookOrgId) {
+      await withOrgDb(c.env, webhookOrgId, (sql) => sql`
+        INSERT INTO webhook_deliveries (webhook_id, event_type, payload, status_code, response_body, duration_ms, success)
+        VALUES (${webhookId}, 'incoming', ${JSON.stringify(payload)}, ${resp.status}, ${respText.slice(0, 500)}, ${duration}, ${resp.status < 400})
+      `).catch(() => {});
+    }
 
     return c.json({ status: resp.status, duration_ms: Math.round(duration * 10) / 10, success: resp.status < 400 });
   } catch (e: any) {
@@ -497,20 +511,20 @@ const rotateSecretRoute = createRoute({
 webhookRoutes.openapi(rotateSecretRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { webhook_id: webhookId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT webhook_id FROM webhooks WHERE webhook_id = ${webhookId}
+    `;
+    if (rows.length === 0) return c.json({ error: "Webhook not found" }, 404);
 
-  const rows = await sql`
-    SELECT webhook_id FROM webhooks WHERE webhook_id = ${webhookId} AND org_id = ${user.org_id}
-  `;
-  if (rows.length === 0) return c.json({ error: "Webhook not found" }, 404);
+    const arr = new Uint8Array(32);
+    crypto.getRandomValues(arr);
+    const newSecret = [...arr].map((b) => b.toString(16).padStart(2, "0")).join("");
 
-  const arr = new Uint8Array(32);
-  crypto.getRandomValues(arr);
-  const newSecret = [...arr].map((b) => b.toString(16).padStart(2, "0")).join("");
+    await sql`
+      UPDATE webhooks SET secret = ${newSecret} WHERE webhook_id = ${webhookId}
+    `;
 
-  await sql`
-    UPDATE webhooks SET secret = ${newSecret} WHERE webhook_id = ${webhookId} AND org_id = ${user.org_id}
-  `;
-
-  return c.json({ webhook_id: webhookId, secret: newSecret, rotated: true });
+    return c.json({ webhook_id: webhookId, secret: newSecret, rotated: true });
+  });
 });

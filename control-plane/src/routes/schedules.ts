@@ -6,7 +6,7 @@ import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses, ScheduleCreateBody } from "../schemas/openapi";
 import type { CurrentUser } from "../auth/types";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { parseCron } from "../logic/cron-parser";
 import { requireScope } from "../middleware/auth";
 
@@ -35,21 +35,22 @@ const listSchedulesRoute = createRoute({
 });
 scheduleRoutes.openapi(listSchedulesRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const rows = await sql`
-    SELECT * FROM schedules WHERE org_id = ${user.org_id} ORDER BY created_at DESC
-  `;
-  return c.json(
-    rows.map((r: any) => ({
-      schedule_id: r.id,
-      agent_name: r.agent_name,
-      cron: r.cron,
-      task: r.task,
-      is_enabled: Boolean(r.is_active),
-      run_count: Number(r.run_count || 0),
-      last_run_at: r.last_run_at || null,
-    })),
-  );
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT * FROM schedules ORDER BY created_at DESC
+    `;
+    return c.json(
+      rows.map((r: any) => ({
+        schedule_id: r.id,
+        agent_name: r.agent_name,
+        cron: r.cron,
+        task: r.task,
+        is_enabled: Boolean(r.is_active),
+        run_count: Number(r.run_count || 0),
+        last_run_at: r.last_run_at || null,
+      })),
+    );
+  });
 });
 
 // ── POST /schedules ─────────────────────────────────────────────────────
@@ -91,16 +92,17 @@ scheduleRoutes.openapi(createScheduleRoute, async (c): Promise<any> => {
     return c.json({ error: e.message }, 400);
   }
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const scheduleId = genId();
   const now = new Date().toISOString();
 
-  await sql`
-    INSERT INTO schedules (id, org_id, agent_name, task, cron, is_active, created_at)
-    VALUES (${scheduleId}, ${user.org_id}, ${agentName}, ${task}, ${cron}, true, ${now})
-  `;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    await sql`
+      INSERT INTO schedules (id, org_id, agent_name, task, cron, is_active, created_at)
+      VALUES (${scheduleId}, ${user.org_id}, ${agentName}, ${task}, ${cron}, true, ${now})
+    `;
 
-  return c.json({ schedule_id: scheduleId, agent_name: agentName, cron, task });
+    return c.json({ schedule_id: scheduleId, agent_name: agentName, cron, task });
+  });
 });
 
 // ── PUT /schedules/:schedule_id ─────────────────────────────────────────
@@ -147,30 +149,31 @@ scheduleRoutes.openapi(updateScheduleRoute, async (c): Promise<any> => {
     }
   }
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const rows = await sql`
-    SELECT * FROM schedules WHERE id = ${scheduleId} AND org_id = ${user.org_id}
-  `;
-  if (rows.length === 0) return c.json({ error: "Schedule not found" }, 404);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT * FROM schedules WHERE id = ${scheduleId}
+    `;
+    if (rows.length === 0) return c.json({ error: "Schedule not found" }, 404);
 
-  if (cron && task) {
-    await sql`UPDATE schedules SET cron = ${cron}, task = ${task} WHERE id = ${scheduleId} AND org_id = ${user.org_id}`;
-  } else if (cron) {
-    await sql`UPDATE schedules SET cron = ${cron} WHERE id = ${scheduleId} AND org_id = ${user.org_id}`;
-  } else if (task) {
-    await sql`UPDATE schedules SET task = ${task} WHERE id = ${scheduleId} AND org_id = ${user.org_id}`;
-  }
+    if (cron && task) {
+      await sql`UPDATE schedules SET cron = ${cron}, task = ${task} WHERE id = ${scheduleId}`;
+    } else if (cron) {
+      await sql`UPDATE schedules SET cron = ${cron} WHERE id = ${scheduleId}`;
+    } else if (task) {
+      await sql`UPDATE schedules SET task = ${task} WHERE id = ${scheduleId}`;
+    }
 
-  const updated = await sql`SELECT * FROM schedules WHERE id = ${scheduleId} AND org_id = ${user.org_id}`;
-  const s = updated[0] as any;
-  return c.json({
-    schedule_id: s.id,
-    agent_name: s.agent_name,
-    cron: s.cron,
-    task: s.task,
-    is_enabled: Boolean(s.is_active),
-    run_count: Number(s.run_count || 0),
-    last_run_at: s.last_run_at || null,
+    const updated = await sql`SELECT * FROM schedules WHERE id = ${scheduleId}`;
+    const s = updated[0] as any;
+    return c.json({
+      schedule_id: s.id,
+      agent_name: s.agent_name,
+      cron: s.cron,
+      task: s.task,
+      is_enabled: Boolean(s.is_active),
+      run_count: Number(s.run_count || 0),
+      last_run_at: s.last_run_at || null,
+    });
   });
 });
 
@@ -196,20 +199,20 @@ const scheduleHistoryRoute = createRoute({
 scheduleRoutes.openapi(scheduleHistoryRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { schedule_id: scheduleId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT * FROM schedules WHERE id = ${scheduleId}
+    `;
+    if (rows.length === 0) return c.json({ error: "Schedule not found" }, 404);
 
-  const rows = await sql`
-    SELECT * FROM schedules WHERE id = ${scheduleId} AND org_id = ${user.org_id}
-  `;
-  if (rows.length === 0) return c.json({ error: "Schedule not found" }, 404);
-
-  const s = rows[0] as any;
-  return c.json({
-    schedule_id: s.id,
-    run_count: Number(s.run_count || 0),
-    last_run: s.last_run_at || null,
-    last_status: s.last_status || null,
-    last_output: s.last_output || null,
+    const s = rows[0] as any;
+    return c.json({
+      schedule_id: s.id,
+      run_count: Number(s.run_count || 0),
+      last_run: s.last_run_at || null,
+      last_status: s.last_status || null,
+      last_output: s.last_output || null,
+    });
   });
 });
 
@@ -235,13 +238,13 @@ const deleteScheduleRoute = createRoute({
 scheduleRoutes.openapi(deleteScheduleRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { schedule_id: scheduleId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  const result = await sql`
-    DELETE FROM schedules WHERE id = ${scheduleId} AND org_id = ${user.org_id}
-  `;
-  if (result.count === 0) return c.json({ error: "Schedule not found" }, 404);
-  return c.json({ deleted: scheduleId });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const result = await sql`
+      DELETE FROM schedules WHERE id = ${scheduleId}
+    `;
+    if (result.count === 0) return c.json({ error: "Schedule not found" }, 404);
+    return c.json({ deleted: scheduleId });
+  });
 });
 
 // ── POST /schedules/:schedule_id/enable ─────────────────────────────────
@@ -266,15 +269,15 @@ const enableScheduleRoute = createRoute({
 scheduleRoutes.openapi(enableScheduleRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { schedule_id: scheduleId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT id FROM schedules WHERE id = ${scheduleId}
+    `;
+    if (rows.length === 0) return c.json({ error: "Schedule not found" }, 404);
 
-  const rows = await sql`
-    SELECT id FROM schedules WHERE id = ${scheduleId} AND org_id = ${user.org_id}
-  `;
-  if (rows.length === 0) return c.json({ error: "Schedule not found" }, 404);
-
-  await sql`UPDATE schedules SET is_active = true WHERE id = ${scheduleId}`;
-  return c.json({ enabled: true });
+    await sql`UPDATE schedules SET is_active = true WHERE id = ${scheduleId}`;
+    return c.json({ enabled: true });
+  });
 });
 
 // ── POST /schedules/:schedule_id/disable ────────────────────────────────
@@ -299,13 +302,13 @@ const disableScheduleRoute = createRoute({
 scheduleRoutes.openapi(disableScheduleRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { schedule_id: scheduleId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT id FROM schedules WHERE id = ${scheduleId}
+    `;
+    if (rows.length === 0) return c.json({ error: "Schedule not found" }, 404);
 
-  const rows = await sql`
-    SELECT id FROM schedules WHERE id = ${scheduleId} AND org_id = ${user.org_id}
-  `;
-  if (rows.length === 0) return c.json({ error: "Schedule not found" }, 404);
-
-  await sql`UPDATE schedules SET is_active = false WHERE id = ${scheduleId}`;
-  return c.json({ enabled: false });
+    await sql`UPDATE schedules SET is_active = false WHERE id = ${scheduleId}`;
+    return c.json({ enabled: false });
+  });
 });

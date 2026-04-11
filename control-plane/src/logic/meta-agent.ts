@@ -4,7 +4,8 @@
  * Has full awareness of the platform's tool inventory.
  */
 
-import { getDb } from "../db/client";
+import type { Env } from "../env";
+import { withOrgDb } from "../db/client";
 import { parseJsonColumn } from "../lib/parse-json-column";
 
 /* ── Platform tool inventory ────────────────────────────────────── */
@@ -315,30 +316,31 @@ export function recommendTools(description: string): string[] {
 
 /** Resolve the default model from the org's plan, or fall back to platform default. */
 async function resolveDefaultModel(
-  hyperdrive: Hyperdrive,
+  env: Pick<Env, "HYPERDRIVE">,
   orgId: string,
 ): Promise<string> {
   const PLATFORM_DEFAULT = "anthropic/claude-sonnet-4-6";
   if (!orgId) return PLATFORM_DEFAULT;
 
   try {
-    const sql = await getDb(hyperdrive);
-    const rows = await sql`
-      SELECT config FROM projects
-      WHERE org_id = ${orgId}
-      ORDER BY created_at DESC LIMIT 1
-    `;
-    if (rows.length > 0) {
-      const config = parseJsonColumn(rows[0].config);
-      const routing = config.routing ?? config.plan_routing ?? {};
-      if (routing.default?.model) return routing.default.model;
-      if (routing.general?.model) return routing.general.model;
-    }
+    return await withOrgDb(env, orgId, async (sql) => {
+      // RLS on projects filters to current org automatically.
+      const rows = await sql`
+        SELECT config FROM projects
+        ORDER BY created_at DESC LIMIT 1
+      `;
+      if (rows.length > 0) {
+        const config = parseJsonColumn(rows[0].config);
+        const routing = config.routing ?? config.plan_routing ?? {};
+        if (routing.default?.model) return routing.default.model;
+        if (routing.general?.model) return routing.general.model;
+      }
+      return PLATFORM_DEFAULT;
+    });
   } catch {
     // DB query failed — use platform default
+    return PLATFORM_DEFAULT;
   }
-
-  return PLATFORM_DEFAULT;
 }
 
 /* ── Agent config generation via OpenRouter ─────────────────────── */
@@ -382,7 +384,7 @@ export async function buildFromDescription(
   // Resolve the model the generated agent should use
   const agentModel = opts.model
     || (opts.hyperdrive && opts.orgId
-      ? await resolveDefaultModel(opts.hyperdrive, opts.orgId)
+      ? await resolveDefaultModel({ HYPERDRIVE: opts.hyperdrive }, opts.orgId)
       : "anthropic/claude-sonnet-4-6");
 
   // Build the tool inventory string for the prompt

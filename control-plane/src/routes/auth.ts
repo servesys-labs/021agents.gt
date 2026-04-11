@@ -12,7 +12,7 @@ import type { CurrentUser, TokenClaims } from "../auth/types";
 import { createToken, verifyToken } from "../auth/jwt";
 import { hashPassword, verifyPassword } from "../auth/password";
 import { verifyCfAccessToken, cfAccessEnabled, deriveDisplayName } from "../auth/cf-access";
-import { getDb } from "../db/client";
+import { withAdminDb, type AdminSql } from "../db/client";
 import { sendPasswordResetEmail, sendVerificationEmail, sendWelcomeEmail } from "../lib/email";
 import { buildPersonalAgentPrompt } from "../prompts/personal-agent";
 import { logSecurityEvent } from "../logic/security-events";
@@ -23,7 +23,7 @@ export const authRoutes = createOpenAPIRouter();
 
 /** Fire-and-forget audit log for auth events */
 async function auditAuthEvent(
-  sql: Awaited<ReturnType<typeof getDb>>,
+  sql: AdminSql,
   action: string,
   userId: string,
   orgId: string,
@@ -143,40 +143,36 @@ async function resolveUser(c: { req: { header(name: string): string | undefined 
 
   let orgId = claims.org_id || "";
   let role = claims.role || "member";
+  let name = claims.name || "";
 
   try {
-    const sql = await getDb(c.env.HYPERDRIVE);
-    if (!orgId) {
-      const rows = await sql`
-        SELECT org_id, role FROM org_members
-        WHERE user_id = ${claims.sub}
-        ORDER BY created_at ASC LIMIT 1
-      `;
-      if (rows.length > 0) {
-        orgId = rows[0].org_id;
-        role = rows[0].role;
+    await withAdminDb(c.env, async (sql) => {
+      if (!orgId) {
+        const rows = await sql`
+          SELECT org_id, role FROM org_members
+          WHERE user_id = ${claims.sub}
+          ORDER BY created_at ASC LIMIT 1
+        `;
+        if (rows.length > 0) {
+          orgId = rows[0].org_id;
+          role = rows[0].role;
+        }
+      } else {
+        const rows = await sql`
+          SELECT role FROM org_members
+          WHERE org_id = ${orgId} AND user_id = ${claims.sub}
+        `;
+        if (rows.length > 0) role = rows[0].role;
       }
-    } else {
-      const rows = await sql`
-        SELECT role FROM org_members
-        WHERE org_id = ${orgId} AND user_id = ${claims.sub}
-      `;
-      if (rows.length > 0) role = rows[0].role;
-    }
+
+      // Look up name from DB if not in claims
+      if (!name) {
+        const rows = await sql`SELECT name FROM users WHERE user_id = ${claims.sub}`;
+        if (rows.length > 0) name = rows[0].name || "";
+      }
+    });
   } catch {
     // Best-effort DB lookup
-  }
-
-  // Look up name from DB
-  let name = claims.name || "";
-  if (!name) {
-    try {
-      const sql = await getDb(c.env.HYPERDRIVE);
-      const rows = await sql`SELECT name FROM users WHERE user_id = ${claims.sub}`;
-      if (rows.length > 0) name = rows[0].name || "";
-    } catch {
-      // Best-effort
-    }
   }
 
   return {
@@ -246,24 +242,17 @@ authRoutes.openapi(signupRoute, async (c): Promise<any> => {
     }, 403);
   }
 
-  let sql;
-  try {
-    sql = await getDb(c.env.HYPERDRIVE);
-  } catch (err: any) {
-    console.error("[auth/signup] DB connection failed:", err);
-    return c.json({ error: "Database unavailable", detail: err.message }, 503);
-  }
-
-  // Check if user already exists
-  try {
-    const existing = await sql`SELECT user_id FROM users WHERE email = ${email}`;
-    if (existing.length > 0) {
-      return c.json({ error: "Email already registered" }, 409);
+  return await withAdminDb(c.env, async (sql) => {
+    // Check if user already exists
+    try {
+      const existing = await sql`SELECT user_id FROM users WHERE email = ${email}`;
+      if (existing.length > 0) {
+        return c.json({ error: "Email already registered" }, 409);
+      }
+    } catch (err: any) {
+      console.error("[auth/signup] User lookup failed:", err);
+      return c.json({ error: "Database query failed", detail: err.message }, 500);
     }
-  } catch (err: any) {
-    console.error("[auth/signup] User lookup failed:", err);
-    return c.json({ error: "Database query failed", detail: err.message }, 500);
-  }
 
   // Validate AND consume invite code atomically BEFORE creating user/org.
   // Uses atomic UPDATE ... WHERE to prevent race conditions on max_uses.
@@ -491,6 +480,7 @@ authRoutes.openapi(signupRoute, async (c): Promise<any> => {
     provider: "local",
     email_verified: false,
   });
+  });
 });
 
 // ── POST /login ──────────────────────────────────────────────────────────
@@ -520,14 +510,7 @@ authRoutes.openapi(loginRoute, async (c): Promise<any> => {
 
   const { email, password } = c.req.valid("json");
 
-  let sql;
-  try {
-    sql = await getDb(c.env.HYPERDRIVE);
-  } catch (err: any) {
-    console.error("[auth/login] DB connection failed:", err);
-    return c.json({ error: "Database unavailable", detail: err?.message || "DB connection failed" }, 503);
-  }
-
+  return await withAdminDb(c.env, async (sql) => {
   let rows: Array<{ user_id: string; email: string; name: string; password_hash: string }>;
   try {
     rows = await sql`
@@ -613,6 +596,7 @@ authRoutes.openapi(loginRoute, async (c): Promise<any> => {
     org_id: orgId,
     provider: "local",
   });
+  });
 });
 
 // ── GET /providers ───────────────────────────────────────────────────────
@@ -690,7 +674,7 @@ authRoutes.openapi(cfAccessExchangeRoute, async (c): Promise<any> => {
     return c.json({ error: "Invalid CF Access token" }, 401);
   }
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  return await withAdminDb(c.env, async (sql) => {
   const nowEpoch = new Date().toISOString();
 
   // Provision user from CF Access identity (upsert by email)
@@ -843,6 +827,7 @@ authRoutes.openapi(cfAccessExchangeRoute, async (c): Promise<any> => {
     provider: "cf_access",
     name: userName,
   });
+  });
 });
 
 // ── POST /token/verify ───────────────────────────────────────────────────
@@ -936,8 +921,9 @@ authRoutes.openapi(logoutRoute, async (c): Promise<any> => {
   }
 
   // Stateless JWT — client discards the token. Server acknowledges.
-  const sql = await getDb(c.env.HYPERDRIVE);
-  auditAuthEvent(sql, "auth.logout", user.user_id, user.org_id ?? "", { email: user.email });
+  await withAdminDb(c.env, async (sql) => {
+    await auditAuthEvent(sql, "auth.logout", user.user_id, user.org_id ?? "", { email: user.email });
+  });
 
   return c.json({ logged_out: true });
 });
@@ -970,8 +956,7 @@ authRoutes.openapi(changePasswordRoute, async (c): Promise<any> => {
 
   const { current_password, new_password } = c.req.valid("json");
 
-  const sql = await getDb(c.env.HYPERDRIVE);
-
+  return await withAdminDb(c.env, async (sql) => {
   const rows = await sql`
     SELECT password_hash FROM users WHERE user_id = ${user.user_id}
   `;
@@ -995,6 +980,7 @@ authRoutes.openapi(changePasswordRoute, async (c): Promise<any> => {
   auditAuthEvent(sql, "auth.password_change", user.user_id, user.org_id ?? "", { email: user.email });
 
   return c.json({ updated: true });
+  });
 });
 
 // ── POST /forgot-password ─────────────────────────────────────────────
@@ -1013,35 +999,35 @@ authRoutes.post("/forgot-password", async (c) => {
   }
   const { email } = parsed.data;
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  return await withAdminDb(c.env, async (sql) => {
+    // Always return success to prevent email enumeration
+    const successResponse = { message: "If that email exists, a reset link has been sent." };
 
-  // Always return success to prevent email enumeration
-  const successResponse = { message: "If that email exists, a reset link has been sent." };
+    const rows = await sql`SELECT user_id FROM users WHERE email = ${email} AND password_hash IS NOT NULL`;
+    if (rows.length === 0) {
+      return c.json(successResponse);
+    }
 
-  const rows = await sql`SELECT user_id FROM users WHERE email = ${email} AND password_hash IS NOT NULL`;
-  if (rows.length === 0) {
+    const userId = rows[0].user_id;
+    const token = generateSecureToken();
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // 1 hour
+
+    // Invalidate any existing reset tokens for this user
+    await sql`DELETE FROM password_reset_tokens WHERE user_id = ${userId}`;
+
+    await sql`
+      INSERT INTO password_reset_tokens (token, user_id, expires_at, created_at)
+      VALUES (${token}, ${userId}, ${expiresAt}, now())
+    `;
+
+    auditAuthEvent(sql, "auth.forgot_password", userId, "", { email });
+
+    // Send reset email (fire-and-forget)
+    sendPasswordResetEmail(email, token).catch(() => {});
+    console.log(`[auth] Password reset email sent to ${email}`);
+
     return c.json(successResponse);
-  }
-
-  const userId = rows[0].user_id;
-  const token = generateSecureToken();
-  const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // 1 hour
-
-  // Invalidate any existing reset tokens for this user
-  await sql`DELETE FROM password_reset_tokens WHERE user_id = ${userId}`;
-
-  await sql`
-    INSERT INTO password_reset_tokens (token, user_id, expires_at, created_at)
-    VALUES (${token}, ${userId}, ${expiresAt}, now())
-  `;
-
-  auditAuthEvent(sql, "auth.forgot_password", userId, "", { email });
-
-  // Send reset email (fire-and-forget)
-  sendPasswordResetEmail(email, token).catch(() => {});
-  console.log(`[auth] Password reset email sent to ${email}`);
-
-  return c.json(successResponse);
+  });
 });
 
 // ── POST /reset-password ──────────────────────────────────────────────
@@ -1060,32 +1046,32 @@ authRoutes.post("/reset-password", async (c) => {
   }
   const { token, new_password } = parsed.data;
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  return await withAdminDb(c.env, async (sql) => {
+    const rows = await sql`
+      SELECT user_id, expires_at FROM password_reset_tokens
+      WHERE token = ${token} LIMIT 1
+    `;
 
-  const rows = await sql`
-    SELECT user_id, expires_at FROM password_reset_tokens
-    WHERE token = ${token} LIMIT 1
-  `;
+    if (rows.length === 0) {
+      return c.json({ error: "Invalid or expired reset token" }, 400);
+    }
 
-  if (rows.length === 0) {
-    return c.json({ error: "Invalid or expired reset token" }, 400);
-  }
+    const { user_id, expires_at } = rows[0];
+    if (new Date(expires_at).getTime() < Date.now()) {
+      await sql`DELETE FROM password_reset_tokens WHERE token = ${token}`;
+      return c.json({ error: "Reset token has expired" }, 400);
+    }
 
-  const { user_id, expires_at } = rows[0];
-  if (new Date(expires_at).getTime() < Date.now()) {
-    await sql`DELETE FROM password_reset_tokens WHERE token = ${token}`;
-    return c.json({ error: "Reset token has expired" }, 400);
-  }
+    const newHash = await hashPassword(new_password);
+    const now = new Date().toISOString();
 
-  const newHash = await hashPassword(new_password);
-  const now = new Date().toISOString();
+    await sql`UPDATE users SET password_hash = ${newHash}, updated_at = ${now} WHERE user_id = ${user_id}`;
+    await sql`DELETE FROM password_reset_tokens WHERE user_id = ${user_id}`;
 
-  await sql`UPDATE users SET password_hash = ${newHash}, updated_at = ${now} WHERE user_id = ${user_id}`;
-  await sql`DELETE FROM password_reset_tokens WHERE user_id = ${user_id}`;
+    auditAuthEvent(sql, "auth.password_reset", String(user_id), "", { method: "token" });
 
-  auditAuthEvent(sql, "auth.password_reset", String(user_id), "", { method: "token" });
-
-  return c.json({ updated: true });
+    return c.json({ updated: true });
+  });
 });
 
 // ── POST /verify-email ────────────────────────────────────────────────
@@ -1097,29 +1083,29 @@ authRoutes.post("/verify-email", async (c) => {
     return c.json({ error: "token is required" }, 400);
   }
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  return await withAdminDb(c.env, async (sql) => {
+    const rows = await sql`
+      SELECT user_id, expires_at FROM email_verification_tokens
+      WHERE token = ${parsed.data.token} LIMIT 1
+    `;
 
-  const rows = await sql`
-    SELECT user_id, expires_at FROM email_verification_tokens
-    WHERE token = ${parsed.data.token} LIMIT 1
-  `;
+    if (rows.length === 0) {
+      return c.json({ error: "Invalid or expired verification token" }, 400);
+    }
 
-  if (rows.length === 0) {
-    return c.json({ error: "Invalid or expired verification token" }, 400);
-  }
+    const { user_id, expires_at } = rows[0];
+    if (new Date(expires_at).getTime() < Date.now()) {
+      await sql`DELETE FROM email_verification_tokens WHERE token = ${parsed.data.token}`;
+      return c.json({ error: "Verification token has expired" }, 400);
+    }
 
-  const { user_id, expires_at } = rows[0];
-  if (new Date(expires_at).getTime() < Date.now()) {
-    await sql`DELETE FROM email_verification_tokens WHERE token = ${parsed.data.token}`;
-    return c.json({ error: "Verification token has expired" }, 400);
-  }
+    await sql`UPDATE users SET email_verified = true, updated_at = now() WHERE user_id = ${user_id}`;
+    await sql`DELETE FROM email_verification_tokens WHERE user_id = ${user_id}`;
 
-  await sql`UPDATE users SET email_verified = true, updated_at = now() WHERE user_id = ${user_id}`;
-  await sql`DELETE FROM email_verification_tokens WHERE user_id = ${user_id}`;
+    auditAuthEvent(sql, "auth.email_verified", String(user_id), "", {});
 
-  auditAuthEvent(sql, "auth.email_verified", String(user_id), "", {});
-
-  return c.json({ verified: true });
+    return c.json({ verified: true });
+  });
 });
 
 // ── POST /resend-verification ─────────────────────────────────────────
@@ -1133,27 +1119,27 @@ authRoutes.post("/resend-verification", async (c) => {
     return c.json({ error: "Missing or invalid Authorization header" }, 401);
   }
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  return await withAdminDb(c.env, async (sql) => {
+    const rows = await sql`SELECT email_verified FROM users WHERE user_id = ${user.user_id}`;
+    if (rows.length > 0 && rows[0].email_verified) {
+      return c.json({ message: "Email already verified" });
+    }
 
-  const rows = await sql`SELECT email_verified FROM users WHERE user_id = ${user.user_id}`;
-  if (rows.length > 0 && rows[0].email_verified) {
-    return c.json({ message: "Email already verified" });
-  }
+    const token = generateSecureToken();
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(); // 24 hours
 
-  const token = generateSecureToken();
-  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(); // 24 hours
+    await sql`DELETE FROM email_verification_tokens WHERE user_id = ${user.user_id}`;
+    await sql`
+      INSERT INTO email_verification_tokens (token, user_id, expires_at, created_at)
+      VALUES (${token}, ${user.user_id}, ${expiresAt}, now())
+    `;
 
-  await sql`DELETE FROM email_verification_tokens WHERE user_id = ${user.user_id}`;
-  await sql`
-    INSERT INTO email_verification_tokens (token, user_id, expires_at, created_at)
-    VALUES (${token}, ${user.user_id}, ${expiresAt}, now())
-  `;
+    // Send verification email (fire-and-forget)
+    sendVerificationEmail(user.email, token).catch(() => {});
+    console.log(`[auth] Verification email sent to ${user.email}`);
 
-  // Send verification email (fire-and-forget)
-  sendVerificationEmail(user.email, token).catch(() => {});
-  console.log(`[auth] Verification email sent to ${user.email}`);
-
-  return c.json({ message: "Verification email sent" });
+    return c.json({ message: "Verification email sent" });
+  });
 });
 
 // ── GET /cli — CLI login redirect page ────────────────────────────────────
@@ -1250,8 +1236,7 @@ authRoutes.openapi(cliCallbackRoute, async (c): Promise<any> => {
   const loginLimit = checkRateLimit(c, `cli-login:${getClientIp(c)}`, 10, 60 * 60 * 1000);
   if (loginLimit) return loginLimit as any;
 
-  const sql = await getDb(c.env.HYPERDRIVE);
-
+  return await withAdminDb(c.env, async (sql) => {
   // Validate credentials (same logic as POST /login)
   const rows = await sql`
     SELECT user_id, email, name, password_hash FROM users WHERE email = ${email}
@@ -1323,4 +1308,5 @@ authRoutes.openapi(cliCallbackRoute, async (c): Promise<any> => {
   return c.redirect(
     `http://localhost:${encodeURIComponent(port)}/callback?token=${encodeURIComponent(token)}&state=${encodeURIComponent(state)}`,
   );
+  });
 });

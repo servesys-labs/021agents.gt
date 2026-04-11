@@ -6,7 +6,7 @@ import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb, type OrgSql } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import {
   detectDrift,
@@ -80,28 +80,27 @@ goldImageRoutes.openapi(listGoldImagesRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { active_only } = c.req.valid("query");
   const activeOnly = active_only !== "false";
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    let rows;
+    if (activeOnly) {
+      rows = await sql`
+        SELECT image_id, name, description, version, category, config_hash,
+               org_id, created_by, approved_by, approved_at, created_at
+        FROM gold_images
+        WHERE deleted_at IS NULL
+        ORDER BY created_at DESC
+      `;
+    } else {
+      rows = await sql`
+        SELECT image_id, name, description, version, category, config_hash,
+               org_id, created_by, approved_by, approved_at, created_at, deleted_at
+        FROM gold_images
+        ORDER BY created_at DESC
+      `;
+    }
 
-  let rows;
-  if (activeOnly) {
-    rows = await sql`
-      SELECT image_id, name, description, version, category, config_hash,
-             org_id, created_by, approved_by, approved_at, created_at
-      FROM gold_images
-      WHERE org_id = ${user.org_id} AND deleted_at IS NULL
-      ORDER BY created_at DESC
-    `;
-  } else {
-    rows = await sql`
-      SELECT image_id, name, description, version, category, config_hash,
-             org_id, created_by, approved_by, approved_at, created_at, deleted_at
-      FROM gold_images
-      WHERE org_id = ${user.org_id}
-      ORDER BY created_at DESC
-    `;
-  }
-
-  return c.json({ images: rows });
+    return c.json({ images: rows });
+  });
 });
 
 // ── POST / ───────────────────────────────────────────────────────
@@ -123,40 +122,41 @@ goldImageRoutes.openapi(createGoldImageRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const req = c.req.valid("json");
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const imageId = randomId();
-  const configJson = JSON.stringify(req.config, Object.keys(req.config).sort());
-  const hash = await configHashAsync(req.config);
-  const now = new Date().toISOString();
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const imageId = randomId();
+    const configJson = JSON.stringify(req.config, Object.keys(req.config).sort());
+    const hash = await configHashAsync(req.config);
+    const now = new Date().toISOString();
 
-  await sql`
-    INSERT INTO gold_images (
-      image_id, name, config, config_hash, org_id,
-      description, version, category, created_by, created_at
-    ) VALUES (
-      ${imageId}, ${req.name}, ${configJson}, ${hash}, ${user.org_id},
-      ${req.description}, ${req.version}, ${req.category}, ${user.user_id}, ${now}
-    )
-  `;
-
-  // Audit trail
-  try {
     await sql`
-      INSERT INTO config_audit (
-        org_id, action, field_changed, new_value, changed_by, image_id, created_at
+      INSERT INTO gold_images (
+        image_id, name, config, config_hash, org_id,
+        description, version, category, created_by, created_at
       ) VALUES (
-        ${user.org_id}, ${"gold_image.created"}, ${"*"}, ${req.name},
-        ${user.user_id}, ${imageId}, ${now}
+        ${imageId}, ${req.name}, ${configJson}, ${hash}, ${user.org_id},
+        ${req.description}, ${req.version}, ${req.category}, ${user.user_id}, ${now}
       )
     `;
-  } catch { /* best-effort */ }
 
-  return c.json({
-    image_id: imageId,
-    name: req.name,
-    version: req.version,
-    config_hash: hash,
-    category: req.category,
+    // Audit trail
+    try {
+      await sql`
+        INSERT INTO config_audit (
+          org_id, action, field_changed, new_value, changed_by, image_id, created_at
+        ) VALUES (
+          ${user.org_id}, ${"gold_image.created"}, ${"*"}, ${req.name},
+          ${user.user_id}, ${imageId}, ${now}
+        )
+      `;
+    } catch { /* best-effort */ }
+
+    return c.json({
+      image_id: imageId,
+      name: req.name,
+      version: req.version,
+      config_hash: hash,
+      category: req.category,
+    });
   });
 });
 
@@ -178,24 +178,25 @@ const auditRoute = createRoute({
 goldImageRoutes.openapi(auditRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name: agentName, limit } = c.req.valid("query");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // config_audit is not in the RLS-enforced table list — keep the org_id filter.
+    let rows;
+    if (agentName) {
+      rows = await sql`
+        SELECT * FROM config_audit
+        WHERE org_id = ${user.org_id} AND agent_name = ${agentName}
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    } else {
+      rows = await sql`
+        SELECT * FROM config_audit
+        WHERE org_id = ${user.org_id}
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    }
 
-  let rows;
-  if (agentName) {
-    rows = await sql`
-      SELECT * FROM config_audit
-      WHERE org_id = ${user.org_id} AND agent_name = ${agentName}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  } else {
-    rows = await sql`
-      SELECT * FROM config_audit
-      WHERE org_id = ${user.org_id}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  }
-
-  return c.json({ entries: rows });
+    return c.json({ entries: rows });
+  });
 });
 
 // ── POST /from-agent/:agent_name ─────────────────────────────────
@@ -218,58 +219,58 @@ const fromAgentRoute = createRoute({
 goldImageRoutes.openapi(fromAgentRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name: agentName } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Load agent config
+    const agentRows = await sql`
+      SELECT config FROM agents
+      WHERE name = ${agentName}
+      LIMIT 1
+    `;
+    if (!agentRows.length) {
+      return c.json({ error: `Agent '${agentName}' not found` }, 404);
+    }
 
-  // Load agent config
-  const agentRows = await sql`
-    SELECT config FROM agents
-    WHERE name = ${agentName} AND org_id = ${user.org_id}
-    LIMIT 1
-  `;
-  if (!agentRows.length) {
-    return c.json({ error: `Agent '${agentName}' not found` }, 404);
-  }
+    const rawConfig = agentRows[0].config;
+    const config: Record<string, unknown> =
+      typeof rawConfig === "string" ? JSON.parse(rawConfig) : (rawConfig ?? {});
 
-  const rawConfig = agentRows[0].config;
-  const config: Record<string, unknown> =
-    typeof rawConfig === "string" ? JSON.parse(rawConfig) : (rawConfig ?? {});
+    const goldName = `${agentName}-gold`;
+    const imageId = randomId();
+    const configJson = JSON.stringify(config, Object.keys(config).sort());
+    const hash = await configHashAsync(config);
+    const now = new Date().toISOString();
+    const version = String(config.version ?? "1.0.0");
 
-  const goldName = `${agentName}-gold`;
-  const imageId = randomId();
-  const configJson = JSON.stringify(config, Object.keys(config).sort());
-  const hash = await configHashAsync(config);
-  const now = new Date().toISOString();
-  const version = String(config.version ?? "1.0.0");
-
-  await sql`
-    INSERT INTO gold_images (
-      image_id, name, config, config_hash, org_id,
-      description, version, category, created_by, created_at
-    ) VALUES (
-      ${imageId}, ${goldName}, ${configJson}, ${hash}, ${user.org_id},
-      ${`Gold image created from agent '${agentName}'`}, ${version},
-      ${"general"}, ${user.user_id}, ${now}
-    )
-  `;
-
-  // Audit
-  try {
     await sql`
-      INSERT INTO config_audit (
-        org_id, action, field_changed, new_value, changed_by, image_id, created_at
+      INSERT INTO gold_images (
+        image_id, name, config, config_hash, org_id,
+        description, version, category, created_by, created_at
       ) VALUES (
-        ${user.org_id}, ${"gold_image.created"}, ${"*"}, ${goldName},
-        ${user.user_id}, ${imageId}, ${now}
+        ${imageId}, ${goldName}, ${configJson}, ${hash}, ${user.org_id},
+        ${`Gold image created from agent '${agentName}'`}, ${version},
+        ${"general"}, ${user.user_id}, ${now}
       )
     `;
-  } catch { /* best-effort */ }
 
-  return c.json({
-    image_id: imageId,
-    name: goldName,
-    version,
-    config_hash: hash,
-    category: "general",
+    // Audit
+    try {
+      await sql`
+        INSERT INTO config_audit (
+          org_id, action, field_changed, new_value, changed_by, image_id, created_at
+        ) VALUES (
+          ${user.org_id}, ${"gold_image.created"}, ${"*"}, ${goldName},
+          ${user.user_id}, ${imageId}, ${now}
+        )
+      `;
+    } catch { /* best-effort */ }
+
+    return c.json({
+      image_id: imageId,
+      name: goldName,
+      version,
+      config_hash: hash,
+      category: "general",
+    });
   });
 });
 
@@ -289,18 +290,17 @@ const complianceSummaryRoute = createRoute({
 
 goldImageRoutes.openapi(complianceSummaryRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT * FROM compliance_checks
+      ORDER BY created_at DESC LIMIT 200
+    `;
 
-  const rows = await sql`
-    SELECT * FROM compliance_checks
-    WHERE org_id = ${user.org_id}
-    ORDER BY created_at DESC LIMIT 200
-  `;
-
-  const summary = complianceSummaryFromChecks(
-    rows as unknown as Record<string, unknown>[],
-  );
-  return c.json(summary);
+    const summary = complianceSummaryFromChecks(
+      rows as unknown as Record<string, unknown>[],
+    );
+    return c.json(summary);
+  });
 });
 
 // ── GET /compliance/checks ───────────────────────────────────────
@@ -321,24 +321,23 @@ const complianceChecksRoute = createRoute({
 goldImageRoutes.openapi(complianceChecksRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name: agentName, limit } = c.req.valid("query");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    let rows;
+    if (agentName) {
+      rows = await sql`
+        SELECT * FROM compliance_checks
+        WHERE agent_name = ${agentName}
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    } else {
+      rows = await sql`
+        SELECT * FROM compliance_checks
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    }
 
-  let rows;
-  if (agentName) {
-    rows = await sql`
-      SELECT * FROM compliance_checks
-      WHERE org_id = ${user.org_id} AND agent_name = ${agentName}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  } else {
-    rows = await sql`
-      SELECT * FROM compliance_checks
-      WHERE org_id = ${user.org_id}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  }
-
-  return c.json({ checks: rows });
+    return c.json({ checks: rows });
+  });
 });
 
 // ── POST /compliance/check/:agent_name ───────────────────────────
@@ -363,17 +362,16 @@ goldImageRoutes.openapi(complianceCheckRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name: agentName } = c.req.valid("param");
   const { image_id: imageId } = c.req.valid("query");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  // Load agent config
-  const agentRows = await sql`
-    SELECT config FROM agents
-    WHERE name = ${agentName} AND org_id = ${user.org_id}
-    LIMIT 1
-  `;
-  if (!agentRows.length) {
-    return c.json({ error: `Agent '${agentName}' not found` }, 404);
-  }
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Load agent config
+    const agentRows = await sql`
+      SELECT config FROM agents
+      WHERE name = ${agentName}
+      LIMIT 1
+    `;
+    if (!agentRows.length) {
+      return c.json({ error: `Agent '${agentName}' not found` }, 404);
+    }
 
   const rawConfig = agentRows[0].config;
   const agentConfig: Record<string, unknown> =
@@ -408,14 +406,85 @@ goldImageRoutes.openapi(complianceCheckRoute, async (c): Promise<any> => {
     return c.json(report);
   }
 
-  // Check against all relevant gold images
-  const allGoldRows = await sql`
-    SELECT * FROM gold_images
-    WHERE org_id = ${user.org_id} AND deleted_at IS NULL
-    ORDER BY created_at DESC
-  `;
+    // Check against all relevant gold images
+    const allGoldRows = await sql`
+      SELECT * FROM gold_images
+      WHERE deleted_at IS NULL
+      ORDER BY created_at DESC
+    `;
 
-  if (!allGoldRows.length) {
+    if (!allGoldRows.length) {
+      return c.json({
+        agent_name: agentName,
+        image_id: "",
+        image_name: "none",
+        total_drifts: 0,
+        status: "no_gold_images",
+        drifted_fields: [],
+      });
+    }
+
+    // Filter to relevant images
+    const agentTags = new Set((agentConfig.tags ?? []) as string[]);
+    const agentCategory = String(agentConfig.category ?? "");
+
+    const relevant = allGoldRows.filter((gold) => {
+      const goldName = String(gold.name ?? "");
+      const goldCategory = String(gold.category ?? "general");
+      // Match by name
+      if (agentName && (goldName.includes(agentName) || goldName.replace("-gold", "") === agentName)) {
+        return true;
+      }
+      // Match by category
+      if (agentCategory && goldCategory === agentCategory) return true;
+      // Match by tags
+      let goldTags: string[] = [];
+      try { goldTags = JSON.parse(String(gold.tags ?? "[]")); } catch { /* empty */ }
+      if (agentTags.size && goldTags.some((t) => agentTags.has(t))) return true;
+      return false;
+    });
+
+    if (!relevant.length) {
+      return c.json({
+        agent_name: agentName,
+        image_id: "",
+        image_name: "none",
+        total_drifts: 0,
+        status: "no_matching_gold_image",
+        drifted_fields: [],
+      });
+    }
+
+    // Find best match (fewest drifts)
+    let bestReport: ReturnType<typeof detectDrift> | null = null;
+    let bestGold: Record<string, unknown> | null = null;
+
+    for (const gold of relevant) {
+      let goldConfig: Record<string, unknown>;
+      try {
+        goldConfig = typeof gold.config === "string"
+          ? JSON.parse(gold.config)
+          : (gold.config ?? {}) as Record<string, unknown>;
+      } catch {
+        goldConfig = {};
+      }
+
+      const report = detectDrift(
+        agentConfig, goldConfig,
+        agentName, String(gold.image_id ?? ""), String(gold.name ?? ""),
+      );
+
+      if (!bestReport || report.total_drifts < bestReport.total_drifts) {
+        bestReport = report;
+        bestGold = gold as Record<string, unknown>;
+      }
+    }
+
+    if (bestReport && bestGold) {
+      await persistComplianceCheck(sql, user, agentName, bestGold, bestReport);
+      return c.json(bestReport);
+    }
+
     return c.json({
       agent_name: agentName,
       image_id: "",
@@ -424,81 +493,11 @@ goldImageRoutes.openapi(complianceCheckRoute, async (c): Promise<any> => {
       status: "no_gold_images",
       drifted_fields: [],
     });
-  }
-
-  // Filter to relevant images
-  const agentTags = new Set((agentConfig.tags ?? []) as string[]);
-  const agentCategory = String(agentConfig.category ?? "");
-
-  const relevant = allGoldRows.filter((gold) => {
-    const goldName = String(gold.name ?? "");
-    const goldCategory = String(gold.category ?? "general");
-    // Match by name
-    if (agentName && (goldName.includes(agentName) || goldName.replace("-gold", "") === agentName)) {
-      return true;
-    }
-    // Match by category
-    if (agentCategory && goldCategory === agentCategory) return true;
-    // Match by tags
-    let goldTags: string[] = [];
-    try { goldTags = JSON.parse(String(gold.tags ?? "[]")); } catch { /* empty */ }
-    if (agentTags.size && goldTags.some((t) => agentTags.has(t))) return true;
-    return false;
-  });
-
-  if (!relevant.length) {
-    return c.json({
-      agent_name: agentName,
-      image_id: "",
-      image_name: "none",
-      total_drifts: 0,
-      status: "no_matching_gold_image",
-      drifted_fields: [],
-    });
-  }
-
-  // Find best match (fewest drifts)
-  let bestReport: ReturnType<typeof detectDrift> | null = null;
-  let bestGold: Record<string, unknown> | null = null;
-
-  for (const gold of relevant) {
-    let goldConfig: Record<string, unknown>;
-    try {
-      goldConfig = typeof gold.config === "string"
-        ? JSON.parse(gold.config)
-        : (gold.config ?? {}) as Record<string, unknown>;
-    } catch {
-      goldConfig = {};
-    }
-
-    const report = detectDrift(
-      agentConfig, goldConfig,
-      agentName, String(gold.image_id ?? ""), String(gold.name ?? ""),
-    );
-
-    if (!bestReport || report.total_drifts < bestReport.total_drifts) {
-      bestReport = report;
-      bestGold = gold as Record<string, unknown>;
-    }
-  }
-
-  if (bestReport && bestGold) {
-    await persistComplianceCheck(sql, user, agentName, bestGold, bestReport);
-    return c.json(bestReport);
-  }
-
-  return c.json({
-    agent_name: agentName,
-    image_id: "",
-    image_name: "none",
-    total_drifts: 0,
-    status: "no_gold_images",
-    drifted_fields: [],
   });
 });
 
 async function persistComplianceCheck(
-  sql: Awaited<ReturnType<typeof getDbForOrg>>,
+  sql: OrgSql,
   user: CurrentUser,
   agentName: string,
   gold: Record<string, unknown>,
@@ -543,46 +542,46 @@ const driftRoute = createRoute({
 goldImageRoutes.openapi(driftRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name: agentName, image_id: imageId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Load agent config
+    const agentRows = await sql`
+      SELECT config FROM agents
+      WHERE name = ${agentName}
+      LIMIT 1
+    `;
+    if (!agentRows.length) {
+      return c.json({ error: `Agent '${agentName}' not found` }, 404);
+    }
 
-  // Load agent config
-  const agentRows = await sql`
-    SELECT config FROM agents
-    WHERE name = ${agentName} AND org_id = ${user.org_id}
-    LIMIT 1
-  `;
-  if (!agentRows.length) {
-    return c.json({ error: `Agent '${agentName}' not found` }, 404);
-  }
+    const rawConfig = agentRows[0].config;
+    const agentConfig: Record<string, unknown> =
+      typeof rawConfig === "string" ? JSON.parse(rawConfig) : (rawConfig ?? {});
 
-  const rawConfig = agentRows[0].config;
-  const agentConfig: Record<string, unknown> =
-    typeof rawConfig === "string" ? JSON.parse(rawConfig) : (rawConfig ?? {});
+    // Load gold image
+    const goldRows = await sql`
+      SELECT * FROM gold_images WHERE image_id = ${imageId} AND deleted_at IS NULL LIMIT 1
+    `;
+    if (!goldRows.length) {
+      return c.json({ error: "Gold image not found" }, 404);
+    }
 
-  // Load gold image
-  const goldRows = await sql`
-    SELECT * FROM gold_images WHERE image_id = ${imageId} AND deleted_at IS NULL LIMIT 1
-  `;
-  if (!goldRows.length) {
-    return c.json({ error: "Gold image not found" }, 404);
-  }
+    const gold = goldRows[0] as Record<string, unknown>;
+    let goldConfig: Record<string, unknown>;
+    try {
+      goldConfig = typeof gold.config === "string"
+        ? JSON.parse(gold.config)
+        : (gold.config ?? {}) as Record<string, unknown>;
+    } catch {
+      goldConfig = {};
+    }
 
-  const gold = goldRows[0] as Record<string, unknown>;
-  let goldConfig: Record<string, unknown>;
-  try {
-    goldConfig = typeof gold.config === "string"
-      ? JSON.parse(gold.config)
-      : (gold.config ?? {}) as Record<string, unknown>;
-  } catch {
-    goldConfig = {};
-  }
+    const report = detectDrift(
+      agentConfig, goldConfig,
+      agentName, imageId, String(gold.name ?? ""),
+    );
 
-  const report = detectDrift(
-    agentConfig, goldConfig,
-    agentName, imageId, String(gold.name ?? ""),
-  );
-
-  return c.json(report);
+    return c.json(report);
+  });
 });
 
 // ── GET /:image_id ───────────────────────────────────────────────
@@ -605,26 +604,26 @@ const getGoldImageRoute = createRoute({
 goldImageRoutes.openapi(getGoldImageRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { image_id: imageId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  const rows = await sql`
-    SELECT * FROM gold_images WHERE image_id = ${imageId} AND deleted_at IS NULL LIMIT 1
-  `;
-  if (!rows.length) {
-    return c.json({ error: "Gold image not found" }, 404);
-  }
-
-  const image = rows[0] as Record<string, unknown>;
-  // Parse config into config field
-  if (typeof image.config === "string") {
-    try {
-      image.config = JSON.parse(image.config);
-    } catch {
-      image.config = {};
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT * FROM gold_images WHERE image_id = ${imageId} AND deleted_at IS NULL LIMIT 1
+    `;
+    if (!rows.length) {
+      return c.json({ error: "Gold image not found" }, 404);
     }
-  }
 
-  return c.json(image);
+    const image = rows[0] as Record<string, unknown>;
+    // Parse config into config field
+    if (typeof image.config === "string") {
+      try {
+        image.config = JSON.parse(image.config);
+      } catch {
+        image.config = {};
+      }
+    }
+
+    return c.json(image);
+  });
 });
 
 // ── PUT /:image_id ───────────────────────────────────────────────
@@ -650,67 +649,67 @@ goldImageRoutes.openapi(updateGoldImageRoute, async (c): Promise<any> => {
   const { image_id: imageId } = c.req.valid("param");
   const req = c.req.valid("json");
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  const existingRows = await sql`
-    SELECT * FROM gold_images WHERE image_id = ${imageId} AND deleted_at IS NULL LIMIT 1
-  `;
-  if (!existingRows.length) {
-    return c.json({ error: "Gold image not found" }, 404);
-  }
-
-  const existing = existingRows[0] as Record<string, unknown>;
-  const now = new Date().toISOString();
-  const changedFields: string[] = [];
-
-  // Apply updates
-  if (req.config !== undefined) {
-    const configJson = JSON.stringify(req.config, Object.keys(req.config).sort());
-    const hash = await configHashAsync(req.config);
-    await sql`
-      UPDATE gold_images SET config = ${configJson}, config_hash = ${hash}
-      WHERE image_id = ${imageId}
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const existingRows = await sql`
+      SELECT * FROM gold_images WHERE image_id = ${imageId} AND deleted_at IS NULL LIMIT 1
     `;
-    changedFields.push("config", "config_hash");
-  }
-  if (req.name !== undefined) {
-    await sql`UPDATE gold_images SET name = ${req.name} WHERE image_id = ${imageId}`;
-    changedFields.push("name");
-  }
-  if (req.description !== undefined) {
-    await sql`UPDATE gold_images SET description = ${req.description} WHERE image_id = ${imageId}`;
-    changedFields.push("description");
-  }
-  if (req.version !== undefined) {
-    await sql`UPDATE gold_images SET version = ${req.version} WHERE image_id = ${imageId}`;
-    changedFields.push("version");
-  }
+    if (!existingRows.length) {
+      return c.json({ error: "Gold image not found" }, 404);
+    }
 
-  if (changedFields.length) {
-    // Audit trail
-    try {
+    const existing = existingRows[0] as Record<string, unknown>;
+    const now = new Date().toISOString();
+    const changedFields: string[] = [];
+
+    // Apply updates
+    if (req.config !== undefined) {
+      const configJson = JSON.stringify(req.config, Object.keys(req.config).sort());
+      const hash = await configHashAsync(req.config);
       await sql`
-        INSERT INTO config_audit (
-          org_id, action, field_changed, old_value, new_value,
-          changed_by, image_id, created_at
-        ) VALUES (
-          ${user.org_id}, ${"gold_image.updated"}, ${changedFields.join(",")},
-          ${String(existing.name ?? "")}, ${req.name ?? String(existing.name ?? "")},
-          ${user.user_id}, ${imageId}, ${now}
-        )
+        UPDATE gold_images SET config = ${configJson}, config_hash = ${hash}
+        WHERE image_id = ${imageId}
       `;
-    } catch { /* best-effort */ }
-  }
+      changedFields.push("config", "config_hash");
+    }
+    if (req.name !== undefined) {
+      await sql`UPDATE gold_images SET name = ${req.name} WHERE image_id = ${imageId}`;
+      changedFields.push("name");
+    }
+    if (req.description !== undefined) {
+      await sql`UPDATE gold_images SET description = ${req.description} WHERE image_id = ${imageId}`;
+      changedFields.push("description");
+    }
+    if (req.version !== undefined) {
+      await sql`UPDATE gold_images SET version = ${req.version} WHERE image_id = ${imageId}`;
+      changedFields.push("version");
+    }
 
-  // Return updated image
-  const updatedRows = await sql`
-    SELECT * FROM gold_images WHERE image_id = ${imageId} LIMIT 1
-  `;
-  const updated = updatedRows[0] as Record<string, unknown>;
-  if (typeof updated.config === "string") {
-    try { updated.config = JSON.parse(updated.config); } catch { updated.config = {}; }
-  }
-  return c.json(updated);
+    if (changedFields.length) {
+      // Audit trail
+      try {
+        await sql`
+          INSERT INTO config_audit (
+            org_id, action, field_changed, old_value, new_value,
+            changed_by, image_id, created_at
+          ) VALUES (
+            ${user.org_id}, ${"gold_image.updated"}, ${changedFields.join(",")},
+            ${String(existing.name ?? "")}, ${req.name ?? String(existing.name ?? "")},
+            ${user.user_id}, ${imageId}, ${now}
+          )
+        `;
+      } catch { /* best-effort */ }
+    }
+
+    // Return updated image
+    const updatedRows = await sql`
+      SELECT * FROM gold_images WHERE image_id = ${imageId} LIMIT 1
+    `;
+    const updated = updatedRows[0] as Record<string, unknown>;
+    if (typeof updated.config === "string") {
+      try { updated.config = JSON.parse(updated.config); } catch { updated.config = {}; }
+    }
+    return c.json(updated);
+  });
 });
 
 // ── POST /:image_id/approve ──────────────────────────────────────
@@ -733,34 +732,34 @@ const approveGoldImageRoute = createRoute({
 goldImageRoutes.openapi(approveGoldImageRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { image_id: imageId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  const existingRows = await sql`
-    SELECT * FROM gold_images WHERE image_id = ${imageId} AND deleted_at IS NULL LIMIT 1
-  `;
-  if (!existingRows.length) {
-    return c.json({ error: "Gold image not found" }, 404);
-  }
-
-  const now = new Date().toISOString();
-  await sql`
-    UPDATE gold_images SET approved_by = ${user.user_id}, approved_at = ${now}
-    WHERE image_id = ${imageId}
-  `;
-
-  // Audit
-  try {
-    await sql`
-      INSERT INTO config_audit (
-        org_id, action, field_changed, new_value, changed_by, image_id, created_at
-      ) VALUES (
-        ${user.org_id}, ${"gold_image.approved"}, ${"approved_by"},
-        ${user.user_id}, ${user.user_id}, ${imageId}, ${now}
-      )
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const existingRows = await sql`
+      SELECT * FROM gold_images WHERE image_id = ${imageId} AND deleted_at IS NULL LIMIT 1
     `;
-  } catch { /* best-effort */ }
+    if (!existingRows.length) {
+      return c.json({ error: "Gold image not found" }, 404);
+    }
 
-  return c.json({ approved: true, image_id: imageId });
+    const now = new Date().toISOString();
+    await sql`
+      UPDATE gold_images SET approved_by = ${user.user_id}, approved_at = ${now}
+      WHERE image_id = ${imageId}
+    `;
+
+    // Audit
+    try {
+      await sql`
+        INSERT INTO config_audit (
+          org_id, action, field_changed, new_value, changed_by, image_id, created_at
+        ) VALUES (
+          ${user.org_id}, ${"gold_image.approved"}, ${"approved_by"},
+          ${user.user_id}, ${user.user_id}, ${imageId}, ${now}
+        )
+      `;
+    } catch { /* best-effort */ }
+
+    return c.json({ approved: true, image_id: imageId });
+  });
 });
 
 // ── DELETE /:image_id ────────────────────────────────────────────
@@ -783,34 +782,34 @@ const deleteGoldImageRoute = createRoute({
 goldImageRoutes.openapi(deleteGoldImageRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { image_id: imageId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  const existingRows = await sql`
-    SELECT * FROM gold_images WHERE image_id = ${imageId} AND deleted_at IS NULL LIMIT 1
-  `;
-  if (!existingRows.length) {
-    return c.json({ error: "Gold image not found" }, 404);
-  }
-
-  const existing = existingRows[0] as Record<string, unknown>;
-  const now = new Date().toISOString();
-
-  // Soft delete
-  await sql`
-    UPDATE gold_images SET deleted_at = ${now} WHERE image_id = ${imageId}
-  `;
-
-  // Audit
-  try {
-    await sql`
-      INSERT INTO config_audit (
-        org_id, action, field_changed, old_value, changed_by, image_id, created_at
-      ) VALUES (
-        ${user.org_id}, ${"gold_image.deleted"}, ${"*"},
-        ${String(existing.name ?? "")}, ${user.user_id}, ${imageId}, ${now}
-      )
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const existingRows = await sql`
+      SELECT * FROM gold_images WHERE image_id = ${imageId} AND deleted_at IS NULL LIMIT 1
     `;
-  } catch { /* best-effort */ }
+    if (!existingRows.length) {
+      return c.json({ error: "Gold image not found" }, 404);
+    }
 
-  return c.json({ deleted: true, image_id: imageId });
+    const existing = existingRows[0] as Record<string, unknown>;
+    const now = new Date().toISOString();
+
+    // Soft delete
+    await sql`
+      UPDATE gold_images SET deleted_at = ${now} WHERE image_id = ${imageId}
+    `;
+
+    // Audit
+    try {
+      await sql`
+        INSERT INTO config_audit (
+          org_id, action, field_changed, old_value, changed_by, image_id, created_at
+        ) VALUES (
+          ${user.org_id}, ${"gold_image.deleted"}, ${"*"},
+          ${String(existing.name ?? "")}, ${user.user_id}, ${imageId}, ${now}
+        )
+      `;
+    } catch { /* best-effort */ }
+
+    return c.json({ deleted: true, image_id: imageId });
+  });
 });

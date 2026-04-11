@@ -5,7 +5,7 @@
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { deductCredits } from "../logic/credits";
 
@@ -44,20 +44,20 @@ const listEndpointsRoute = createRoute({
 gpuRoutes.openapi(listEndpointsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { status } = c.req.valid("query");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  let rows;
-  if (status) {
-    rows = await sql`
-      SELECT * FROM gpu_endpoints WHERE org_id = ${user.org_id} AND status = ${status}
-      ORDER BY created_at DESC
-    `;
-  } else {
-    rows = await sql`
-      SELECT * FROM gpu_endpoints WHERE org_id = ${user.org_id} ORDER BY created_at DESC
-    `;
-  }
-  return c.json({ endpoints: rows });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    let rows;
+    if (status) {
+      rows = await sql`
+        SELECT * FROM gpu_endpoints WHERE status = ${status}
+        ORDER BY created_at DESC
+      `;
+    } else {
+      rows = await sql`
+        SELECT * FROM gpu_endpoints ORDER BY created_at DESC
+      `;
+    }
+    return c.json({ endpoints: rows });
+  });
 });
 
 // ── POST /endpoints — Create a GPU endpoint ─────────────────────────
@@ -99,26 +99,27 @@ gpuRoutes.openapi(createEndpointRoute, async (c): Promise<any> => {
 
   if (!modelId) return c.json({ error: "model_id is required" }, 400);
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const endpointId = genId();
-  const hourlyRate = HOURLY_RATES[gpuType] ?? 3.98;
-  const now = new Date().toISOString();
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const endpointId = genId();
+    const hourlyRate = HOURLY_RATES[gpuType] ?? 3.98;
+    const now = new Date().toISOString();
 
-  const apiBase = `https://dedicated-${endpointId}.gmi-serving.com/v1`;
-  const configJson = JSON.stringify({ gpu_type: gpuType, gpu_count: gpuCount, hourly_rate_usd: hourlyRate });
-  await sql`
-    INSERT INTO gpu_endpoints (id, org_id, name, model, url, provider, status, config, created_at)
-    VALUES (${endpointId}, ${user.org_id}, ${`gpu-${endpointId}`}, ${modelId}, ${apiBase},
-            ${"dedicated"}, 'provisioning', ${configJson}, ${now})
-  `;
+    const apiBase = `https://dedicated-${endpointId}.gmi-serving.com/v1`;
+    const configJson = JSON.stringify({ gpu_type: gpuType, gpu_count: gpuCount, hourly_rate_usd: hourlyRate });
+    await sql`
+      INSERT INTO gpu_endpoints (id, org_id, name, model, url, provider, status, config, created_at)
+      VALUES (${endpointId}, ${user.org_id}, ${`gpu-${endpointId}`}, ${modelId}, ${apiBase},
+              ${"dedicated"}, 'provisioning', ${configJson}, ${now})
+    `;
 
-  return c.json({
-    endpoint_id: endpointId,
-    status: "provisioning",
-    gpu_type: gpuType,
-    gpu_count: gpuCount,
-    model_id: modelId,
-    hourly_rate_usd: hourlyRate,
+    return c.json({
+      endpoint_id: endpointId,
+      status: "provisioning",
+      gpu_type: gpuType,
+      gpu_count: gpuCount,
+      model_id: modelId,
+      hourly_rate_usd: hourlyRate,
+    });
   });
 });
 
@@ -145,43 +146,43 @@ const deleteEndpointRoute = createRoute({
 gpuRoutes.openapi(deleteEndpointRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { endpoint_id: endpointId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT * FROM gpu_endpoints WHERE id = ${endpointId}
+    `;
+    if (rows.length === 0) return c.json({ error: "GPU endpoint not found" }, 404);
 
-  const rows = await sql`
-    SELECT * FROM gpu_endpoints WHERE id = ${endpointId} AND org_id = ${user.org_id}
-  `;
-  if (rows.length === 0) return c.json({ error: "GPU endpoint not found" }, 404);
+    const endpoint = rows[0] as any;
+    const endpointConfig = typeof endpoint.config === "object" && endpoint.config ? endpoint.config : {};
+    const nowMs = Date.now();
+    const now = new Date(nowMs).toISOString();
+    const createdAtMs = endpoint.created_at ? new Date(endpoint.created_at).getTime() : nowMs;
+    const hours = Math.max(0, (nowMs - createdAtMs) / 3600000);
+    const costUsd = Math.round(hours * Number(endpointConfig.hourly_rate_usd || 3.98) * 100) / 100;
 
-  const endpoint = rows[0] as any;
-  const endpointConfig = typeof endpoint.config === "object" && endpoint.config ? endpoint.config : {};
-  const nowMs = Date.now();
-  const now = new Date(nowMs).toISOString();
-  const createdAtMs = endpoint.created_at ? new Date(endpoint.created_at).getTime() : nowMs;
-  const hours = Math.max(0, (nowMs - createdAtMs) / 3600000);
-  const costUsd = Math.round(hours * Number(endpointConfig.hourly_rate_usd || 3.98) * 100) / 100;
-
-  await sql`
-    UPDATE gpu_endpoints SET status = 'terminated', updated_at = ${now} WHERE id = ${endpointId}
-  `;
-
-  // Record billing
-  try {
     await sql`
-      INSERT INTO billing_records (org_id, cost_type, total_cost_usd, model, provider, created_at)
-      VALUES (${user.org_id}, 'gpu_compute', ${costUsd}, ${String(endpoint.model || "")}, ${"dedicated"}, ${now})
+      UPDATE gpu_endpoints SET status = 'terminated', updated_at = ${now} WHERE id = ${endpointId}
     `;
 
-    // Fire-and-forget credit deduction for GPU compute cost
-    if (costUsd > 0) {
-      // deductCredits expects USD, not cents
-      deductCredits(sql, user.org_id, costUsd, `GPU compute: ${endpointId}`, "", "").catch(() => {});
-    }
-  } catch {}
+    // Record billing
+    try {
+      await sql`
+        INSERT INTO billing_records (org_id, cost_type, total_cost_usd, model, provider, created_at)
+        VALUES (${user.org_id}, 'gpu_compute', ${costUsd}, ${String(endpoint.model || "")}, ${"dedicated"}, ${now})
+      `;
 
-  return c.json({
-    endpoint_id: endpointId,
-    status: "terminated",
-    hours: Math.round(hours * 100) / 100,
-    cost_usd: costUsd,
+      // Fire-and-forget credit deduction for GPU compute cost
+      if (costUsd > 0) {
+        // deductCredits expects USD, not cents
+        deductCredits(sql, user.org_id, costUsd, `GPU compute: ${endpointId}`, "", "").catch(() => {});
+      }
+    } catch {}
+
+    return c.json({
+      endpoint_id: endpointId,
+      status: "terminated",
+      hours: Math.round(hours * 100) / 100,
+      cost_usd: costUsd,
+    });
   });
 });

@@ -6,7 +6,7 @@
  * Eval runs stored in Supabase. POST /run proxies to RUNTIME service binding.
  */
 import { createRoute, z } from "@hono/zod-openapi";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { EvalRunSummary, ErrorSchema, errorResponses } from "../schemas/openapi";
@@ -54,26 +54,25 @@ const listRunsRoute = createRoute({
 
 evalRoutes.openapi(listRunsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const orgId = user.org_id;
   const { agent_name: agentName, limit } = c.req.valid("query");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = agentName
+      ? await sql`SELECT * FROM eval_runs WHERE agent_name = ${agentName} ORDER BY created_at DESC LIMIT ${limit}`
+      : await sql`SELECT * FROM eval_runs ORDER BY created_at DESC LIMIT ${limit}`;
 
-  const rows = agentName
-    ? await sql`SELECT * FROM eval_runs WHERE org_id = ${orgId} AND agent_name = ${agentName} ORDER BY created_at DESC LIMIT ${limit}`
-    : await sql`SELECT * FROM eval_runs WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT ${limit}`;
-
-  return c.json(
-    rows.map((r: any) => ({
-      run_id: r.id,
-      agent_name: r.agent_name,
-      pass_rate: r.pass_rate,
-      avg_score: r.avg_score,
-      avg_latency_ms: r.avg_latency_ms,
-      total_cost_usd: r.total_cost_usd,
-      total_tasks: r.total_tasks,
-      total_trials: r.total_trials,
-    })),
-  );
+    return c.json(
+      rows.map((r: any) => ({
+        run_id: r.id,
+        agent_name: r.agent_name,
+        pass_rate: r.pass_rate,
+        avg_score: r.avg_score,
+        avg_latency_ms: r.avg_latency_ms,
+        total_cost_usd: r.total_cost_usd,
+        total_tasks: r.total_tasks,
+        total_trials: r.total_trials,
+      })),
+    );
+  });
 });
 
 const getRunRoute = createRoute({
@@ -91,25 +90,26 @@ const getRunRoute = createRoute({
 
 evalRoutes.openapi(getRunRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const orgId = user.org_id;
   const runId = Number(c.req.valid("param").run_id);
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const rows = await sql`SELECT * FROM eval_runs WHERE id = ${runId} AND org_id = ${orgId}`;
-  if (rows.length === 0) return c.json({ error: "Eval run not found" }, 404);
-  const data: any = { ...rows[0] };
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`SELECT * FROM eval_runs WHERE id = ${runId}`;
+    if (rows.length === 0) return c.json({ error: "Eval run not found" }, 404);
+    const data: any = { ...rows[0] };
 
-  data.eval_conditions = parseJsonColumn(data.eval_conditions_json);
-  delete data.eval_conditions_json;
+    data.eval_conditions = parseJsonColumn(data.eval_conditions_json);
+    delete data.eval_conditions_json;
 
-  // Get trials
-  try {
-    const trials = await sql`SELECT * FROM eval_trials WHERE run_id = ${runId} AND run_id IN (SELECT id FROM eval_runs WHERE org_id = ${user.org_id}) ORDER BY trial_number`;
-    data.trials = trials;
-  } catch {
-    data.trials = [];
-  }
+    // Get trials. eval_trials is NOT RLS-enforced — keep the IN-clause that
+    // joins back to eval_runs (which IS RLS-enforced) for tenant isolation.
+    try {
+      const trials = await sql`SELECT * FROM eval_trials WHERE run_id = ${runId} AND run_id IN (SELECT id FROM eval_runs) ORDER BY trial_number`;
+      data.trials = trials;
+    } catch {
+      data.trials = [];
+    }
 
-  return c.json(data);
+    return c.json(data);
+  });
 });
 
 const getTrialsRoute = createRoute({
@@ -127,19 +127,20 @@ const getTrialsRoute = createRoute({
 
 evalRoutes.openapi(getTrialsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const orgId = user.org_id;
   const runId = Number(c.req.valid("param").run_id);
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const check = await sql`SELECT id FROM eval_runs WHERE id = ${runId} AND org_id = ${orgId}`;
-  if (check.length === 0) return c.json({ error: "Eval run not found" }, 404);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const check = await sql`SELECT id FROM eval_runs WHERE id = ${runId}`;
+    if (check.length === 0) return c.json({ error: "Eval run not found" }, 404);
 
-  let trials: any[] = [];
-  try {
-    trials = await sql`SELECT * FROM eval_trials WHERE run_id = ${runId} AND run_id IN (SELECT id FROM eval_runs WHERE org_id = ${orgId}) ORDER BY trial_number`;
-  } catch {
-    trials = [];
-  }
-  return c.json({ run_id: runId, trials });
+    let trials: any[] = [];
+    try {
+      // eval_trials is NOT RLS-enforced — gate via the RLS-enforced eval_runs subquery.
+      trials = await sql`SELECT * FROM eval_trials WHERE run_id = ${runId} AND run_id IN (SELECT id FROM eval_runs) ORDER BY trial_number`;
+    } catch {
+      trials = [];
+    }
+    return c.json({ run_id: runId, trials });
+  });
 });
 
 const startRunRoute = createRoute({
@@ -309,11 +310,11 @@ const deleteRunRoute = createRoute({
 
 evalRoutes.openapi(deleteRunRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const orgId = user.org_id;
   const runId = Number(c.req.valid("param").run_id);
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  await sql`DELETE FROM eval_runs WHERE id = ${runId} AND org_id = ${orgId}`;
-  return c.json({ deleted: runId });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    await sql`DELETE FROM eval_runs WHERE id = ${runId}`;
+    return c.json({ deleted: runId });
+  });
 });
 
 const listTasksRoute = createRoute({

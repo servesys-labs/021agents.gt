@@ -10,10 +10,33 @@
     "head_sampling_rate": 1
   },
 
-  // Hyperdrive — accelerated Supabase Postgres connection from edge
+  // Hyperdrive — accelerated Supabase Postgres connection from edge.
+  //
+  // Two bindings so withOrgDb (RLS-enforced) and withAdminDb (RLS bypass)
+  // can point at different connection strings:
+  //
+  //   HYPERDRIVE       — the default binding used by withOrgDb. Connects
+  //                      via a role subject to RLS. Every query runs
+  //                      inside a transaction that sets app.current_org_id
+  //                      so row-level policies enforce tenant isolation.
+  //
+  //   HYPERDRIVE_ADMIN — used by withAdminDb for legitimate cross-org
+  //                      reads (admin dashboards, marketplace discovery,
+  //                      webhook dispatch, auth bootstrap, background
+  //                      workers iterating across tenants). In prototype
+  //                      mode this points at the same Hyperdrive config
+  //                      as HYPERDRIVE — the TypeScript brand is the
+  //                      only audit boundary. In production, point this
+  //                      at a Hyperdrive config whose connection string
+  //                      uses a role granted BYPASSRLS so admin access
+  //                      is auditable at the database level too.
   "hyperdrive": [
     {
       "binding": "HYPERDRIVE",
+      "id": "775f7e11ce8c479993855531f728770a"
+    },
+    {
+      "binding": "HYPERDRIVE_ADMIN",
       "id": "775f7e11ce8c479993855531f728770a"
     }
   ],

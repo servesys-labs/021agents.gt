@@ -8,7 +8,7 @@
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDb } from "../db/client";
+import { withAdminDb } from "../db/client";
 
 export const edgeIngestRoutes = createOpenAPIRouter();
 
@@ -103,37 +103,39 @@ edgeIngestRoutes.openapi(ingestSessionRoute, async (c): Promise<any> => {
   const now = payload.created_at ? new Date(Number(payload.created_at) * 1000).toISOString() : new Date().toISOString();
   const endedAt = new Date().toISOString();
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  // Edge ingest is service-to-service (SERVICE_TOKEN). org_id comes from the
+  // payload and may target any tenant — use the admin connection.
+  return await withAdminDb(c.env, async (sql) => {
+    await sql`
+      INSERT INTO sessions (
+        session_id, org_id, project_id, agent_name, model, status,
+        input_text, output_text, step_count, action_count, wall_clock_seconds,
+        cost_total_usd, trace_id, parent_session_id, depth, created_at, ended_at
+      ) VALUES (
+        ${sessionId}, ${orgId}, ${projectId}, ${agentName}, ${model}, ${status},
+        ${inputText}, ${outputText}, ${stepCount}, ${actionCount}, ${wallClockSeconds},
+        ${costTotalUsd}, ${traceId}, ${parentSessionId}, ${depth}, ${now}, ${endedAt}
+      )
+      ON CONFLICT (session_id) DO UPDATE SET
+        org_id = EXCLUDED.org_id,
+        project_id = EXCLUDED.project_id,
+        agent_name = EXCLUDED.agent_name,
+        model = EXCLUDED.model,
+        status = EXCLUDED.status,
+        input_text = EXCLUDED.input_text,
+        output_text = EXCLUDED.output_text,
+        step_count = EXCLUDED.step_count,
+        action_count = EXCLUDED.action_count,
+        wall_clock_seconds = EXCLUDED.wall_clock_seconds,
+        cost_total_usd = EXCLUDED.cost_total_usd,
+        trace_id = EXCLUDED.trace_id,
+        parent_session_id = EXCLUDED.parent_session_id,
+        depth = EXCLUDED.depth,
+        ended_at = EXCLUDED.ended_at
+    `;
 
-  await sql`
-    INSERT INTO sessions (
-      session_id, org_id, project_id, agent_name, model, status,
-      input_text, output_text, step_count, action_count, wall_clock_seconds,
-      cost_total_usd, trace_id, parent_session_id, depth, created_at, ended_at
-    ) VALUES (
-      ${sessionId}, ${orgId}, ${projectId}, ${agentName}, ${model}, ${status},
-      ${inputText}, ${outputText}, ${stepCount}, ${actionCount}, ${wallClockSeconds},
-      ${costTotalUsd}, ${traceId}, ${parentSessionId}, ${depth}, ${now}, ${endedAt}
-    )
-    ON CONFLICT (session_id) DO UPDATE SET
-      org_id = EXCLUDED.org_id,
-      project_id = EXCLUDED.project_id,
-      agent_name = EXCLUDED.agent_name,
-      model = EXCLUDED.model,
-      status = EXCLUDED.status,
-      input_text = EXCLUDED.input_text,
-      output_text = EXCLUDED.output_text,
-      step_count = EXCLUDED.step_count,
-      action_count = EXCLUDED.action_count,
-      wall_clock_seconds = EXCLUDED.wall_clock_seconds,
-      cost_total_usd = EXCLUDED.cost_total_usd,
-      trace_id = EXCLUDED.trace_id,
-      parent_session_id = EXCLUDED.parent_session_id,
-      depth = EXCLUDED.depth,
-      ended_at = EXCLUDED.ended_at
-  `;
-
-  return c.json({ ingested: true, session_id: sessionId });
+    return c.json({ ingested: true, session_id: sessionId });
+  });
 });
 
 // ── POST /turns — Ingest turn data ──────────────────────────────────
@@ -189,10 +191,10 @@ edgeIngestRoutes.openapi(ingestTurnRoute, async (c): Promise<any> => {
     return c.json({ error: "session_id and turn_number required" }, 400);
   }
 
-  const sql = await getDb(c.env.HYPERDRIVE);
-
-  // Delete existing turn and insert fresh
-  await sql`DELETE FROM turns WHERE session_id = ${sessionId} AND turn_number = ${turnNumber}`;
+  // Edge ingest runs without an org context — admin connection.
+  return await withAdminDb(c.env, async (sql) => {
+    // Delete existing turn and insert fresh
+    await sql`DELETE FROM turns WHERE session_id = ${sessionId} AND turn_number = ${turnNumber}`;
 
   const modelUsed = String(payload.model_used || "");
   const inputTokens = Number(payload.input_tokens || 0) || 0;
@@ -221,5 +223,6 @@ edgeIngestRoutes.openapi(ingestTurnRoute, async (c): Promise<any> => {
     )
   `;
 
-  return c.json({ ingested: true, session_id: sessionId, turn_number: turnNumber });
+    return c.json({ ingested: true, session_id: sessionId, turn_number: turnNumber });
+  });
 });

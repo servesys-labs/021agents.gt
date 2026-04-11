@@ -8,7 +8,7 @@
 import { createMiddleware } from "hono/factory";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { withAdminDb } from "../db/client";
 
 // ---------------------------------------------------------------------------
 // In-memory TTL cache: hostname -> { org_id, allowed_origins }
@@ -96,21 +96,25 @@ export const hostnameMiddleware = createMiddleware<{
     return next();
   }
 
-  // Look up from custom_domains table
+  // Look up from custom_domains table. This runs BEFORE auth middleware,
+  // so there is no user or org context yet — we have to use withAdminDb
+  // to find out which org the incoming hostname belongs to.
   try {
-    const sql = await getDb(c.env.HYPERDRIVE);
-    const rows = await sql`
-      SELECT org_id FROM custom_domains
-      WHERE hostname = ${lookupHostname} AND status = 'active'
-      LIMIT 1
-    `;
+    const row = await withAdminDb(c.env, async (sql) => {
+      const rows = await sql`
+        SELECT org_id FROM custom_domains
+        WHERE hostname = ${lookupHostname} AND status = 'active'
+        LIMIT 1
+      `;
+      return rows.length > 0 ? rows[0] : null;
+    });
 
-    if (rows.length === 0) {
+    if (!row) {
       // No matching custom domain — pass through (may be handled by auth normally)
       return next();
     }
 
-    const orgId: string = rows[0].org_id;
+    const orgId: string = row.org_id;
     const allowedOrigins: string[] | null = null;
 
     // Populate cache

@@ -6,7 +6,7 @@ import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses, ProjectSummary } from "../schemas/openapi";
 import type { CurrentUser } from "../auth/types";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { ORCHESTRATOR_SYSTEM_PROMPT, ORCHESTRATOR_TOOLS } from "../templates/orchestrator";
 import { parseJsonColumn } from "../lib/parse-json-column";
@@ -45,11 +45,12 @@ const listProjectsRoute = createRoute({
 });
 projectRoutes.openapi(listProjectsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const rows = await sql`
-    SELECT * FROM projects WHERE org_id = ${user.org_id} ORDER BY created_at DESC
-  `;
-  return c.json({ projects: rows });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT * FROM projects ORDER BY created_at DESC
+    `;
+    return c.json({ projects: rows });
+  });
 });
 
 // ── POST / — create a project ───────────────────────────────────────────
@@ -92,9 +93,10 @@ projectRoutes.openapi(createProjectRoute, async (c): Promise<any> => {
   const allowedPlans = new Set(["starter", "standard", "pro", "enterprise"]);
   if (!allowedPlans.has(plan)) return c.json({ error: "Invalid plan" }, 400);
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const projectId = genId();
   const slug = name.toLowerCase().replace(/\s+/g, "-");
+
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   await sql`
     INSERT INTO projects (project_id, org_id, name, slug, description, default_plan)
@@ -175,6 +177,7 @@ projectRoutes.openapi(createProjectRoute, async (c): Promise<any> => {
     envs: ["development", "staging", "production"],
     meta_agent: metaAgent,
   });
+  });
 });
 
 // ── GET /:project_id — get project details ──────────────────────────────
@@ -199,17 +202,17 @@ const getProjectRoute = createRoute({
 projectRoutes.openapi(getProjectRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { project_id: projectId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    let project: any;
+    try {
+      project = await requireProjectOrg(sql, projectId, user.org_id);
+    } catch (e: any) {
+      return c.json({ error: e.message }, e.status || 400);
+    }
 
-  let project: any;
-  try {
-    project = await requireProjectOrg(sql, projectId, user.org_id);
-  } catch (e: any) {
-    return c.json({ error: e.message }, e.status || 400);
-  }
-
-  const envs = await sql`SELECT * FROM environments WHERE project_id = ${projectId} AND project_id IN (SELECT project_id FROM projects WHERE org_id = ${user.org_id})`;
-  return c.json({ project, environments: envs });
+    const envs = await sql`SELECT * FROM environments WHERE project_id = ${projectId}`;
+    return c.json({ project, environments: envs });
+  });
 });
 
 // ── GET /:project_id/envs — list environments ──────────────────────────
@@ -234,16 +237,16 @@ const listEnvsRoute = createRoute({
 projectRoutes.openapi(listEnvsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { project_id: projectId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    try {
+      await requireProjectOrg(sql, projectId, user.org_id);
+    } catch (e: any) {
+      return c.json({ error: e.message }, e.status || 400);
+    }
 
-  try {
-    await requireProjectOrg(sql, projectId, user.org_id);
-  } catch (e: any) {
-    return c.json({ error: e.message }, e.status || 400);
-  }
-
-  const rows = await sql`SELECT * FROM environments WHERE project_id = ${projectId} AND project_id IN (SELECT project_id FROM projects WHERE org_id = ${user.org_id})`;
-  return c.json({ environments: rows });
+    const rows = await sql`SELECT * FROM environments WHERE project_id = ${projectId}`;
+    return c.json({ environments: rows });
+  });
 });
 
 // ── PUT /:project_id/envs/:env_name — update environment ───────────────
@@ -282,32 +285,33 @@ projectRoutes.openapi(updateEnvRoute, async (c): Promise<any> => {
   const plan = String(body.plan || "");
   const providerConfig = body.provider_config;
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  try {
-    await requireProjectOrg(sql, projectId, user.org_id);
-  } catch (e: any) {
-    return c.json({ error: e.message }, e.status || 400);
-  }
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    try {
+      await requireProjectOrg(sql, projectId, user.org_id);
+    } catch (e: any) {
+      return c.json({ error: e.message }, e.status || 400);
+    }
 
-  if (!plan && providerConfig === undefined) return c.json({ error: "Nothing to update" }, 400);
+    if (!plan && providerConfig === undefined) return c.json({ error: "Nothing to update" }, 400);
 
-  if (plan && providerConfig !== undefined) {
-    const configJson = JSON.stringify(providerConfig);
-    await sql`
-      UPDATE environments SET plan = ${plan}, provider_config = ${configJson}
-      WHERE project_id = ${projectId} AND name = ${envName}
-    `;
-  } else if (plan) {
-    await sql`UPDATE environments SET plan = ${plan} WHERE project_id = ${projectId} AND name = ${envName}`;
-  } else {
-    const configJson = JSON.stringify(providerConfig);
-    await sql`
-      UPDATE environments SET provider_config = ${configJson}
-      WHERE project_id = ${projectId} AND name = ${envName}
-    `;
-  }
+    if (plan && providerConfig !== undefined) {
+      const configJson = JSON.stringify(providerConfig);
+      await sql`
+        UPDATE environments SET plan = ${plan}, provider_config = ${configJson}
+        WHERE project_id = ${projectId} AND name = ${envName}
+      `;
+    } else if (plan) {
+      await sql`UPDATE environments SET plan = ${plan} WHERE project_id = ${projectId} AND name = ${envName}`;
+    } else {
+      const configJson = JSON.stringify(providerConfig);
+      await sql`
+        UPDATE environments SET provider_config = ${configJson}
+        WHERE project_id = ${projectId} AND name = ${envName}
+      `;
+    }
 
-  return c.json({ updated: envName });
+    return c.json({ updated: envName });
+  });
 });
 
 // ── GET /:project_id/canvas-layout — get canvas layout ─────────────────
@@ -341,33 +345,34 @@ const getCanvasLayoutRoute = createRoute({
 projectRoutes.openapi(getCanvasLayoutRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { project_id: projectId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    try {
+      await requireProjectOrg(sql, projectId, user.org_id);
+    } catch (e: any) {
+      return c.json({ error: e.message }, e.status || 400);
+    }
 
-  try {
-    await requireProjectOrg(sql, projectId, user.org_id);
-  } catch (e: any) {
-    return c.json({ error: e.message }, e.status || 400);
-  }
+    // project_canvas_layouts is not in the RLS-enforced list — keep filter.
+    const rows = await sql`
+      SELECT layout_json, assignments_json FROM project_canvas_layouts
+      WHERE project_id = ${projectId} AND org_id = ${user.org_id}
+    `;
 
-  const rows = await sql`
-    SELECT layout_json, assignments_json FROM project_canvas_layouts
-    WHERE project_id = ${projectId} AND org_id = ${user.org_id}
-  `;
+    if (rows.length === 0) {
+      return c.json({ nodes: [], edges: [], assignments: [], updated_at: 0 });
+    }
 
-  if (rows.length === 0) {
-    return c.json({ nodes: [], edges: [], assignments: [], updated_at: 0 });
-  }
+    let layout: any = {};
+    let assignments: any[] = [];
+    layout = parseJsonColumn(rows[0].layout_json);
+    assignments = parseJsonColumn(rows[0].assignments_json, []);
 
-  let layout: any = {};
-  let assignments: any[] = [];
-  layout = parseJsonColumn(rows[0].layout_json);
-  assignments = parseJsonColumn(rows[0].assignments_json, []);
-
-  return c.json({
-    nodes: layout.nodes || [],
-    edges: layout.edges || [],
-    assignments: Array.isArray(assignments) ? assignments : [],
-    updated_at: layout.updated_at || 0,
+    return c.json({
+      nodes: layout.nodes || [],
+      edges: layout.edges || [],
+      assignments: Array.isArray(assignments) ? assignments : [],
+      updated_at: layout.updated_at || 0,
+    });
   });
 });
 
@@ -413,40 +418,41 @@ projectRoutes.openapi(saveCanvasLayoutRoute, async (c): Promise<any> => {
   const edges = Array.isArray(body.edges) ? body.edges : [];
   let assignments = body.assignments;
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  try {
-    await requireProjectOrg(sql, projectId, user.org_id);
-  } catch (e: any) {
-    return c.json({ error: e.message }, e.status || 400);
-  }
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    try {
+      await requireProjectOrg(sql, projectId, user.org_id);
+    } catch (e: any) {
+      return c.json({ error: e.message }, e.status || 400);
+    }
 
-  const now = new Date().toISOString();
-  const layout = { nodes, edges, updated_at: now };
+    const now = new Date().toISOString();
+    const layout = { nodes, edges, updated_at: now };
 
-  if (assignments === undefined || assignments === null) {
-    // Derive from edges
-    assignments = edges
-      .filter((e: any) => typeof e === "object" && e?.source && e?.target)
-      .map((e: any) => ({
-        source_node_id: String(e.source),
-        target_node_id: String(e.target),
-        relationship: "attached",
-      }));
-  }
-  if (!Array.isArray(assignments)) assignments = [];
+    if (assignments === undefined || assignments === null) {
+      // Derive from edges
+      assignments = edges
+        .filter((e: any) => typeof e === "object" && e?.source && e?.target)
+        .map((e: any) => ({
+          source_node_id: String(e.source),
+          target_node_id: String(e.target),
+          relationship: "attached",
+        }));
+    }
+    if (!Array.isArray(assignments)) assignments = [];
 
-  const layoutJson = JSON.stringify(layout);
-  const assignmentsJson = JSON.stringify(assignments);
+    const layoutJson = JSON.stringify(layout);
+    const assignmentsJson = JSON.stringify(assignments);
 
-  await sql`
-    INSERT INTO project_canvas_layouts (project_id, org_id, layout_json, assignments_json, updated_by, updated_at)
-    VALUES (${projectId}, ${user.org_id}, ${layoutJson}, ${assignmentsJson}, ${user.user_id}, ${now})
-    ON CONFLICT (project_id) DO UPDATE SET
-      layout_json = EXCLUDED.layout_json,
-      assignments_json = EXCLUDED.assignments_json,
-      updated_by = EXCLUDED.updated_by,
-      updated_at = EXCLUDED.updated_at
-  `;
+    await sql`
+      INSERT INTO project_canvas_layouts (project_id, org_id, layout_json, assignments_json, updated_by, updated_at)
+      VALUES (${projectId}, ${user.org_id}, ${layoutJson}, ${assignmentsJson}, ${user.user_id}, ${now})
+      ON CONFLICT (project_id) DO UPDATE SET
+        layout_json = EXCLUDED.layout_json,
+        assignments_json = EXCLUDED.assignments_json,
+        updated_by = EXCLUDED.updated_by,
+        updated_at = EXCLUDED.updated_at
+    `;
 
-  return c.json({ saved: true, project_id: projectId, assignments: assignments.length });
+    return c.json({ saved: true, project_id: projectId, assignments: assignments.length });
+  });
 });

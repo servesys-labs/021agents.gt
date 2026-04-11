@@ -7,7 +7,7 @@ import type { CurrentUser } from "../auth/types";
 import { hasRole } from "../auth/types";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb, type OrgSql } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 export const complianceRoutes = createOpenAPIRouter();
@@ -20,7 +20,7 @@ function genId(): string {
 
 /** Fire-and-forget security event log */
 async function logSecurityEvent(
-  sql: ReturnType<typeof getDbForOrg> extends Promise<infer T> ? T : never,
+  sql: OrgSql,
   orgId: string,
   userId: string,
   action: string,
@@ -36,7 +36,7 @@ async function logSecurityEvent(
 
 /** Fire-and-forget audit log */
 async function auditLog(
-  sql: ReturnType<typeof getDbForOrg> extends Promise<infer T> ? T : never,
+  sql: OrgSql,
   orgId: string,
   userId: string,
   action: string,
@@ -89,20 +89,20 @@ complianceRoutes.openapi(deleteAccountRoute, async (c): Promise<any> => {
     return c.json({ error: "Admin or owner role required to delete other accounts" }, 403);
   }
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const requestId = genId();
   const orgId = user.org_id;
 
-  // Create deletion request record
-  await sql`
-    INSERT INTO account_deletion_requests (request_id, org_id, user_id, requested_by, reason, status, created_at)
-    VALUES (${requestId}, ${orgId}, ${targetUserId}, ${user.user_id}, ${reason}, 'processing', now())
-  `;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Create deletion request record
+    await sql`
+      INSERT INTO account_deletion_requests (request_id, org_id, user_id, requested_by, reason, status, created_at)
+      VALUES (${requestId}, ${orgId}, ${targetUserId}, ${user.user_id}, ${reason}, 'processing', now())
+    `;
 
-  let rowsDeleted = 0;
-  const tablesPurged: string[] = [];
+    let rowsDeleted = 0;
+    const tablesPurged: string[] = [];
 
-  try {
+    try {
     // 1. conversation_messages (via conversation_id join)
     const msgResult = await sql`
       DELETE FROM conversation_messages
@@ -245,8 +245,9 @@ complianceRoutes.openapi(deleteAccountRoute, async (c): Promise<any> => {
       error: err?.message ?? "unknown",
     });
 
-    return c.json({ error: "Account deletion failed", request_id: requestId }, 500);
-  }
+      return c.json({ error: "Account deletion failed", request_id: requestId }, 500);
+    }
+  });
 });
 
 // ── POST /data-export — Request full data export (GDPR Art. 20) ─────────
@@ -265,17 +266,17 @@ const dataExportRoute = createRoute({
 
 complianceRoutes.openapi(dataExportRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const orgId = user.org_id;
   const exportId = genId();
 
-  // Create export request record
-  await sql`
-    INSERT INTO data_export_requests (export_id, org_id, requested_by, status, created_at)
-    VALUES (${exportId}, ${orgId}, ${user.user_id}, 'pending', now())
-  `;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Create export request record
+    await sql`
+      INSERT INTO data_export_requests (export_id, org_id, requested_by, status, created_at)
+      VALUES (${exportId}, ${orgId}, ${user.user_id}, 'pending', now())
+    `;
 
-  try {
+    try {
     // Collect all org data
     const [
       agents,
@@ -292,24 +293,24 @@ complianceRoutes.openapi(dataExportRoute, async (c): Promise<any> => {
       orgSettings,
       orgMembers,
     ] = await Promise.all([
-      sql`SELECT * FROM agents WHERE org_id = ${orgId} LIMIT 10000`,
-      sql`SELECT * FROM agent_versions WHERE org_id = ${orgId} LIMIT 10000`,
-      sql`SELECT * FROM sessions WHERE org_id = ${orgId} LIMIT 10000`,
-      sql`SELECT t.* FROM turns t JOIN sessions s ON t.session_id = s.session_id WHERE s.org_id = ${orgId} LIMIT 10000`,
-      sql`SELECT * FROM conversations WHERE org_id = ${orgId} LIMIT 10000`,
+      sql`SELECT * FROM agents LIMIT 10000`,
+      sql`SELECT * FROM agent_versions LIMIT 10000`,
+      sql`SELECT * FROM sessions LIMIT 10000`,
+      sql`SELECT t.* FROM turns t JOIN sessions s ON t.session_id = s.session_id LIMIT 10000`,
+      sql`SELECT * FROM conversations LIMIT 10000`,
       sql`SELECT cm.* FROM conversation_messages cm
           JOIN conversations cv ON cm.conversation_id = cv.conversation_id
-          WHERE cv.org_id = ${orgId} LIMIT 10000`,
+          LIMIT 10000`,
       sql`SELECT key_id, org_id, user_id, name, scopes, created_at, expires_at, last_used_at, revoked
-          FROM api_keys WHERE org_id = ${orgId} LIMIT 10000`,
-      sql`SELECT * FROM billing_records WHERE org_id = ${orgId} LIMIT 10000`,
-      sql`SELECT * FROM webhooks WHERE org_id = ${orgId} LIMIT 10000`,
+          FROM api_keys LIMIT 10000`,
+      sql`SELECT * FROM billing_records LIMIT 10000`,
+      sql`SELECT * FROM webhooks LIMIT 10000`,
       sql`SELECT wd.* FROM webhook_deliveries wd
           JOIN webhooks w ON wd.webhook_id = w.webhook_id
-          WHERE w.org_id = ${orgId} LIMIT 10000`,
+          LIMIT 10000`,
       sql`SELECT file_id, org_id, uploaded_by, filename, content_type, size_bytes, created_at
-          FROM file_uploads WHERE org_id = ${orgId} LIMIT 10000`,
-      sql`SELECT * FROM org_settings WHERE org_id = ${orgId} LIMIT 10000`,
+          FROM file_uploads LIMIT 10000`,
+      sql`SELECT * FROM org_settings LIMIT 10000`,
       sql`SELECT * FROM org_members WHERE org_id = ${orgId} LIMIT 10000`,
     ]);
 
@@ -376,15 +377,16 @@ complianceRoutes.openapi(dataExportRoute, async (c): Promise<any> => {
       size_bytes: sizeBytes,
       expires_at: expiresAt,
     });
-  } catch (err: any) {
-    await sql`
-      UPDATE data_export_requests
-      SET status = 'failed', completed_at = now()
-      WHERE export_id = ${exportId}
-    `.catch(() => {});
+    } catch (err: any) {
+      await sql`
+        UPDATE data_export_requests
+        SET status = 'failed', completed_at = now()
+        WHERE export_id = ${exportId}
+      `.catch(() => {});
 
-    return c.json({ error: "Data export failed", export_id: exportId }, 500);
-  }
+      return c.json({ error: "Data export failed", export_id: exportId }, 500);
+    }
+  });
 });
 
 // ── GET /data-export/:export_id — Download data export ──────────────────
@@ -407,19 +409,19 @@ const downloadExportRoute = createRoute({
 complianceRoutes.openapi(downloadExportRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { export_id: exportId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  const rows = await sql`
-    SELECT * FROM data_export_requests
-    WHERE export_id = ${exportId} AND org_id = ${user.org_id}
-    LIMIT 1
-  `;
+  const exportReq = await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT * FROM data_export_requests
+      WHERE export_id = ${exportId}
+      LIMIT 1
+    `;
+    return rows.length > 0 ? (rows[0] as any) : null;
+  });
 
-  if (rows.length === 0) {
+  if (!exportReq) {
     return c.json({ error: "Export not found" }, 404);
   }
-
-  const exportReq = rows[0] as any;
 
   if (exportReq.status !== "completed" || !exportReq.r2_key) {
     return c.json({ error: "Export not ready or failed", status: exportReq.status }, 400);
@@ -459,17 +461,16 @@ const listExportsRoute = createRoute({
 
 complianceRoutes.openapi(listExportsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT export_id, org_id, requested_by, status, size_bytes, expires_at, created_at, completed_at
+      FROM data_export_requests
+      ORDER BY created_at DESC
+      LIMIT 50
+    `;
 
-  const rows = await sql`
-    SELECT export_id, org_id, requested_by, status, size_bytes, expires_at, created_at, completed_at
-    FROM data_export_requests
-    WHERE org_id = ${user.org_id}
-    ORDER BY created_at DESC
-    LIMIT 50
-  `;
-
-  return c.json({ exports: rows });
+    return c.json({ exports: rows });
+  });
 });
 
 // ── GET /deletion-requests — List deletion requests ─────────────────────
@@ -488,22 +489,21 @@ const listDeletionRequestsRoute = createRoute({
 
 complianceRoutes.openapi(listDeletionRequestsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT request_id, org_id, user_id, requested_by, reason, status,
+             rows_deleted, tables_purged, created_at, completed_at
+      FROM account_deletion_requests
+      ORDER BY created_at DESC
+      LIMIT 50
+    `;
 
-  const rows = await sql`
-    SELECT request_id, org_id, user_id, requested_by, reason, status,
-           rows_deleted, tables_purged, created_at, completed_at
-    FROM account_deletion_requests
-    WHERE org_id = ${user.org_id}
-    ORDER BY created_at DESC
-    LIMIT 50
-  `;
+    const result = rows.map((r: any) => {
+      const d = { ...r };
+      try { d.tables_purged = JSON.parse(d.tables_purged || "[]"); } catch { d.tables_purged = []; }
+      return d;
+    });
 
-  const result = rows.map((r: any) => {
-    const d = { ...r };
-    try { d.tables_purged = JSON.parse(d.tables_purged || "[]"); } catch { d.tables_purged = []; }
-    return d;
+    return c.json({ deletion_requests: result });
   });
-
-  return c.json({ deletion_requests: result });
 });

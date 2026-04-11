@@ -16,7 +16,7 @@ import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import {
   analyzeSessionRecords,
@@ -83,26 +83,25 @@ evolveRoutes.openapi(analyzeRoute, async (c): Promise<any> => {
   const body = await c.req.json().catch(() => ({}));
   const days = Math.min(90, Math.max(1, Number(body.days) || 7));
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Verify agent exists
+    const agentRows = await sql`
+      SELECT name, config FROM agents
+      WHERE name = ${agentName} AND is_active = true LIMIT 1
+    `;
+    if (agentRows.length === 0) return c.json({ error: "Agent not found" }, 404);
 
-  // Verify agent exists
-  const agentRows = await sql`
-    SELECT name, config FROM agents
-    WHERE name = ${agentName} AND org_id = ${orgId} AND is_active = true LIMIT 1
-  `;
-  if (agentRows.length === 0) return c.json({ error: "Agent not found" }, 404);
+    const agentConfig = safeJsonParse(agentRows[0].config) || {};
+    const since = new Date(Date.now() - days * 86400 * 1000).toISOString();
 
-  const agentConfig = safeJsonParse(agentRows[0].config) || {};
-  const since = new Date(Date.now() - days * 86400 * 1000).toISOString();
-
-  // Fetch sessions in the time window
-  const sessions = await sql`
-    SELECT session_id, agent_name, status, cost_total_usd, wall_clock_seconds,
-           step_count, action_count, created_at
-    FROM sessions
-    WHERE agent_name = ${agentName} AND org_id = ${orgId} AND created_at > ${since}
-    ORDER BY created_at DESC LIMIT 500
-  `;
+    // Fetch sessions in the time window
+    const sessions = await sql`
+      SELECT session_id, agent_name, status, cost_total_usd, wall_clock_seconds,
+             step_count, action_count, created_at
+      FROM sessions
+      WHERE agent_name = ${agentName} AND created_at > ${since}
+      ORDER BY created_at DESC LIMIT 500
+    `;
 
   // Batch-fetch all turns for all sessions to avoid N+1 queries
   const allSessionIds = sessions.map((s: any) => String(s.session_id));
@@ -225,10 +224,11 @@ evolveRoutes.openapi(analyzeRoute, async (c): Promise<any> => {
     )
   `.catch(() => {});
 
-  return c.json({
-    report,
-    proposals,
-    sessions_analyzed: records.length,
+    return c.json({
+      report,
+      proposals,
+      sessions_analyzed: records.length,
+    });
   });
 });
 
@@ -251,24 +251,23 @@ const reportRoute = createRoute({
 
 evolveRoutes.openapi(reportRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const orgId = user.org_id;
   const { agent_name: agentName } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT report, session_count, created_at FROM evolution_reports
+      WHERE agent_name = ${agentName}
+      ORDER BY created_at DESC LIMIT 1
+    `.catch(() => []);
 
-  const rows = await sql`
-    SELECT report, session_count, created_at FROM evolution_reports
-    WHERE agent_name = ${agentName} AND org_id = ${orgId}
-    ORDER BY created_at DESC LIMIT 1
-  `.catch(() => []);
+    if (rows.length === 0) {
+      return c.json({ report: null, message: "No analysis runs yet. POST to /:agent_name/analyze to start." });
+    }
 
-  if (rows.length === 0) {
-    return c.json({ report: null, message: "No analysis runs yet. POST to /:agent_name/analyze to start." });
-  }
-
-  return c.json({
-    report: safeJsonParse(rows[0].report),
-    sessions_analyzed: Number(rows[0].session_count || 0),
-    analyzed_at: Number(rows[0].created_at || 0),
+    return c.json({
+      report: safeJsonParse(rows[0].report),
+      sessions_analyzed: Number(rows[0].session_count || 0),
+      analyzed_at: Number(rows[0].created_at || 0),
+    });
   });
 });
 
@@ -302,25 +301,24 @@ evolveRoutes.openapi(applyRoute, async (c): Promise<any> => {
   const autopilotRequested = body.autopilot === true || body.scheduled === true;
   const applyGuard = body.evolution_apply_guard as { force?: boolean; reason?: string } | undefined;
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Fetch the proposal
+    const proposalRows = await sql`
+      SELECT * FROM evolution_proposals
+      WHERE proposal_id = ${proposalId} AND agent_name = ${agentName}
+    `;
+    if (proposalRows.length === 0) return c.json({ error: "Proposal not found" }, 404);
+    const proposal = proposalRows[0];
+    if (proposal.status !== "approved") {
+      return c.json({ error: "Proposal must be approved before applying" }, 400);
+    }
 
-  // Fetch the proposal
-  const proposalRows = await sql`
-    SELECT * FROM evolution_proposals
-    WHERE proposal_id = ${proposalId} AND agent_name = ${agentName} AND org_id = ${orgId}
-  `;
-  if (proposalRows.length === 0) return c.json({ error: "Proposal not found" }, 404);
-  const proposal = proposalRows[0];
-  if (proposal.status !== "approved") {
-    return c.json({ error: "Proposal must be approved before applying" }, 400);
-  }
-
-  // Fetch current agent config
-  const agentRows = await sql`
-    SELECT config FROM agents
-    WHERE name = ${agentName} AND org_id = ${orgId} AND is_active = true LIMIT 1
-  `;
-  if (agentRows.length === 0) return c.json({ error: "Agent not found" }, 404);
+    // Fetch current agent config
+    const agentRows = await sql`
+      SELECT config FROM agents
+      WHERE name = ${agentName} AND is_active = true LIMIT 1
+    `;
+    if (agentRows.length === 0) return c.json({ error: "Agent not found" }, 404);
 
   const currentConfig = safeJsonParse(agentRows[0].config) || {};
   const modification = safeJsonParse(proposal.config_diff) || {};
@@ -357,7 +355,7 @@ evolveRoutes.openapi(applyRoute, async (c): Promise<any> => {
   const now = new Date().toISOString();
   await sql`
     UPDATE agents SET config = ${JSON.stringify(newConfig)}
-    WHERE name = ${agentName} AND org_id = ${orgId}
+    WHERE name = ${agentName}
   `;
 
   // Notify runtime DO to invalidate config cache — ensures the evolution
@@ -391,7 +389,7 @@ evolveRoutes.openapi(applyRoute, async (c): Promise<any> => {
   // Mark proposal as applied
   await sql`
     UPDATE evolution_proposals SET status = 'applied', reviewed_at = ${now}
-    WHERE proposal_id = ${proposalId} AND org_id = ${orgId}
+    WHERE proposal_id = ${proposalId}
   `;
 
   const applyContext = {
@@ -430,14 +428,15 @@ evolveRoutes.openapi(applyRoute, async (c): Promise<any> => {
     markers_before: applyContext.markers_before,
   });
 
-  return c.json({
-    applied: true,
-    proposal_id: proposalId,
-    title: proposal.title,
-    changes: Object.keys(modification),
-    metrics_before: baselineMetrics,
-    apply_markers: applyContext.markers_before,
-    autopilot: autopilotRequested,
+    return c.json({
+      applied: true,
+      proposal_id: proposalId,
+      title: proposal.title,
+      changes: Object.keys(modification),
+      metrics_before: baselineMetrics,
+      apply_markers: applyContext.markers_before,
+      autopilot: autopilotRequested,
+    });
   });
 });
 
@@ -463,26 +462,25 @@ evolveRoutes.openapi(measureImpactRoute, async (c): Promise<any> => {
   const orgId = user.org_id;
   const { agent_name: agentName, proposal_id: proposalId } = c.req.valid("param");
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Fetch proposal — must be applied
+    const proposalRows = await sql`
+      SELECT * FROM evolution_proposals
+      WHERE proposal_id = ${proposalId} AND agent_name = ${agentName}
+    `;
+    if (proposalRows.length === 0) return c.json({ error: "Proposal not found" }, 404);
+    const proposal = proposalRows[0];
+    if (proposal.status !== "applied") {
+      return c.json({ error: "Can only measure impact on applied proposals" }, 400);
+    }
 
-  // Fetch proposal — must be applied
-  const proposalRows = await sql`
-    SELECT * FROM evolution_proposals
-    WHERE proposal_id = ${proposalId} AND agent_name = ${agentName} AND org_id = ${orgId}
-  `;
-  if (proposalRows.length === 0) return c.json({ error: "Proposal not found" }, 404);
-  const proposal = proposalRows[0];
-  if (proposal.status !== "applied") {
-    return c.json({ error: "Can only measure impact on applied proposals" }, 400);
-  }
-
-  // Fetch the ledger entry to get applied_at timestamp and baseline metrics
-  const ledgerRows = await sql`
-    SELECT * FROM evolution_ledger
-    WHERE proposal_id = ${proposalId} AND agent_name = ${agentName} AND org_id = ${orgId}
-      AND action = 'applied'
-    ORDER BY created_at DESC LIMIT 1
-  `;
+    // Fetch the ledger entry to get applied_at timestamp and baseline metrics
+    const ledgerRows = await sql`
+      SELECT * FROM evolution_ledger
+      WHERE proposal_id = ${proposalId} AND agent_name = ${agentName}
+        AND action = 'applied'
+      ORDER BY created_at DESC LIMIT 1
+    `;
   if (ledgerRows.length === 0) {
     return c.json({ error: "No ledger entry found for this applied proposal" }, 404);
   }
@@ -535,26 +533,27 @@ evolveRoutes.openapi(measureImpactRoute, async (c): Promise<any> => {
   // Store impact data
   const impactData = { metrics_before: metricsBefore, metrics_after: metricsAfter, delta, improved, regressions, recommendation };
 
-  await sql`
-    UPDATE evolution_proposals
-    SET impact = ${JSON.stringify(impactData)}
-    WHERE proposal_id = ${proposalId} AND org_id = ${orgId}
-  `;
+    await sql`
+      UPDATE evolution_proposals
+      SET impact = ${JSON.stringify(impactData)}
+      WHERE proposal_id = ${proposalId}
+    `;
 
-  // Update ledger with metrics_after
-  await sql`
-    UPDATE evolution_ledger
-    SET metrics_after = ${JSON.stringify(metricsAfter)}
-    WHERE proposal_id = ${proposalId} AND agent_name = ${agentName} AND org_id = ${orgId}
-      AND action = 'applied'
-  `;
+    // Update ledger with metrics_after
+    await sql`
+      UPDATE evolution_ledger
+      SET metrics_after = ${JSON.stringify(metricsAfter)}
+      WHERE proposal_id = ${proposalId} AND agent_name = ${agentName}
+        AND action = 'applied'
+    `;
 
-  return c.json({
-    improved,
-    metrics_before: metricsBefore,
-    metrics_after: metricsAfter,
-    delta,
-    recommendation,
+    return c.json({
+      improved,
+      metrics_before: metricsBefore,
+      metrics_after: metricsAfter,
+      delta,
+      recommendation,
+    });
   });
 });
 
@@ -583,26 +582,25 @@ evolveRoutes.openapi(autoRollbackRoute, async (c): Promise<any> => {
   const body = await c.req.json().catch(() => ({}));
   const reason = String(body.reason || "Auto-rollback due to metric regression");
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Fetch proposal
+    const proposalRows = await sql`
+      SELECT * FROM evolution_proposals
+      WHERE proposal_id = ${proposalId} AND agent_name = ${agentName}
+    `;
+    if (proposalRows.length === 0) return c.json({ error: "Proposal not found" }, 404);
+    const proposal = proposalRows[0];
+    if (proposal.status !== "applied") {
+      return c.json({ error: "Can only rollback applied proposals" }, 400);
+    }
 
-  // Fetch proposal
-  const proposalRows = await sql`
-    SELECT * FROM evolution_proposals
-    WHERE proposal_id = ${proposalId} AND agent_name = ${agentName} AND org_id = ${orgId}
-  `;
-  if (proposalRows.length === 0) return c.json({ error: "Proposal not found" }, 404);
-  const proposal = proposalRows[0];
-  if (proposal.status !== "applied") {
-    return c.json({ error: "Can only rollback applied proposals" }, 400);
-  }
-
-  // Fetch ledger entry with previous config
-  const ledgerRows = await sql`
-    SELECT * FROM evolution_ledger
-    WHERE proposal_id = ${proposalId} AND agent_name = ${agentName} AND org_id = ${orgId}
-      AND action = 'applied'
-    ORDER BY created_at DESC LIMIT 1
-  `;
+    // Fetch ledger entry with previous config
+    const ledgerRows = await sql`
+      SELECT * FROM evolution_ledger
+      WHERE proposal_id = ${proposalId} AND agent_name = ${agentName}
+        AND action = 'applied'
+      ORDER BY created_at DESC LIMIT 1
+    `;
   if (ledgerRows.length === 0) {
     return c.json({ error: "No ledger entry found — cannot determine previous config" }, 404);
   }
@@ -617,7 +615,7 @@ evolveRoutes.openapi(autoRollbackRoute, async (c): Promise<any> => {
   // Restore previous config to the agent
   await sql`
     UPDATE agents SET config = ${JSON.stringify(previousConfig)}
-    WHERE name = ${agentName} AND org_id = ${orgId}
+    WHERE name = ${agentName}
   `;
 
   // Notify runtime DO to invalidate config cache
@@ -659,7 +657,7 @@ evolveRoutes.openapi(autoRollbackRoute, async (c): Promise<any> => {
   await sql`
     UPDATE evolution_proposals
     SET status = 'rolled_back', rolled_back_at = ${now}, rollback_reason = ${reason}
-    WHERE proposal_id = ${proposalId} AND org_id = ${orgId}
+    WHERE proposal_id = ${proposalId}
   `;
 
   // Record rollback in ledger
@@ -674,11 +672,12 @@ evolveRoutes.openapi(autoRollbackRoute, async (c): Promise<any> => {
     )
   `;
 
-  return c.json({
-    rolled_back: true,
-    proposal_id: proposalId,
-    reason,
-    config_restored: true,
+    return c.json({
+      rolled_back: true,
+      proposal_id: proposalId,
+      reason,
+      config_restored: true,
+    });
   });
 });
 
@@ -727,40 +726,39 @@ const listProposalsRoute = createRoute({
 
 evolveRoutes.openapi(listProposalsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const orgId = user.org_id;
   const { agent_name: agentName } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Verify agent belongs to this org
+    const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} LIMIT 1`;
+    if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
 
-  // Verify agent belongs to this org
-  const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
-  if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
+    try {
+      const rows = await sql`
+        SELECT * FROM evolution_proposals
+        WHERE agent_name = ${agentName}
+        ORDER BY created_at DESC
+      `;
 
-  try {
-    const rows = await sql`
-      SELECT * FROM evolution_proposals
-      WHERE agent_name = ${agentName} AND org_id = ${orgId}
-      ORDER BY created_at DESC
-    `;
-
-    // Enrich applied/rolled_back proposals with impact data
-    const proposals = rows.map((row: any) => {
-      const base: any = { ...row };
-      if ((row.status === "applied" || row.status === "rolled_back") && row.impact) {
-        const impact = safeJsonParse(row.impact);
-        if (impact) {
-          base.impact = impact;
+      // Enrich applied/rolled_back proposals with impact data
+      const proposals = rows.map((row: any) => {
+        const base: any = { ...row };
+        if ((row.status === "applied" || row.status === "rolled_back") && row.impact) {
+          const impact = safeJsonParse(row.impact);
+          if (impact) {
+            base.impact = impact;
+          }
         }
-      }
-      if (row.status === "rolled_back" && row.rollback_reason) {
-        base.rollback_reason = row.rollback_reason;
-      }
-      return base;
-    });
+        if (row.status === "rolled_back" && row.rollback_reason) {
+          base.rollback_reason = row.rollback_reason;
+        }
+        return base;
+      });
 
-    return c.json({ proposals });
-  } catch {
-    return c.json({ proposals: [] });
-  }
+      return c.json({ proposals });
+    } catch {
+      return c.json({ proposals: [] });
+    }
+  });
 });
 
 // ── POST /:agent_name/proposals/:proposal_id/approve ────────────
@@ -788,32 +786,32 @@ evolveRoutes.openapi(approveRoute, async (c): Promise<any> => {
   const body = await c.req.json().catch(() => ({}));
   const note = String(body.note || "");
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Verify agent belongs to this org
+    const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} LIMIT 1`;
+    if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
 
-  // Verify agent belongs to this org
-  const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
-  if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
+    const rows = await sql`
+      SELECT * FROM evolution_proposals
+      WHERE proposal_id = ${proposalId} AND agent_name = ${agentName}
+    `;
+    if (rows.length === 0) return c.json({ error: "Proposal not found" }, 404);
 
-  const rows = await sql`
-    SELECT * FROM evolution_proposals
-    WHERE proposal_id = ${proposalId} AND agent_name = ${agentName} AND org_id = ${orgId}
-  `;
-  if (rows.length === 0) return c.json({ error: "Proposal not found" }, 404);
+    const now = new Date().toISOString();
+    await sql`
+      UPDATE evolution_proposals
+      SET status = 'approved', review_note = ${note}, reviewed_at = ${now}
+      WHERE proposal_id = ${proposalId}
+    `;
 
-  const now = new Date().toISOString();
-  await sql`
-    UPDATE evolution_proposals
-    SET status = 'approved', review_note = ${note}, reviewed_at = ${now}
-    WHERE proposal_id = ${proposalId} AND org_id = ${orgId}
-  `;
+    // Add ledger entry
+    await sql`
+      INSERT INTO evolution_ledger (agent_name, org_id, proposal_id, action, note, created_at)
+      VALUES (${agentName}, ${orgId}, ${proposalId}, 'approved', ${note}, ${now})
+    `;
 
-  // Add ledger entry
-  await sql`
-    INSERT INTO evolution_ledger (agent_name, org_id, proposal_id, action, note, created_at)
-    VALUES (${agentName}, ${orgId}, ${proposalId}, 'approved', ${note}, ${now})
-  `;
-
-  return c.json({ approved: proposalId, title: rows[0].title || "" });
+    return c.json({ approved: proposalId, title: rows[0].title || "" });
+  });
 });
 
 // ── POST /:agent_name/proposals/:proposal_id/reject ─────────────
@@ -841,31 +839,31 @@ evolveRoutes.openapi(rejectRoute, async (c): Promise<any> => {
   const body = await c.req.json().catch(() => ({}));
   const note = String(body.note || "");
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Verify agent belongs to this org
+    const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} LIMIT 1`;
+    if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
 
-  // Verify agent belongs to this org
-  const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
-  if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
+    const rows = await sql`
+      SELECT * FROM evolution_proposals
+      WHERE proposal_id = ${proposalId} AND agent_name = ${agentName}
+    `;
+    if (rows.length === 0) return c.json({ error: "Proposal not found" }, 404);
 
-  const rows = await sql`
-    SELECT * FROM evolution_proposals
-    WHERE proposal_id = ${proposalId} AND agent_name = ${agentName} AND org_id = ${orgId}
-  `;
-  if (rows.length === 0) return c.json({ error: "Proposal not found" }, 404);
+    const now = new Date().toISOString();
+    await sql`
+      UPDATE evolution_proposals
+      SET status = 'rejected', review_note = ${note}, reviewed_at = ${now}
+      WHERE proposal_id = ${proposalId}
+    `;
 
-  const now = new Date().toISOString();
-  await sql`
-    UPDATE evolution_proposals
-    SET status = 'rejected', review_note = ${note}, reviewed_at = ${now}
-    WHERE proposal_id = ${proposalId} AND org_id = ${orgId}
-  `;
+    await sql`
+      INSERT INTO evolution_ledger (agent_name, org_id, proposal_id, action, note, created_at)
+      VALUES (${agentName}, ${orgId}, ${proposalId}, 'rejected', ${note}, ${now})
+    `;
 
-  await sql`
-    INSERT INTO evolution_ledger (agent_name, org_id, proposal_id, action, note, created_at)
-    VALUES (${agentName}, ${orgId}, ${proposalId}, 'rejected', ${note}, ${now})
-  `;
-
-  return c.json({ rejected: proposalId, title: rows[0].title || "" });
+    return c.json({ rejected: proposalId, title: rows[0].title || "" });
+  });
 });
 
 // ── GET /:agent_name/ledger ─────────────────────────────────────
@@ -887,24 +885,23 @@ const ledgerRoute = createRoute({
 
 evolveRoutes.openapi(ledgerRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const orgId = user.org_id;
   const { agent_name: agentName } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Verify agent belongs to this org
+    const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} LIMIT 1`;
+    if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
 
-  // Verify agent belongs to this org
-  const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
-  if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
-
-  try {
-    const rows = await sql`
-      SELECT * FROM evolution_ledger
-      WHERE agent_name = ${agentName} AND org_id = ${orgId}
-      ORDER BY created_at DESC
-    `;
-    return c.json({ entries: rows, current_version: "0.1.0" });
-  } catch {
-    return c.json({ entries: [], current_version: "0.1.0" });
-  }
+    try {
+      const rows = await sql`
+        SELECT * FROM evolution_ledger
+        WHERE agent_name = ${agentName}
+        ORDER BY created_at DESC
+      `;
+      return c.json({ entries: rows, current_version: "0.1.0" });
+    } catch {
+      return c.json({ entries: [], current_version: "0.1.0" });
+    }
+  });
 });
 
 // ── GET /:agent_name/schedule ───────────────────────────────────
@@ -926,25 +923,24 @@ const getScheduleRoute = createRoute({
 
 evolveRoutes.openapi(getScheduleRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const orgId = user.org_id;
   const { agent_name: agentName } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Verify agent belongs to this org
+    const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} LIMIT 1`;
+    if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
 
-  // Verify agent belongs to this org
-  const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
-  if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
+    const rows = await sql`
+      SELECT * FROM evolution_schedules
+      WHERE agent_name = ${agentName}
+      LIMIT 1
+    `.catch(() => []);
 
-  const rows = await sql`
-    SELECT * FROM evolution_schedules
-    WHERE agent_name = ${agentName} AND org_id = ${orgId}
-    LIMIT 1
-  `.catch(() => []);
+    if (rows.length === 0) {
+      return c.json({ schedule: null, message: "No evolution schedule configured for this agent." });
+    }
 
-  if (rows.length === 0) {
-    return c.json({ schedule: null, message: "No evolution schedule configured for this agent." });
-  }
-
-  return c.json({ schedule: rows[0] });
+    return c.json({ schedule: rows[0] });
+  });
 });
 
 // ── POST /:agent_name/schedule ──────────────────────────────────
@@ -979,49 +975,49 @@ evolveRoutes.openapi(createScheduleRoute, async (c): Promise<any> => {
   const minSessions = Math.min(1000, Math.max(1, Number(body.min_sessions) || 10));
   const isActive = body.is_active !== false;
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Verify agent belongs to this org
+    const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} LIMIT 1`;
+    if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
 
-  // Verify agent belongs to this org
-  const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
-  if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
+    const now = Date.now() / 1000;
+    const nextRunAt = now + intervalDays * 86400;
+    const id = `evosched-${crypto.randomUUID().slice(0, 12)}`;
 
-  const now = Date.now() / 1000;
-  const nextRunAt = now + intervalDays * 86400;
-  const id = `evosched-${crypto.randomUUID().slice(0, 12)}`;
-
-  // Upsert: create or update existing schedule for this agent+org
-  await sql`
-    INSERT INTO evolution_schedules (id, agent_name, org_id, is_active, interval_days, min_sessions, next_run_at, created_at)
-    VALUES (${id}, ${agentName}, ${orgId}, ${isActive}, ${intervalDays}, ${minSessions}, ${nextRunAt}, ${now})
-    ON CONFLICT (id) DO NOTHING
-  `;
-
-  // If a row already exists for this agent+org, update it instead
-  const existing = await sql`
-    SELECT id FROM evolution_schedules
-    WHERE agent_name = ${agentName} AND org_id = ${orgId} AND id != ${id}
-    LIMIT 1
-  `.catch(() => []);
-
-  if (existing.length > 0) {
+    // Upsert: create or update existing schedule for this agent+org
     await sql`
-      UPDATE evolution_schedules
-      SET is_active = ${isActive},
-          interval_days = ${intervalDays},
-          min_sessions = ${minSessions},
-          next_run_at = CASE WHEN next_run_at IS NULL THEN ${nextRunAt} ELSE next_run_at END
-      WHERE agent_name = ${agentName} AND org_id = ${orgId}
+      INSERT INTO evolution_schedules (id, agent_name, org_id, is_active, interval_days, min_sessions, next_run_at, created_at)
+      VALUES (${id}, ${agentName}, ${orgId}, ${isActive}, ${intervalDays}, ${minSessions}, ${nextRunAt}, ${now})
+      ON CONFLICT (id) DO NOTHING
     `;
-    // Remove the duplicate we just inserted
-    await sql`DELETE FROM evolution_schedules WHERE id = ${id}`.catch(() => {});
-  }
 
-  const rows = await sql`
-    SELECT * FROM evolution_schedules
-    WHERE agent_name = ${agentName} AND org_id = ${orgId} LIMIT 1
-  `.catch(() => []);
+    // If a row already exists for this agent+org, update it instead
+    const existing = await sql`
+      SELECT id FROM evolution_schedules
+      WHERE agent_name = ${agentName} AND id != ${id}
+      LIMIT 1
+    `.catch(() => []);
 
-  return c.json({ schedule: rows[0] || null, created: existing.length === 0 });
+    if (existing.length > 0) {
+      await sql`
+        UPDATE evolution_schedules
+        SET is_active = ${isActive},
+            interval_days = ${intervalDays},
+            min_sessions = ${minSessions},
+            next_run_at = CASE WHEN next_run_at IS NULL THEN ${nextRunAt} ELSE next_run_at END
+        WHERE agent_name = ${agentName}
+      `;
+      // Remove the duplicate we just inserted
+      await sql`DELETE FROM evolution_schedules WHERE id = ${id}`.catch(() => {});
+    }
+
+    const rows = await sql`
+      SELECT * FROM evolution_schedules
+      WHERE agent_name = ${agentName} LIMIT 1
+    `.catch(() => []);
+
+    return c.json({ schedule: rows[0] || null, created: existing.length === 0 });
+  });
 });
 
 // ── DELETE /:agent_name/schedule ────────────────────────────────
@@ -1043,22 +1039,21 @@ const deleteScheduleRoute = createRoute({
 
 evolveRoutes.openapi(deleteScheduleRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const orgId = user.org_id;
   const { agent_name: agentName } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Verify agent belongs to this org
+    const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} LIMIT 1`;
+    if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
 
-  // Verify agent belongs to this org
-  const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
-  if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
+    // Soft-disable rather than delete, so history is preserved
+    await sql`
+      UPDATE evolution_schedules
+      SET is_active = false
+      WHERE agent_name = ${agentName}
+    `.catch(() => {});
 
-  // Soft-disable rather than delete, so history is preserved
-  await sql`
-    UPDATE evolution_schedules
-    SET is_active = false
-    WHERE agent_name = ${agentName} AND org_id = ${orgId}
-  `.catch(() => {});
-
-  return c.json({ disabled: true, agent_name: agentName });
+    return c.json({ disabled: true, agent_name: agentName });
+  });
 });
 
 // ── Helpers ────────────────────────────────────────────────────

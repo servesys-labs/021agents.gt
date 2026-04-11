@@ -7,7 +7,7 @@
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 export const skillRoutes = createOpenAPIRouter();
@@ -29,13 +29,14 @@ const listSkillsRoute = createRoute({
 });
 skillRoutes.openapi(listSkillsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  try {
-    const rows = await sql`SELECT * FROM skills WHERE org_id = ${user.org_id} ORDER BY name`;
-    return c.json(rows);
-  } catch {
-    return c.json([]);
-  }
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    try {
+      const rows = await sql`SELECT * FROM skills ORDER BY name`;
+      return c.json(rows);
+    } catch {
+      return c.json([]);
+    }
+  });
 });
 
 // ── GET /skills/{name} ────────────────────────────────────────────────
@@ -60,11 +61,11 @@ const getSkillRoute = createRoute({
 skillRoutes.openapi(getSkillRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { name } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  const rows = await sql`SELECT * FROM skills WHERE org_id = ${user.org_id} AND name = ${name}`;
-  if (rows.length === 0) return c.json({ error: `Skill '${name}' not found` }, 404);
-  return c.json(rows[0]);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`SELECT * FROM skills WHERE name = ${name}`;
+    if (rows.length === 0) return c.json({ error: `Skill '${name}' not found` }, 404);
+    return c.json(rows[0]);
+  });
 });
 
 // ── PUT /skills/{name} ────────────────────────────────────────────────
@@ -101,14 +102,15 @@ skillRoutes.openapi(updateSkillRoute, async (c): Promise<any> => {
   const body = c.req.valid("json");
   const isActive = Boolean(body.is_active);
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const rows = await sql`SELECT name FROM skills WHERE org_id = ${user.org_id} AND name = ${name}`;
-  if (rows.length === 0) return c.json({ error: `Skill '${name}' not found` }, 404);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`SELECT name FROM skills WHERE name = ${name}`;
+    if (rows.length === 0) return c.json({ error: `Skill '${name}' not found` }, 404);
 
-  await sql`UPDATE skills SET is_active = ${isActive} WHERE org_id = ${user.org_id} AND name = ${name}`;
+    await sql`UPDATE skills SET is_active = ${isActive} WHERE name = ${name}`;
 
-  const updated = await sql`SELECT * FROM skills WHERE org_id = ${user.org_id} AND name = ${name}`;
-  return c.json(updated[0]);
+    const updated = await sql`SELECT * FROM skills WHERE name = ${name}`;
+    return c.json(updated[0]);
+  });
 });
 
 // ── POST /skills/reload ────────────────────────────────────────────────
@@ -136,16 +138,16 @@ const reloadSkillsRoute = createRoute({
 });
 skillRoutes.openapi(reloadSkillsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  try {
-    const rows = await sql`SELECT * FROM skills WHERE org_id = ${user.org_id} ORDER BY name`;
-    return c.json({
-      total: rows.length,
-      enabled: rows.filter((r: any) => r.is_active).length,
-      skills: rows.map((r: any) => r.name),
-    });
-  } catch {
-    return c.json({ total: 0, enabled: 0, skills: [] });
-  }
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    try {
+      const rows = await sql`SELECT * FROM skills ORDER BY name`;
+      return c.json({
+        total: rows.length,
+        enabled: rows.filter((r: any) => r.is_active).length,
+        skills: rows.map((r: any) => r.name),
+      });
+    } catch {
+      return c.json({ total: 0, enabled: 0, skills: [] });
+    }
+  });
 });

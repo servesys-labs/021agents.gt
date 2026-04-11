@@ -13,6 +13,7 @@
  */
 
 import { fastAgentTurn, type FastAgentResult, type FastAgentOpts } from "./fast-agent";
+import { log } from "./log";
 import { getChannelConfig, isVoiceChannel, isRealtimeChannel, type ChannelId } from "./channel-prompts";
 
 // ── Types ─────────────────────────────────────────────────────
@@ -145,7 +146,7 @@ export async function channelAgentTurn(
     try {
       await callbacks.onEscalationStart(fastResult.escalation_message);
     } catch (err) {
-      console.warn(`[channel-router] onEscalationStart callback failed: ${err}`);
+      log.warn(`[channel-router] onEscalationStart callback failed: ${err}`);
     }
   }
 
@@ -178,7 +179,7 @@ export async function channelAgentTurn(
       },
     };
   } catch (err) {
-    console.error(`[channel-router] Full pipeline failed: ${err}`);
+    log.error(`[channel-router] Full pipeline failed: ${err}`);
 
     // If the fast path had partial output (e.g. from tool calls), use that
     if (fastResult.output) {

@@ -1,5 +1,15 @@
 const TOKEN_KEY = "oneshots_token";
 
+export class ApiError extends Error {
+  status: number;
+  body: string;
+  constructor(status: number, body: string) {
+    super(`API ${status}: ${body}`);
+    this.status = status;
+    this.body = body;
+  }
+}
+
 export class ApiClient {
   baseUrl: string;
 
@@ -27,7 +37,31 @@ export class ApiClient {
     return h;
   }
 
+  /**
+   * Handle a 401 response. Only clears the token and redirects when we
+   * have good reason to believe the session is actually invalid:
+   *
+   *   - We must be in a browser context (not SSR).
+   *   - We must not already be on the login page — otherwise the
+   *     redirect loops forever against a failing /auth/me probe.
+   *   - We must have held a token at the time of the request —
+   *     401s on anonymous calls shouldn't nuke a token we don't own.
+   *
+   * Network errors (fetch rejection, CORS, DNS) never reach here;
+   * they throw before a status is assigned, so they cannot trip the
+   * logout path by mistake.
+   */
+  private handleUnauthorized(hadToken: boolean): void {
+    if (typeof window === "undefined") return;
+    if (!hadToken) return;
+    this.token = null;
+    const path = window.location.pathname;
+    if (path === "/login" || path.startsWith("/login/")) return;
+    window.location.href = "/login";
+  }
+
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+    const hadToken = this.token !== null;
     const res = await fetch(`${this.baseUrl}${path}`, {
       method,
       headers: this.headers(),
@@ -35,14 +69,14 @@ export class ApiClient {
     });
 
     if (res.status === 401) {
-      this.token = null;
-      if (typeof window !== "undefined") window.location.href = "/login";
-      throw new Error("Unauthorized");
+      this.handleUnauthorized(hadToken);
+      const text = await res.text().catch(() => res.statusText);
+      throw new ApiError(401, text || "Unauthorized");
     }
 
     if (!res.ok) {
       const text = await res.text().catch(() => res.statusText);
-      throw new Error(`API ${res.status}: ${text}`);
+      throw new ApiError(res.status, text);
     }
 
     if (res.status === 204) return undefined as T;
@@ -101,6 +135,7 @@ export class ApiClient {
   }
 
   async postForm<T>(path: string, formData: FormData): Promise<T> {
+    const hadToken = this.token !== null;
     const h: HeadersInit = {};
     if (this.token) h["Authorization"] = `Bearer ${this.token}`;
     // Don't set Content-Type — browser sets multipart boundary automatically
@@ -111,20 +146,21 @@ export class ApiClient {
     });
 
     if (res.status === 401) {
-      this.token = null;
-      if (typeof window !== "undefined") window.location.href = "/login";
-      throw new Error("Unauthorized");
+      this.handleUnauthorized(hadToken);
+      const text = await res.text().catch(() => res.statusText);
+      throw new ApiError(401, text || "Unauthorized");
     }
 
     if (!res.ok) {
       const text = await res.text().catch(() => res.statusText);
-      throw new Error(`API ${res.status}: ${text}`);
+      throw new ApiError(res.status, text);
     }
 
     return res.json() as Promise<T>;
   }
 
   async postBlob(path: string, body: unknown): Promise<Blob> {
+    const hadToken = this.token !== null;
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: "POST",
       headers: this.headers(),
@@ -132,14 +168,14 @@ export class ApiClient {
     });
 
     if (res.status === 401) {
-      this.token = null;
-      if (typeof window !== "undefined") window.location.href = "/login";
-      throw new Error("Unauthorized");
+      this.handleUnauthorized(hadToken);
+      const text = await res.text().catch(() => res.statusText);
+      throw new ApiError(401, text || "Unauthorized");
     }
 
     if (!res.ok) {
       const text = await res.text().catch(() => res.statusText);
-      throw new Error(`API ${res.status}: ${text}`);
+      throw new ApiError(res.status, text);
     }
 
     return res.blob();

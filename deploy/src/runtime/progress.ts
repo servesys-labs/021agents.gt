@@ -13,6 +13,7 @@
  */
 
 import type { AgentConfig, RuntimeEvent } from "./types";
+import { log } from "./log";
 
 // ── Types ─────────────────────────────────────────────────────
 
@@ -159,7 +160,7 @@ export async function writeProgress(
         summary = EXCLUDED.summary
     `;
   } catch (err) {
-    console.error(
+    log.error(
       "[progress] writeProgress failed:",
       err instanceof Error ? err.message : err,
     );
@@ -237,7 +238,7 @@ export async function loadStartupContext(
       context_block: contextBlock,
     };
   } catch (err) {
-    console.error(
+    log.error(
       "[progress] loadStartupContext failed:",
       err instanceof Error ? err.message : err,
     );

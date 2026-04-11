@@ -8,7 +8,7 @@ import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import type { Env } from "../env";
-import { getDb } from "../db/client";
+import { withOrgDb, withAdminDb } from "../db/client";
 import Stripe from "stripe";
 import { requireScope } from "../middleware/auth";
 import { addCredits } from "../logic/credits";
@@ -75,32 +75,33 @@ stripeRoutes.openapi(checkoutRoute, async (c): Promise<any> => {
   const priceId = PLAN_PRICES[plan];
   if (!priceId) return c.json({ error: `Unknown plan: ${plan}` }, 400);
 
-  const sql = await getDb(c.env.HYPERDRIVE);
-  const orgs = await sql`SELECT * FROM orgs WHERE org_id = ${user.org_id}`;
-  if (orgs.length === 0) return c.json({ error: "Org not found" }, 404);
-  const org = orgs[0] as any;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const orgs = await sql`SELECT * FROM orgs`;
+    if (orgs.length === 0) return c.json({ error: "Org not found" }, 404);
+    const org = orgs[0] as any;
 
-  let customerId = org.stripe_customer_id || "";
-  if (!customerId) {
-    const customer = await stripe.customers.create({
-      email: user.email,
-      metadata: { org_id: user.org_id, user_id: user.user_id },
+    let customerId = org.stripe_customer_id || "";
+    if (!customerId) {
+      const customer = await stripe.customers.create({
+        email: user.email,
+        metadata: { org_id: user.org_id, user_id: user.user_id },
+      });
+      customerId = customer.id;
+      await sql`UPDATE orgs SET stripe_customer_id = ${customerId}`;
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      customer: customerId,
+      payment_method_types: ["card"],
+      line_items: [{ price: priceId, quantity: 1 }],
+      mode: "subscription",
+      success_url: successUrl,
+      cancel_url: cancelUrl,
+      metadata: { org_id: user.org_id, plan },
     });
-    customerId = customer.id;
-    await sql`UPDATE orgs SET stripe_customer_id = ${customerId} WHERE org_id = ${user.org_id}`;
-  }
 
-  const session = await stripe.checkout.sessions.create({
-    customer: customerId,
-    payment_method_types: ["card"],
-    line_items: [{ price: priceId, quantity: 1 }],
-    mode: "subscription",
-    success_url: successUrl,
-    cancel_url: cancelUrl,
-    metadata: { org_id: user.org_id, plan },
+    return c.json({ checkout_url: session.url, session_id: session.id });
   });
-
-  return c.json({ checkout_url: session.url, session_id: session.id });
 });
 
 // ── POST /stripe/portal ────────────────────────────────────────────────
@@ -142,17 +143,18 @@ stripeRoutes.openapi(portalRoute, async (c): Promise<any> => {
     return c.json({ error: e.message }, 503);
   }
 
-  const sql = await getDb(c.env.HYPERDRIVE);
-  const orgs = await sql`SELECT stripe_customer_id FROM orgs WHERE org_id = ${user.org_id}`;
-  if (orgs.length === 0 || !orgs[0].stripe_customer_id) {
-    return c.json({ error: "No Stripe customer found. Subscribe to a plan first." }, 400);
-  }
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const orgs = await sql`SELECT stripe_customer_id FROM orgs`;
+    if (orgs.length === 0 || !orgs[0].stripe_customer_id) {
+      return c.json({ error: "No Stripe customer found. Subscribe to a plan first." }, 400);
+    }
 
-  const session = await stripe.billingPortal.sessions.create({
-    customer: orgs[0].stripe_customer_id,
-    return_url: returnUrl,
+    const session = await stripe.billingPortal.sessions.create({
+      customer: orgs[0].stripe_customer_id,
+      return_url: returnUrl,
+    });
+    return c.json({ portal_url: session.url });
   });
-  return c.json({ portal_url: session.url });
 });
 
 // ── POST /stripe/webhook ───────────────────────────────────────────────
@@ -195,93 +197,109 @@ stripeRoutes.openapi(webhookRoute, async (c): Promise<any> => {
   const eventType = event.type || "";
   const eventId = event.id || "";
   const data = event.data?.object || {};
-  const sql = await getDb(c.env.HYPERDRIVE);
   const now = new Date().toISOString();
 
-  // ── Idempotency: skip already-processed events ────────────────
-  if (eventId) {
-    const existing = await sql`
-      SELECT 1 FROM stripe_events_processed WHERE event_id = ${eventId} LIMIT 1
-    `.catch(() => []);
-    if (existing.length > 0) {
-      return c.json({ received: true, deduplicated: true });
-    }
-  }
-
-  if (eventType === "checkout.session.completed") {
-    const orgId = data.metadata?.org_id || "";
-    const packageId = data.metadata?.package_id || "";
-    const isCreditPurchase = data.metadata?.type === "credit_purchase";
-
-    if (orgId && isCreditPurchase && packageId) {
-      // ── Credit purchase fulfillment ───────────────────────
-      const pkgs = await sql`
-        SELECT credits_usd, name FROM credit_packages WHERE id = ${packageId} LIMIT 1
-      `;
-      if (pkgs.length > 0) {
-        const pkg = pkgs[0] as any;
-        const creditsUsd = Number(pkg.credits_usd);
-        await addCredits(
-          sql,
-          orgId,
-          creditsUsd,
-          `Credit purchase: ${pkg.name}`,
-          data.id || eventId,
-          "stripe_checkout",
-        );
-        console.log(`[stripe] Credited $${creditsUsd} to org ${orgId} (package: ${packageId})`);
-      }
-    } else if (orgId) {
-      // ── Subscription checkout (existing flow) ─────────────
-      const plan = data.metadata?.plan || "standard";
-      const subscriptionId = data.subscription || "";
-      await sql`
-        UPDATE orgs SET plan = ${plan}, stripe_subscription_id = ${subscriptionId}, updated_at = ${now}
-        WHERE org_id = ${orgId}
-      `;
-    }
-  } else if (eventType === "customer.subscription.deleted") {
-    const customerId = data.customer || "";
-    const orgs = await sql`SELECT org_id FROM orgs WHERE stripe_customer_id = ${customerId}`;
-    if (orgs.length > 0) {
-      await sql`
-        UPDATE orgs SET plan = 'free', stripe_subscription_id = '', updated_at = ${now}
-        WHERE org_id = ${orgs[0].org_id}
-      `;
-    }
-  } else if (eventType === "invoice.paid") {
-    const customerId = data.customer || "";
-    const amount = (data.amount_paid || 0) / 100;
-    const orgs = await sql`SELECT org_id FROM orgs WHERE stripe_customer_id = ${customerId}`;
-    if (orgs.length > 0) {
-      await sql`
-        INSERT INTO billing_records (org_id, cost_type, total_cost_usd, description, created_at)
-        VALUES (${orgs[0].org_id}, 'subscription', ${amount}, ${`Stripe invoice: ${data.id || ""}`}, ${now})
-      `;
-
-      // If invoice has credit metadata, allocate credits for subscription renewals
-      const invoiceMeta = data.subscription_details?.metadata || data.lines?.data?.[0]?.metadata || {};
-      const invoiceCredits = Number(invoiceMeta.credits_usd || invoiceMeta.credits_cents ? Number(invoiceMeta.credits_cents) / 100 : 0);
-      if (invoiceCredits > 0 && orgs[0].org_id) {
-        await addCredits(
-          sql,
-          orgs[0].org_id,
-          invoiceCredits,
-          `Subscription credit allocation: invoice ${data.id || ""}`,
-          data.id || "",
-          "stripe_invoice",
-        );
+  // ── Idempotency check + resolve org context (admin connection — no
+  //    org context yet, signature already verified above). stripe_events_processed
+  //    is NOT RLS, and we need to read orgs.stripe_customer_id without an org GUC.
+  const dedupeAndResolve = await withAdminDb(c.env, async (sql) => {
+    if (eventId) {
+      const existing = await sql`
+        SELECT 1 FROM stripe_events_processed WHERE event_id = ${eventId} LIMIT 1
+      `.catch(() => []);
+      if (existing.length > 0) {
+        return { duplicate: true as const };
       }
     }
+
+    // Resolve org_id from event payload (metadata or customer lookup)
+    let orgId: string = data.metadata?.org_id || "";
+    if (!orgId && (eventType === "customer.subscription.deleted" || eventType === "invoice.paid")) {
+      const customerId = data.customer || "";
+      if (customerId) {
+        const orgs = await sql`SELECT org_id FROM orgs WHERE stripe_customer_id = ${customerId}`;
+        if (orgs.length > 0) orgId = String(orgs[0].org_id || "");
+      }
+    }
+    return { duplicate: false as const, orgId };
+  });
+
+  if (dedupeAndResolve.duplicate) {
+    return c.json({ received: true, deduplicated: true });
   }
 
-  // ── Mark event as processed ───────────────────────────────────
+  const resolvedOrgId = dedupeAndResolve.orgId;
+
+  // ── Apply state mutations under the resolved org's RLS context ────
+  if (resolvedOrgId) {
+    await withOrgDb(c.env, resolvedOrgId, async (sql) => {
+      if (eventType === "checkout.session.completed") {
+        const packageId = data.metadata?.package_id || "";
+        const isCreditPurchase = data.metadata?.type === "credit_purchase";
+
+        if (isCreditPurchase && packageId) {
+          // credit_packages is NOT RLS — keep direct lookup
+          const pkgs = await sql`
+            SELECT credits_usd, name FROM credit_packages WHERE id = ${packageId} LIMIT 1
+          `;
+          if (pkgs.length > 0) {
+            const pkg = pkgs[0] as any;
+            const creditsUsd = Number(pkg.credits_usd);
+            await addCredits(
+              sql,
+              resolvedOrgId,
+              creditsUsd,
+              `Credit purchase: ${pkg.name}`,
+              data.id || eventId,
+              "stripe_checkout",
+            );
+            console.log(`[stripe] Credited $${creditsUsd} to org ${resolvedOrgId} (package: ${packageId})`);
+          }
+        } else {
+          // ── Subscription checkout (existing flow) ─────────────
+          const plan = data.metadata?.plan || "standard";
+          const subscriptionId = data.subscription || "";
+          await sql`
+            UPDATE orgs SET plan = ${plan}, stripe_subscription_id = ${subscriptionId}, updated_at = ${now}
+          `;
+        }
+      } else if (eventType === "customer.subscription.deleted") {
+        await sql`
+          UPDATE orgs SET plan = 'free', stripe_subscription_id = '', updated_at = ${now}
+        `;
+      } else if (eventType === "invoice.paid") {
+        const amount = (data.amount_paid || 0) / 100;
+        await sql`
+          INSERT INTO billing_records (org_id, cost_type, total_cost_usd, description, created_at)
+          VALUES (${resolvedOrgId}, 'subscription', ${amount}, ${`Stripe invoice: ${data.id || ""}`}, ${now})
+        `;
+
+        // If invoice has credit metadata, allocate credits for subscription renewals
+        const invoiceMeta = data.subscription_details?.metadata || data.lines?.data?.[0]?.metadata || {};
+        const invoiceCredits = Number(invoiceMeta.credits_usd || invoiceMeta.credits_cents ? Number(invoiceMeta.credits_cents) / 100 : 0);
+        if (invoiceCredits > 0) {
+          await addCredits(
+            sql,
+            resolvedOrgId,
+            invoiceCredits,
+            `Subscription credit allocation: invoice ${data.id || ""}`,
+            data.id || "",
+            "stripe_invoice",
+          );
+        }
+      }
+    });
+  }
+
+  // ── Mark event as processed (admin — stripe_events_processed is global) ──
   if (eventId) {
-    await sql`
-      INSERT INTO stripe_events_processed (event_id, event_type, processed_at)
-      VALUES (${eventId}, ${eventType}, ${now})
-      ON CONFLICT (event_id) DO NOTHING
-    `.catch(() => {});
+    await withAdminDb(c.env, async (sql) => {
+      await sql`
+        INSERT INTO stripe_events_processed (event_id, event_type, processed_at)
+        VALUES (${eventId}, ${eventType}, ${now})
+        ON CONFLICT (event_id) DO NOTHING
+      `.catch(() => {});
+    });
   }
 
   return c.json({ received: true });
@@ -304,15 +322,16 @@ const statusRoute = createRoute({
 });
 stripeRoutes.openapi(statusRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
-  const orgs = await sql`
-    SELECT plan, stripe_customer_id, stripe_subscription_id FROM orgs WHERE org_id = ${user.org_id}
-  `;
-  if (orgs.length === 0) return c.json({ plan: "free", subscription: null });
-  const org = orgs[0] as any;
-  return c.json({
-    plan: org.plan || "free",
-    has_stripe: Boolean(org.stripe_customer_id),
-    subscription_id: org.stripe_subscription_id || null,
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const orgs = await sql`
+      SELECT plan, stripe_customer_id, stripe_subscription_id FROM orgs
+    `;
+    if (orgs.length === 0) return c.json({ plan: "free", subscription: null });
+    const org = orgs[0] as any;
+    return c.json({
+      plan: org.plan || "free",
+      has_stripe: Boolean(org.stripe_customer_id),
+      subscription_id: org.stripe_subscription_id || null,
+    });
   });
 });

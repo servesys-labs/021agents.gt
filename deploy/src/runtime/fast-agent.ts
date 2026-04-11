@@ -11,6 +11,7 @@
 
 import type { ToolDefinition } from "./types";
 import { getChannelConfig, type ChannelConfig } from "./channel-prompts";
+import { log } from "./log";
 
 // ── Types ─────────────────────────────────────────────────────
 
@@ -146,7 +147,7 @@ async function loadCachedConfig(
         };
       }
     } catch (err) {
-      console.warn(`[fast-agent] Config load failed for ${agentName}: ${err instanceof Error ? err.message : err}`);
+      log.warn(`[fast-agent] Config load failed for ${agentName}: ${err instanceof Error ? err.message : err}`);
     }
   }
 
@@ -446,7 +447,7 @@ function saveTurnAsync(
   if (!env.HYPERDRIVE) return;
   import("./db").then(({ writeConversationMessage }) => {
     writeConversationMessage(env.HYPERDRIVE, msg).catch((err: unknown) => {
-      console.warn(`[fast-agent] DB write failed: ${err instanceof Error ? err.message : err}`);
+      log.warn(`[fast-agent] DB write failed: ${err instanceof Error ? err.message : err}`);
     });
   }).catch(() => {});
 }
@@ -609,7 +610,7 @@ export async function fastAgentTurn(
 
   if (!resp.ok) {
     const errBody = await resp.text().catch(() => "");
-    console.error(`[fast-agent] LLM call failed (${resp.status}): ${errBody.slice(0, 300)}`);
+    log.error(`[fast-agent] LLM call failed (${resp.status}): ${errBody.slice(0, 300)}`);
     return {
       output: "Sorry, I encountered an issue. Please try again in a moment.",
       tool_calls: [], input_tokens: 0, output_tokens: 0,
@@ -646,7 +647,7 @@ export async function fastAgentTurn(
       try { escalateArgs = JSON.parse(escalateCall.function?.arguments || "{}"); } catch {}
       const reason = escalateArgs.reason || "complex task";
       const interim = escalateArgs.interim_message || "";
-      console.log(`[fast-agent] LLM escalated: ${reason}`);
+      log.info(`[fast-agent] LLM escalated: ${reason}`);
 
       const instanceId = opts.session_id || agentName;
       saveTurnAsync(env, { agent_name: agentName, instance_id: instanceId, role: "user", content: userMessage, channel });

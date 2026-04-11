@@ -370,8 +370,8 @@ export interface Env extends Cloudflare.Env {
   FACEBOOK_VERIFY_TOKEN?: string; // Meta handshake verification token for Messenger
   ENABLE_LANGCHAIN_TOOLS?: string;
   VAPI_API_KEY?: string;         // Vapi API key (for make-voice-call tool)
-  AGENT_RUN_WORKFLOW?: any;      // Cloudflare Workflow for durable agent runs
-  AGENT_PROGRESS_KV?: KVNamespace; // KV for workflow progress events
+  // AGENT_RUN_WORKFLOW — provided by Cloudflare.Env from wrangler.jsonc workflows binding
+  // AGENT_PROGRESS_KV — provided by Cloudflare.Env from wrangler.jsonc KV binding
   CONTROL_PLANE?: { fetch: (url: string, init?: RequestInit) => Promise<Response> }; // Service binding to control-plane Worker
 }
 
@@ -1184,7 +1184,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       try {
         const config = this.state.config;
         const runtimeEnv: RuntimeEnv = {
-          AI: this.env.AI, HYPERDRIVE: this.env.HYPERDRIVE, VECTORIZE: this.env.VECTORIZE,
+          AI: this.env.AI, HYPERDRIVE: this.env.HYPERDRIVE, HYPERDRIVE_ADMIN: this.env.HYPERDRIVE_ADMIN, VECTORIZE: this.env.VECTORIZE,
           STORAGE: this.env.STORAGE, SANDBOX: this.env.SANDBOX, LOADER: this.env.LOADER,
           TELEMETRY_QUEUE: this.env.TELEMETRY_QUEUE, BROWSER: this.env.BROWSER,
           AI_GATEWAY_ID: this.env.AI_GATEWAY_ID, AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN,
@@ -4614,7 +4614,7 @@ export default {
       const { executeScopedCode } = await import("./runtime/codemode");
       const { getToolDefinitions } = await import("./runtime/tools");
       const runtimeEnv: RuntimeEnv = {
-        AI: env.AI, HYPERDRIVE: env.HYPERDRIVE, VECTORIZE: env.VECTORIZE,
+        AI: env.AI, HYPERDRIVE: env.HYPERDRIVE, HYPERDRIVE_ADMIN: env.HYPERDRIVE_ADMIN, VECTORIZE: env.VECTORIZE,
         STORAGE: env.STORAGE, SANDBOX: env.SANDBOX, LOADER: env.LOADER,
         TELEMETRY_QUEUE: env.TELEMETRY_QUEUE, BROWSER: env.BROWSER,
         AI_GATEWAY_ID: env.AI_GATEWAY_ID, AI_GATEWAY_TOKEN: env.AI_GATEWAY_TOKEN,
@@ -4675,7 +4675,7 @@ export default {
       const { executeWebhookHandler } = await import("./runtime/codemode");
       const { getToolDefinitions } = await import("./runtime/tools");
       const runtimeEnv: RuntimeEnv = {
-        AI: env.AI, HYPERDRIVE: env.HYPERDRIVE, VECTORIZE: env.VECTORIZE,
+        AI: env.AI, HYPERDRIVE: env.HYPERDRIVE, HYPERDRIVE_ADMIN: env.HYPERDRIVE_ADMIN, VECTORIZE: env.VECTORIZE,
         STORAGE: env.STORAGE, SANDBOX: env.SANDBOX, LOADER: env.LOADER,
         TELEMETRY_QUEUE: env.TELEMETRY_QUEUE, BROWSER: env.BROWSER,
         AI_GATEWAY_ID: env.AI_GATEWAY_ID, AI_GATEWAY_TOKEN: env.AI_GATEWAY_TOKEN,
@@ -4751,7 +4751,7 @@ export default {
       }> };
 
       const runtimeEnv: RuntimeEnv = {
-        AI: env.AI, HYPERDRIVE: env.HYPERDRIVE, VECTORIZE: env.VECTORIZE,
+        AI: env.AI, HYPERDRIVE: env.HYPERDRIVE, HYPERDRIVE_ADMIN: env.HYPERDRIVE_ADMIN, VECTORIZE: env.VECTORIZE,
         STORAGE: env.STORAGE, SANDBOX: env.SANDBOX, LOADER: env.LOADER,
         TELEMETRY_QUEUE: env.TELEMETRY_QUEUE, BROWSER: env.BROWSER,
         AI_GATEWAY_ID: env.AI_GATEWAY_ID,

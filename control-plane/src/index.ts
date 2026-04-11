@@ -209,28 +209,31 @@ app.get("/.well-known/agent.json", (c) =>
 app.get("/api/v1/health/detailed", async (c) => {
   const checks: Record<string, { ok: boolean; latency_ms: number; error?: string }> = {};
 
-  // DB check
+  // DB check — platform-wide health, admin path.
   const dbStart = Date.now();
   try {
-    const { getDb } = await import("./db/client");
-    const sql = await getDb(c.env.HYPERDRIVE);
-    await sql`SELECT 1`;
+    const { withAdminDb } = await import("./db/client");
+    await withAdminDb(c.env, async (sql) => {
+      await sql`SELECT 1`;
+    });
     checks.database = { ok: true, latency_ms: Date.now() - dbStart };
   } catch (err: any) {
     checks.database = { ok: false, latency_ms: Date.now() - dbStart, error: err.message };
   }
 
-  // Billing system check
+  // Billing system check — platform-wide aggregate, admin path.
   const billStart = Date.now();
   try {
-    const { getDb } = await import("./db/client");
-    const sql = await getDb(c.env.HYPERDRIVE);
-    const [stats] = await sql`
-      SELECT
-        (SELECT COUNT(*) FROM credit_transactions WHERE created_at > now() - interval '1 hour') as tx_last_hour,
-        (SELECT COUNT(*) FROM credit_transactions WHERE type = 'burn' AND created_at > now() - interval '1 hour') as burns_last_hour,
-        (SELECT COALESCE(SUM(ABS(amount_usd)), 0) FROM credit_transactions WHERE type = 'burn' AND created_at > now() - interval '1 hour') as revenue_last_hour_usd
-    `;
+    const { withAdminDb } = await import("./db/client");
+    const stats = await withAdminDb(c.env, async (sql) => {
+      const [row] = await sql`
+        SELECT
+          (SELECT COUNT(*) FROM credit_transactions WHERE created_at > now() - interval '1 hour') as tx_last_hour,
+          (SELECT COUNT(*) FROM credit_transactions WHERE type = 'burn' AND created_at > now() - interval '1 hour') as burns_last_hour,
+          (SELECT COALESCE(SUM(ABS(amount_usd)), 0) FROM credit_transactions WHERE type = 'burn' AND created_at > now() - interval '1 hour') as revenue_last_hour_usd
+      `;
+      return row;
+    });
     checks.billing = {
       ok: true, latency_ms: Date.now() - billStart,
       ...stats as any,
@@ -598,15 +601,18 @@ app.get("/api/v1/docs", (c) => {
 export default {
   fetch: app.fetch,
 
-  // Queue consumer — async job processing
+  // Queue consumer — async job processing. This is a trusted backend
+  // iterating across many orgs per batch; it uses withAdminDb throughout.
+  // Per-job work that needs RLS-scoped writes can open nested withOrgDb
+  // inside the admin callback using the job payload's org_id.
   async queue(batch: MessageBatch, env: Env): Promise<void> {
-    const { getDb, getDbForOrg } = await import("./db/client");
+    const { withAdminDb } = await import("./db/client");
     const { hasCredits: hasCreditsCheck, deductCredits: deductCreditsForOrg } = await import("./logic/credits");
 
     await Promise.allSettled(batch.messages.map(async (msg) => {
       const job = msg.body as { type: string; payload: Record<string, unknown> };
       try {
-        const sql = await getDb(env.HYPERDRIVE);
+        await withAdminDb(env, async (sql) => {
         const now = new Date().toISOString();
 
         if (job.type === "agent_run") {
@@ -660,10 +666,11 @@ export default {
           let failedCount = 0;
 
           for (const task of tasks) {
-            // Credit gate: check before each task
+            // Credit gate: check before each task. Reuses the admin sql
+            // — hasCredits internally reads org_credit_balance which is
+            // admin-connected via the trusted backend pattern.
             try {
-              const creditSql = await getDbForOrg(env.HYPERDRIVE, orgId);
-              const hasEnough = await hasCreditsCheck(creditSql, orgId, 1);
+              const hasEnough = await hasCreditsCheck(sql, orgId, 1);
               if (!hasEnough) {
                 // Mark this and all remaining tasks as failed
                 await sql`
@@ -708,8 +715,7 @@ export default {
               // Fire-and-forget credit deduction based on actual cost
               try {
                 const costUsd = Number(result.cost_usd || 0);
-                const deductSql = await getDbForOrg(env.HYPERDRIVE, orgId);
-                deductCreditsForOrg(deductSql, orgId, costUsd, `Batch run: ${agentName}`, agentName, String(result.session_id || "")).catch(() => {});
+                deductCreditsForOrg(sql, orgId, costUsd, `Batch run: ${agentName}`, agentName, String(result.session_id || "")).catch(() => {});
               } catch {}
             } catch (taskErr) {
               await sql`UPDATE batch_tasks SET status = 'failed', error = ${String(taskErr)} WHERE task_id = ${task.task_id}`.catch(() => {});
@@ -877,15 +883,17 @@ export default {
         }
 
         msg.ack();
+        }); // end withAdminDb
       } catch (err) {
         console.error(`[queue] Job ${job.type} failed:`, err);
         // Update job status to failed
         try {
-          const sql = await getDb(env.HYPERDRIVE);
-          await sql`
-            UPDATE job_queue SET status = 'failed', error = ${String(err)}, completed_at = ${new Date().toISOString()}
-            WHERE job_id = ${String(job.payload.job_id || "")}
-          `;
+          await withAdminDb(env, async (sql) => {
+            await sql`
+              UPDATE job_queue SET status = 'failed', error = ${String(err)}, completed_at = ${new Date().toISOString()}
+              WHERE job_id = ${String(job.payload.job_id || "")}
+            `;
+          });
         } catch {}
         msg.retry();
       }
@@ -920,8 +928,9 @@ export default {
     // Autopilot: tick active sessions
     ctx.waitUntil(tickAutopilotSessions(env));
 
-    const { getDb } = await import("./db/client");
-    const sql = await getDb(env.HYPERDRIVE);
+    // Cron runs across every org — trusted backend, admin path.
+    const { withAdminDb } = await import("./db/client");
+    await withAdminDb(env, async (sql) => {
     const now = new Date().toISOString();
     const nowEpoch = Math.floor(Date.now() / 1000);
 
@@ -1493,5 +1502,6 @@ export default {
       console.error("[cron] Canary auto-promotion failed:", err);
     }
 
+    }); // end withAdminDb
   },
 };

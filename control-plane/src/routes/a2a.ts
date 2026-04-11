@@ -15,7 +15,7 @@
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { buildAgentCard, agentCardToJSON } from "../lib/a2a/card";
 import { parseAgentConfigJson } from "../schemas/common";
 
@@ -25,15 +25,19 @@ const taskStore = new Map<string, A2ATask>();
 /** Persist A2A task to DB for audit trail. */
 async function persistA2ATask(env: any, task: A2ATask, callerOrgId: string, calleeOrgId: string, transferId?: string, amountUsd?: number) {
   try {
-    const sql = await getDbForOrg(env.HYPERDRIVE, calleeOrgId);
-    const firstUserMsg = task.messages.find((m: any) => m.role === "user");
-    const input = String((firstUserMsg?.parts?.[0] as any)?.text || "");
-    const output = String((task.artifacts?.[0]?.parts?.[0] as any)?.text || "");
-    await sql`
-      INSERT INTO a2a_tasks (task_id, caller_org_id, callee_org_id, caller_agent_name, callee_agent_name, status, input_text, output_text, transfer_id, amount_usd, created_at, completed_at)
-      VALUES (${task.id}, ${callerOrgId}, ${calleeOrgId}, '', ${task.agentName || ''}, ${task.status.state.toLowerCase()}, ${input.slice(0, 5000)}, ${output.slice(0, 5000)}, ${transferId || ''}, ${amountUsd || 0}, ${task.status.timestamp || new Date().toISOString()}, ${task.status.state !== 'WORKING' ? task.status.timestamp : null})
-      ON CONFLICT (task_id) DO UPDATE SET status = ${task.status.state.toLowerCase()}, output_text = ${output.slice(0, 5000)}, completed_at = ${task.status.state !== 'WORKING' ? task.status.timestamp : null}
-    `;
+    // a2a_tasks has two-sided RLS (caller_org_id OR callee_org_id matches
+    // current_org_id()), so writing under the callee org is sufficient and
+    // both sides can read the row afterwards under their own GUC.
+    await withOrgDb(env, calleeOrgId, async (sql) => {
+      const firstUserMsg = task.messages.find((m: any) => m.role === "user");
+      const input = String((firstUserMsg?.parts?.[0] as any)?.text || "");
+      const output = String((task.artifacts?.[0]?.parts?.[0] as any)?.text || "");
+      await sql`
+        INSERT INTO a2a_tasks (task_id, caller_org_id, callee_org_id, caller_agent_name, callee_agent_name, status, input_text, output_text, transfer_id, amount_usd, created_at, completed_at)
+        VALUES (${task.id}, ${callerOrgId}, ${calleeOrgId}, '', ${task.agentName || ''}, ${task.status.state.toLowerCase()}, ${input.slice(0, 5000)}, ${output.slice(0, 5000)}, ${transferId || ''}, ${amountUsd || 0}, ${task.status.timestamp || new Date().toISOString()}, ${task.status.state !== 'WORKING' ? task.status.timestamp : null})
+        ON CONFLICT (task_id) DO UPDATE SET status = ${task.status.state.toLowerCase()}, output_text = ${output.slice(0, 5000)}, completed_at = ${task.status.state !== 'WORKING' ? task.status.timestamp : null}
+      `;
+    });
   } catch {} // non-blocking
 }
 
@@ -143,42 +147,42 @@ a2aRoutes.openapi(agentCardRoute, async (c): Promise<any> => {
     return c.json({ error: "Missing 'org' query parameter — required for public agent discovery" }, 400);
   }
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, orgParam);
+  return await withOrgDb(c.env, orgParam, async (sql) => {
+    const rows = agentParam
+      ? await sql`
+          SELECT name, description, config
+          FROM agents
+          WHERE name = ${agentParam} AND is_active = true
+          LIMIT 1
+        `
+      : await sql`
+          SELECT name, description, config
+          FROM agents
+          WHERE is_active = true
+          ORDER BY created_at DESC
+          LIMIT 1
+        `;
 
-  const rows = agentParam
-    ? await sql`
-        SELECT name, description, config
-        FROM agents
-        WHERE name = ${agentParam} AND org_id = ${orgParam} AND is_active = true
-        LIMIT 1
-      `
-    : await sql`
-        SELECT name, description, config
-        FROM agents
-        WHERE org_id = ${orgParam} AND is_active = true
-        ORDER BY created_at DESC
-        LIMIT 1
-      `;
+    if (rows.length === 0) {
+      return c.json({ error: "No agents available" }, 404);
+    }
 
-  if (rows.length === 0) {
-    return c.json({ error: "No agents available" }, 404);
-  }
+    const row = rows[0] as { name: string; description: string; config: unknown };
+    const config = parseAgentConfigJson(row.config);
 
-  const row = rows[0] as { name: string; description: string; config: unknown };
-  const config = parseAgentConfigJson(row.config);
+    const baseUrl = new URL(c.req.url).origin;
+    const agentConfig = {
+      name: row.name,
+      agent_id: (config.agent_id as string) || row.name,
+      description: row.description || (config.description as string) || "",
+      version: (config.version as string) || "0.1.0",
+      tools: Array.isArray(config.tools) ? config.tools : [],
+      tags: Array.isArray(config.tags) ? config.tags : [],
+    };
 
-  const baseUrl = new URL(c.req.url).origin;
-  const agentConfig = {
-    name: row.name,
-    agent_id: (config.agent_id as string) || row.name,
-    description: row.description || (config.description as string) || "",
-    version: (config.version as string) || "0.1.0",
-    tools: Array.isArray(config.tools) ? config.tools : [],
-    tags: Array.isArray(config.tags) ? config.tags : [],
-  };
-
-  const card = buildAgentCard(agentConfig, baseUrl);
-  return c.json(agentCardToJSON(card));
+    const card = buildAgentCard(agentConfig, baseUrl);
+    return c.json(agentCardToJSON(card));
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -203,14 +207,14 @@ a2aRoutes.openapi(agentCardsRoute, async (c): Promise<any> => {
     return c.json({ error: "Missing 'org' query parameter — required for public agent discovery" }, 400);
   }
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, orgParam);
-
-  const rows = await sql`
-    SELECT name, description, config
-    FROM agents
-    WHERE org_id = ${orgParam} AND is_active = true
-    ORDER BY created_at DESC
-  `;
+  const rows = await withOrgDb(c.env, orgParam, async (sql) => {
+    return await sql`
+      SELECT name, description, config
+      FROM agents
+      WHERE is_active = true
+      ORDER BY created_at DESC
+    `;
+  });
 
   const baseUrl = new URL(c.req.url).origin;
 
@@ -249,32 +253,32 @@ const agentsListRoute = createRoute({
 });
 a2aRoutes.openapi(agentsListRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let agents: Array<Record<string, unknown>> = [];
   try {
-    const rows = await sql`
-      SELECT name, description, config, is_active, created_at, updated_at
-      FROM agents
-      WHERE org_id = ${user.org_id}
-      ORDER BY created_at DESC
-    `;
+    agents = await withOrgDb(c.env, user.org_id, async (sql) => {
+      const rows = await sql`
+        SELECT name, description, config, is_active, created_at, updated_at
+        FROM agents
+        ORDER BY created_at DESC
+      `;
 
-    const baseUrl = new URL(c.req.url).origin;
+      const baseUrl = new URL(c.req.url).origin;
 
-    agents = rows.map((row: any) => {
-      const config = parseAgentConfigJson(row.config);
-      return {
-        agent_id: (config.agent_id as string) || row.name,
-        name: row.name,
-        description: row.description || (config.description as string) || "",
-        url: `${baseUrl}/a2a`,
-        status: Number(row.is_active) === 1 ? "active" : "inactive",
-        capabilities: Array.isArray(config.capabilities) ? config.capabilities : [],
-        skills: Array.isArray(config.tools) ? config.tools : [],
-        created_at: row.created_at,
-        updated_at: row.updated_at || row.created_at,
-      };
+      return rows.map((row: any) => {
+        const config = parseAgentConfigJson(row.config);
+        return {
+          agent_id: (config.agent_id as string) || row.name,
+          name: row.name,
+          description: row.description || (config.description as string) || "",
+          url: `${baseUrl}/a2a`,
+          status: Number(row.is_active) === 1 ? "active" : "inactive",
+          capabilities: Array.isArray(config.capabilities) ? config.capabilities : [],
+          skills: Array.isArray(config.tools) ? config.tools : [],
+          created_at: row.created_at,
+          updated_at: row.updated_at || row.created_at,
+        };
+      });
     });
   } catch {}
 
@@ -338,8 +342,7 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
       taskStore.set(taskId, task);
 
       try {
-        // Resolve agent
-        const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+        return await withOrgDb(c.env, user.org_id, async (sql) => {
 
         let targetAgentName = agentName;
         if (!targetAgentName) {
@@ -576,21 +579,23 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
         // Item 5: Auto-rate completed task (default 4/5 = good)
         // Item 8: Increment task counter on marketplace listing
         try {
-          const mktSql = await getDbForOrg(c.env.HYPERDRIVE, targetOrgId);
-          const [listing] = await mktSql`
-            SELECT id FROM marketplace_listings WHERE agent_name = ${targetAgentName} AND is_published = true LIMIT 1
-          `.catch(() => [] as any[]);
-          if (listing) {
-            const { submitRating } = await import("../logic/marketplace");
-            await submitRating(mktSql, listing.id, user.org_id, 4, { task_id: taskId }).catch(() => {});
-            await mktSql`
-              UPDATE marketplace_listings SET total_tasks_completed = total_tasks_completed + 1, updated_at = now()
-              WHERE id = ${listing.id}
-            `.catch(() => {});
-          }
+          await withOrgDb(c.env, targetOrgId, async (mktSql) => {
+            const [listing] = await mktSql`
+              SELECT id FROM marketplace_listings WHERE agent_name = ${targetAgentName} AND is_published = true LIMIT 1
+            `.catch(() => [] as any[]);
+            if (listing) {
+              const { submitRating } = await import("../logic/marketplace");
+              await submitRating(mktSql, listing.id, user.org_id, 4, { task_id: taskId }).catch(() => {});
+              await mktSql`
+                UPDATE marketplace_listings SET total_tasks_completed = total_tasks_completed + 1, updated_at = now()
+                WHERE id = ${listing.id}
+              `.catch(() => {});
+            }
+          });
         } catch {} // non-blocking
 
         return c.json(jsonrpcResponse(id, { task }));
+        }); // close withOrgDb
       } catch (e) {
         const errorMsg = e instanceof Error ? e.message : String(e);
         task.status = { state: "FAILED", timestamp: new Date().toISOString() };
@@ -600,28 +605,31 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
 
         // Item 8: Increment failure counter on marketplace listing
         try {
-          const mktSql = await getDbForOrg(c.env.HYPERDRIVE, targetOrgId);
-          await mktSql`
-            UPDATE marketplace_listings SET total_tasks_failed = COALESCE(total_tasks_failed, 0) + 1, updated_at = now()
-            WHERE agent_name = ${task.agentName || ''} AND is_published = true
-          `.catch(() => {});
+          await withOrgDb(c.env, targetOrgId, async (mktSql) => {
+            await mktSql`
+              UPDATE marketplace_listings SET total_tasks_failed = COALESCE(total_tasks_failed, 0) + 1, updated_at = now()
+              WHERE agent_name = ${task.agentName || ''} AND is_published = true
+            `.catch(() => {});
+          });
         } catch {} // non-blocking
 
         // Refund payment if task failed after payment
         const failedPaymentReceipt = params.payment_receipt as { transfer_id?: string } | undefined;
-        if (failedPaymentReceipt?.transfer_id && targetOrgId !== user.org_id) {
+        const failedTransferId = failedPaymentReceipt?.transfer_id;
+        if (failedTransferId && targetOrgId !== user.org_id) {
           try {
             const { refundTransfer } = await import("../logic/agent-payments");
-            const refundSql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-            // Look up original transfer amount from credit_transactions
-            const [txRow] = await refundSql`
-              SELECT ABS(amount_usd) as amount FROM credit_transactions
-              WHERE reference_id = ${failedPaymentReceipt.transfer_id} AND type = 'transfer_out' LIMIT 1
-            `.catch(() => []);
-            const refundAmount = Number(txRow?.amount || 0);
-            if (refundAmount > 0) {
-              await refundTransfer(refundSql, failedPaymentReceipt.transfer_id, user.org_id, targetOrgId, refundAmount, `A2A task failed: ${errorMsg.slice(0, 200)}`);
-            }
+            await withOrgDb(c.env, user.org_id, async (refundSql) => {
+              // Look up original transfer amount from credit_transactions
+              const [txRow] = await refundSql`
+                SELECT ABS(amount_usd) as amount FROM credit_transactions
+                WHERE reference_id = ${failedTransferId} AND type = 'transfer_out' LIMIT 1
+              `.catch(() => []);
+              const refundAmount = Number(txRow?.amount || 0);
+              if (refundAmount > 0) {
+                await refundTransfer(refundSql, failedTransferId, user.org_id, targetOrgId, refundAmount, `A2A task failed: ${errorMsg.slice(0, 200)}`);
+              }
+            });
           } catch {} // best-effort refund
         }
 
@@ -645,25 +653,27 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
       task.agentName = agentName;
       taskStore.set(taskId, task);
 
-      const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-      let targetAgentName = agentName;
-      if (!targetAgentName) {
-        const rows = await sql`
-          SELECT name FROM agents
-          WHERE org_id = ${user.org_id} AND is_active = true
-          ORDER BY created_at DESC
-          LIMIT 1
-        `;
-        if (rows.length === 0) {
-          task.status = { state: "FAILED", timestamp: new Date().toISOString() };
-          return c.json(jsonrpcError(id, -32000, "No agents available"), 400);
+      // Resolve agent + payment gate inside org-scoped tx; the streaming
+      // section below does not touch the DB and runs after the tx commits.
+      const gateResult = await withOrgDb(c.env, user.org_id, async (sql): Promise<
+        { error: Response; targetAgentName?: undefined } | { error?: undefined; targetAgentName: string }
+      > => {
+        let targetAgentName = agentName;
+        if (!targetAgentName) {
+          const rows = await sql`
+            SELECT name FROM agents
+            WHERE is_active = true
+            ORDER BY created_at DESC
+            LIMIT 1
+          `;
+          if (rows.length === 0) {
+            task.status = { state: "FAILED", timestamp: new Date().toISOString() };
+            return { error: c.json(jsonrpcError(id, -32000, "No agents available"), 400) };
+          }
+          targetAgentName = (rows[0] as { name: string }).name;
         }
-        targetAgentName = (rows[0] as { name: string }).name;
-      }
 
-      // ── x-402 Payment Gate (streaming) ──────────────────────────
-      {
+        // ── x-402 Payment Gate (streaming) ──────────────────────────
         const streamTargetOrgFromUrl = new URL(c.req.url).searchParams.get("org") || "";
         const streamAgentOwnerRows = await sql`
           SELECT org_id, config FROM agents
@@ -684,20 +694,25 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
             if (!paymentReceipt?.transfer_id) {
               task.status = { state: "FAILED", timestamp: new Date().toISOString() };
               const headers402 = build402Headers(pricing, targetAgentName, streamTargetOrgId);
-              return c.json(jsonrpcError(id, -32000, "Payment required"), {
+              return { error: c.json(jsonrpcError(id, -32000, "Payment required"), {
                 status: 402 as any,
                 headers: headers402,
-              });
+              }) };
             }
 
             const verification = await verifyPaymentReceipt(sql, paymentReceipt.transfer_id, streamTargetOrgId, pricing.price_per_task_usd);
             if (!verification.valid) {
               task.status = { state: "FAILED", timestamp: new Date().toISOString() };
-              return c.json(jsonrpcError(id, -32000, `Payment verification failed: ${verification.error}`), 402 as any);
+              return { error: c.json(jsonrpcError(id, -32000, `Payment verification failed: ${verification.error}`), 402 as any) };
             }
           }
         }
-      }
+
+        return { targetAgentName };
+      });
+
+      if (gateResult.error) return gateResult.error;
+      const targetAgentName = gateResult.targetAgentName;
 
       const encoder = new TextEncoder();
 
@@ -870,57 +885,66 @@ a2aRoutes.openapi(taskSendRoute, async (c): Promise<any> => {
   taskStore.set(taskId, task);
 
   try {
-    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+    // Resolve agent + payment gate inside org-scoped tx; the runtime fetch
+    // below does not touch the DB and runs after the tx commits.
+    const gateResult = await withOrgDb(c.env, user.org_id, async (sql): Promise<
+      { error: Response; targetAgentName?: undefined } | { error?: undefined; targetAgentName: string }
+    > => {
+      let targetAgentName = agentName;
+      if (!targetAgentName) {
+        const rows = await sql`
+          SELECT name FROM agents
+          WHERE is_active = true
+          ORDER BY created_at DESC
+          LIMIT 1
+        `;
+        if (rows.length === 0) {
+          task.status = { state: "FAILED", timestamp: new Date().toISOString() };
+          return { error: c.json(jsonrpcError(body.id || null, -32000, "No agents available"), 400) };
+        }
+        targetAgentName = (rows[0] as { name: string }).name;
+      }
 
-    let targetAgentName = agentName;
-    if (!targetAgentName) {
-      const rows = await sql`
-        SELECT name FROM agents
-        WHERE org_id = ${user.org_id} AND is_active = true
-        ORDER BY created_at DESC
+      // ── x-402 Payment Gate (REST) ──────────────────────────────
+      const restTargetOrgFromUrl = new URL(c.req.url).searchParams.get("org") || "";
+      const restAgentOwnerRows = await sql`
+        SELECT org_id, config FROM agents
+        WHERE name = ${targetAgentName} AND is_active = true
+        ${restTargetOrgFromUrl ? sql`AND org_id = ${restTargetOrgFromUrl}` : sql``}
         LIMIT 1
-      `;
-      if (rows.length === 0) {
-        task.status = { state: "FAILED", timestamp: new Date().toISOString() };
-        return c.json(jsonrpcError(body.id || null, -32000, "No agents available"), 400);
-      }
-      targetAgentName = (rows[0] as { name: string }).name;
-    }
+      `.catch(() => []);
+      const restTargetOrgId = restAgentOwnerRows.length > 0 ? String(restAgentOwnerRows[0].org_id) : user.org_id;
 
-    // ── x-402 Payment Gate (REST) ──────────────────────────────
-    const restTargetOrgFromUrl = new URL(c.req.url).searchParams.get("org") || "";
-    const restAgentOwnerRows = await sql`
-      SELECT org_id, config FROM agents
-      WHERE name = ${targetAgentName} AND is_active = true
-      ${restTargetOrgFromUrl ? sql`AND org_id = ${restTargetOrgFromUrl}` : sql``}
-      LIMIT 1
-    `.catch(() => []);
-    const restTargetOrgId = restAgentOwnerRows.length > 0 ? String(restAgentOwnerRows[0].org_id) : user.org_id;
+      if (restAgentOwnerRows.length > 0) {
+        const { getAgentPricing, build402Headers, verifyPaymentReceipt } = await import("../logic/agent-payments");
+        const cfg = typeof restAgentOwnerRows[0].config === "string" ? JSON.parse(restAgentOwnerRows[0].config) : restAgentOwnerRows[0].config || {};
+        const pricing = getAgentPricing(cfg);
 
-    if (restAgentOwnerRows.length > 0) {
-      const { getAgentPricing, build402Headers, verifyPaymentReceipt } = await import("../logic/agent-payments");
-      const cfg = typeof restAgentOwnerRows[0].config === "string" ? JSON.parse(restAgentOwnerRows[0].config) : restAgentOwnerRows[0].config || {};
-      const pricing = getAgentPricing(cfg);
+        if (pricing?.requires_payment && user.org_id !== restTargetOrgId) {
+          const paymentReceipt = (body as any).payment_receipt as { transfer_id?: string } | undefined;
 
-      if (pricing?.requires_payment && user.org_id !== restTargetOrgId) {
-        const paymentReceipt = (body as any).payment_receipt as { transfer_id?: string } | undefined;
+          if (!paymentReceipt?.transfer_id) {
+            task.status = { state: "FAILED", timestamp: new Date().toISOString() };
+            const headers402 = build402Headers(pricing, targetAgentName, restTargetOrgId);
+            return { error: c.json(jsonrpcError(body.id || null, -32000, "Payment required"), {
+              status: 402 as any,
+              headers: headers402,
+            }) };
+          }
 
-        if (!paymentReceipt?.transfer_id) {
-          task.status = { state: "FAILED", timestamp: new Date().toISOString() };
-          const headers402 = build402Headers(pricing, targetAgentName, restTargetOrgId);
-          return c.json(jsonrpcError(body.id || null, -32000, "Payment required"), {
-            status: 402 as any,
-            headers: headers402,
-          });
-        }
-
-        const verification = await verifyPaymentReceipt(sql, paymentReceipt.transfer_id, restTargetOrgId, pricing.price_per_task_usd);
-        if (!verification.valid) {
-          task.status = { state: "FAILED", timestamp: new Date().toISOString() };
-          return c.json(jsonrpcError(body.id || null, -32000, `Payment verification failed: ${verification.error}`), 402 as any);
+          const verification = await verifyPaymentReceipt(sql, paymentReceipt.transfer_id, restTargetOrgId, pricing.price_per_task_usd);
+          if (!verification.valid) {
+            task.status = { state: "FAILED", timestamp: new Date().toISOString() };
+            return { error: c.json(jsonrpcError(body.id || null, -32000, `Payment verification failed: ${verification.error}`), 402 as any) };
+          }
         }
       }
-    }
+
+      return { targetAgentName };
+    });
+
+    if (gateResult.error) return gateResult.error;
+    const targetAgentName = gateResult.targetAgentName;
 
     const resp = await c.env.RUNTIME.fetch(
       new Request("https://runtime/run", {
@@ -1018,25 +1042,27 @@ a2aRoutes.openapi(taskSendSubscribeRoute, async (c): Promise<any> => {
   task.agentName = agentName;
   taskStore.set(taskId, task);
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  let targetAgentName = agentName;
-  if (!targetAgentName) {
-    const rows = await sql`
-      SELECT name FROM agents
-      WHERE org_id = ${user.org_id} AND is_active = true
-      ORDER BY created_at DESC
-      LIMIT 1
-    `;
-    if (rows.length === 0) {
-      task.status = { state: "FAILED", timestamp: new Date().toISOString() };
-      return c.json(jsonrpcError(body.id || null, -32000, "No agents available"), 400);
+  // Resolve agent + payment gate inside org-scoped tx; the streaming
+  // section below does not touch the DB and runs after the tx commits.
+  const subGateResult = await withOrgDb(c.env, user.org_id, async (sql): Promise<
+    { error: Response; targetAgentName?: undefined } | { error?: undefined; targetAgentName: string }
+  > => {
+    let targetAgentName = agentName;
+    if (!targetAgentName) {
+      const rows = await sql`
+        SELECT name FROM agents
+        WHERE is_active = true
+        ORDER BY created_at DESC
+        LIMIT 1
+      `;
+      if (rows.length === 0) {
+        task.status = { state: "FAILED", timestamp: new Date().toISOString() };
+        return { error: c.json(jsonrpcError(body.id || null, -32000, "No agents available"), 400) };
+      }
+      targetAgentName = (rows[0] as { name: string }).name;
     }
-    targetAgentName = (rows[0] as { name: string }).name;
-  }
 
-  // ── x-402 Payment Gate (REST streaming) ────────────────────
-  {
+    // ── x-402 Payment Gate (REST streaming) ────────────────────
     const subTargetOrgFromUrl = new URL(c.req.url).searchParams.get("org") || "";
     const subAgentOwnerRows = await sql`
       SELECT org_id, config FROM agents
@@ -1057,20 +1083,25 @@ a2aRoutes.openapi(taskSendSubscribeRoute, async (c): Promise<any> => {
         if (!paymentReceipt?.transfer_id) {
           task.status = { state: "FAILED", timestamp: new Date().toISOString() };
           const headers402 = build402Headers(pricing, targetAgentName, subTargetOrgId);
-          return c.json(jsonrpcError(body.id || null, -32000, "Payment required"), {
+          return { error: c.json(jsonrpcError(body.id || null, -32000, "Payment required"), {
             status: 402 as any,
             headers: headers402,
-          });
+          }) };
         }
 
         const verification = await verifyPaymentReceipt(sql, paymentReceipt.transfer_id, subTargetOrgId, pricing.price_per_task_usd);
         if (!verification.valid) {
           task.status = { state: "FAILED", timestamp: new Date().toISOString() };
-          return c.json(jsonrpcError(body.id || null, -32000, `Payment verification failed: ${verification.error}`), 402 as any);
+          return { error: c.json(jsonrpcError(body.id || null, -32000, `Payment verification failed: ${verification.error}`), 402 as any) };
         }
       }
     }
-  }
+
+    return { targetAgentName };
+  });
+
+  if (subGateResult.error) return subGateResult.error;
+  const targetAgentName = subGateResult.targetAgentName;
 
   const encoder = new TextEncoder();
 

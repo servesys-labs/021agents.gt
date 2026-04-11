@@ -6,7 +6,7 @@ import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import type { CurrentUser } from "../auth/types";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { logSecurityEvent } from "../logic/security-events";
 
@@ -36,16 +36,19 @@ const listRetentionRoute = createRoute({
 });
 retentionRoutes.openapi(listRetentionRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const rows = await sql`
-    SELECT * FROM retention_policies WHERE org_id = ${user.org_id} OR org_id = '' ORDER BY resource_type
-  `;
-  const result = rows.map((r: any) => {
-    const d = { ...r };
-    try { d.redact_fields = JSON.parse(d.redact_fields || "[]"); } catch { d.redact_fields = []; }
-    return d;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // RLS filters retention_policies by current org; the OR org_id = ''
+    // also returns built-in templates which the policy permits.
+    const rows = await sql`
+      SELECT * FROM retention_policies WHERE org_id = ${user.org_id} OR org_id = '' ORDER BY resource_type
+    `;
+    const result = rows.map((r: any) => {
+      const d = { ...r };
+      try { d.redact_fields = JSON.parse(d.redact_fields || "[]"); } catch { d.redact_fields = []; }
+      return d;
+    });
+    return c.json({ policies: result });
   });
-  return c.json({ policies: result });
 });
 
 // ── POST / — Create retention policy ───────────────────────────────────────
@@ -91,15 +94,16 @@ retentionRoutes.openapi(createRetentionRoute, async (c): Promise<any> => {
     );
   }
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const policyId = genId();
 
-  await sql`
-    INSERT INTO retention_policies (policy_id, org_id, resource_type, retention_days, redact_pii, redact_fields, archive_before_delete)
-    VALUES (${policyId}, ${user.org_id}, ${resourceType}, ${retentionDays}, ${redactPii}, ${JSON.stringify(redactFields)}, ${archiveBeforeDelete})
-  `;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    await sql`
+      INSERT INTO retention_policies (policy_id, org_id, resource_type, retention_days, redact_pii, redact_fields, archive_before_delete)
+      VALUES (${policyId}, ${user.org_id}, ${resourceType}, ${retentionDays}, ${redactPii}, ${JSON.stringify(redactFields)}, ${archiveBeforeDelete})
+    `;
 
-  return c.json({ policy_id: policyId, resource_type: resourceType, retention_days: retentionDays });
+    return c.json({ policy_id: policyId, resource_type: resourceType, retention_days: retentionDays });
+  });
 });
 
 // ── DELETE /{policy_id} — Delete retention policy ──────────────────────────
@@ -120,9 +124,10 @@ const deleteRetentionRoute = createRoute({
 retentionRoutes.openapi(deleteRetentionRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { policy_id: policyId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  await sql`DELETE FROM retention_policies WHERE policy_id = ${policyId} AND org_id = ${user.org_id}`;
-  return c.json({ deleted: policyId });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    await sql`DELETE FROM retention_policies WHERE policy_id = ${policyId}`;
+    return c.json({ deleted: policyId });
+  });
 });
 
 // ── POST /apply — Apply retention policies ─────────────────────────────────
@@ -139,7 +144,7 @@ const applyRetentionRoute = createRoute({
 });
 retentionRoutes.openapi(applyRetentionRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   // Get all active policies for the org
   const policies = await sql`
@@ -262,4 +267,5 @@ retentionRoutes.openapi(applyRetentionRoute, async (c): Promise<any> => {
   } catch {}
 
   return c.json({ applied: results });
+  });
 });

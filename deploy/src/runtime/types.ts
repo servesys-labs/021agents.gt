@@ -200,6 +200,13 @@ export interface RuntimeEvent {
 export interface RuntimeEnv {
   AI: Ai;
   HYPERDRIVE: Hyperdrive;
+  /**
+   * Admin Hyperdrive binding — bypasses RLS for cross-org queries
+   * (runtime is a trusted backend processing events across tenants).
+   * In prototype mode this may share HYPERDRIVE's connection string;
+   * in production it should use a BYPASSRLS role for audit clarity.
+   */
+  HYPERDRIVE_ADMIN: Hyperdrive;
   VECTORIZE: VectorizeIndex;
   STORAGE: R2Bucket;
   SANDBOX: DurableObjectNamespace<any>;

@@ -6,7 +6,7 @@ import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { parseJsonColumn } from "../lib/parse-json-column";
 
@@ -36,24 +36,24 @@ sessionRoutes.openapi(getRuntimeInsightsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { since_days: sinceDays, limit_sessions: limitSessions } = c.req.valid("query");
   const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Aggregate runtime insights
+    const [stats] = await sql`
+      SELECT COUNT(*) as total_sessions,
+             COALESCE(AVG(wall_clock_seconds), 0) as avg_duration,
+             COALESCE(SUM(cost_total_usd), 0) as total_cost,
+             COALESCE(AVG(step_count), 0) as avg_steps
+      FROM sessions
+      WHERE created_at >= ${since}
+      LIMIT ${limitSessions}
+    `;
 
-  // Aggregate runtime insights
-  const [stats] = await sql`
-    SELECT COUNT(*) as total_sessions,
-           COALESCE(AVG(wall_clock_seconds), 0) as avg_duration,
-           COALESCE(SUM(cost_total_usd), 0) as total_cost,
-           COALESCE(AVG(step_count), 0) as avg_steps
-    FROM sessions
-    WHERE org_id = ${user.org_id} AND created_at >= ${since}
-    LIMIT ${limitSessions}
-  `;
-
-  return c.json({
-    total_sessions: Number(stats.total_sessions),
-    avg_duration_seconds: Number(stats.avg_duration),
-    total_cost_usd: Number(stats.total_cost),
-    avg_steps: Number(stats.avg_steps),
+    return c.json({
+      total_sessions: Number(stats.total_sessions),
+      avg_duration_seconds: Number(stats.avg_duration),
+      total_cost_usd: Number(stats.total_cost),
+      avg_steps: Number(stats.avg_steps),
+    });
   });
 });
 
@@ -79,45 +79,45 @@ sessionRoutes.openapi(getStatsSummaryRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name: agentName, since_days: sinceDays } = c.req.valid("query");
   const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    let summaryRows;
+    if (agentName) {
+      summaryRows = await sql`
+        SELECT COUNT(*) as total, COALESCE(SUM(cost_total_usd), 0) as cost, COALESCE(AVG(wall_clock_seconds), 0) as avg_duration
+        FROM sessions WHERE created_at >= ${since} AND agent_name = ${agentName}
+      `;
+    } else {
+      summaryRows = await sql`
+        SELECT COUNT(*) as total, COALESCE(SUM(cost_total_usd), 0) as cost, COALESCE(AVG(wall_clock_seconds), 0) as avg_duration
+        FROM sessions WHERE created_at >= ${since}
+      `;
+    }
+    const r = summaryRows[0] as any;
 
-  let summaryRows;
-  if (agentName) {
-    summaryRows = await sql`
-      SELECT COUNT(*) as total, COALESCE(SUM(cost_total_usd), 0) as cost, COALESCE(AVG(wall_clock_seconds), 0) as avg_duration
-      FROM sessions WHERE org_id = ${user.org_id} AND created_at >= ${since} AND agent_name = ${agentName}
-    `;
-  } else {
-    summaryRows = await sql`
-      SELECT COUNT(*) as total, COALESCE(SUM(cost_total_usd), 0) as cost, COALESCE(AVG(wall_clock_seconds), 0) as avg_duration
-      FROM sessions WHERE org_id = ${user.org_id} AND created_at >= ${since}
-    `;
-  }
-  const r = summaryRows[0] as any;
+    let statusRows;
+    if (agentName) {
+      statusRows = await sql`
+        SELECT status, COUNT(*) as cnt FROM sessions
+        WHERE created_at >= ${since} AND agent_name = ${agentName}
+        GROUP BY status
+      `;
+    } else {
+      statusRows = await sql`
+        SELECT status, COUNT(*) as cnt FROM sessions
+        WHERE created_at >= ${since}
+        GROUP BY status
+      `;
+    }
 
-  let statusRows;
-  if (agentName) {
-    statusRows = await sql`
-      SELECT status, COUNT(*) as cnt FROM sessions
-      WHERE org_id = ${user.org_id} AND created_at >= ${since} AND agent_name = ${agentName}
-      GROUP BY status
-    `;
-  } else {
-    statusRows = await sql`
-      SELECT status, COUNT(*) as cnt FROM sessions
-      WHERE org_id = ${user.org_id} AND created_at >= ${since}
-      GROUP BY status
-    `;
-  }
+    const byStatus: Record<string, number> = {};
+    for (const s of statusRows) byStatus[s.status] = Number(s.cnt);
 
-  const byStatus: Record<string, number> = {};
-  for (const s of statusRows) byStatus[s.status] = Number(s.cnt);
-
-  return c.json({
-    total_sessions: Number(r.total) || 0,
-    total_cost_usd: Number(r.cost) || 0,
-    avg_duration_seconds: Number(r.avg_duration) || 0,
-    by_status: byStatus,
+    return c.json({
+      total_sessions: Number(r.total) || 0,
+      total_cost_usd: Number(r.cost) || 0,
+      avg_duration_seconds: Number(r.avg_duration) || 0,
+      by_status: byStatus,
+    });
   });
 });
 
@@ -144,47 +144,47 @@ const listSessionsRoute = createRoute({
 sessionRoutes.openapi(listSessionsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name: agentName, status, limit, offset } = c.req.valid("query");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    let rows;
+    if (agentName && status) {
+      rows = await sql`
+        SELECT * FROM sessions WHERE agent_name = ${agentName} AND status = ${status}
+        ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}
+      `;
+    } else if (agentName) {
+      rows = await sql`
+        SELECT * FROM sessions WHERE agent_name = ${agentName}
+        ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}
+      `;
+    } else if (status) {
+      rows = await sql`
+        SELECT * FROM sessions WHERE status = ${status}
+        ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}
+      `;
+    } else {
+      rows = await sql`
+        SELECT * FROM sessions
+        ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}
+      `;
+    }
 
-  let rows;
-  if (agentName && status) {
-    rows = await sql`
-      SELECT * FROM sessions WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND status = ${status}
-      ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}
-    `;
-  } else if (agentName) {
-    rows = await sql`
-      SELECT * FROM sessions WHERE org_id = ${user.org_id} AND agent_name = ${agentName}
-      ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}
-    `;
-  } else if (status) {
-    rows = await sql`
-      SELECT * FROM sessions WHERE org_id = ${user.org_id} AND status = ${status}
-      ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}
-    `;
-  } else {
-    rows = await sql`
-      SELECT * FROM sessions WHERE org_id = ${user.org_id}
-      ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}
-    `;
-  }
-
-  return c.json(
-    rows.map((r: any) => ({
-      session_id: r.session_id || "",
-      agent_name: r.agent_name || "",
-      status: r.status || "",
-      input_text: (r.input_text || "").slice(0, 200),
-      output_text: (r.output_text || "").slice(0, 200),
-      step_count: Number(r.step_count || 0),
-      cost_total_usd: Number(r.cost_total_usd || 0),
-      wall_clock_seconds: Number(r.wall_clock_seconds || 0),
-      trace_id: r.trace_id || "",
-      parent_session_id: r.parent_session_id || null,
-      depth: Number(r.depth || 0),
-      created_at: Number(r.created_at || 0),
-    })),
-  );
+    return c.json(
+      rows.map((r: any) => ({
+        session_id: r.session_id || "",
+        agent_name: r.agent_name || "",
+        status: r.status || "",
+        input_text: (r.input_text || "").slice(0, 200),
+        output_text: (r.output_text || "").slice(0, 200),
+        step_count: Number(r.step_count || 0),
+        cost_total_usd: Number(r.cost_total_usd || 0),
+        wall_clock_seconds: Number(r.wall_clock_seconds || 0),
+        trace_id: r.trace_id || "",
+        parent_session_id: r.parent_session_id || null,
+        depth: Number(r.depth || 0),
+        created_at: Number(r.created_at || 0),
+      })),
+    );
+  });
 });
 
 const getSessionRoute = createRoute({
@@ -206,23 +206,24 @@ const getSessionRoute = createRoute({
 sessionRoutes.openapi(getSessionRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { session_id: sessionId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const rows = await sql`SELECT * FROM sessions WHERE session_id = ${sessionId} AND org_id = ${user.org_id}`;
-  if (rows.length === 0) return c.json({ error: "Session not found" }, 404);
-  const r = rows[0] as any;
-  return c.json({
-    session_id: r.session_id || "",
-    agent_name: r.agent_name || "",
-    status: r.status || "",
-    input_text: r.input_text || "",
-    output_text: r.output_text || "",
-    step_count: Number(r.step_count || 0),
-    cost_total_usd: Number(r.cost_total_usd || 0),
-    wall_clock_seconds: Number(r.wall_clock_seconds || 0),
-    trace_id: r.trace_id || "",
-    parent_session_id: r.parent_session_id || null,
-    depth: Number(r.depth || 0),
-    created_at: Number(r.created_at || 0),
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`SELECT * FROM sessions WHERE session_id = ${sessionId}`;
+    if (rows.length === 0) return c.json({ error: "Session not found" }, 404);
+    const r = rows[0] as any;
+    return c.json({
+      session_id: r.session_id || "",
+      agent_name: r.agent_name || "",
+      status: r.status || "",
+      input_text: r.input_text || "",
+      output_text: r.output_text || "",
+      step_count: Number(r.step_count || 0),
+      cost_total_usd: Number(r.cost_total_usd || 0),
+      wall_clock_seconds: Number(r.wall_clock_seconds || 0),
+      trace_id: r.trace_id || "",
+      parent_session_id: r.parent_session_id || null,
+      depth: Number(r.depth || 0),
+      created_at: Number(r.created_at || 0),
+    });
   });
 });
 
@@ -245,19 +246,19 @@ const getSessionTurnsRoute = createRoute({
 sessionRoutes.openapi(getSessionTurnsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { session_id: sessionId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Verify session belongs to org via RLS — turns is NOT RLS but session_id
+    // is only returnable from the sessions table when RLS allows it
+    const ownerCheck = await sql`
+      SELECT 1 FROM sessions WHERE session_id = ${sessionId}
+    `;
+    if (ownerCheck.length === 0) return c.json({ error: "Session not found" }, 404);
 
-  // Verify session belongs to org before querying turns
-  const ownerCheck = await sql`
-    SELECT 1 FROM sessions WHERE session_id = ${sessionId} AND org_id = ${user.org_id}
-  `;
-  if (ownerCheck.length === 0) return c.json({ error: "Session not found" }, 404);
-
-  const rows = await sql`
-    SELECT * FROM turns WHERE session_id = ${sessionId}
-      AND session_id IN (SELECT session_id FROM sessions WHERE org_id = ${user.org_id})
-    ORDER BY turn_number
-  `;
+    const rows = await sql`
+      SELECT * FROM turns WHERE session_id = ${sessionId}
+        AND session_id IN (SELECT session_id FROM sessions)
+      ORDER BY turn_number
+    `;
 
   return c.json(
     rows.map((r: any) => {
@@ -286,7 +287,8 @@ sessionRoutes.openapi(getSessionTurnsRoute, async (c): Promise<any> => {
         created_at: r.created_at || null,
       };
     }),
-  );
+    );
+  });
 });
 
 const getSessionArtifactsRoute = createRoute({
@@ -330,39 +332,39 @@ const getSessionArtifactsRoute = createRoute({
 sessionRoutes.openapi(getSessionArtifactsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { session_id: sessionId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const ownerCheck = await sql`
+      SELECT 1 FROM sessions WHERE session_id = ${sessionId}
+    `;
+    if (ownerCheck.length === 0) return c.json({ error: "Session not found" }, 404);
 
-  const ownerCheck = await sql`
-    SELECT 1 FROM sessions WHERE session_id = ${sessionId} AND org_id = ${user.org_id}
-  `;
-  if (ownerCheck.length === 0) return c.json({ error: "Session not found" }, 404);
+    const rows = await sql`
+      SELECT artifact_name, artifact_kind, mime_type, size_bytes, storage_key,
+             source_tool, source_event, schema_version, status, metadata,
+             turn_number, created_at
+      FROM run_artifacts
+      WHERE session_id = ${sessionId}
+      ORDER BY created_at DESC, id DESC
+      LIMIT 200
+    `;
 
-  const rows = await sql`
-    SELECT artifact_name, artifact_kind, mime_type, size_bytes, storage_key,
-           source_tool, source_event, schema_version, status, metadata,
-           turn_number, created_at
-    FROM run_artifacts
-    WHERE session_id = ${sessionId}
-    ORDER BY created_at DESC, id DESC
-    LIMIT 200
-  `;
-
-  return c.json(
-    rows.map((r: any) => ({
-      artifact_name: r.artifact_name || "",
-      artifact_kind: r.artifact_kind || "",
-      mime_type: r.mime_type || "application/octet-stream",
-      size_bytes: Number(r.size_bytes || 0),
-      storage_key: r.storage_key || "",
-      source_tool: r.source_tool || "",
-      source_event: r.source_event || "",
-      schema_version: r.schema_version || null,
-      status: r.status || "",
-      metadata: parseJsonColumn(r.metadata, {}),
-      turn_number: Number(r.turn_number || 0),
-      created_at: r.created_at || null,
-    })),
-  );
+    return c.json(
+      rows.map((r: any) => ({
+        artifact_name: r.artifact_name || "",
+        artifact_kind: r.artifact_kind || "",
+        mime_type: r.mime_type || "application/octet-stream",
+        size_bytes: Number(r.size_bytes || 0),
+        storage_key: r.storage_key || "",
+        source_tool: r.source_tool || "",
+        source_event: r.source_event || "",
+        schema_version: r.schema_version || null,
+        status: r.status || "",
+        metadata: parseJsonColumn(r.metadata, {}),
+        turn_number: Number(r.turn_number || 0),
+        created_at: r.created_at || null,
+      })),
+    );
+  });
 });
 
 const getSessionRuntimeRoute = createRoute({
@@ -384,28 +386,29 @@ const getSessionRuntimeRoute = createRoute({
 sessionRoutes.openapi(getSessionRuntimeRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { session_id: sessionId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const check = await sql`SELECT session_id FROM sessions WHERE session_id = ${sessionId} AND org_id = ${user.org_id}`;
-  if (check.length === 0) return c.json({ error: "Session not found" }, 404);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const check = await sql`SELECT session_id FROM sessions WHERE session_id = ${sessionId}`;
+    if (check.length === 0) return c.json({ error: "Session not found" }, 404);
 
-  // Build runtime profile from turns
-  const turns = await sql`
-    SELECT turn_number, execution_mode, plan_artifact, reflection, latency_ms, cost_total_usd
-    FROM turns WHERE session_id = ${sessionId}
-      AND session_id IN (SELECT session_id FROM sessions WHERE org_id = ${user.org_id})
-    ORDER BY turn_number
-  `;
+    // Build runtime profile from turns (turns is NOT RLS — gate via sessions subquery)
+    const turns = await sql`
+      SELECT turn_number, execution_mode, plan_artifact, reflection, latency_ms, cost_total_usd
+      FROM turns WHERE session_id = ${sessionId}
+        AND session_id IN (SELECT session_id FROM sessions)
+      ORDER BY turn_number
+    `;
 
-  return c.json({
-    session_id: sessionId,
-    turns: turns.map((t: any) => ({
-      turn_number: Number(t.turn_number),
-      execution_mode: t.execution_mode || "sequential",
-      plan: parseJsonColumn(t.plan_artifact),
-      reflection: parseJsonColumn(t.reflection),
-      latency_ms: Number(t.latency_ms || 0),
-      cost_total_usd: Number(t.cost_total_usd || 0),
-    })),
+    return c.json({
+      session_id: sessionId,
+      turns: turns.map((t: any) => ({
+        turn_number: Number(t.turn_number),
+        execution_mode: t.execution_mode || "sequential",
+        plan: parseJsonColumn(t.plan_artifact),
+        reflection: parseJsonColumn(t.reflection),
+        latency_ms: Number(t.latency_ms || 0),
+        cost_total_usd: Number(t.cost_total_usd || 0),
+      })),
+    });
   });
 });
 
@@ -428,36 +431,36 @@ const getSessionTraceRoute = createRoute({
 sessionRoutes.openapi(getSessionTraceRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { session_id: sessionId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const sessionRows = await sql`SELECT trace_id FROM sessions WHERE session_id = ${sessionId}`;
+    if (sessionRows.length === 0 || !sessionRows[0].trace_id) {
+      return c.json({ error: "No trace found for session" }, 404);
+    }
+    const traceId = sessionRows[0].trace_id;
 
-  const sessionRows = await sql`SELECT trace_id FROM sessions WHERE session_id = ${sessionId} AND org_id = ${user.org_id}`;
-  if (sessionRows.length === 0 || !sessionRows[0].trace_id) {
-    return c.json({ error: "No trace found for session" }, 404);
-  }
-  const traceId = sessionRows[0].trace_id;
+    const sessions = await sql`
+      SELECT * FROM sessions WHERE trace_id = ${traceId} ORDER BY created_at LIMIT 100
+    `;
 
-  const sessions = await sql`
-    SELECT * FROM sessions WHERE trace_id = ${traceId} AND org_id = ${user.org_id} ORDER BY created_at LIMIT 100
-  `;
+    // Cost rollup — RLS on billing_records enforces org isolation
+    const billing = await sql`
+      SELECT COALESCE(SUM(total_cost_usd), 0) as total_cost,
+             COALESCE(SUM(input_tokens), 0) as total_input_tokens,
+             COALESCE(SUM(output_tokens), 0) as total_output_tokens,
+             COUNT(*) as records
+      FROM billing_records WHERE trace_id = ${traceId}
+    `;
 
-  // Cost rollup — scope to org via trace_id already validated above, but also filter by org_id
-  const billing = await sql`
-    SELECT COALESCE(SUM(total_cost_usd), 0) as total_cost,
-           COALESCE(SUM(input_tokens), 0) as total_input_tokens,
-           COALESCE(SUM(output_tokens), 0) as total_output_tokens,
-           COUNT(*) as records
-    FROM billing_records WHERE trace_id = ${traceId} AND org_id = ${user.org_id}
-  `;
-
-  return c.json({
-    trace_id: traceId,
-    sessions,
-    cost_rollup: {
-      total_cost_usd: Number(billing[0]?.total_cost || 0),
-      total_input_tokens: Number(billing[0]?.total_input_tokens || 0),
-      total_output_tokens: Number(billing[0]?.total_output_tokens || 0),
-      billing_records: Number(billing[0]?.records || 0),
-    },
+    return c.json({
+      trace_id: traceId,
+      sessions,
+      cost_rollup: {
+        total_cost_usd: Number(billing[0]?.total_cost || 0),
+        total_input_tokens: Number(billing[0]?.total_input_tokens || 0),
+        total_output_tokens: Number(billing[0]?.total_output_tokens || 0),
+        billing_records: Number(billing[0]?.records || 0),
+      },
+    });
   });
 });
 
@@ -496,16 +499,17 @@ sessionRoutes.openapi(postSessionFeedbackRoute, async (c): Promise<any> => {
   const comment = String(body.comment || "");
   const tags = String(body.tags || "");
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const check = await sql`SELECT session_id FROM sessions WHERE session_id = ${sessionId} AND org_id = ${user.org_id}`;
-  if (check.length === 0) return c.json({ error: "Session not found" }, 404);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const check = await sql`SELECT session_id FROM sessions WHERE session_id = ${sessionId}`;
+    if (check.length === 0) return c.json({ error: "Session not found" }, 404);
 
-  const now = new Date().toISOString();
-  await sql`
-    INSERT INTO session_feedback (session_id, rating, comment, tags, created_at)
-    VALUES (${sessionId}, ${rating}, ${comment}, ${tags}, ${now})
-  `;
-  return c.json({ submitted: true, session_id: sessionId });
+    const now = new Date().toISOString();
+    await sql`
+      INSERT INTO session_feedback (session_id, rating, comment, tags, created_at)
+      VALUES (${sessionId}, ${rating}, ${comment}, ${tags}, ${now})
+    `;
+    return c.json({ submitted: true, session_id: sessionId });
+  });
 });
 
 const getSessionFeedbackRoute = createRoute({
@@ -527,18 +531,18 @@ const getSessionFeedbackRoute = createRoute({
 sessionRoutes.openapi(getSessionFeedbackRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { session_id: sessionId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Verify session belongs to org via RLS before returning feedback
+    const ownerCheck = await sql`
+      SELECT 1 FROM sessions WHERE session_id = ${sessionId}
+    `;
+    if (ownerCheck.length === 0) return c.json({ error: "Session not found" }, 404);
 
-  // Verify session belongs to org before returning feedback
-  const ownerCheck = await sql`
-    SELECT 1 FROM sessions WHERE session_id = ${sessionId} AND org_id = ${user.org_id}
-  `;
-  if (ownerCheck.length === 0) return c.json({ error: "Session not found" }, 404);
-
-  const rows = await sql`
-    SELECT * FROM session_feedback WHERE session_id = ${sessionId} ORDER BY created_at DESC
-  `;
-  return c.json({ feedback: rows });
+    const rows = await sql`
+      SELECT * FROM session_feedback WHERE session_id = ${sessionId} ORDER BY created_at DESC
+    `;
+    return c.json({ feedback: rows });
+  });
 });
 
 const deleteSessionsRoute = createRoute({
@@ -562,18 +566,19 @@ sessionRoutes.openapi(deleteSessionsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { before_days: beforeDays } = c.req.valid("query");
   const cutoff = new Date(Date.now() - beforeDays * 86400 * 1000).toISOString();
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Delete turns for the sessions we're about to delete (turns is NOT RLS —
+    // the session subquery is RLS-filtered, so this only touches our sessions)
+    await sql`
+      DELETE FROM turns WHERE session_id IN (
+        SELECT session_id FROM sessions WHERE created_at < ${cutoff}
+      )
+    `;
+    // Then delete the sessions
+    const result = await sql`DELETE FROM sessions WHERE created_at < ${cutoff}`;
 
-  // Delete turns for the sessions we're about to delete (before deleting sessions)
-  await sql`
-    DELETE FROM turns WHERE session_id IN (
-      SELECT session_id FROM sessions WHERE created_at < ${cutoff} AND org_id = ${user.org_id}
-    )
-  `;
-  // Then delete the sessions
-  const result = await sql`DELETE FROM sessions WHERE created_at < ${cutoff} AND org_id = ${user.org_id}`;
-
-  return c.json({ deleted: result.count, before_days: beforeDays });
+    return c.json({ deleted: result.count, before_days: beforeDays });
+  });
 });
 
 // ══════════════════════════════════════════════════════════════════════
@@ -585,51 +590,50 @@ sessionRoutes.openapi(deleteSessionsRoute, async (c): Promise<any> => {
  */
 sessionRoutes.get("/search", requireScope("sessions:read"), async (c) => {
   const user = c.get("user") as CurrentUser;
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const q = c.req.query("q") || "";
+    const agentName = c.req.query("agent") || "";
+    const status = c.req.query("status") || "";
+    const minCost = Number(c.req.query("min_cost") || 0);
+    const limit = Math.min(Number(c.req.query("limit") || 20), 50);
+    const offset = Number(c.req.query("offset") || 0);
 
-  const q = c.req.query("q") || "";
-  const agentName = c.req.query("agent") || "";
-  const status = c.req.query("status") || "";
-  const minCost = Number(c.req.query("min_cost") || 0);
-  const limit = Math.min(Number(c.req.query("limit") || 20), 50);
-  const offset = Number(c.req.query("offset") || 0);
-
-  try {
-    // Escape LIKE wildcards (% and _) in search query to prevent unintended patterns
-    const escapedQ = q.toLowerCase().replace(/%/g, "\\%").replace(/_/g, "\\_");
-    let rows: any[];
-    if (q) {
-      rows = await sql`
-        SELECT session_id, agent_name, status, cost_total_usd,
-               LEFT(input_text, 100) as input_preview,
-               created_at
-        FROM sessions
-        WHERE org_id = ${user.org_id}
-          AND (LOWER(input_text) LIKE ${`%${escapedQ}%`} OR LOWER(output_text) LIKE ${`%${escapedQ}%`})
-          ${agentName ? sql`AND agent_name = ${agentName}` : sql``}
-          ${status ? sql`AND status = ${status}` : sql``}
-          ${minCost > 0 ? sql`AND COALESCE(cost_total_usd, 0) >= ${minCost}` : sql``}
-        ORDER BY created_at DESC
-        LIMIT ${limit} OFFSET ${offset}
-      `;
-    } else {
-      rows = await sql`
-        SELECT session_id, agent_name, status, cost_total_usd,
-               LEFT(input_text, 100) as input_preview,
-               created_at
-        FROM sessions
-        WHERE org_id = ${user.org_id}
-          ${agentName ? sql`AND agent_name = ${agentName}` : sql``}
-          ${status ? sql`AND status = ${status}` : sql``}
-          ${minCost > 0 ? sql`AND COALESCE(cost_total_usd, 0) >= ${minCost}` : sql``}
-        ORDER BY created_at DESC
-        LIMIT ${limit} OFFSET ${offset}
-      `;
+    try {
+      // Escape LIKE wildcards (% and _) in search query to prevent unintended patterns
+      const escapedQ = q.toLowerCase().replace(/%/g, "\\%").replace(/_/g, "\\_");
+      let rows: any[];
+      if (q) {
+        rows = await sql`
+          SELECT session_id, agent_name, status, cost_total_usd,
+                 LEFT(input_text, 100) as input_preview,
+                 created_at
+          FROM sessions
+          WHERE (LOWER(input_text) LIKE ${`%${escapedQ}%`} OR LOWER(output_text) LIKE ${`%${escapedQ}%`})
+            ${agentName ? sql`AND agent_name = ${agentName}` : sql``}
+            ${status ? sql`AND status = ${status}` : sql``}
+            ${minCost > 0 ? sql`AND COALESCE(cost_total_usd, 0) >= ${minCost}` : sql``}
+          ORDER BY created_at DESC
+          LIMIT ${limit} OFFSET ${offset}
+        `;
+      } else {
+        rows = await sql`
+          SELECT session_id, agent_name, status, cost_total_usd,
+                 LEFT(input_text, 100) as input_preview,
+                 created_at
+          FROM sessions
+          WHERE 1=1
+            ${agentName ? sql`AND agent_name = ${agentName}` : sql``}
+            ${status ? sql`AND status = ${status}` : sql``}
+            ${minCost > 0 ? sql`AND COALESCE(cost_total_usd, 0) >= ${minCost}` : sql``}
+          ORDER BY created_at DESC
+          LIMIT ${limit} OFFSET ${offset}
+        `;
+      }
+      return c.json({ results: rows, query: q, limit, offset });
+    } catch (err) {
+      return c.json({ results: [], error: String(err) }, 500);
     }
-    return c.json({ results: rows, query: q, limit, offset });
-  } catch (err) {
-    return c.json({ results: [], error: String(err) }, 500);
-  }
+  });
 });
 
 /**
@@ -639,47 +643,47 @@ sessionRoutes.get("/:session_id/export", requireScope("sessions:read"), async (c
   const user = c.get("user") as CurrentUser;
   const sessionId = c.req.param("session_id");
   const format = c.req.query("format") || "json";
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    try {
+      const session = await sql`
+        SELECT * FROM sessions WHERE session_id = ${sessionId}
+      `;
+      if (session.length === 0) return c.json({ error: "Session not found" }, 404);
 
-  try {
-    const session = await sql`
-      SELECT * FROM sessions WHERE session_id = ${sessionId} AND org_id = ${user.org_id}
-    `;
-    if (session.length === 0) return c.json({ error: "Session not found" }, 404);
+      const turns = await sql`
+        SELECT turn_number, model_used, llm_content, input_tokens, output_tokens,
+               cost_total_usd, latency_ms, tool_calls, tool_results
+        FROM turns WHERE session_id = ${sessionId}
+          AND session_id IN (SELECT session_id FROM sessions)
+        ORDER BY turn_number ASC
+      `;
 
-    const turns = await sql`
-      SELECT turn_number, model_used, llm_content, input_tokens, output_tokens,
-             cost_total_usd, latency_ms, tool_calls, tool_results
-      FROM turns WHERE session_id = ${sessionId}
-        AND session_id IN (SELECT session_id FROM sessions WHERE org_id = ${user.org_id})
-      ORDER BY turn_number ASC
-    `;
+      if (format === "csv") {
+        const header = "turn_number,model,input_tokens,output_tokens,cost_usd,latency_ms,content\n";
+        const rows = turns.map((t: any) =>
+          `${t.turn_number},"${t.model_used}",${t.input_tokens},${t.output_tokens},${t.cost_total_usd},${t.latency_ms},"${(t.llm_content || "").replace(/"/g, '""').slice(0, 500)}"`
+        ).join("\n");
+        return new Response(header + rows, {
+          headers: { "Content-Type": "text/csv", "Content-Disposition": `attachment; filename="session-${sessionId}.csv"` },
+        });
+      }
 
-    if (format === "csv") {
-      const header = "turn_number,model,input_tokens,output_tokens,cost_usd,latency_ms,content\n";
-      const rows = turns.map((t: any) =>
-        `${t.turn_number},"${t.model_used}",${t.input_tokens},${t.output_tokens},${t.cost_total_usd},${t.latency_ms},"${(t.llm_content || "").replace(/"/g, '""').slice(0, 500)}"`
-      ).join("\n");
-      return new Response(header + rows, {
-        headers: { "Content-Type": "text/csv", "Content-Disposition": `attachment; filename="session-${sessionId}.csv"` },
+      const parsedTurns = (turns as any[]).map((t) => {
+        let tool_calls: unknown[] = [];
+        let tool_results: unknown[] = [];
+        tool_calls = parseJsonColumn(t.tool_calls, []);
+        tool_results = parseJsonColumn(t.tool_results, []);
+        return {
+          ...t,
+          content: t.llm_content,
+          tool_calls,
+          tool_results,
+        };
       });
+
+      return c.json({ session: session[0], turns: parsedTurns });
+    } catch (err) {
+      return c.json({ error: String(err) }, 500);
     }
-
-    const parsedTurns = (turns as any[]).map((t) => {
-      let tool_calls: unknown[] = [];
-      let tool_results: unknown[] = [];
-      tool_calls = parseJsonColumn(t.tool_calls, []);
-      tool_results = parseJsonColumn(t.tool_results, []);
-      return {
-        ...t,
-        content: t.llm_content,
-        tool_calls,
-        tool_results,
-      };
-    });
-
-    return c.json({ session: session[0], turns: parsedTurns });
-  } catch (err) {
-    return c.json({ error: String(err) }, 500);
-  }
+  });
 });

@@ -19,6 +19,7 @@
 
 import type { LLMMessage, LLMResponse, ToolCall, ToolDefinition, RuntimeEnv } from "./types";
 import { LLMError, RefusalError, classifyFetchError } from "./errors";
+import { log } from "./log";
 // Pricing imported dynamically in callLLM to avoid circular deps
 
 // ── Circuit Breaker for LLM Calls ─────────────────────────────
@@ -87,7 +88,7 @@ function recordLlmFailure(key: string, message: string): void {
   st.lastError = message.slice(0, 200);
   if (st.failures >= LLM_BREAKER_THRESHOLD && st.openedAt === 0) {
     st.openedAt = Date.now();
-    console.warn(
+    log.warn(
       `[LLM:breaker] OPEN(${key}) after ${st.failures} consecutive failures — ` +
       `failing fast for ${LLM_BREAKER_COOLDOWN_MS / 1000}s. Last error: ${st.lastError}`,
     );
@@ -105,7 +106,7 @@ function isLlmBreakerOpen(key: string): boolean {
   const st = getBreakerState(key);
   if (st.failures < LLM_BREAKER_THRESHOLD) return false;
   if (st.openedAt > 0 && Date.now() - st.openedAt > LLM_BREAKER_COOLDOWN_MS) {
-    console.info(`[LLM:breaker] HALF-OPEN(${key}) — allowing next call through`);
+    log.info(`[LLM:breaker] HALF-OPEN(${key}) — allowing next call through`);
     st.failures = LLM_BREAKER_THRESHOLD - 1; // one more failure re-opens
     st.openedAt = 0;
     return false;
@@ -309,7 +310,7 @@ async function _doCallLLM(
   const isCustomProvider = opts.provider?.startsWith("custom-");
 
   if (!isWorkersAI && !isCustomProvider) {
-    console.warn(`[llm] Non-free model requested: provider="${opts.provider || "openrouter"}" model="${model}". Proceeding — ensure OpenRouter key is configured.`);
+    log.warn(`[llm] Non-free model requested: provider="${opts.provider || "openrouter"}" model="${model}". Proceeding — ensure OpenRouter key is configured.`);
   }
 
   const providerPath = isWorkersAI
@@ -395,7 +396,7 @@ async function _doCallLLM(
         const delayMs = !isNaN(retryAfterSec) && retryAfterSec > 0
           ? Math.min(retryAfterSec * 1000, 30_000) // Cap at 30s
           : BACKOFF_MS[attempt] || 8000;
-        console.warn(`[llm] ${status} on attempt ${attempt + 1}, retrying in ${delayMs}ms`);
+        log.warn(`[llm] ${status} on attempt ${attempt + 1}, retrying in ${delayMs}ms`);
         await new Promise(r => setTimeout(r, delayMs));
         continue;
       }
@@ -413,7 +414,7 @@ async function _doCallLLM(
         throw e; // Re-throw non-retryable errors
       }
       if (attempt < MAX_LLM_RETRIES - 1) {
-        console.warn(`[llm] Network error on attempt ${attempt + 1}: ${e.message?.slice(0, 100)}`);
+        log.warn(`[llm] Network error on attempt ${attempt + 1}: ${e.message?.slice(0, 100)}`);
         await new Promise(r => setTimeout(r, BACKOFF_MS[attempt] || 8000));
         continue;
       }

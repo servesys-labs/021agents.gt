@@ -10,7 +10,7 @@
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 export const feedbackRoutes = createOpenAPIRouter();
@@ -49,44 +49,44 @@ feedbackRoutes.openapi(listFeedbackRoute, async (c): Promise<any> => {
   const offset = Math.max(0, Number(q.offset) || 0);
   const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    let rows;
+    if (agentName && rating) {
+      rows = await sql`
+        SELECT id, session_id, turn_number, rating, comment, message_preview, agent_name, channel, created_at
+        FROM session_feedback
+        WHERE agent_name = ${agentName} AND rating = ${rating} AND created_at >= ${since}
+        ORDER BY created_at DESC
+        LIMIT ${limit} OFFSET ${offset}
+      `;
+    } else if (agentName) {
+      rows = await sql`
+        SELECT id, session_id, turn_number, rating, comment, message_preview, agent_name, channel, created_at
+        FROM session_feedback
+        WHERE agent_name = ${agentName} AND created_at >= ${since}
+        ORDER BY created_at DESC
+        LIMIT ${limit} OFFSET ${offset}
+      `;
+    } else if (rating) {
+      rows = await sql`
+        SELECT id, session_id, turn_number, rating, comment, message_preview, agent_name, channel, created_at
+        FROM session_feedback
+        WHERE rating = ${rating} AND created_at >= ${since}
+        ORDER BY created_at DESC
+        LIMIT ${limit} OFFSET ${offset}
+      `;
+    } else {
+      rows = await sql`
+        SELECT id, session_id, turn_number, rating, comment, message_preview, agent_name, channel, created_at
+        FROM session_feedback
+        WHERE created_at >= ${since}
+        ORDER BY created_at DESC
+        LIMIT ${limit} OFFSET ${offset}
+      `;
+    }
 
-  let rows;
-  if (agentName && rating) {
-    rows = await sql`
-      SELECT id, session_id, turn_number, rating, comment, message_preview, agent_name, channel, created_at
-      FROM session_feedback
-      WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND rating = ${rating} AND created_at >= ${since}
-      ORDER BY created_at DESC
-      LIMIT ${limit} OFFSET ${offset}
-    `;
-  } else if (agentName) {
-    rows = await sql`
-      SELECT id, session_id, turn_number, rating, comment, message_preview, agent_name, channel, created_at
-      FROM session_feedback
-      WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND created_at >= ${since}
-      ORDER BY created_at DESC
-      LIMIT ${limit} OFFSET ${offset}
-    `;
-  } else if (rating) {
-    rows = await sql`
-      SELECT id, session_id, turn_number, rating, comment, message_preview, agent_name, channel, created_at
-      FROM session_feedback
-      WHERE org_id = ${user.org_id} AND rating = ${rating} AND created_at >= ${since}
-      ORDER BY created_at DESC
-      LIMIT ${limit} OFFSET ${offset}
-    `;
-  } else {
-    rows = await sql`
-      SELECT id, session_id, turn_number, rating, comment, message_preview, agent_name, channel, created_at
-      FROM session_feedback
-      WHERE org_id = ${user.org_id} AND created_at >= ${since}
-      ORDER BY created_at DESC
-      LIMIT ${limit} OFFSET ${offset}
-    `;
-  }
-
-  return c.json({ feedback: rows, count: rows.length });
+    return c.json({ feedback: rows, count: rows.length });
+  });
 });
 
 /* ── Aggregate stats ────────────────────────────────────────────── */
@@ -118,96 +118,96 @@ feedbackRoutes.openapi(feedbackStatsRoute, async (c): Promise<any> => {
   const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
   const prevSince = new Date(Date.now() - sinceDays * 2 * 86400 * 1000).toISOString();
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Current period counts
+    const countQuery = agentName
+      ? sql`
+          SELECT rating, COUNT(*) as cnt
+          FROM session_feedback
+          WHERE agent_name = ${agentName} AND created_at >= ${since}
+          GROUP BY rating
+        `
+      : sql`
+          SELECT rating, COUNT(*) as cnt
+          FROM session_feedback
+          WHERE created_at >= ${since}
+          GROUP BY rating
+        `;
 
-  // Current period counts
-  const countQuery = agentName
-    ? sql`
-        SELECT rating, COUNT(*) as cnt
-        FROM session_feedback
-        WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND created_at >= ${since}
-        GROUP BY rating
-      `
-    : sql`
-        SELECT rating, COUNT(*) as cnt
-        FROM session_feedback
-        WHERE org_id = ${user.org_id} AND created_at >= ${since}
-        GROUP BY rating
-      `;
+    const counts = await countQuery;
 
-  const counts = await countQuery;
+    // Previous period counts (for trend)
+    const prevCountQuery = agentName
+      ? sql`
+          SELECT rating, COUNT(*) as cnt
+          FROM session_feedback
+          WHERE agent_name = ${agentName} AND created_at >= ${prevSince} AND created_at < ${since}
+          GROUP BY rating
+        `
+      : sql`
+          SELECT rating, COUNT(*) as cnt
+          FROM session_feedback
+          WHERE created_at >= ${prevSince} AND created_at < ${since}
+          GROUP BY rating
+        `;
 
-  // Previous period counts (for trend)
-  const prevCountQuery = agentName
-    ? sql`
-        SELECT rating, COUNT(*) as cnt
-        FROM session_feedback
-        WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND created_at >= ${prevSince} AND created_at < ${since}
-        GROUP BY rating
-      `
-    : sql`
-        SELECT rating, COUNT(*) as cnt
-        FROM session_feedback
-        WHERE org_id = ${user.org_id} AND created_at >= ${prevSince} AND created_at < ${since}
-        GROUP BY rating
-      `;
+    const prevCounts = await prevCountQuery;
 
-  const prevCounts = await prevCountQuery;
+    // Per-agent breakdown
+    const agentBreakdown = agentName
+      ? []
+      : await sql`
+          SELECT agent_name, rating, COUNT(*) as cnt
+          FROM session_feedback
+          WHERE created_at >= ${since}
+          GROUP BY agent_name, rating
+          ORDER BY agent_name
+        `;
 
-  // Per-agent breakdown
-  const agentBreakdown = agentName
-    ? []
-    : await sql`
-        SELECT agent_name, rating, COUNT(*) as cnt
-        FROM session_feedback
-        WHERE org_id = ${user.org_id} AND created_at >= ${since}
-        GROUP BY agent_name, rating
-        ORDER BY agent_name
-      `;
+    // Build response
+    const byRating: Record<string, number> = {};
+    const prevByRating: Record<string, number> = {};
+    let total = 0;
+    let prevTotal = 0;
 
-  // Build response
-  const byRating: Record<string, number> = {};
-  const prevByRating: Record<string, number> = {};
-  let total = 0;
-  let prevTotal = 0;
+    for (const row of counts as any[]) {
+      byRating[row.rating] = Number(row.cnt);
+      total += Number(row.cnt);
+    }
+    for (const row of prevCounts as any[]) {
+      prevByRating[row.rating] = Number(row.cnt);
+      prevTotal += Number(row.cnt);
+    }
 
-  for (const row of counts as any[]) {
-    byRating[row.rating] = Number(row.cnt);
-    total += Number(row.cnt);
-  }
-  for (const row of prevCounts as any[]) {
-    prevByRating[row.rating] = Number(row.cnt);
-    prevTotal += Number(row.cnt);
-  }
+    // Group agent breakdown
+    const agentMap = new Map<string, Record<string, number>>();
+    for (const row of agentBreakdown as any[]) {
+      const name = row.agent_name || "unknown";
+      if (!agentMap.has(name)) agentMap.set(name, {});
+      agentMap.get(name)![row.rating] = Number(row.cnt);
+    }
 
-  // Group agent breakdown
-  const agentMap = new Map<string, Record<string, number>>();
-  for (const row of agentBreakdown as any[]) {
-    const name = row.agent_name || "unknown";
-    if (!agentMap.has(name)) agentMap.set(name, {});
-    agentMap.get(name)![row.rating] = Number(row.cnt);
-  }
+    const agents = Array.from(agentMap.entries()).map(([name, ratings]) => ({
+      agent_name: name,
+      positive: ratings.positive || 0,
+      negative: ratings.negative || 0,
+      neutral: ratings.neutral || 0,
+      total: (ratings.positive || 0) + (ratings.negative || 0) + (ratings.neutral || 0),
+    }));
 
-  const agents = Array.from(agentMap.entries()).map(([name, ratings]) => ({
-    agent_name: name,
-    positive: ratings.positive || 0,
-    negative: ratings.negative || 0,
-    neutral: ratings.neutral || 0,
-    total: (ratings.positive || 0) + (ratings.negative || 0) + (ratings.neutral || 0),
-  }));
-
-  return c.json({
-    total,
-    positive: byRating.positive || 0,
-    negative: byRating.negative || 0,
-    neutral: byRating.neutral || 0,
-    positive_pct: total > 0 ? ((byRating.positive || 0) / total) * 100 : 0,
-    negative_pct: total > 0 ? ((byRating.negative || 0) / total) * 100 : 0,
-    prev_total: prevTotal,
-    prev_positive: prevByRating.positive || 0,
-    prev_negative: prevByRating.negative || 0,
-    trend_direction: total > prevTotal ? "up" : total < prevTotal ? "down" : "flat",
-    by_agent: agents,
+    return c.json({
+      total,
+      positive: byRating.positive || 0,
+      negative: byRating.negative || 0,
+      neutral: byRating.neutral || 0,
+      positive_pct: total > 0 ? ((byRating.positive || 0) / total) * 100 : 0,
+      negative_pct: total > 0 ? ((byRating.negative || 0) / total) * 100 : 0,
+      prev_total: prevTotal,
+      prev_positive: prevByRating.positive || 0,
+      prev_negative: prevByRating.negative || 0,
+      trend_direction: total > prevTotal ? "up" : total < prevTotal ? "down" : "flat",
+      by_agent: agents,
+    });
   });
 });
 
@@ -234,16 +234,17 @@ feedbackRoutes.openapi(getFeedbackRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { id } = c.req.valid("param");
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const rows = await sql`
-    SELECT id, session_id, turn_number, rating, comment, message_preview, agent_name, channel, created_at, org_id
-    FROM session_feedback
-    WHERE id = ${id} AND org_id = ${user.org_id}
-    LIMIT 1
-  `;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT id, session_id, turn_number, rating, comment, message_preview, agent_name, channel, created_at, org_id
+      FROM session_feedback
+      WHERE id = ${id}
+      LIMIT 1
+    `;
 
-  if (rows.length === 0) return c.json({ error: "not_found" }, 404);
-  return c.json(rows[0] as any);
+    if (rows.length === 0) return c.json({ error: "not_found" }, 404);
+    return c.json(rows[0] as any);
+  });
 });
 
 /* ── Delete feedback ────────────────────────────────────────────── */
@@ -268,11 +269,12 @@ feedbackRoutes.openapi(deleteFeedbackRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { id } = c.req.valid("param");
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  await sql`
-    DELETE FROM session_feedback
-    WHERE id = ${id} AND org_id = ${user.org_id}
-  `;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    await sql`
+      DELETE FROM session_feedback
+      WHERE id = ${id}
+    `;
 
-  return c.json({ deleted: true, id });
+    return c.json({ deleted: true, id });
+  });
 });
