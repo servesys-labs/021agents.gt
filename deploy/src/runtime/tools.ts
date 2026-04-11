@@ -1733,22 +1733,22 @@ async function dispatch(
     case "memory-delete":
       return memoryDelete(env, args);
 
-    case "memory-health":
-      {
-        const result = await memoryHealth(env, args);
-        emitMemoryEvent(
-          (env as any).TELEMETRY_QUEUE,
-          "memory_read",
-          sessionId,
-          resolveTelemetryOrgId(env) || "",
-          { tool: "memory-health", limit: Number(args.limit || 20) },
-        );
-        return result;
-      }
+    case "memory-health": {
+      const { memoryHealth } = await import("./memory-tools");
+      const result = await memoryHealth(env, args);
+      emitMemoryEvent(
+        (env as any).TELEMETRY_QUEUE,
+        "memory_read",
+        sessionId,
+        resolveTelemetryOrgId(env) || "",
+        { tool: "memory-health", limit: Number(args.limit || 20) },
+      );
+      return result;
+    }
 
     case "memory": {
-      const { curatedMemoryTool } = await import("./curated-memory");
-      const result = await curatedMemoryTool(env, args);
+      const { curatedMemoryHandler } = await import("./memory-tools");
+      const result = await curatedMemoryHandler(env, args);
       const action = String(args.action || "");
       const target = String(args.target || "memory");
       const orgId = resolveTelemetryOrgId(env) || "";
@@ -1756,15 +1756,13 @@ async function dispatch(
         const parsed = JSON.parse(result);
         if (parsed?.success) {
           emitMemoryEvent((env as any).TELEMETRY_QUEUE, "memory_write", sessionId, orgId, {
-            action,
-            target,
+            action, target,
             usage: String(parsed?.usage || ""),
             entry_count: Number(parsed?.entry_count || 0),
           });
         } else {
           emitMemoryEvent((env as any).TELEMETRY_QUEUE, "memory_write_rejected", sessionId, orgId, {
-            action,
-            target,
+            action, target,
             error: String(parsed?.error || "unknown"),
           });
         }
@@ -4244,6 +4242,7 @@ return { mode: "codemode", total_tasks: tasks.length, results };
       return parallelWebSearch(env, args);
 
     case "session-search": {
+      const { sessionSearch } = await import("./memory-tools");
       const result = await sessionSearch(env, args);
       emitMemoryEvent(
         (env as any).TELEMETRY_QUEUE,
@@ -4468,73 +4467,7 @@ async function parallelWebSearch(env: RuntimeEnv, args: Record<string, any>): Pr
   return output.join("\n\n---\n\n");
 }
 
-// ── Session Search — full-text search across past conversations ──
-
-async function sessionSearch(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
-  const query = String(args.query || "").trim();
-  const limit = Math.max(1, Math.min(Number(args.limit) || 5, 20));
-
-  try {
-    const { getDb } = await import("./db");
-    const sql = await getDb(env.HYPERDRIVE);
-    const agentName = (env as any).__agentConfig?.name || "";
-    let orgId = (env as any).__agentConfig?.org_id || (env as any).__agentConfig?.orgId || "";
-    if (!orgId) {
-      const fallback = await sql`SELECT org_id FROM orgs LIMIT 1`;
-      orgId = String(fallback?.[0]?.org_id || "");
-    }
-    if (!orgId) return JSON.stringify({ success: false, error: "No org_id available for session-search." });
-
-    const rows = query
-      ? await sql`
-          SELECT session_id, input_text, output_text, status, created_at, cost_total_usd, step_count
-          FROM sessions
-          WHERE org_id = ${orgId}
-            AND (${agentName} = '' OR agent_name = ${agentName})
-            AND (LOWER(input_text) LIKE ${"%" + query.toLowerCase() + "%"} OR LOWER(output_text) LIKE ${"%" + query.toLowerCase() + "%"})
-          ORDER BY created_at DESC
-          LIMIT ${limit}
-        `
-      : await sql`
-          SELECT session_id, input_text, output_text, status, created_at, cost_total_usd, step_count
-          FROM sessions
-          WHERE org_id = ${orgId}
-            AND (${agentName} = '' OR agent_name = ${agentName})
-          ORDER BY created_at DESC
-          LIMIT ${limit}
-        `;
-
-    if (!rows.length) {
-      return JSON.stringify({
-        success: true,
-        mode: query ? "search" : "recent",
-        query: query || undefined,
-        count: 0,
-        results: [],
-      });
-    }
-
-    const results = (rows as any[]).map((r: any) => ({
-      session_id: String(r.session_id || ""),
-      created_at: String(r.created_at || ""),
-      status: String(r.status || ""),
-      user_request: String(r.input_text || "").slice(0, 220),
-      outcome: String(r.output_text || "").slice(0, 260),
-      turns: Number(r.step_count || 0),
-      cost_usd: Number(r.cost_total_usd || 0),
-    }));
-
-    return JSON.stringify({
-      success: true,
-      mode: query ? "search" : "recent",
-      query: query || undefined,
-      count: results.length,
-      results,
-    });
-  } catch (err: any) {
-    return JSON.stringify({ success: false, error: `Session search failed: ${err?.message || String(err)}` });
-  }
-}
+// ── sessionSearch moved to memory-tools.ts (M2 ceiling recovery) ─
 
 // ── User Profile Memory — persistent per-user learning ──────
 
@@ -5307,56 +5240,7 @@ async function memoryDelete(env: RuntimeEnv, args: Record<string, any>): Promise
   }
 }
 
-async function memoryHealth(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
-  const agentName = (env as any).__agentConfig?.name || "my-assistant";
-  const hyperdrive = (env as any).HYPERDRIVE;
-  if (!hyperdrive) return JSON.stringify({ success: false, tool: "memory-health", error: "Memory not available" });
-  try {
-    const { getDb } = await import("./db");
-    const sql = await getDb(hyperdrive);
-    let orgId = String((env as any).__agentConfig?.org_id || "").trim();
-    if (!orgId) {
-      const fallback = await sql`SELECT org_id FROM orgs LIMIT 1`;
-      orgId = String(fallback?.[0]?.org_id || "");
-    }
-    if (!orgId) return JSON.stringify({ success: false, tool: "memory-health", error: "No org_id available" });
-    const limit = Math.max(1, Math.min(Number(args.limit) || 20, 100));
-    const [factsRows, episodesRows] = await Promise.all([
-      sql`
-        SELECT key, value, category, created_at
-        FROM facts
-        WHERE agent_name = ${agentName} AND org_id = ${orgId}
-        ORDER BY created_at DESC
-        LIMIT ${limit}
-      `,
-      sql`
-        SELECT content, created_at
-        FROM episodes
-        WHERE agent_name = ${agentName} AND org_id = ${orgId}
-        ORDER BY created_at DESC
-        LIMIT ${limit}
-      `,
-    ]);
-    const now = Date.now();
-    const dayMs = 86_400_000;
-    const staleFacts = (factsRows as any[]).filter((r) => {
-      const ts = Date.parse(String(r.created_at || ""));
-      return Number.isFinite(ts) && now - ts > dayMs * 30;
-    }).length;
-    return JSON.stringify({
-      success: true,
-      tool: "memory-health",
-      agent_name: agentName,
-      org_id: orgId,
-      semantic_facts_count: (factsRows as any[]).length,
-      episodic_entries_count: (episodesRows as any[]).length,
-      stale_facts_30d_count: staleFacts,
-      sample_limit: limit,
-    });
-  } catch (err: any) {
-    return JSON.stringify({ success: false, tool: "memory-health", error: `memory-health failed: ${err?.message || String(err)}` });
-  }
-}
+// ── memoryHealth moved to memory-tools.ts (M2 ceiling recovery) ─
 
 // ── TTS (Workers AI Deepgram) ─────────────────────────────────
 
