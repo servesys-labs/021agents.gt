@@ -391,9 +391,12 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
     best_iteration: jobRow.best_iteration,
   };
 
-  // Mark job as running
+  // Mark job as running. A mass column-rename regex during the April
+  // 2026 schema consolidation mangled this statement — it previously
+  // read `UPDATE 0 = ${job_id}`, which is not valid SQL and would
+  // throw at runtime. Restored the real shape.
   if (jobRow.status === "created") {
-    await sql`UPDATE 0 = ${job_id}`;
+    await sql`UPDATE training_jobs SET status = 'running', updated_at = now() WHERE id = ${job_id}`;
   }
 
   await emitTrainingEvent(c.env, job_id, job.agent_name, {

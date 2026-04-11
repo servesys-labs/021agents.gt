@@ -38,7 +38,12 @@ function resetDb() {
     {
       name: "test-agent",
       org_id: "org-a",
-      config_json: JSON.stringify({
+      // April 2026 schema consolidation renamed `config_json` → `config`
+      // and dropped the `_json` suffix across every table. The fixture
+      // has to match the new column name or the route's
+      // `parseJsonColumn(agentRows[0].config)` reads undefined and
+      // the preflight check fails with "No model configured" → 400.
+      config: JSON.stringify({
         name: "test-agent",
         system_prompt: "You are a helpful assistant.",
         model: "claude-sonnet-4-20250514",
@@ -47,7 +52,7 @@ function resetDb() {
         version: "0.1.0",
       }),
       description: "Test agent",
-      is_active: 1,
+      is_active: true,
     },
   ];
 }
@@ -58,11 +63,35 @@ function makeSql() {
 
     // ── INSERT ──
     if (query.includes("INSERT INTO training_jobs")) {
-      const job: any = {};
-      const keys = ["job_id","org_id","agent_name","algorithm","status","config_json","dataset_name","eval_tasks_json","max_iterations","auto_activate","created_by","tags"];
-      keys.forEach((k, i) => { if (i < values.length) job[k] = values[i]; });
-      job.current_iteration = 0; job.best_score = null; job.best_iteration = null;
-      job.best_resource_version = null; job.created_at = new Date().toISOString();
+      // The route's INSERT binds 11 values (status is a literal
+      // 'created', not a bind). Column order after the April 2026
+      // schema consolidation:
+      //   job_id, org_id, agent_name, algorithm, config, dataset_name,
+      //   eval_tasks, max_iterations, auto_activate, created_by, tags
+      // We store both `job_id` AND `id` on the row so the two
+      // different SELECT paths in the route (one of which reads
+      // `WHERE id = $1`, the other responds with `{job_id: ...}`)
+      // both resolve against the same row.
+      const job: any = {
+        job_id: values[0],
+        id: values[0],
+        org_id: values[1],
+        agent_name: values[2],
+        algorithm: values[3],
+        status: "created",
+        config: values[4],
+        dataset_name: values[5],
+        eval_tasks: values[6],
+        max_iterations: values[7],
+        auto_activate: values[8],
+        created_by: values[9],
+        tags: values[10],
+        current_iteration: 0,
+        best_score: null,
+        best_iteration: null,
+        best_resource_version: null,
+        created_at: new Date().toISOString(),
+      };
       db_training_jobs.push(job);
       return { count: 1 };
     }
@@ -443,9 +472,7 @@ describe("training jobs CRUD", () => {
 // ══════════════════════════════════════════════════════════════════════
 
 describe("training step execution", () => {
-  // TODO(rls-migration): step route returns 400 in RLS mode — likely a
-  // precondition query shape the in-memory mock no longer satisfies.
-  it.skip("runs a baseline step and produces a resource update", async () => {
+  it("runs a baseline step and produces a resource update", async () => {
     const app = buildApp();
     const env = mockEnv({ RUNTIME: runtimeMock(0.6) });
 
@@ -470,9 +497,7 @@ describe("training step execution", () => {
     expect(typeof step.should_continue).toBe("boolean");
   });
 
-  // TODO(rls-migration): step route returns 400 in RLS mode — in-memory mock
-  // precondition rows not matched under new query shapes.
-  it.skip("runs an APO step with LLM calls", async () => {
+  it("runs an APO step with LLM calls", async () => {
     const app = buildApp();
     let aiCalls = 0;
     const env = mockEnv({
@@ -503,9 +528,7 @@ describe("training step execution", () => {
     expect(step.optimization.metadata).toBeDefined();
   });
 
-  // TODO(rls-migration): step route returns 400 in RLS mode — in-memory mock
-  // precondition rows not matched under new query shapes.
-  it.skip("sequential steps advance iteration numbers correctly", async () => {
+  it("sequential steps advance iteration numbers correctly", async () => {
     const app = buildApp();
     const env = mockEnv({ RUNTIME: runtimeMock() });
 
@@ -563,8 +586,7 @@ describe("training step execution", () => {
     expect(step.status).toBe(200);
   });
 
-  // TODO(rls-migration): step route doesn't reach reward insert in RLS mode.
-  it.skip("writes to training_rewards on each step", async () => {
+  it("writes to training_rewards on each step", async () => {
     const app = buildApp();
     const env = mockEnv({ RUNTIME: runtimeMock(0.7) });
 
