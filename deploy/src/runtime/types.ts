@@ -97,6 +97,14 @@ export interface AgentConfig {
   timeout_seconds?: number; // Default: 300 (5 minutes)
   tools: string[];
   blocked_tools: string[];
+  /**
+   * Optional agent-level allowlist of skill names (Phase 4). Empty/undefined =
+   * backward compatible: all skills (built-in + DB-loaded) are available.
+   * Non-empty = only the listed skills are injected into the prompt and
+   * callable via <activate-skill>. Filter applies after the merge so order
+   * and the Phase 0 byte-identity snapshot are preserved.
+   */
+  enabled_skills?: string[];
   allowed_domains: string[];           // Domain allowlist for HTTP/browse tools
   blocked_domains?: string[];
   /** Normalized deploy-time policy artifact (config.deploy_policy). */

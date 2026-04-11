@@ -1745,22 +1745,22 @@ async function dispatch(
     case "memory-delete":
       return memoryDelete(env, args);
 
-    case "memory-health":
-      {
-        const result = await memoryHealth(env, args);
-        emitMemoryEvent(
-          (env as any).TELEMETRY_QUEUE,
-          "memory_read",
-          sessionId,
-          resolveTelemetryOrgId(env) || "",
-          { tool: "memory-health", limit: Number(args.limit || 20) },
-        );
-        return result;
-      }
+    case "memory-health": {
+      const { memoryHealth } = await import("./memory-tools");
+      const result = await memoryHealth(env, args);
+      emitMemoryEvent(
+        (env as any).TELEMETRY_QUEUE,
+        "memory_read",
+        sessionId,
+        resolveTelemetryOrgId(env) || "",
+        { tool: "memory-health", limit: Number(args.limit || 20) },
+      );
+      return result;
+    }
 
     case "memory": {
-      const { curatedMemoryTool } = await import("./curated-memory");
-      const result = await curatedMemoryTool(env, args);
+      const { curatedMemoryHandler } = await import("./memory-tools");
+      const result = await curatedMemoryHandler(env, args);
       const action = String(args.action || "");
       const target = String(args.target || "memory");
       const orgId = resolveTelemetryOrgId(env) || "";
@@ -1768,15 +1768,13 @@ async function dispatch(
         const parsed = JSON.parse(result);
         if (parsed?.success) {
           emitMemoryEvent((env as any).TELEMETRY_QUEUE, "memory_write", sessionId, orgId, {
-            action,
-            target,
+            action, target,
             usage: String(parsed?.usage || ""),
             entry_count: Number(parsed?.entry_count || 0),
           });
         } else {
           emitMemoryEvent((env as any).TELEMETRY_QUEUE, "memory_write_rejected", sessionId, orgId, {
-            action,
-            target,
+            action, target,
             error: String(parsed?.error || "unknown"),
           });
         }
@@ -4259,6 +4257,7 @@ return { mode: "codemode", total_tasks: tasks.length, results };
       return parallelWebSearch(env, args);
 
     case "session-search": {
+      const { sessionSearch } = await import("./memory-tools");
       const result = await sessionSearch(env, args);
       let count = 0;
       try {
@@ -4496,21 +4495,32 @@ async function parallelWebSearch(env: RuntimeEnv, args: Record<string, any>): Pr
 }
 
 // ── Session Search — full-text search across past conversations ──
+// Exported so deploy/test/memory-tools.test.ts can exercise fail-closed behavior
+// without a full dispatch loop. Internal callers use the `session-search` case
+// in the switch statement above.
 
-async function sessionSearch(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
+export async function sessionSearch(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
   const query = String(args.query || "").trim();
   const limit = Math.max(1, Math.min(Number(args.limit) || 5, 20));
+
+  // Fail-closed on org_id: do NOT fall back to "pick any org from the orgs table"
+  // (latent cross-tenant leak pattern). Agents that cannot supply an org_id
+  // receive a structured error.
+  const agentName = (env as any).__agentConfig?.name || "";
+  const orgId = String(
+    (env as any).__agentConfig?.org_id || (env as any).__agentConfig?.orgId || "",
+  ).trim();
+  if (!orgId) {
+    return JSON.stringify({
+      success: false,
+      tool: "session-search",
+      error: "org_id required — session-search must not fall back to another tenant.",
+    });
+  }
 
   try {
     const { getDb } = await import("./db");
     const sql = await getDb(env.HYPERDRIVE);
-    const agentName = (env as any).__agentConfig?.name || "";
-    let orgId = (env as any).__agentConfig?.org_id || (env as any).__agentConfig?.orgId || "";
-    if (!orgId) {
-      const fallback = await sql`SELECT org_id FROM orgs LIMIT 1`;
-      orgId = String(fallback?.[0]?.org_id || "");
-    }
-    if (!orgId) return JSON.stringify({ success: false, error: "No org_id available for session-search." });
 
     const rows = query
       ? await sql`
@@ -4565,7 +4575,7 @@ async function sessionSearch(env: RuntimeEnv, args: Record<string, any>): Promis
       results,
     });
   } catch (err: any) {
-    return JSON.stringify({ success: false, error: `Session search failed: ${err?.message || String(err)}` });
+    return JSON.stringify({ success: false, tool: "session-search", error: `Session search failed: ${err?.message || String(err)}` });
   }
 }
 
@@ -5303,18 +5313,24 @@ async function syncWorkspaceProcedures(
   args: Record<string, any>,
 ): Promise<string> {
   const agentName = (env as any).__agentConfig?.name || "my-assistant";
-  let orgId = (env as any).__agentConfig?.org_id || (env as any).__delegationLineage?.org_id || "";
+  // Fail-closed on org_id — do NOT fall back to "pick any org from the orgs
+  // table", which is the cross-tenant leak pattern.
+  const orgId = String(
+    (env as any).__agentConfig?.org_id || (env as any).__delegationLineage?.org_id || "",
+  ).trim();
   const hyperdrive = (env as any).HYPERDRIVE;
   if (!hyperdrive) return JSON.stringify({ ok: false, tool: "sync-workspace-procedures", error: "no database" });
+  if (!orgId) {
+    return JSON.stringify({
+      ok: false,
+      tool: "sync-workspace-procedures",
+      error: "org_id required — must not fall back to another tenant.",
+    });
+  }
 
   try {
     const { getDb } = await import("./db");
     const sql = await getDb(hyperdrive);
-    if (!orgId) {
-      const fallback = await sql`SELECT org_id FROM orgs LIMIT 1`;
-      orgId = String(fallback?.[0]?.org_id || "");
-    }
-    if (!orgId) return JSON.stringify({ ok: false, tool: "sync-workspace-procedures", error: "no org_id available" });
 
     const { exportProceduresMarkdown } = await import("./memory");
     const { markdown, count } = await exportProceduresMarkdown(hyperdrive, {
@@ -5425,19 +5441,30 @@ async function memoryDelete(env: RuntimeEnv, args: Record<string, any>): Promise
   }
 }
 
-async function memoryHealth(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
+// ── Memory Health — summary of memory tier state for an agent ──
+// Exported for deploy/test/memory-tools.test.ts. Fail-closed on org_id.
+
+export async function memoryHealth(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
   const agentName = (env as any).__agentConfig?.name || "my-assistant";
   const hyperdrive = (env as any).HYPERDRIVE;
-  if (!hyperdrive) return JSON.stringify({ success: false, tool: "memory-health", error: "Memory not available" });
+  if (!hyperdrive) {
+    return JSON.stringify({
+      success: false,
+      tool: "memory-health",
+      error: "Memory not available (no database binding)",
+    });
+  }
+  const orgId = String((env as any).__agentConfig?.org_id || "").trim();
+  if (!orgId) {
+    return JSON.stringify({
+      success: false,
+      tool: "memory-health",
+      error: "org_id required — memory-health must not fall back to another tenant.",
+    });
+  }
   try {
     const { getDb } = await import("./db");
     const sql = await getDb(hyperdrive);
-    let orgId = String((env as any).__agentConfig?.org_id || "").trim();
-    if (!orgId) {
-      const fallback = await sql`SELECT org_id FROM orgs LIMIT 1`;
-      orgId = String(fallback?.[0]?.org_id || "");
-    }
-    if (!orgId) return JSON.stringify({ success: false, tool: "memory-health", error: "No org_id available" });
     const limit = Math.max(1, Math.min(Number(args.limit) || 20, 100));
     const [factsRows, episodesRows] = await Promise.all([
       sql`

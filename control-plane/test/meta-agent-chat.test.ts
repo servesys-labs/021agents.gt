@@ -766,3 +766,172 @@ describe("consolidated schema — feature_flags, agent_versions, skills", () => 
     expect(content).toContain("agent_name");
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+// 12. PHASE 5 — enabled_skills validation + catalog wiring
+// ══════════════════════════════════════════════════════════════════
+//
+// Verifies the control-plane side of the Phase 4 runtime filter:
+//   - SKILL_CATALOG.generated.ts is fresh (matches SKILL.md on disk)
+//   - normalizeEnabledSkills drops unknowns, de-dupes, and coerces
+//     unexpected input shapes
+//   - the tool schemas for update_agent_config and create_sub_agent
+//     advertise enabled_skills
+//   - the prompt mentions the Skill selection contract
+// ══════════════════════════════════════════════════════════════════
+
+import {
+  SKILL_CATALOG,
+  SKILL_CATALOG_BY_NAME,
+  SKILL_CATALOG_NAMES,
+} from "../src/lib/skill-catalog.generated";
+import { normalizeEnabledSkills } from "../src/logic/meta-agent-chat";
+
+describe("Phase 5 — SKILL_CATALOG shape", () => {
+  it("contains at least the 19 BUILTIN skills", () => {
+    const expected = [
+      "analyze", "batch", "chart", "debug", "design", "docs", "docx",
+      "game", "pdf", "pptx", "remember", "report", "research", "review",
+      "schedule", "skillify", "spreadsheet", "verify", "website",
+    ];
+    for (const name of expected) {
+      expect(SKILL_CATALOG_NAMES.has(name), `missing skill: ${name}`).toBe(true);
+    }
+  });
+
+  it("also ships the 2 pre-existing fixture skills (NON_BUILTIN_ALLOWLIST from Phase 3)", () => {
+    expect(SKILL_CATALOG_NAMES.has("code-review")).toBe(true);
+    expect(SKILL_CATALOG_NAMES.has("deep-research")).toBe(true);
+  });
+
+  it("SKILL_CATALOG is sorted alphabetically by name", () => {
+    const names = SKILL_CATALOG.map((s) => s.name);
+    const sorted = [...names].sort((a, b) => a.localeCompare(b));
+    expect(names).toEqual(sorted);
+  });
+
+  it("every entry has a non-empty description", () => {
+    for (const s of SKILL_CATALOG) {
+      expect(s.description.length, `empty description for ${s.name}`).toBeGreaterThan(0);
+    }
+  });
+
+  it("SKILL_CATALOG_BY_NAME is consistent with SKILL_CATALOG", () => {
+    for (const s of SKILL_CATALOG) {
+      expect(SKILL_CATALOG_BY_NAME[s.name]).toBe(s);
+    }
+  });
+
+  it("every skill with min_plan also has delegate_agent (no half-configured delegates)", () => {
+    for (const s of SKILL_CATALOG) {
+      if (s.min_plan) {
+        expect(s.delegate_agent, `${s.name} has min_plan but no delegate_agent`).toBeTruthy();
+      }
+    }
+  });
+
+  it("delegate_agent targets reference real skill-agent names", () => {
+    const knownDelegates = new Set([
+      "pdf-specialist",
+      "research-analyst",
+      "data-analyst",
+    ]);
+    for (const s of SKILL_CATALOG) {
+      if (s.delegate_agent) {
+        expect(
+          knownDelegates.has(s.delegate_agent),
+          `${s.name} delegates to unknown agent: ${s.delegate_agent}`,
+        ).toBe(true);
+      }
+    }
+  });
+});
+
+describe("Phase 5 — normalizeEnabledSkills", () => {
+  it("returns empty for non-array input", () => {
+    expect(normalizeEnabledSkills(undefined)).toEqual({ valid: [], dropped: [] });
+    expect(normalizeEnabledSkills(null)).toEqual({ valid: [], dropped: [] });
+    expect(normalizeEnabledSkills("pdf")).toEqual({ valid: [], dropped: [] });
+    expect(normalizeEnabledSkills({ pdf: true })).toEqual({ valid: [], dropped: [] });
+    expect(normalizeEnabledSkills(42)).toEqual({ valid: [], dropped: [] });
+  });
+
+  it("returns valid known skills unchanged", () => {
+    const r = normalizeEnabledSkills(["pdf"]);
+    expect(r.valid).toEqual(["pdf"]);
+    expect(r.dropped).toEqual([]);
+  });
+
+  it("drops unknown names into dropped[] but keeps valid ones", () => {
+    const r = normalizeEnabledSkills(["pdf", "not-a-skill", "research", "xyz"]);
+    expect(r.valid).toEqual(["pdf", "research"]);
+    expect(r.dropped).toEqual(["not-a-skill", "xyz"]);
+  });
+
+  it("de-duplicates while preserving first-seen order", () => {
+    const r = normalizeEnabledSkills(["pdf", "research", "pdf", "research"]);
+    expect(r.valid).toEqual(["pdf", "research"]);
+    expect(r.dropped).toEqual([]);
+  });
+
+  it("trims whitespace and skips empty strings", () => {
+    const r = normalizeEnabledSkills(["  pdf  ", "", "   ", "research"]);
+    expect(r.valid).toEqual(["pdf", "research"]);
+    expect(r.dropped).toEqual([]);
+  });
+
+  it("coerces non-string items via String()", () => {
+    const r = normalizeEnabledSkills(["pdf", 42, null, "research"]);
+    expect(r.valid).toEqual(["pdf", "research"]);
+    // 42 → "42" (dropped), null → "" (skipped before dropped)
+    expect(r.dropped).toEqual(["42"]);
+  });
+
+  it("rejects a name that looks like a skill-agent (not a skill)", () => {
+    // pdf-specialist is an agent, not a skill. Only "pdf" is in the catalog.
+    const r = normalizeEnabledSkills(["pdf-specialist"]);
+    expect(r.valid).toEqual([]);
+    expect(r.dropped).toEqual(["pdf-specialist"]);
+  });
+});
+
+describe("Phase 5 — tool schemas advertise enabled_skills", () => {
+  it("update_agent_config schema includes enabled_skills: array of string", async () => {
+    const fs = await import("fs");
+    const src = fs.readFileSync("src/logic/meta-agent-chat.ts", "utf8");
+    // Scan the update_agent_config tool definition for the enabled_skills property
+    const updateBlock = src.slice(
+      src.indexOf('name: "update_agent_config"'),
+      src.indexOf('name: "read_sessions"'),
+    );
+    expect(updateBlock).toContain("enabled_skills");
+    expect(updateBlock).toMatch(/enabled_skills[\s\S]*type:\s*"array"/);
+    expect(updateBlock).toMatch(/enabled_skills[\s\S]*items:\s*\{\s*type:\s*"string"\s*\}/);
+  });
+
+  it("create_sub_agent schema includes enabled_skills: array of string", async () => {
+    const fs = await import("fs");
+    const src = fs.readFileSync("src/logic/meta-agent-chat.ts", "utf8");
+    const createBlock = src.slice(
+      src.indexOf('name: "create_sub_agent"'),
+      src.indexOf('name: "manage_connectors"'),
+    );
+    expect(createBlock).toContain("enabled_skills");
+    expect(createBlock).toMatch(/enabled_skills[\s\S]*type:\s*"array"/);
+  });
+
+  it("create_sub_agent schema nudges away from inlining skill prose", async () => {
+    const fs = await import("fs");
+    const src = fs.readFileSync("src/logic/meta-agent-chat.ts", "utf8");
+    // The system_prompt description should advise against inlining skill bodies
+    expect(src).toMatch(/don't duplicate skill bodies in prose/i);
+  });
+
+  it("prompt explains Skill selection and the anti-pattern warning", () => {
+    const prompt = buildMetaAgentChatPrompt("test-agent", "live");
+    expect(prompt).toContain("Skill selection");
+    expect(prompt).toContain("enabled_skills");
+    expect(prompt).toMatch(/Phase 4 anti-pattern/);
+    expect(prompt).toContain("allowed_tools");  // superset reminder
+  });
+});

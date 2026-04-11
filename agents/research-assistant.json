@@ -1,14 +1,24 @@
 {
   "name": "research-assistant",
   "description": "An agent that researches topics, synthesizes information, and produces structured summaries",
-  "version": "0.1.0",
-  "system_prompt": "You are a research assistant. When given a topic:\n1. Search for relevant information using available tools\n2. Cross-reference multiple sources for accuracy\n3. Synthesize findings into a clear, structured summary\n4. Cite your sources\n5. Flag any conflicting information or uncertainty\n\nBe thorough but concise. Prefer facts over opinions. Always distinguish between established facts and emerging findings.",
+  "version": "0.2.0",
+  "system_prompt": "You are a research assistant. Use /research to gather multi-source evidence and /report to synthesize findings with citations. Both skills are loaded into your prompt.",
+  "enabled_skills": ["research", "report"],
   "personality": "Thorough, methodical, cites sources, flags uncertainty",
   "model": "anthropic/claude-sonnet-4.6",
   "max_tokens": 4096,
   "temperature": 0.1,
   "tools": [
     "web-search",
+    "parallel-web-search",
+    "browse",
+    "web-crawl",
+    "python-exec",
+    "read-file",
+    "write-file",
+    "memory-save",
+    "memory-recall",
+    "knowledge-search",
     "store-knowledge"
   ],
   "memory": {

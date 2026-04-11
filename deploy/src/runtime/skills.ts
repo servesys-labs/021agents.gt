@@ -79,11 +79,12 @@ export async function loadSkills(
   }
 }
 
-/**
- * Format skills as a system prompt section.
- */
-export function formatSkillsPrompt(skills: Skill[], plan?: string): string {
-  const all = [...BUILTIN_SKILLS, ...skills];
+/** Format skills section. Default=BUILTIN_SKILLS (Phase 0 byte-id). Opt-in adds NON_BUILTIN_BUNDLED. */
+export function formatSkillsPrompt(skills: Skill[], plan?: string, enabled?: readonly string[]): string {
+  const merged = enabled?.length
+    ? [...BUILTIN_SKILLS, ...NON_BUILTIN_BUNDLED, ...skills]
+    : [...BUILTIN_SKILLS, ...skills];
+  const all = merged.filter(s => !enabled?.length || enabled.includes(s.name));
   if (all.length === 0) return "";
 
   const planTier = (plan || "standard").toLowerCase();
@@ -129,13 +130,10 @@ export function formatSkillsPrompt(skills: Skill[], plan?: string): string {
   return lines.join("\n");
 }
 
-/**
- * Get the full prompt for a specific skill activation.
- * Called when user invokes /skill-name or when the agent matches a trigger.
- */
-export function getSkillPrompt(skillName: string, args: string, skills: Skill[]): string | null {
-  const all = [...BUILTIN_SKILLS, ...skills];
-  const skill = all.find(s => s.name === skillName);
+/** Get skill body by name. Honors `enabled` allowlist. Searches full bundled manifest. */
+export function getSkillPrompt(skillName: string, args: string, skills: Skill[], enabled?: readonly string[]): string | null {
+  if (enabled?.length && !enabled.includes(skillName)) return null;
+  const skill = BUNDLED_SKILLS_BY_NAME[skillName] ?? skills.find(s => s.name === skillName);
   if (!skill) return null;
 
   let prompt = skill.prompt_template;
@@ -143,11 +141,7 @@ export function getSkillPrompt(skillName: string, args: string, skills: Skill[])
   return prompt;
 }
 
-// Built-in skills. Source-of-truth lives in skills/public/<name>/SKILL.md;
-// the bundler at deploy/scripts/bundle-skills.mjs emits the generated manifest
-// that this array references. Insertion order is load-bearing — it determines
-// the byte-exact output of formatSkillsPrompt() and is snapshot-tested by the
-// Phase 0 drift guards. Do not reorder without a fixture bump.
+// Order is load-bearing — snapshot-tested by Phase 0. Bodies come from skills/public/<name>/SKILL.md.
 const BUILTIN_SKILL_ORDER = [
   "batch",
   "review",
@@ -171,12 +165,12 @@ const BUILTIN_SKILL_ORDER = [
 ] as const;
 
 export const BUILTIN_SKILLS: Skill[] = BUILTIN_SKILL_ORDER.map((name) => {
-  const skill = BUNDLED_SKILLS_BY_NAME[name];
-  if (!skill) {
-    throw new Error(
-      `[skills] BUILTIN_SKILL_ORDER references "${name}" but no matching entry exists in skills-manifest.generated.ts. Did you forget to add skills/public/${name}/SKILL.md, or run the bundler?`,
-    );
-  }
-  return skill;
+  const s = BUNDLED_SKILLS_BY_NAME[name];
+  if (!s) throw new Error(`[skills] BUILTIN_SKILL_ORDER references unbundled "${name}" — add skills/public/${name}/SKILL.md and run the bundler`);
+  return s;
 });
+
+// Bundled skills NOT in BUILTIN_SKILL_ORDER. Opt-in only via enabled_skills.
+const NON_BUILTIN_BUNDLED: Skill[] = Object.values(BUNDLED_SKILLS_BY_NAME)
+  .filter((s) => !(BUILTIN_SKILL_ORDER as readonly string[]).includes(s.name));
 

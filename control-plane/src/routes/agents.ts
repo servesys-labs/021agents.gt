@@ -12,6 +12,7 @@ import { withOrgDb, type OrgSql } from "../db/client";
 import { failSafe } from "../lib/error-response";
 import { latestEvalGate, rolloutRecommendation } from "../logic/gate-pack";
 import { buildFromDescription, recommendTools, expandEvalConfig, generateEvolutionSuggestions, type EvalTestCase, type EvalRubric } from "../logic/meta-agent";
+import { normalizeEnabledSkills } from "../logic/meta-agent-chat";
 import { runMetaChat, type MetaChatMessage } from "../logic/meta-agent-chat";
 import { AGENT_TEMPLATES, getTemplateById } from "../logic/agent-templates";
 import { applyDeployPolicyToConfigJson } from "../logic/deploy-policy-contract";
@@ -377,6 +378,15 @@ agentRoutes.openapi(createAgentRoute, async (c): Promise<any> => {
       harness: {},
     };
 
+    // Phase 5 — validate enabled_skills against the bundled catalog; drop
+    // unknowns and surface them via package_errors so the caller sees what
+    // was dropped. Empty/absent = default ("all skills available") —
+    // backward-compatible with pre-Phase-5 configs.
+    const createEnabled = normalizeEnabledSkills(req.enabled_skills);
+    if (createEnabled.valid.length > 0) {
+      configJson.enabled_skills = createEnabled.valid;
+    }
+
     // Reasoning strategy
     if (req.reasoning_strategy) {
       configJson.reasoning_strategy = req.reasoning_strategy;
@@ -447,6 +457,11 @@ agentRoutes.openapi(createAgentRoute, async (c): Promise<any> => {
       version: "0.1.0",
     };
     if (req.reasoning_strategy) response.reasoning_strategy = req.reasoning_strategy;
+    if (createEnabled.valid.length > 0) response.enabled_skills = createEnabled.valid;
+    if (createEnabled.dropped.length > 0) {
+      response.warning_enabled_skills = `dropped ${createEnabled.dropped.length} unknown skill name(s): ${createEnabled.dropped.join(", ")}`;
+      response.dropped_skills = createEnabled.dropped;
+    }
     if (packageErrors.length > 0) response.package_errors = packageErrors;
     return c.json(response as any, 201);
     });
@@ -498,6 +513,14 @@ agentRoutes.openapi(updateAgentRoute, async (c): Promise<any> => {
     if (req.temperature != null) existingConfig.temperature = req.temperature;
     if (req.tools && req.tools.length > 0) existingConfig.tools = req.tools;
     if (req.tags && req.tags.length > 0) existingConfig.tags = req.tags;
+    // Phase 5 — enabled_skills validated against the bundled catalog.
+    // An explicit empty array clears the allowlist (back to "all skills").
+    let updateDroppedSkills: string[] = [];
+    if (req.enabled_skills !== undefined) {
+      const { valid, dropped } = normalizeEnabledSkills(req.enabled_skills);
+      existingConfig.enabled_skills = valid;
+      updateDroppedSkills = dropped;
+    }
     if (req.max_turns != null) existingConfig.max_turns = req.max_turns;
     if (req.timeout_seconds != null) existingConfig.timeout_seconds = req.timeout_seconds;
     if (req.deploy_policy) {
@@ -568,14 +591,22 @@ agentRoutes.openapi(updateAgentRoute, async (c): Promise<any> => {
     // This triggers the DO to reload config on next request
     notifyRuntimeOfConfigChange(c.env, name, newVersion).catch(() => {});
 
-    return c.json({
+    const updateResponse: Record<string, unknown> = {
       name,
       description: existingConfig.description ?? "",
       model: existingConfig.model ?? "",
       tools: Array.isArray(existingConfig.tools) ? existingConfig.tools : [],
       tags: Array.isArray(existingConfig.tags) ? existingConfig.tags : [],
       version: newVersion,
-    } as any);
+    };
+    if (Array.isArray(existingConfig.enabled_skills) && existingConfig.enabled_skills.length > 0) {
+      updateResponse.enabled_skills = existingConfig.enabled_skills;
+    }
+    if (updateDroppedSkills.length > 0) {
+      updateResponse.warning_enabled_skills = `dropped ${updateDroppedSkills.length} unknown skill name(s): ${updateDroppedSkills.join(", ")}`;
+      updateResponse.dropped_skills = updateDroppedSkills;
+    }
+    return c.json(updateResponse as any);
     });
 });
 

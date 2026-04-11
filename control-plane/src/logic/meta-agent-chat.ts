@@ -11,6 +11,29 @@
 import { withOrgDb } from "../db/client";
 import { generateEvolutionSuggestions } from "./meta-agent";
 import { parseJsonColumn } from "../lib/parse-json-column";
+import { SKILL_CATALOG_NAMES } from "../lib/skill-catalog.generated";
+
+/**
+ * Normalize an enabled_skills input from the LLM: coerce to string[],
+ * drop unknowns (with a captured list for logging), and de-dupe.
+ * Returns { valid, dropped } so callers can surface warnings.
+ *
+ * Exported for direct testing in meta-agent-chat.test.ts.
+ */
+export function normalizeEnabledSkills(raw: unknown): { valid: string[]; dropped: string[] } {
+  if (!Array.isArray(raw)) return { valid: [], dropped: [] };
+  const valid: string[] = [];
+  const dropped: string[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    const name = String(item || "").trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    if (SKILL_CATALOG_NAMES.has(name)) valid.push(name);
+    else dropped.push(name);
+  }
+  return { valid, dropped };
+}
 
 /* ── Types ──────────────────────────────────────────────────────── */
 
@@ -162,6 +185,11 @@ const META_TOOLS: ToolDef[] = [
             type: "array",
             items: { type: "string" },
             description: "Full list of tools the agent should have",
+          },
+          enabled_skills: {
+            type: "array",
+            items: { type: "string" },
+            description: "Optional agent-level allowlist of skill names (e.g. ['pdf', 'research']). If set, the agent only sees and can activate those skills. If empty/omitted, all available skills are exposed. Pick skills from the catalog instead of duplicating their workflows in system_prompt.",
           },
           blocked_tools: {
             type: "array",
@@ -546,8 +574,13 @@ const META_TOOLS: ToolDef[] = [
         properties: {
           name: { type: "string", description: "Snake_case name for the sub-agent (e.g., 'research_assistant')" },
           description: { type: "string", description: "What this sub-agent specializes in" },
-          system_prompt: { type: "string", description: "Detailed system prompt for the sub-agent (200+ words)" },
-          tools: { type: "array", items: { type: "string" }, description: "Tools the sub-agent should have" },
+          system_prompt: { type: "string", description: "Short role description (1-3 sentences). Prefer enabled_skills to load full workflows — don't duplicate skill bodies in prose here." },
+          tools: { type: "array", items: { type: "string" }, description: "Tools the sub-agent should have. Must be a superset of the enabled skills' allowed_tools — missing tools cause the skill to fail at dispatch." },
+          enabled_skills: {
+            type: "array",
+            items: { type: "string" },
+            description: "Skill names to enable for this sub-agent (e.g. ['pdf'] for a pdf-specialist). Unknown names are dropped with a warning. Prefer this over inlining skill workflows in system_prompt — it keeps agents thin and skills fat.",
+          },
           model: { type: "string", description: "Model (default: same as parent agent)" },
           max_turns: { type: "number", description: "Max turns for sub-agent (default: 15)" },
           budget_limit_usd: { type: "number", description: "Budget per sub-agent session (default: 1.0)" },
@@ -781,11 +814,22 @@ async function executeTool(
         "use_code_mode",
       ] as const;
       const changed: string[] = [];
+      const droppedSkills: string[] = [];
       for (const key of updatable) {
         if (args[key] !== undefined) {
           (config as any)[key] = args[key];
           changed.push(key);
         }
+      }
+      // enabled_skills — validate each name against the bundled catalog
+      // and drop unknowns. Unknown names would be silently ignored by the
+      // runtime filter anyway, but validating here surfaces the mistake
+      // to the meta-agent so it can re-emit a corrected list.
+      if (args.enabled_skills !== undefined) {
+        const { valid, dropped } = normalizeEnabledSkills(args.enabled_skills);
+        (config as any).enabled_skills = valid;
+        changed.push("enabled_skills");
+        for (const d of dropped) droppedSkills.push(d);
       }
       // Handle budget_limit_usd — nested under governance
       if (args.budget_limit_usd !== undefined) {
@@ -863,6 +907,12 @@ async function executeTool(
         updated: true,
         changed_fields: changed,
         new_version: newVersion,
+        ...(droppedSkills.length > 0
+          ? {
+              warning: `enabled_skills: dropped ${droppedSkills.length} unknown skill name(s): ${droppedSkills.join(", ")}. Valid names come from skills/public/<name>/SKILL.md and are in the catalog.`,
+              dropped_skills: droppedSkills,
+            }
+          : {}),
       });
     }
 
@@ -2137,6 +2187,9 @@ async function executeTool(
       const tools = Array.isArray(args.tools) ? args.tools.map(String) : [];
       if (tools.length === 0) return JSON.stringify({ error: "tools array is required" });
 
+      // Validate enabled_skills against the catalog (drop unknown names).
+      const { valid: enabledSkills, dropped: droppedSkills } = normalizeEnabledSkills(args.enabled_skills);
+
       try {
         // Read parent agent config for defaults
         const parentRows = await sql`SELECT config FROM agents WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId} LIMIT 1`;
@@ -2144,7 +2197,19 @@ async function executeTool(
           ? (typeof parentRows[0].config === "string" ? JSON.parse(parentRows[0].config as string) : parentRows[0].config || {})
           : {};
 
-        const subConfig = {
+        interface SubAgentConfig {
+          system_prompt: string;
+          model: string;
+          plan: string;
+          provider: string;
+          tools: string[];
+          max_turns: number;
+          governance: { budget_limit_usd: number };
+          parent_agent: string;
+          version: string;
+          enabled_skills?: string[];
+        }
+        const subConfig: SubAgentConfig = {
           system_prompt: systemPrompt,
           model: String(args.model || parentConfig.model || "anthropic/claude-sonnet-4-6"),
           plan: parentConfig.plan || "standard",
@@ -2157,6 +2222,9 @@ async function executeTool(
           parent_agent: ctx.agentName,
           version: "0.1.0",
         };
+        if (enabledSkills.length > 0) {
+          subConfig.enabled_skills = enabledSkills;
+        }
 
         await sql`
           INSERT INTO agents (name, org_id, description, config, is_active, created_at, updated_at)
@@ -2184,9 +2252,16 @@ async function executeTool(
           description,
           model: subConfig.model,
           tools,
+          enabled_skills: enabledSkills.length > 0 ? enabledSkills : undefined,
           max_turns: subConfig.max_turns,
           budget_limit_usd: subConfig.governance.budget_limit_usd,
           message: `Sub-agent '${name}' created. The parent agent '${ctx.agentName}' can now delegate to it using the run-agent tool with agent_name='${name}'.`,
+          ...(droppedSkills.length > 0
+            ? {
+                warning: `enabled_skills: dropped ${droppedSkills.length} unknown skill name(s): ${droppedSkills.join(", ")}. Valid names come from skills/public/<name>/SKILL.md and are in the catalog.`,
+                dropped_skills: droppedSkills,
+              }
+            : {}),
         });
       } catch (err: any) {
         return JSON.stringify({ error: `Failed to create sub-agent: ${err.message || err}` });
