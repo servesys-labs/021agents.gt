@@ -705,6 +705,27 @@ CREATE TABLE IF NOT EXISTS delegation_events (
   created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS run_artifacts (
+  id                BIGSERIAL PRIMARY KEY,
+  session_id        TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+  org_id            TEXT NOT NULL DEFAULT '',
+  agent_name        TEXT NOT NULL DEFAULT '',
+  turn_number       INT NOT NULL DEFAULT 0,
+  artifact_name     TEXT NOT NULL,
+  artifact_kind     TEXT NOT NULL DEFAULT 'generic',
+  mime_type         TEXT NOT NULL DEFAULT 'application/octet-stream',
+  size_bytes        BIGINT NOT NULL DEFAULT 0,
+  storage_key       TEXT NOT NULL DEFAULT '',
+  source_tool       TEXT NOT NULL DEFAULT '',
+  source_event      TEXT NOT NULL DEFAULT '',
+  schema_version    TEXT,
+  status            TEXT NOT NULL DEFAULT 'available',
+  metadata          JSONB NOT NULL DEFAULT '{}',
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (session_id, artifact_name, storage_key)
+);
+
 -- ============================================================================
 -- SECTION 9: Observability & Telemetry
 -- ============================================================================
@@ -2016,6 +2037,9 @@ CREATE INDEX IF NOT EXISTS idx_a2a_tasks_caller_org ON a2a_tasks(caller_org_id);
 CREATE INDEX IF NOT EXISTS idx_a2a_tasks_callee_org ON a2a_tasks(callee_org_id);
 CREATE INDEX IF NOT EXISTS idx_a2a_tasks_created_at ON a2a_tasks(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_a2a_artifacts_task_id ON a2a_artifacts(task_id);
+CREATE INDEX IF NOT EXISTS idx_run_artifacts_session ON run_artifacts(session_id);
+CREATE INDEX IF NOT EXISTS idx_run_artifacts_org_created ON run_artifacts(org_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_run_artifacts_storage_key ON run_artifacts(storage_key);
 CREATE INDEX IF NOT EXISTS idx_delegation_events_org_id ON delegation_events(org_id);
 CREATE INDEX IF NOT EXISTS idx_delegation_events_parent_session ON delegation_events(parent_session_id);
 

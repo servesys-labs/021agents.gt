@@ -289,6 +289,82 @@ sessionRoutes.openapi(getSessionTurnsRoute, async (c): Promise<any> => {
   );
 });
 
+const getSessionArtifactsRoute = createRoute({
+  method: "get",
+  path: "/{session_id}/artifacts",
+  tags: ["Sessions"],
+  summary: "Get persisted run artifacts for a session",
+  middleware: [requireScope("sessions:read")],
+  request: {
+    params: z.object({ session_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Run artifact manifest entries",
+      content: {
+        "application/json": {
+          schema: z.array(
+            z.object({
+              artifact_name: z.string(),
+              artifact_kind: z.string(),
+              mime_type: z.string(),
+              size_bytes: z.number(),
+              storage_key: z.string(),
+              source_tool: z.string(),
+              source_event: z.string(),
+              schema_version: z.string().nullable().optional(),
+              status: z.string(),
+              metadata: z.record(z.unknown()),
+              turn_number: z.number(),
+              created_at: z.unknown().nullable().optional(),
+            }),
+          ),
+        },
+      },
+    },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+sessionRoutes.openapi(getSessionArtifactsRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const { session_id: sessionId } = c.req.valid("param");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  const ownerCheck = await sql`
+    SELECT 1 FROM sessions WHERE session_id = ${sessionId} AND org_id = ${user.org_id}
+  `;
+  if (ownerCheck.length === 0) return c.json({ error: "Session not found" }, 404);
+
+  const rows = await sql`
+    SELECT artifact_name, artifact_kind, mime_type, size_bytes, storage_key,
+           source_tool, source_event, schema_version, status, metadata,
+           turn_number, created_at
+    FROM run_artifacts
+    WHERE session_id = ${sessionId}
+    ORDER BY created_at DESC, id DESC
+    LIMIT 200
+  `;
+
+  return c.json(
+    rows.map((r: any) => ({
+      artifact_name: r.artifact_name || "",
+      artifact_kind: r.artifact_kind || "",
+      mime_type: r.mime_type || "application/octet-stream",
+      size_bytes: Number(r.size_bytes || 0),
+      storage_key: r.storage_key || "",
+      source_tool: r.source_tool || "",
+      source_event: r.source_event || "",
+      schema_version: r.schema_version || null,
+      status: r.status || "",
+      metadata: parseJsonColumn(r.metadata, {}),
+      turn_number: Number(r.turn_number || 0),
+      created_at: r.created_at || null,
+    })),
+  );
+});
+
 const getSessionRuntimeRoute = createRoute({
   method: "get",
   path: "/{session_id}/runtime",
