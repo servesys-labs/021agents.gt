@@ -14,12 +14,12 @@
 
 import { META_SKILL_BODIES } from "../lib/meta-skill-bodies.generated";
 
-// Phase 7.2b: meta skills the prompt builder hard-depends on. Missing
-// any of these means the worker cannot produce a correct prompt, so
-// fail loudly at module-load rather than silently degrading at the
-// first request. Extend this list every time a new meta skill becomes
-// a required input to buildMetaAgentChatPrompt.
-const REQUIRED_META_SKILLS = ["mode-demo"] as const;
+// Meta skills the prompt builder hard-depends on. Missing any of these
+// means the worker cannot produce a correct prompt, so fail loudly at
+// module-load rather than silently degrading at the first request.
+// Extend this tuple every time a new meta skill becomes a required
+// input to buildMetaAgentChatPrompt.
+const REQUIRED_META_SKILLS = ["mode-demo", "mode-live"] as const;
 for (const name of REQUIRED_META_SKILLS) {
   if (!META_SKILL_BODIES[name]) {
     throw new Error(
@@ -44,9 +44,7 @@ for (const name of REQUIRED_META_SKILLS) {
  * a production-ready agent. Thorough, multi-round, professional.
  */
 export function buildMetaAgentChatPrompt(agentName: string, mode: "demo" | "live" = "live"): string {
-  const modeInstructions = mode === "demo"
-    ? META_SKILL_BODIES["mode-demo"]
-    : LIVE_MODE_INSTRUCTIONS;
+  const modeInstructions = META_SKILL_BODIES[`mode-${mode}`];
 
   return `You are the Agent Manager for "${agentName}" on the OneShots platform. You help the owner understand, configure, monitor, and improve their agent through conversation.
 
@@ -324,69 +322,8 @@ Configs auto-migrate to latest schema version at runtime. config_version field i
 ### Cost Tracking
 Per-turn check + pre-execution batch estimate. Tools skipped if estimated cost would exceed remaining budget.`;
 
-// ══════════════════════════════════════════════════════════════════════
-// Mode-Specific Instructions
-// ══════════════════════════════════════════════════════════════════════
-// DEMO_MODE_INSTRUCTIONS extracted to skills/meta/mode-demo/SKILL.md in
-// Phase 7 commit 7.2b. Body is consumed via META_SKILL_BODIES["mode-demo"]
-// at the mode ternary above, guarded by the REQUIRED_META_SKILLS assert.
-// LIVE_MODE_INSTRUCTIONS extraction lands in commit 7.3.
-
-const LIVE_MODE_INSTRUCTIONS = `
-### Live Mode Behavior
-
-You are in PRODUCTION mode. Your goal is to build an agent that ACTUALLY WORKS for this user's real business needs. This requires understanding their data sources, integrations, and workflows.
-
-**How to behave in live mode:**
-You MUST conduct a structured interview before creating the agent. Do NOT generate a system prompt until you understand the user's actual setup.
-
-**Interview Round 1: PURPOSE & USERS (ask first)**
-- What is this agent's primary job? (e.g., "answer customer questions about orders")
-- Who will use it? (internal team, customers, both?)
-- What channels? (web chat, Slack, Telegram, API?)
-- What does a successful interaction look like? Give me an example.
-- What should the agent NEVER do? (compliance boundaries)
-
-**Interview Round 2: DATA SOURCES (ask after Round 1)**
-- Where does the data this agent needs live?
-  - Database? (PostgreSQL, MySQL, Supabase, Airtable?) → need db-query tool + connection config
-  - APIs? (REST, GraphQL?) → need http-request tool + auth headers
-  - Files? (S3, R2, local?) → need read-file tool + storage config
-  - Knowledge base? (docs, FAQs, wiki?) → need knowledge-search + store-knowledge tools
-  - CRM/SaaS? (HubSpot, Salesforce, Zendesk?) → need connector tool + MCP integration
-- Do any data sources require authentication? What kind? (API key, OAuth, service account?)
-- How fresh does the data need to be? (real-time, daily, cached is fine?)
-- Is there any data the agent should NOT access? (PII, financial records, HR data?)
-
-**Interview Round 3: ACTIONS & INTEGRATIONS (ask after Round 2)**
-- What actions should the agent take beyond just answering?
-  - Send emails? → need connector(gmail/outlook) tool
-  - Update records? → need write access to DB/CRM
-  - Create tickets? → need connector(jira/linear/github) tool
-  - Schedule meetings? → need connector(google-calendar) tool
-  - Generate reports/documents? → need write-file + python-exec tools
-  - Post to channels? → need connector(slack/teams) tool
-- For each action: who needs to approve it? (always auto, human-in-loop, escalate?)
-- What existing tools/workflows does this replace or integrate with?
-
-**Interview Round 4: EDGE CASES & GOVERNANCE (ask after Round 3)**
-- What happens when the agent doesn't know the answer? (escalate to human? say "I don't know"? search web?)
-- What's the budget per conversation? (cost ceiling)
-- What's the expected volume? (10/day, 1000/day?)
-- Any compliance requirements? (HIPAA, GDPR, SOC2, industry-specific?)
-- What should trigger an alert to the team? (errors, low confidence, sensitive topics?)
-
-**After all 4 rounds, THEN build the agent:**
-- Create a system prompt that references the SPECIFIC data sources and tools discussed
-- Only include tools the user actually needs (not everything available)
-- Set governance based on discussed compliance/budget requirements
-- Create eval test cases based on the real examples the user gave
-- Set up connectors and integrations as discussed
-- Explain what you built and why each piece is there
-
-**CRITICAL: Do NOT skip the interview.**
-- If the user says "just make it", explain: "I want to build something that actually works for your setup, not a generic demo. Let me ask a few questions about your data sources so I can connect the right tools."
-- If the user is vague, give options: "Do you need this agent to access a database, an API, or a knowledge base? Each requires different setup."
-- Take notes on what the user says and reference them in the system prompt you create.
-`;
+// Phase 7.3: DEMO_MODE_INSTRUCTIONS (→ skills/meta/mode-demo/) and
+// LIVE_MODE_INSTRUCTIONS (→ skills/meta/mode-live/) are both consumed
+// via META_SKILL_BODIES[`mode-${mode}`] at the pure lookup above,
+// guarded by the REQUIRED_META_SKILLS module-load assert.
 

@@ -843,10 +843,11 @@ describe("Phase 7.2 — META_SKILL_BODIES shape", () => {
     expect(Array.isArray(META_SKILL_BODIES)).toBe(false);
   });
 
-  it("contains mode-demo (extracted in 7.2b) but not yet mode-live (extracts in 7.3)", () => {
+  it("contains both mode-demo (7.2b) and mode-live (7.3)", () => {
     expect(META_SKILL_BODIES["mode-demo"]).toBeDefined();
+    expect(META_SKILL_BODIES["mode-live"]).toBeDefined();
     expect(typeof META_SKILL_BODIES["mode-demo"]).toBe("string");
-    expect(META_SKILL_BODIES["mode-live"]).toBeUndefined();
+    expect(typeof META_SKILL_BODIES["mode-live"]).toBe("string");
   });
 });
 
@@ -858,6 +859,13 @@ describe("Phase 7.2b — META_SKILL_BODIES['mode-demo'] byte identity", () => {
   // middle + trailing preserved, 3342 chars total. If this drifts
   // after 7.2b, either the SKILL.md was edited OR someone reverted
   // the FRONTMATTER_RE fix. Either is load-bearing, fail loudly.
+  //
+  // This test is scheduled for removal in a separate 7.3-exit commit
+  // (NOT this commit). During the window between 7.3 and the exit
+  // commit, DEMO + LIVE byte-identity coexist as belt-and-suspenders
+  // coverage. After the exit commit, the CI freshness gate on
+  // meta-skill-bodies.generated.ts takes over as the ongoing drift
+  // guard for both modes.
   const EXPECTED_SHA = "48508bce4c6920a1deda1bd470c8eea1c5826f674a058914207fe6ce2a60cdfd";
   const EXPECTED_LENGTH = 3342;
 
@@ -882,6 +890,42 @@ describe("Phase 7.2b — META_SKILL_BODIES['mode-demo'] byte identity", () => {
         `     was it reverted from '[ \\t]*\\n' back to '\\s*\\n'? That\n` +
         `     regex consumes leading newlines in bodies (see the inline\n` +
         `     comment in the bundler for why).\n` +
+        `  3. Run 'node control-plane/scripts/bundle-skill-catalog.mjs' and\n` +
+        `     inspect the diff on meta-skill-bodies.generated.ts.`,
+      );
+    }
+  });
+});
+
+describe("Phase 7.3 — META_SKILL_BODIES['mode-live'] byte identity", () => {
+  // sha computed against the pre-extraction LIVE_MODE_INSTRUCTIONS
+  // constant at commit 910edd17 (last commit that had LIVE inline).
+  // Same Path B regex fix as DEMO — transitive proof that the fix
+  // generalizes to any body starting with `\n`. Landed on first try,
+  // no whitespace surgery required. Removed alongside the DEMO
+  // byte-identity test in the 7.3-exit commit.
+  const EXPECTED_SHA = "0c5503bf912bc4001ccafb928eb1802e8586b874cc1d73918511d6f4cf5adc63";
+  const EXPECTED_LENGTH = 3521;
+
+  it("matches sha256 of pre-extraction LIVE_MODE_INSTRUCTIONS", () => {
+    const body = META_SKILL_BODIES["mode-live"];
+    const actual = createHash("sha256").update(body, "utf8").digest("hex");
+
+    if (actual !== EXPECTED_SHA) {
+      throw new Error(
+        `META_SKILL_BODIES["mode-live"] drifted from pre-extraction constant.\n` +
+        `  expected sha256: ${EXPECTED_SHA}\n` +
+        `  actual sha256:   ${actual}\n` +
+        `  expected length: ${EXPECTED_LENGTH}\n` +
+        `  actual length:   ${body.length}\n` +
+        `  first 80 chars:  ${JSON.stringify(body.slice(0, 80))}\n` +
+        `  last  80 chars:  ${JSON.stringify(body.slice(-80))}\n` +
+        `\n` +
+        `If you intentionally modified the body, recompute the sha and\n` +
+        `update EXPECTED_SHA. Otherwise investigate:\n` +
+        `  1. skills/meta/mode-live/SKILL.md — was it edited?\n` +
+        `  2. control-plane/scripts/bundle-skill-catalog.mjs FRONTMATTER_RE —\n` +
+        `     was it reverted from '[ \\t]*\\n' back to '\\s*\\n'?\n` +
         `  3. Run 'node control-plane/scripts/bundle-skill-catalog.mjs' and\n` +
         `     inspect the diff on meta-skill-bodies.generated.ts.`,
       );
