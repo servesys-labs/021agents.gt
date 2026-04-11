@@ -2,7 +2,6 @@
  * Red-team runner — executes security probes against target agents.
  *
  * Orchestrates OWASP probes, MAESTRO assessment, and AIVSS scoring.
- * Ported from agentos/security/redteam.py.
  */
 
 import {

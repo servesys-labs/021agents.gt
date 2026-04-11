@@ -6,7 +6,7 @@ import { describe, it, expect } from "vitest";
 import { formatSkillsPrompt, getSkillPrompt } from "../src/runtime/skills";
 
 describe("formatSkillsPrompt", () => {
-  it("includes all 8 built-in skills when no DB skills provided", () => {
+  it("includes the 19 built-in skills when no DB skills provided", () => {
     const prompt = formatSkillsPrompt([]);
     expect(prompt).toContain("Available Skills");
     expect(prompt).toContain("/batch");

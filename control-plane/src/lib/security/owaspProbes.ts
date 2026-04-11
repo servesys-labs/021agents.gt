@@ -12,8 +12,6 @@
  *   LLM08: Excessive Agency
  *   LLM09: Overreliance
  *   LLM10: Model Theft (config-level check)
- *
- * Ported from agentos/security/owasp_probes.py.
  */
 
 /** A single security probe definition. */

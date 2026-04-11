@@ -92,7 +92,7 @@ function parseYamlSimple(text) {
   return result;
 }
 
-function parseSkillMd(path) {
+export function parseSkillMd(path) {
   const raw = readFileSync(path, "utf8");
   const match = raw.match(FRONTMATTER_RE);
   if (!match) {
@@ -200,4 +200,8 @@ function main() {
   }
 }
 
-main();
+// Only run the CLI flow when invoked as a script. When imported by a test,
+// the consumer drives parseSkillMd directly.
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main();
+}

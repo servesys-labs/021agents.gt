@@ -9,8 +9,6 @@
  *   5. RAG Pipeline — data poisoning, retrieval injection
  *   6. Agent Orchestration — multi-agent trust, delegation
  *   7. Deployment — infrastructure, API security
- *
- * Ported from agentos/security/maestro.py.
  */
 
 export const MAESTRO_LAYERS = [

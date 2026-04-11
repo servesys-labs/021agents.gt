@@ -43,6 +43,11 @@ jobs:
       - run: npm ci
       - name: Sandbox image E2E (assistant-office profile)
         run: bash ../scripts/e2e_sandbox_office_image.sh
+      - name: Skill manifest freshness
+        run: |
+          node scripts/bundle-skills.mjs
+          git diff --exit-code src/runtime/skills-manifest.generated.ts \
+            || { echo "::error::skills-manifest.generated.ts is stale — run 'node deploy/scripts/bundle-skills.mjs' and commit."; exit 1; }
       - name: Test
         run: npm test
       - name: Deploy runtime

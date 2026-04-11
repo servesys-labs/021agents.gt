@@ -170,7 +170,13 @@ const BUILTIN_SKILL_ORDER = [
   "pptx",
 ] as const;
 
-export const BUILTIN_SKILLS: Skill[] = BUILTIN_SKILL_ORDER.map(
-  (name) => BUNDLED_SKILLS_BY_NAME[name],
-);
+export const BUILTIN_SKILLS: Skill[] = BUILTIN_SKILL_ORDER.map((name) => {
+  const skill = BUNDLED_SKILLS_BY_NAME[name];
+  if (!skill) {
+    throw new Error(
+      `[skills] BUILTIN_SKILL_ORDER references "${name}" but no matching entry exists in skills-manifest.generated.ts. Did you forget to add skills/public/${name}/SKILL.md, or run the bundler?`,
+    );
+  }
+  return skill;
+});
 
