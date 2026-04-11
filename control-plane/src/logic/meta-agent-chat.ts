@@ -12,6 +12,7 @@ import { withOrgDb } from "../db/client";
 import { generateEvolutionSuggestions } from "./meta-agent";
 import { parseJsonColumn } from "../lib/parse-json-column";
 import { SKILL_CATALOG, SKILL_CATALOG_NAMES } from "../lib/skill-catalog.generated";
+import { appendRule } from "./skill-mutation";
 
 /**
  * Normalize an enabled_skills input from the LLM: coerce to string[],
@@ -680,19 +681,23 @@ const META_TOOLS: ToolDef[] = [
     function: {
       name: "manage_skills",
       description:
-        "List, create, or delete custom /slash-command skills for this agent. Built-in: /batch, /review, /debug, /verify, /remember, /skillify, /schedule, /docs.",
+        "List, create, delete, or append learned rules to /slash-command skills. append_rule is the Phase 6 learning-loop write path: rules layer on top of the disk SKILL.md at load time, are rate-limited to 10/day/skill, and are scanned for prompt-injection before insert.",
       parameters: {
         type: "object",
         properties: {
           action: {
             type: "string",
-            enum: ["list", "create", "delete"],
+            enum: ["list", "create", "delete", "append_rule"],
             description: "Action to perform",
           },
           name: { type: "string", description: "Skill name (for create/delete). Must be lowercase, hyphens allowed." },
           description: { type: "string", description: "Short description of what the skill does (for create)" },
           prompt_template: { type: "string", description: "The prompt template for the skill (for create). Use {{ARGS}} as a placeholder for user arguments." },
           category: { type: "string", description: "Skill category (for create): workflow, analysis, code, data, creative, ops" },
+          skill_name: { type: "string", description: "Target skill name (for append_rule). Must be a known skill (bundled or custom)." },
+          rule_text: { type: "string", description: "The rule to append (for append_rule). Should be concrete and action-shaped, e.g. 'when: <trigger>\\nthen: <action>'. Max 4096 chars. Scanned for prompt-injection." },
+          source: { type: "string", description: "Source of the rule (for append_rule): improve | evolve | autoresearch | manual." },
+          reason: { type: "string", description: "Short citation of the feedback pattern that justified the rule (for append_rule)." },
         },
         required: ["action"],
       },
@@ -2678,7 +2683,25 @@ async function executeTool(
           return JSON.stringify({ deleted: true, name, message: `Skill '/${name}' deleted.` });
         }
 
-        return JSON.stringify({ error: `Unknown action: ${action}. Use list, create, or delete.` });
+        if (action === "append_rule") {
+          // Phase 6 learning loop: /improve (and future evolve-agent /
+          // autoresearch wiring in commit 6) calls this to layer a learned
+          // rule on top of a disk SKILL.md. Rate limited to
+          // SKILL_MUTATION_RATE_LIMIT_PER_DAY per skill per org.
+          const result = await appendRule(sql, {
+            orgId: ctx.orgId,
+            agentName: ctx.agentName,
+            userRole: ctx.userRole,
+          }, {
+            skillName: String(args.skill_name || ""),
+            ruleText: String(args.rule_text || ""),
+            source: args.source ? String(args.source) : undefined,
+            reason: args.reason ? String(args.reason) : undefined,
+          });
+          return JSON.stringify(result);
+        }
+
+        return JSON.stringify({ error: `Unknown action: ${action}. Use list, create, delete, or append_rule.` });
       } catch (err: any) {
         return JSON.stringify({ error: `Skills management failed: ${err.message || err}` });
       }
