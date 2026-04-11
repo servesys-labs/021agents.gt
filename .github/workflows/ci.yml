@@ -25,6 +25,8 @@ jobs:
           node scripts/bundle-skill-catalog.mjs
           git diff --exit-code src/lib/skill-catalog.generated.ts \
             || { echo "::error::skill-catalog.generated.ts is stale — run 'node control-plane/scripts/bundle-skill-catalog.mjs' and commit."; exit 1; }
+          git diff --exit-code src/lib/meta-skill-bodies.generated.ts \
+            || { echo "::error::meta-skill-bodies.generated.ts is stale — run 'node control-plane/scripts/bundle-skill-catalog.mjs' and commit."; exit 1; }
       - name: Typecheck
         run: npx tsc --noEmit
       - name: Deploy control-plane

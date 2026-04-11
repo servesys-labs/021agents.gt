@@ -819,6 +819,31 @@ describe("002_skill_learning — overlays + audit migration", () => {
 });
 
 // ══════════════════════════════════════════════════════════════════
+// 16. PHASE 7.2a — META_SKILL_BODIES shape (infrastructure scaffold)
+// ══════════════════════════════════════════════════════════════════
+//
+// At 7.2a the map is empty — the bundler walks skills/meta/ and emits
+// an empty Record. First content lands in 7.2b (mode-demo extraction).
+// This test proves the generated file exists, type-checks, and can be
+// imported from the test runner. A future regression where the bundler
+// stops emitting the file (or emits a non-object) trips here first.
+// ══════════════════════════════════════════════════════════════════
+
+import { META_SKILL_BODIES } from "../src/lib/meta-skill-bodies.generated";
+
+describe("Phase 7.2a — META_SKILL_BODIES scaffold", () => {
+  it("is importable and is a plain object", () => {
+    expect(typeof META_SKILL_BODIES).toBe("object");
+    expect(META_SKILL_BODIES).not.toBeNull();
+    expect(Array.isArray(META_SKILL_BODIES)).toBe(false);
+  });
+
+  it("is empty at 7.2a (first entry lands in 7.2b)", () => {
+    expect(Object.keys(META_SKILL_BODIES).length).toBe(0);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
 // 12. PHASE 5 — enabled_skills validation + catalog wiring
 // ══════════════════════════════════════════════════════════════════
 //
