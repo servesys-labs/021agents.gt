@@ -41,16 +41,20 @@ function buildApp(orgId = "org-a") {
 }
 
 describe("middleware status routes", () => {
-  // TODO(rls-migration): withOrgDb scopes org_id via RLS session variable,
-  // not as an explicit first bind parameter. This test asserted the old
-  // binding order and no longer applies.
-  it.skip("events list is org-scoped", async () => {
-    let firstBinding: unknown;
-    mockSql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
+  it("events list query no longer references org_id (RLS scopes it)", async () => {
+    // Post-RLS: the /events route drops `WHERE org_id = $1` from the
+    // middleware_events query because the RLS policy handles it via
+    // current_org_id(). This test verifies the negative — if someone
+    // adds `org_id` back as an explicit bind in the future (which
+    // would be a bug, since the RLS policy already covers it), this
+    // assertion fires.
+    let sawMiddlewareEventsQuery = false;
+    let queryText = "";
+    mockSql = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("FROM middleware_events")) {
-        expect(query).toContain("org_id");
-        firstBinding = values[0];
+        sawMiddlewareEventsQuery = true;
+        queryText = query;
         return [];
       }
       return [];
@@ -59,12 +63,15 @@ describe("middleware status routes", () => {
     const app = buildApp("org-a");
     const res = await app.request("/events?limit=10", { method: "GET" }, mockEnv());
     expect(res.status).toBe(200);
-    expect(firstBinding).toBe("org-a");
+    expect(sawMiddlewareEventsQuery).toBe(true);
+    // RLS invariant: the events query MUST NOT carry an explicit
+    // `org_id` filter — that's what the policy is for.
+    expect(queryText).not.toMatch(/\borg_id\s*=/);
   });
 
-  // TODO(rls-migration): withOrgDb scopes org_id via RLS session variable,
-  // so org_id is no longer the first explicit bind in middleware event queries.
-  it.skip("events with session_id and middleware_name binds org_id first", async () => {
+  it("events with session_id + middleware_name passes only those binds (no org_id)", async () => {
+    // Expected bind order under RLS: [sessionId, middlewareName, limit].
+    // The original test expected org_id in position 0 which is gone.
     const bindings: unknown[] = [];
     mockSql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join("?");
@@ -82,9 +89,8 @@ describe("middleware status routes", () => {
       mockEnv(),
     );
     expect(res.status).toBe(200);
-    expect(bindings[0]).toBe("org-b");
-    expect(bindings[1]).toBe("s1");
-    expect(bindings[2]).toBe("loop_detection");
-    expect(bindings[3]).toBe(5);
+    expect(bindings).toEqual(["s1", "loop_detection", 5]);
+    // Extra sanity: the org_id should never appear in the bind list.
+    expect(bindings).not.toContain("org-b");
   });
 });

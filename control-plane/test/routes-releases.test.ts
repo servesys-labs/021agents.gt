@@ -41,18 +41,19 @@ function buildApp(orgId = "org-a") {
 }
 
 describe("release routes org scoping", () => {
-  // TODO(rls-migration): test verifies org filtering via binding values, but
-  // RLS now enforces scoping via withOrgDb wrapper and the route no longer
-  // passes org_id as a sql binding.
-  it.skip("channels are org-scoped", async () => {
-    mockSql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
+  it("channels list returns rows the RLS-scoped query produced", async () => {
+    // Post-RLS: the route calls withOrgDb(env, user.org_id, ...), which
+    // wraps the query in a transaction with `SET LOCAL
+    // app.current_org_id = <user org>`. The `FROM release_channels`
+    // query no longer includes an explicit `WHERE org_id = ?` bind —
+    // Postgres filters the rows via the table's policy. From the test's
+    // perspective we can no longer inspect values[1]; instead we assert
+    // the route returns whatever the mocked query returned, which under
+    // real RLS would already be the caller-org-filtered set.
+    mockSql = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("FROM release_channels") && query.includes("ORDER BY channel")) {
-        const [, orgId] = values;
-        if (orgId === "org-a") {
-          return [{ org_id: "org-a", agent_name: "agent-x", channel: "staging" }];
-        }
-        return [{ org_id: "org-b", agent_name: "agent-x", channel: "staging" }];
+        return [{ org_id: "org-a", agent_name: "agent-x", channel: "staging" }];
       }
       return [];
     }) as unknown as MockSqlFn;
@@ -60,22 +61,23 @@ describe("release routes org scoping", () => {
     const app = buildApp("org-a");
     const res = await app.request("/agent-x/channels", { method: "GET" }, mockEnv());
     expect(res.status).toBe(200);
-    const payload = await res.json() as { channels?: Array<{ org_id?: string }> };
+    const payload = await res.json() as { channels?: Array<{ org_id?: string; agent_name?: string; channel?: string }> };
     expect(payload.channels?.length).toBe(1);
-    expect(payload.channels?.[0]?.org_id).toBe("org-a");
+    expect(payload.channels?.[0]?.agent_name).toBe("agent-x");
+    expect(payload.channels?.[0]?.channel).toBe("staging");
   });
 
-  // TODO(rls-migration): mock inspects values[1] as org_id but RLS routes
-  // no longer bind org_id explicitly — ownership check is now implicit.
-  it.skip("promote returns 404 when agent is not owned by org", async () => {
-    mockSql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
+  it("promote returns 404 when agent does not exist in the caller's RLS scope", async () => {
+    // Under RLS, the `SELECT * FROM agents WHERE name = 'agent-x'`
+    // query is automatically filtered by current_org_id(). If the
+    // agent doesn't exist in the caller's org, the query returns
+    // zero rows and the route 404s. The mock just returns `[]` for
+    // the agents lookup — the same result the RLS policy would
+    // produce for a cross-tenant access attempt.
+    mockSql = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("FROM release_channels") && query.includes("channel")) return [];
-      if (query.includes("FROM agents")) {
-        const [, orgId] = values;
-        if (orgId !== "org-a") return [{ config: "{}", version: "0.1.0" }];
-        return [];
-      }
+      if (query.includes("FROM agents")) return [];
       return [];
     }) as unknown as MockSqlFn;
 
@@ -111,16 +113,14 @@ describe("release routes org scoping", () => {
     expect(res.status).toBe(400);
   });
 
-  // TODO(rls-migration): test asserts org filter via query bindings; RLS now
-  // handled by withOrgDb wrapper, not a query parameter.
-  it.skip("canary lookup returns null when no record in caller org", async () => {
-    mockSql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
+  it("canary lookup returns null when RLS query yields no rows", async () => {
+    // RLS filters `FROM canary_splits` by current_org_id() — a row
+    // owned by a different org simply never surfaces. The mock
+    // returns `[]` as the RLS-filtered result and the route maps
+    // that to `{canary: null}`.
+    mockSql = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
-      if (query.includes("FROM canary_splits")) {
-        const [, orgId] = values;
-        if (orgId === "org-a") return [];
-        return [{ org_id: "org-b", agent_name: "agent-x", is_active: true }];
-      }
+      if (query.includes("FROM canary_splits")) return [];
       return [];
     }) as unknown as MockSqlFn;
 
@@ -131,9 +131,13 @@ describe("release routes org scoping", () => {
     expect(payload.canary).toBeNull();
   });
 
-  // TODO(rls-migration): test asserts UPDATE SQL contains "org_id" but RLS
-  // route no longer includes org_id in WHERE clause.
-  it.skip("promote upserts with org-scoped UPDATE then INSERT (no ON CONFLICT)", async () => {
+  it("promote performs UPDATE-then-INSERT upsert (no ON CONFLICT)", async () => {
+    // The promote route does an UPDATE first, checks `count`, then
+    // falls through to INSERT if no row was touched. This avoids
+    // ON CONFLICT on a multi-column composite key. Under RLS the
+    // UPDATE's WHERE clause filters on `agent_name` + `channel`
+    // only — `org_id` is no longer in the SQL text because the
+    // RLS policy scopes it automatically.
     const queries: string[] = [];
     mockSql = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
@@ -142,7 +146,6 @@ describe("release routes org scoping", () => {
         return [{ config: "{}", version: "1.0.0" }];
       }
       if (query.includes("UPDATE release_channels")) {
-        expect(query).toContain("org_id");
         expect(query).toContain("agent_name");
         expect(query).not.toContain("ON CONFLICT");
         return { count: 0 } as unknown as [];
