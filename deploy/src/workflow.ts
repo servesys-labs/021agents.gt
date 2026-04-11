@@ -52,6 +52,7 @@ import { registerSession, unregisterSession, isSessionLimitReached, refreshHeart
 import { BudgetError, AgentOSError, SSRFError } from "./runtime/errors";
 import { createChildAbortController } from "./runtime/abort";
 import { queueSessionEpisodicNote } from "./runtime/memory";
+import { applyHistoryBudget, buildQueryIntentProfile } from "./runtime/query-profile";
 
 // ── Cloud C4.3: Memoized module imports ──────────────────────────
 // Workflow step functions run in isolated contexts. Dynamic imports are
@@ -300,6 +301,10 @@ export interface RunOutput {
   run_phase_history?: RunPhase[];
   artifact_schema?: string;
   artifact_schema_validated?: boolean;
+  query_profile?: string;
+  query_profile_complexity?: string;
+  query_profile_category?: string;
+  query_profile_role?: string;
 }
 
 interface LLMResult {
@@ -929,6 +934,26 @@ ALWAYS:
         __agentConfig: { org_id: p.org_id || "", agent_name: p.agent_name || "" },
       } as any,
     );
+    const queryProfile = buildQueryIntentProfile(selectedRoute as any, safeInput);
+    const historyBudgeted = applyHistoryBudget(messages as any, queryProfile.max_history_messages);
+    messages = historyBudgeted.messages as any;
+    logger.info("query_profile_applied", {
+      profile: queryProfile.key,
+      complexity: (selectedRoute as any)?.complexity || "unknown",
+      category: (selectedRoute as any)?.category || "unknown",
+      role: (selectedRoute as any)?.role || "unknown",
+      history_dropped: historyBudgeted.dropped,
+      max_history_messages: queryProfile.max_history_messages,
+      max_tools_exposed: queryProfile.max_tools_exposed,
+      max_tokens_per_turn: queryProfile.max_tokens_per_turn,
+    });
+    if (historyBudgeted.dropped > 0) {
+      await this.emit(p.progress_key, {
+        type: "system",
+        message: `Context tuned for query type (${queryProfile.key}): trimmed ${historyBudgeted.dropped} older messages to reduce prompt size.`,
+        source: "query_profile",
+      });
+    }
 
     for (let turn = 1; turn <= config.max_turns; turn++) {
       let turnCompactionTriggered = false;
@@ -1055,7 +1080,16 @@ ALWAYS:
 
       // ── LLM call — retryable, checkpointed ──
       transitionPhase("planning");
-      await this.emit(p.progress_key, { type: "turn_start", turn, model: selectedRoute.model, plan: config.plan });
+      await this.emit(p.progress_key, {
+        type: "turn_start",
+        turn,
+        model: selectedRoute.model,
+        plan: config.plan,
+        query_profile: queryProfile.key,
+        query_profile_complexity: (selectedRoute as any)?.complexity || "unknown",
+        query_profile_category: (selectedRoute as any)?.category || "unknown",
+        query_profile_role: (selectedRoute as any)?.role || "unknown",
+      });
       const preLlmMs = Date.now() - turnStartedAt;
 
       const llm = await step.do(`llm-${turn}`, {
@@ -1076,10 +1110,13 @@ ALWAYS:
           // Progressive tool discovery: only send relevant tools per turn
           const recentContext = messages.slice(-3).map(m => m.content || "").join(" ");
           toolDefs = selectToolsForQuery(allToolDefs, p.input, recentContext);
+          if (queryProfile.max_tools_exposed > 0 && toolDefs.length > queryProfile.max_tools_exposed) {
+            toolDefs = toolDefs.slice(0, queryProfile.max_tools_exposed);
+          }
 
           // Phase 2.2: Inject deferred tool index on first turn so model knows
           // what else exists without paying full schema cost
-          if (turn === 1) {
+          if (turn === 1 && queryProfile.include_deferred_tool_index) {
             const deferredIndex = buildDeferredToolIndex(allToolDefs, toolDefs);
             if (deferredIndex) {
               const hasIndex = messages.some(m => m.role === "system" && (m.content || "").includes("Additional Tools"));
@@ -1133,7 +1170,13 @@ ALWAYS:
                 llmEnv as any,
                 promptMessages,
                 toolDefinitions,
-                { model: candidate.model, provider: candidate.provider, max_tokens: selectedRoute.max_tokens },
+                {
+                  model: candidate.model,
+                  provider: candidate.provider,
+                  max_tokens: queryProfile.max_tokens_per_turn > 0
+                    ? queryProfile.max_tokens_per_turn
+                    : selectedRoute.max_tokens,
+                },
               );
               if (i > 0) {
                 llmFallbackCount++;
@@ -1331,6 +1374,10 @@ ALWAYS:
               done: false,
               completion_gate_triggered: true,
               completion_gate_reason: completionGate.reason,
+              query_profile: queryProfile.key,
+              query_profile_complexity: (selectedRoute as any)?.complexity || "unknown",
+              query_profile_category: (selectedRoute as any)?.category || "unknown",
+              query_profile_role: (selectedRoute as any)?.role || "unknown",
             });
             continue;
           }
@@ -1370,6 +1417,10 @@ ALWAYS:
           phase_pre_llm_ms: preLlmMs,
           phase_tool_exec_ms: 0,
           done: true,
+          query_profile: queryProfile.key,
+          query_profile_complexity: (selectedRoute as any)?.complexity || "unknown",
+          query_profile_category: (selectedRoute as any)?.category || "unknown",
+          query_profile_role: (selectedRoute as any)?.role || "unknown",
         });
         // Record final answer turn
         turnRecords.push({
@@ -1699,6 +1750,10 @@ ALWAYS:
         phase_tool_exec_ms: Date.now() - toolExecStartedAt,
         done: false,
         tool_calls: executableCalls.length,
+        query_profile: queryProfile.key,
+        query_profile_complexity: (selectedRoute as any)?.complexity || "unknown",
+        query_profile_category: (selectedRoute as any)?.category || "unknown",
+        query_profile_role: (selectedRoute as any)?.role || "unknown",
       });
 
       // Accumulate turn record for telemetry
@@ -1894,7 +1949,13 @@ ALWAYS:
           { AI: this.env.AI, CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID, AI_GATEWAY_ID: this.env.AI_GATEWAY_ID, AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN, CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN, GPU_SERVICE_KEY: this.env.GPU_SERVICE_KEY } as any,
           messages.map(m => ({ role: m.role as any, content: m.content || "", tool_calls: m.tool_calls, tool_call_id: m.tool_call_id, name: m.name })),
           [], // no tools — force text response
-          { model: config.model, provider: config.provider },
+          {
+            model: config.model,
+            provider: config.provider,
+            max_tokens: queryProfile.max_tokens_per_turn > 0
+              ? Math.max(900, Math.floor(queryProfile.max_tokens_per_turn * 0.8))
+              : undefined,
+          },
         );
         return {
           content: response.content || "",
@@ -1953,7 +2014,11 @@ ALWAYS:
             { role: "user", content: `User request:\n${p.input}\n\nCurrent draft output:\n${finalOutput.slice(0, 12000)}` },
           ] as any,
           [],
-          { model: selectedRoute.model, provider: selectedRoute.provider },
+          {
+            model: selectedRoute.model,
+            provider: selectedRoute.provider,
+            max_tokens: Math.max(1800, queryProfile.max_tokens_per_turn),
+          },
         );
         return {
           content: response.content || "",
@@ -2050,6 +2115,10 @@ ALWAYS:
       run_phase_history: runPhaseHistory,
       artifact_schema: researchIntent ? "research_v1" : undefined,
       artifact_schema_validated: researchIntent ? artifactSynthesisValidated : undefined,
+      query_profile: queryProfile.key,
+      query_profile_complexity: (selectedRoute as any)?.complexity || "unknown",
+      query_profile_category: (selectedRoute as any)?.category || "unknown",
+      query_profile_role: (selectedRoute as any)?.role || "unknown",
     };
 
     // Emit final done event (include conversation_id if present)
@@ -2065,6 +2134,10 @@ ALWAYS:
         run_phase_history: runPhaseHistory,
         artifact_schema: researchIntent ? "research_v1" : undefined,
         artifact_schema_validated: researchIntent ? artifactSynthesisValidated : undefined,
+        query_profile: queryProfile.key,
+        query_profile_complexity: (selectedRoute as any)?.complexity || "unknown",
+        query_profile_category: (selectedRoute as any)?.category || "unknown",
+        query_profile_role: (selectedRoute as any)?.role || "unknown",
         source: "workflow_kv",
         latency_ms: Date.now() - startTime,
         ...(p.conversation_id ? { conversation_id: p.conversation_id } : {}),
@@ -2123,6 +2196,10 @@ ALWAYS:
           trace_id: traceId,
           channel: p.channel || "workflow",
           ...(p.conversation_id ? { conversation_id: p.conversation_id } : {}),
+          query_profile: queryProfile.key,
+          query_profile_complexity: (selectedRoute as any)?.complexity || "unknown",
+          query_profile_category: (selectedRoute as any)?.category || "unknown",
+          query_profile_role: (selectedRoute as any)?.role || "unknown",
         },
       });
 
@@ -2191,7 +2268,45 @@ ALWAYS:
           tool_name: "",
           status: runPhase,
           latency_ms: 0,
-          details: { run_phase: runPhase, run_phase_history: runPhaseHistory },
+          details: {
+            run_phase: runPhase,
+            run_phase_history: runPhaseHistory,
+            query_profile: queryProfile.key,
+            query_profile_complexity: (selectedRoute as any)?.complexity || "unknown",
+            query_profile_category: (selectedRoute as any)?.category || "unknown",
+            query_profile_role: (selectedRoute as any)?.role || "unknown",
+          },
+          created_at: Date.now(),
+        },
+      });
+
+      await queue.send({
+        type: "event",
+        payload: {
+          org_id: p.org_id || "",
+          agent_name: p.agent_name || "",
+          session_id: sessionId,
+          trace_id: traceId,
+          turn: 0,
+          event_type: "query_profile",
+          action: "applied",
+          plan: config.plan || "",
+          provider: config.provider || "",
+          model: config.model || "",
+          tool_name: "",
+          status: "ok",
+          latency_ms: 0,
+          details: {
+            query_profile: queryProfile.key,
+            query_profile_complexity: (selectedRoute as any)?.complexity || "unknown",
+            query_profile_category: (selectedRoute as any)?.category || "unknown",
+            query_profile_role: (selectedRoute as any)?.role || "unknown",
+            max_history_messages: queryProfile.max_history_messages,
+            max_tools_exposed: queryProfile.max_tools_exposed,
+            max_tokens_per_turn: queryProfile.max_tokens_per_turn,
+            include_deferred_tool_index: queryProfile.include_deferred_tool_index,
+            history_messages_dropped: historyBudgeted.dropped,
+          },
           created_at: Date.now(),
         },
       });
