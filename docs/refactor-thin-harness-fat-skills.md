@@ -4,25 +4,27 @@ A comprehensive phased refactor to invert this repo from "fat harness, thin skil
 
 ## ▶︎ Resume here (2026-04-11)
 
-**Status:** Phases 0, 1, 2 ✅ done. **Resume at Phase 3.**
+**Status:** Phases 0, 1, 2, 3 ✅ done. **Resume at Phase 4.**
 
-**What was done:**
-- Phase 0 drift guards live in `deploy/test/refactor-phase0.test.ts` (10 tests: golden SHA-256 for 19 BUILTIN_SKILLS, prompt snapshot per plan tier, LoC budgets, meta-prompt size budget). Drift proven real via deliberate-break test.
-- Phase 1 expanded into a **full Python nuke**. The entire `agentos/` tree, `tests/`, `pyproject.toml`, `uv.lock`, `Dockerfile`, `docker-compose.yml`, `scripts/prod_check.sh`, `cli/src/commands/codemap.ts` (broken stub), and stale `data/codemap.*` + `docs/codemap.*` artifacts are gone. README.md truncated 845 → 133 lines. Repo is pure TypeScript on Cloudflare Workers. ~−90,000 lines.
-- Phase 2 pipeline built. `deploy/scripts/bundle-skills.mjs` reads `skills/public/<name>/SKILL.md`, emits `deploy/src/runtime/skills-manifest.generated.ts`. Wired into `predev`/`predeploy`/`pretest`. Extracted `docs`, `remember`, `skillify` — byte-identical, insertion-order preserved via `BUNDLED_SKILLS_BY_NAME["name"]` references at original array positions. `skills.ts` 3,627 → 3,403 lines.
+**What was done (Phase 3):**
+- All 16 remaining `BUILTIN_SKILLS` inline literals extracted to `skills/public/<name>/SKILL.md`, one commit per skill: `batch, review, debug, verify, schedule, research, report, design, chart, pdf, spreadsheet, analyze, website, game, docx, pptx`.
+- `skills.ts` collapsed from 3,403 → **176** LoC. `BUILTIN_SKILLS` is now a derived array: a `BUILTIN_SKILL_ORDER` name list mapped through `BUNDLED_SKILLS_BY_NAME`. Insertion order load-bearing — the Phase 0 prompt snapshot is byte-identical.
+- `loc_budget.json` ceiling for `skills.ts` bumped from 3,627 to **180** (fixture-bump commit).
+- 21 SKILL.md files on disk (19 built-in + 2 pre-existing `code-review`/`deep-research`).
+- The one-off extraction helper `deploy/scripts/extract-skills-oneoff.mjs` was deleted after completing the seed.
 
 **Validation at handoff:**
 - Deploy tests: 414/414 green
 - oneshots CLI: `tsc --noEmit` clean, smoke 3/3
-- Phase 0 drift guards: 10/10 green
-- Git: pushed to `origin/main` (commits `8e5710d4`, `166ab43e`)
+- Phase 0 drift guards: 10/10 green (golden hashes, snapshots, LoC budget all tight)
+- Git: pushed to `origin/main` (commits `2ed0eb71` through `c3bae0e6`)
 
-**Pick up at Phase 3:** extract the remaining 16 BUILTIN_SKILLS one per commit. See the Phase 3 section below for the mechanical steps + the list. Hard budget after Phase 3: `skills.ts` ≤ 250 lines, `BUILTIN_SKILLS` array empty or deleted.
+**Pick up at Phase 4 — de-duplicate `agents/skill-agents/*.json`.** See the Phase 4 section below. The 20 specialist JSON configs currently inline their full skill bodies in `system_prompt`; replace each with a thin `enabled_skills: ["<name>"]` reference. Requires schema + DB migration + runtime wiring in `fast-agent.ts`.
 
 **Before touching anything:**
 1. Run `cd deploy && pnpm test -- refactor-phase0` — must be 10/10 green.
-2. Grep `BUILTIN_SKILLS` in `deploy/src/runtime/skills.ts` for current positions (line numbers moved after Phase 2).
-3. Never modify the frontmatter schema or the bundler's trailing-newline trim logic — both are load-bearing for byte-identity.
+2. Never modify the frontmatter schema or the bundler's trailing-newline trim logic — both are load-bearing for byte-identity.
+3. `BUILTIN_SKILLS` is still imported by `deploy/test/refactor-phase0.test.ts:35`. Do not rename or delete the export until Phase 4+ is done and the drift test is updated in lockstep.
 
 ---
 
