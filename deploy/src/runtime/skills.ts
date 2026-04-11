@@ -143,71 +143,34 @@ export function getSkillPrompt(skillName: string, args: string, skills: Skill[])
   return prompt;
 }
 
-// ══════════════════════════════════════════════════════════════════════
-// Built-in Skills — ported from Claude Code's bundled skill patterns
-// Always available, no DB dependency. Loaded alongside DB skills.
-// ══════════════════════════════════════════════════════════════════════
+// Built-in skills. Source-of-truth lives in skills/public/<name>/SKILL.md;
+// the bundler at deploy/scripts/bundle-skills.mjs emits the generated manifest
+// that this array references. Insertion order is load-bearing — it determines
+// the byte-exact output of formatSkillsPrompt() and is snapshot-tested by the
+// Phase 0 drift guards. Do not reorder without a fixture bump.
+const BUILTIN_SKILL_ORDER = [
+  "batch",
+  "review",
+  "debug",
+  "verify",
+  "remember",
+  "skillify",
+  "schedule",
+  "docs",
+  "research",
+  "report",
+  "design",
+  "chart",
+  "pdf",
+  "spreadsheet",
+  "analyze",
+  "website",
+  "game",
+  "docx",
+  "pptx",
+] as const;
 
-export const BUILTIN_SKILLS: Skill[] = [
-  BUNDLED_SKILLS_BY_NAME["batch"],
-
-  BUNDLED_SKILLS_BY_NAME["review"],
-
-  BUNDLED_SKILLS_BY_NAME["debug"],
-
-  BUNDLED_SKILLS_BY_NAME["verify"],
-
-  // ── /remember — Memory curation and deduplication ──
-  BUNDLED_SKILLS_BY_NAME["remember"],
-
-  // ── /skillify — Extract a repeatable process into a reusable skill ──
-  BUNDLED_SKILLS_BY_NAME["skillify"],
-
-  BUNDLED_SKILLS_BY_NAME["schedule"],
-
-  // ── /docs — Load reference documentation for the current context ──
-  BUNDLED_SKILLS_BY_NAME["docs"],
-
-  // ═══════════════════════════════════════════════════════════════
-  // Research & Analysis Skills (adapted from Perplexity methodology)
-  // ═══════════════════════════════════════════════════════════════
-
-  BUNDLED_SKILLS_BY_NAME["research"],
-
-  BUNDLED_SKILLS_BY_NAME["report"],
-
-  // ═══════════════════════════════════════════════════════════════
-  // Design & Visualization Skills
-  // ═══════════════════════════════════════════════════════════════
-
-  BUNDLED_SKILLS_BY_NAME["design"],
-
-  BUNDLED_SKILLS_BY_NAME["chart"],
-
-  // ═══════════════════════════════════════════════════════════════
-  // Document & Office Skills
-  // ═══════════════════════════════════════════════════════════════
-
-  BUNDLED_SKILLS_BY_NAME["pdf"],
-
-  BUNDLED_SKILLS_BY_NAME["spreadsheet"],
-
-  // ═══════════════════════════════════════════════════════════════
-  // Code & Data Analysis Skills
-  // ═══════════════════════════════════════════════════════════════
-
-  BUNDLED_SKILLS_BY_NAME["analyze"],
-
-  // ═══════════════════════════════════════════════════════════════
-  // Website & App Building Skills
-  // ═══════════════════════════════════════════════════════════════
-
-  BUNDLED_SKILLS_BY_NAME["website"],
-
-  BUNDLED_SKILLS_BY_NAME["game"],
-
-  BUNDLED_SKILLS_BY_NAME["docx"],
-
-  BUNDLED_SKILLS_BY_NAME["pptx"],
-];
+export const BUILTIN_SKILLS: Skill[] = BUILTIN_SKILL_ORDER.map(
+  (name) => BUNDLED_SKILLS_BY_NAME[name],
+);
 
