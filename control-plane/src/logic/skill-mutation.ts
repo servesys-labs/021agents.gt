@@ -300,7 +300,7 @@ export async function revertSkillRule(
   }
 
   const auditRows = await sql`
-    SELECT audit_id, skill_name, overlay_id, before_sha, before_content, after_content, source
+    SELECT audit_id, skill_name, agent_name, overlay_id, before_sha, before_content, after_content, source
     FROM skill_audit
     WHERE audit_id = ${id}
     LIMIT 1
@@ -331,11 +331,15 @@ export async function revertSkillRule(
   }
 
   // Read current overlay state for this skill — the "before" side of the revert.
+  // Scope comes from the AUDIT ROW being reverted, not ctx.agentName: an
+  // agent-scoped overlay must be reverted against the same agent's state, and
+  // the route handler doesn't know which agent the original mutation targeted.
+  const auditAgentName = String(audit.agent_name ?? "");
   const beforeRows = await sql`
     SELECT rule_text FROM skill_overlays
     WHERE org_id = ${ctx.orgId}
       AND skill_name = ${audit.skill_name}
-      AND (agent_name = ${ctx.agentName} OR agent_name = '')
+      AND (agent_name = ${auditAgentName} OR agent_name = '')
     ORDER BY created_at ASC
   `;
   const beforeContent = beforeRows.map((r: any) => r.rule_text).join(OVERLAY_JOINER);
@@ -362,7 +366,7 @@ export async function revertSkillRule(
     SELECT rule_text FROM skill_overlays
     WHERE org_id = ${ctx.orgId}
       AND skill_name = ${audit.skill_name}
-      AND (agent_name = ${ctx.agentName} OR agent_name = '')
+      AND (agent_name = ${auditAgentName} OR agent_name = '')
     ORDER BY created_at ASC
   `;
   const afterContent = afterRows.map((r: any) => r.rule_text).join(OVERLAY_JOINER);
@@ -375,7 +379,7 @@ export async function revertSkillRule(
       reason, source
     )
     VALUES (
-      ${ctx.orgId}, ${audit.skill_name}, ${ctx.agentName}, ${null},
+      ${ctx.orgId}, ${audit.skill_name}, ${auditAgentName}, ${null},
       ${beforeSha}, ${afterSha}, ${beforeContent}, ${afterContent},
       ${`revert of audit ${id}`}, ${"revert"}
     )
