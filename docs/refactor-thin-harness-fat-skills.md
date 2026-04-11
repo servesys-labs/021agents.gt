@@ -520,6 +520,73 @@ Phase 5 must teach **both** entry points about skills. That means updating `cont
 
 ---
 
+### Phase 6.6 — Gastown-inspired follow-ups (deferred)
+
+**Origin.** Captured 2026-04-11 after a structural comparison against the gastown repo (Go CLI using Dolt as versioned SQL for multi-agent coordination — see `/Users/ishprasad/code/gastown`). Phase 6 independently reinvented ~80% of gastown's `DOLT_COMMIT`/`DOLT_RESET`/`before_sha` pattern for skill mutations. These three items are the residual value from that comparison that Phase 6 does **not** already capture. None are blocking; all are explicitly deferred until after Phase 6 is sealed (commits 6 + 7) and Phase 7's meta-prompt slimming is done. Phase 7 owns the ceiling on `meta-agent-chat.ts` tokens, so any addition here must not grow that file.
+
+**Why not fold into Phase 6.5?** Phase 6.5 is scoped to the second-ask auto-fire detector (see Phase 6 progress block, L51-54). These three items are orthogonal — they feed the detector a reward signal, but they don't belong in the detector itself.
+
+**Entry criteria**
+- [ ] Phase 6 sealed (commits 6 + 7 on main, round-trip regression green).
+- [ ] Phase 6.5 second-ask detector has landed and has ≥1 week of `skill_audit` rows to score against. Without real data, picking a scoring function is guessing.
+- [ ] Phase 7 ceiling on `meta-agent-chat.ts` holds — nothing in this phase is allowed to grow that file.
+
+#### Item 1 — `skill_audit_score` table (quality signal for mutations)
+
+**The gap.** `skill_audit` records *that* a mutation happened, not *whether it was good*. The Phase 6.5 second-ask detector has no reward signal — it can propose rules but can't learn which past rules were bad ideas. Gastown's `stamps(quality, reliability, creativity)` is the shape to port, minus the federation dimension.
+
+**Design decision owed before implementation.** What populates `quality`? Three candidates, pick exactly one:
+1. **Eval delta** — run the reference eval suite before and after; score = `post - pre` on the affected skill. Pro: objective, reuses existing infra. Con: slow (eval is minutes), expensive.
+2. **Second-ask frequency** — score = inverse frequency of the same question being asked again within N days after the rule landed. Pro: directly measures the thing we care about. Con: requires N days of latency, noisy for low-traffic skills.
+3. **Human review signal** — admin thumbs-up/down on the audit row. Pro: fastest, highest-signal. Con: requires a reviewer UI and ongoing human time.
+
+**Recommendation (tentative, re-decide at entry).** Start with (1) eval delta because the eval suite is the Phase 0 merge gate and already runs — scoring is then a query against existing eval_runs rows, not new infra. Fall back to (3) if eval coverage on the affected skill is thin.
+
+**Work items (sketch, flesh out at entry)**
+- [ ] Migration: `skill_audit_score(audit_id FK, score_type TEXT, quality REAL, reliability REAL, reason TEXT, scored_at TIMESTAMPTZ, scorer TEXT)`. One audit row may have multiple score rows (different score types, different scorers). `score_type` is one of `eval_delta | second_ask | human`.
+- [ ] **Yearbook rule equivalent** — constraint that the agent that triggered the mutation (`skill_audit.agent_id`) cannot be the `scorer` on its own audit rows. This is gastown's "no self-stamping" constraint (`wl_stamp.go:295-310`) and it matters more than it looks: without it, a buggy `/improve` loop will score its own rules positively and self-reinforce.
+- [ ] Scoring writer lives in `control-plane/src/logic/skill-scoring.ts` (NEW file — do NOT grow `skill-mutation.ts`).
+- [ ] Phase 6.5 detector reads aggregated score per-skill before proposing a rule. Rule threshold: don't auto-propose if recent avg quality on that skill is below some floor.
+
+**Non-goals**
+- No multi-dimensional scoring at first. One `quality` float is enough. Add `reliability` / `creativity` later only if the one-dim signal turns out to be lossy.
+- No leaderboard, no charsheet. Gastown surfaces scores in UI; we don't need to.
+
+#### Item 2 — Diff-query tooling over `skill_audit` history
+
+**The gap.** Gastown gets `DOLT_DIFF(from, to, 'skill_name')` for free as a SQL table function. AgentOS can answer "show me all mutations to skill X" with a linear `SELECT`, but can't answer "show me every mutation that changed a line containing 'reasoning'" without full content-diff in app code. This is a known limitation, not a bug.
+
+**Decision:** accept the limitation. Do **not** adopt Dolt to solve it. Instead, if the need becomes real:
+- [ ] Build a `skill_audit_diff` view (or `CALL get_skill_audit_diff(skill, from_id, to_id)` stored proc) that computes a line-level diff between `before_content` and `after_content` inside Postgres using `string_agg` tricks — ugly but contained.
+- [ ] Surface it in the admin revert UI so a human can see "here's what this mutation changed" before hitting revert.
+
+**Trigger to actually build this.** First time an admin needs to answer "what did `/improve` do last week to the research skill." Until that happens, leave it alone.
+
+#### Item 3 — `skill_audit` compaction strategy
+
+**The gap.** `skill_audit` is append-only with no TTL. At 10 mutations/day/skill × ~25 skills, that's ~91k rows/year — not scary, but grows unbounded, and `before_content`/`after_content` are unbounded TEXT columns. Gastown's compactor-dog (`dolt_flatten.go:149` + `dolt_rebase.go:162`) explicitly treats unbounded history as a bug. Ours will too, eventually.
+
+**Decision:** needed before prod, not now. Queue as a pre-launch item under the "Known Issues" memory doc (already tracked there under "load testing pending").
+
+**Work items (sketch)**
+- [ ] Pick a retention window (90 days? Align with eval_runs retention.)
+- [ ] Keep the most recent N rows per (skill, scorer) regardless of age, so revert always has *something* to fall back on.
+- [ ] Don't delete audit rows that have non-null `skill_audit_score` rows attached — those are still feeding the learning loop.
+- [ ] Scheduled compactor runs nightly (reuse existing cron worker infra — no new primitive).
+- [ ] Compaction is idempotent and emits its own `skill_audit` row with `reason = 'compaction: retained <N> of <M>'` — gastown's commit-the-compaction pattern.
+
+**Non-goals**
+- No Dolt-style history rewrite (we're not rebasing commits, we're just deleting rows). The append-only discipline is only enforced for the retention window.
+
+**Exit audit — "Gastown Follow-ups Closed" (per-item, not all-at-once)**
+- [ ] Item 1: `skill_audit_score` rows populated by ≥1 scorer; Phase 6.5 detector reads them before proposing a rule; yearbook constraint in schema and tested.
+- [ ] Item 2: deferred acceptance documented in `project_known_issues.md`; no code change.
+- [ ] Item 3: compactor lands before first production user (hard gate).
+
+**Rollback:** each item is its own migration + its own file; `git revert` per item. Score rows cascade-delete with audit rows.
+
+---
+
 ### Phase 7 — Slim `meta-agent-chat.ts`
 
 **Goal:** the meta-agent's own system prompt practices the architecture it preaches. Base prompt drops from ~6,000 tokens to ≤ 2,000.
