@@ -1,6 +1,5 @@
 /**
  * Releases router — channels, canary splits, promotions.
- * Ported from agentos/api/routers/releases.py
  */
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";

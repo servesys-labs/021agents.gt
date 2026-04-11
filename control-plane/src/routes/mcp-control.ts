@@ -1,6 +1,5 @@
 /**
  * MCP control plane router — register, monitor, and sync MCP servers.
- * Ported from agentos/api/routers/mcp_control.py
  *
  * RLS: mcp_servers is org-scoped under withOrgDb. Redundant
  * `WHERE org_id = ${user.org_id}` clauses removed.

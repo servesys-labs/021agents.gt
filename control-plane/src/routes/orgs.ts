@@ -1,6 +1,5 @@
 /**
  * Orgs router — organization CRUD, member management, RBAC.
- * Ported from agentos/api/routers/orgs.py
  */
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";

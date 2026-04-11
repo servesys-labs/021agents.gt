@@ -1,6 +1,5 @@
 /**
  * Jobs router — async job queue with retries, idempotency, dead-letter.
- * Ported from agentos/api/routers/jobs.py
  *
  * Queue submission via c.env.JOB_QUEUE, status tracking in DB.
  *

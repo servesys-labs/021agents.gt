@@ -1,6 +1,5 @@
 /**
  * Runtime proxy router — forward tool calls to RUNTIME service binding.
- * Ported from agentos/api/routers/runtime_proxy.py
  *
  * Includes: health checks, graceful degradation, circuit breaker patterns
  */

@@ -1,6 +1,5 @@
 /**
  * Autoresearch router — experiment tracking in Supabase.
- * Ported from agentos/api/routers/autoresearch.py
  *
  * Start/stop/status are edge-only (return 410 for start/stop).
  * DB-backed endpoints for dashboard/UI work from Supabase.

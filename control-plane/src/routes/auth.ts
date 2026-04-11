@@ -1,6 +1,5 @@
 /**
  * Auth routes — signup, login, providers, me, logout, password change, CF Access exchange.
- * Ported from agentos/api/routers/auth.py.
  *
  * Note: The auth middleware skips all /api/v1/auth/* paths, so public routes
  * (signup, login, providers) work without tokens. Protected routes (me, logout,

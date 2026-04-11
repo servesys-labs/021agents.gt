@@ -4,7 +4,6 @@
  * Published at /.well-known/agent.json so other agents and systems
  * can discover what this agent can do.
  *
- * Ported from agentos/a2a/card.py
  */
 
 /** A capability the agent can perform. */

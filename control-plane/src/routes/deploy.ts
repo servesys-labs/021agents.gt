@@ -1,6 +1,5 @@
 /**
  * Deploy router — verify agent config exists, return DO URL.
- * Ported from agentos/api/routers/deploy.py
  *
  * "Deploying" an agent = ensuring its config exists in Supabase.
  * Each agent is a Durable Object instance in the main worker.

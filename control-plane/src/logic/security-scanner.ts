@@ -1,6 +1,5 @@
 /**
  * Security scanner -- OWASP LLM Top 10 probes + MAESTRO + AIVSS.
- * Ported from agentos/security/owasp_probes.py, maestro.py, redteam.py, report.py.
  */
 
 import {

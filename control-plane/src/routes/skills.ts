@@ -1,6 +1,5 @@
 /**
  * Skills router — list, enable/disable, reload skills.
- * Ported from agentos/api/routers/skills.py
  *
  * Skills are stored in Supabase (skills table).
  */

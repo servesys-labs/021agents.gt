@@ -1,6 +1,5 @@
 /**
  * Conversation analytics -- session scoring via AI or heuristics.
- * Ported from agentos/observability/analytics.py, sentiment.py, quality.py.
  */
 
 // ── Heuristic sentiment analysis ─────────────────────────────────

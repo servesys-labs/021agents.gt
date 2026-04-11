@@ -1,7 +1,6 @@
 /**
  * A2A Client — Call external A2A agents via HTTP.
  *
- * Ported from agentos/a2a/client.py
  *
  * Usage:
  *   const client = new A2AClient("https://agent.example.com");

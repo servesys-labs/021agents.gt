@@ -1,6 +1,5 @@
 /**
  * Minimal linear declarative graph execution for the control-plane ↔ edge bridge.
- * Mirrors Python `agentos/graph/declarative_linear.py` path logic and kind → edge node ids.
  */
 
 export const EDGE_FRESH_GRAPH_KIND_MAP: Record<string, string> = {

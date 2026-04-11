@@ -1,6 +1,5 @@
 /**
  * Audit router — compliance audit log with export and tamper evidence.
- * Ported from agentos/api/routers/audit.py
  *
  * Hash chain export uses SHA-256 chaining for tamper evidence.
  */

@@ -1,6 +1,5 @@
 /**
  * Plans router — list and create LLM plans.
- * Ported from agentos/api/routers/plans.py
  *
  * Built-in plans are read from repo config/default.json. Custom plans persist in
  * project_configs (edge parity for agentos.yaml plans).

@@ -1,6 +1,5 @@
 /**
  * Memory router — episodic, semantic (facts), procedural, working memory.
- * Ported from agentos/api/routers/memory.py
  *
  * RLS: episodes, facts, procedures, agents, sessions are all org-scoped
  * under withOrgDb. Redundant `WHERE org_id = ${user.org_id}` clauses

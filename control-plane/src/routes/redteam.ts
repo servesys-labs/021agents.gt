@@ -7,7 +7,6 @@
  *   GET  /redteam/scans       - List scans
  *   POST /redteam/scans/:id/cancel - Cancel scan
  *
- * Ported from agentos/api/routers/redteam.py.
  */
 
 import { createRoute, z } from "@hono/zod-openapi";

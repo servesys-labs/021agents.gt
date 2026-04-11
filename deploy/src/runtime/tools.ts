@@ -18,6 +18,7 @@ import { createChildAbortController, createSiblingGroup } from "./abort";
 import { parseJsonColumn } from "./parse-json-column";
 import { uint8ArrayToBase64 } from "./binary-enc";
 import { log } from "./log";
+import { curatedMemoryTool } from "./curated-memory";
 
 const MAX_SANDBOX_TIMEOUT_SECONDS = 300; // 5 min — npm install/build on basic instance needs time
 const DEFAULT_SANDBOX_TIMEOUT_SECONDS = 30;
@@ -1746,7 +1747,6 @@ async function dispatch(
       return memoryDelete(env, args);
 
     case "memory-health": {
-      const { memoryHealth } = await import("./memory-tools");
       const result = await memoryHealth(env, args);
       emitMemoryEvent(
         (env as any).TELEMETRY_QUEUE,
@@ -1759,8 +1759,7 @@ async function dispatch(
     }
 
     case "memory": {
-      const { curatedMemoryHandler } = await import("./memory-tools");
-      const result = await curatedMemoryHandler(env, args);
+      const result = await curatedMemoryTool(env, args);
       const action = String(args.action || "");
       const target = String(args.target || "memory");
       const orgId = resolveTelemetryOrgId(env) || "";
@@ -4257,7 +4256,6 @@ return { mode: "codemode", total_tasks: tasks.length, results };
       return parallelWebSearch(env, args);
 
     case "session-search": {
-      const { sessionSearch } = await import("./memory-tools");
       const result = await sessionSearch(env, args);
       let count = 0;
       try {

@@ -1,6 +1,5 @@
 /**
  * API key routes — list, create, revoke, rotate.
- * Ported from agentos/api/routers/api_keys.py.
  *
  * All routes are protected (require authenticated user via c.var.user).
  */

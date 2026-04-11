@@ -1,6 +1,5 @@
 /**
  * Gold images, drift detection, and compliance checking.
- * Ported from agentos/config/gold_image.py, drift.py, compliance.py.
  */
 
 // ── Drift detection ──────────────────────────────────────────────

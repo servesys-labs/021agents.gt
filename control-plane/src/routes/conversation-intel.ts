@@ -1,6 +1,5 @@
 /**
  * Conversation intelligence routes -- scoring, analytics, trends.
- * Ported from agentos/api/routers/conversation_intel.py.
  */
 import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";

@@ -1,6 +1,5 @@
 /**
  * Security scanning routes -- OWASP probes, AIVSS, risk profiles.
- * Ported from agentos/api/routers/redteam.py.
  */
 import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";

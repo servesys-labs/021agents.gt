@@ -1,6 +1,5 @@
 /**
  * Compare router — A/B test agent versions.
- * Ported from agentos/api/routers/compare.py
  *
  * The actual eval logic (EvalGym, graders, agent invocation) lives in the
  * runtime worker. The control-plane validates input and proxies to RUNTIME.

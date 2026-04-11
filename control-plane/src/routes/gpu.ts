@@ -1,6 +1,5 @@
 /**
  * GPU router — manage dedicated GPU endpoints (placeholder CRUD).
- * Ported from agentos/api/routers/gpu.py
  */
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";

@@ -1,6 +1,5 @@
 /**
  * Webhooks router — CRUD + test delivery + delivery history + replay + secret rotation.
- * Ported from agentos/api/routers/webhooks.py
  */
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";

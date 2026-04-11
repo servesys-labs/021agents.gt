@@ -1,6 +1,5 @@
 /**
  * Sandbox router — code execution via Cloudflare containers or E2B fallback.
- * Ported from agentos/api/routers/sandbox.py
  *
  * All sandbox operations are proxied to the RUNTIME service binding.
  * Agent code NEVER runs on the control-plane worker.

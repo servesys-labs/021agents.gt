@@ -1,6 +1,5 @@
 /**
  * Billing router — usage, daily breakdown, trace cost, invoices, pricing catalog.
- * Ported from agentos/api/routers/billing.py
  */
 import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";

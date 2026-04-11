@@ -1,6 +1,5 @@
 /**
  * Config router — project configuration, A2A management.
- * Ported from agentos/api/routers/config.py
  *
  * In edge architecture, config is stored in Supabase, not filesystem.
  */

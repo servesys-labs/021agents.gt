@@ -1,6 +1,5 @@
 /**
  * Eval router — runs, datasets, evaluators, experiments, task upload.
- * Ported from agentos/api/routers/eval.py
  *
  * Datasets/evaluators stored in R2 (c.env.STORAGE).
  * Eval runs stored in Supabase. POST /run proxies to RUNTIME service binding.

@@ -1,6 +1,5 @@
 /**
  * Policies router — reusable governance policy templates.
- * Ported from agentos/api/routers/policies.py
  */
 import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";
