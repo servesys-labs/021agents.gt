@@ -8,7 +8,13 @@
   "model": "anthropic/claude-sonnet-4.6",
   "max_tokens": 8192,
   "temperature": 0.0,
-  "tools": [],
+  "tools": [
+    "read-file",
+    "grep",
+    "glob",
+    "edit-file",
+    "bash"
+  ],
   "memory": {
     "working": {
       "max_items": 100

@@ -13,6 +13,9 @@
  *     formatSkillsPrompt's behavior.
  */
 
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+
 import { describe, it, expect } from "vitest";
 
 import {
@@ -91,4 +94,144 @@ describe("Phase 4 — getSkillPrompt enabled_skills allowlist enforcement", () =
   it("unknown skill in enabled list = still null (guard is name-based)", () => {
     expect(getSkillPrompt("not-a-real-skill", "args", [], ["not-a-real-skill"])).toBeNull();
   });
+});
+
+// ── DB-overlap case ───────────────────────────────────────────────
+
+describe("Phase 4 — enabled_skills + DB skill interaction", () => {
+  const dbSkill = {
+    name: "custom-deploy",
+    description: "Custom org-specific deploy workflow",
+    prompt_template: "Deploy {{ARGS}}",
+    allowed_tools: ["bash"],
+    enabled: true,
+    version: "1.0.0",
+    category: "custom",
+    when_to_use: "when the user says deploy",
+  };
+
+  it("DB skill is included when listed in enabled", () => {
+    const out = formatSkillsPrompt([dbSkill], "standard", ["custom-deploy"]);
+    expect(out).toContain("/custom-deploy");
+    expect(out).not.toContain("/batch");
+  });
+
+  it("DB skill is filtered out when NOT in enabled", () => {
+    const out = formatSkillsPrompt([dbSkill], "standard", ["batch"]);
+    expect(out).toContain("/batch");
+    expect(out).not.toContain("/custom-deploy");
+  });
+
+  it("getSkillPrompt finds DB skill when in enabled", () => {
+    const prompt = getSkillPrompt("custom-deploy", "staging", [dbSkill], ["custom-deploy"]);
+    expect(prompt).not.toBeNull();
+    expect(prompt).toContain("staging");
+  });
+
+  it("getSkillPrompt blocks DB skill when NOT in enabled", () => {
+    expect(getSkillPrompt("custom-deploy", "args", [dbSkill], ["batch"])).toBeNull();
+  });
+});
+
+// ── Tool-superset invariant across every agent config ─────────────
+//
+// Phase 4 de-duped several agents to enabled_skills. Each SKILL.md declares
+// an `allowed_tools` list in its frontmatter. An agent that enables a skill
+// without also granting that skill's tools will appear to work at prompt-
+// injection time but fail at tool-dispatch when the model tries to call a
+// tool the config doesn't advertise. Guard the invariant here so future
+// dedups can't silently re-introduce the regression.
+
+const REPO_ROOT = join(__dirname, "..", "..");
+const SKILLS_ROOT = join(REPO_ROOT, "skills", "public");
+const AGENTS_ROOT = join(REPO_ROOT, "agents");
+
+function parseFrontmatter(text: string): Record<string, any> {
+  const fm: Record<string, any> = {};
+  let currentKey: string | null = null;
+  let currentList: string[] | null = null;
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.replace(/\s+$/, "");
+    const stripped = line.trim();
+    if (!stripped || stripped.startsWith("#")) continue;
+    if (stripped.startsWith("- ") && currentKey) {
+      if (currentList === null) {
+        currentList = [];
+        fm[currentKey] = currentList;
+      }
+      currentList.push(stripped.slice(2).trim());
+      continue;
+    }
+    const ci = stripped.indexOf(":");
+    if (ci < 0) continue;
+    currentList = null;
+    currentKey = stripped.slice(0, ci).trim().replace(/-/g, "_");
+    let v = stripped.slice(ci + 1).trim();
+    if (v) {
+      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+        v = v.slice(1, -1);
+      }
+      fm[currentKey] = v;
+    }
+  }
+  return fm;
+}
+
+function skillAllowedTools(name: string): string[] {
+  const path = join(SKILLS_ROOT, name, "SKILL.md");
+  const raw = readFileSync(path, "utf8");
+  const m = raw.match(/^---\s*\n([\s\S]*?)\n---\s*\n/);
+  if (!m) return [];
+  const fm = parseFrontmatter(m[1]);
+  return Array.isArray(fm.allowed_tools) ? fm.allowed_tools : [];
+}
+
+function walkAgentConfigs(): Array<{ path: string; config: any }> {
+  const results: Array<{ path: string; config: any }> = [];
+  function walk(dir: string): void {
+    try {
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        const st = statSync(full);
+        if (st.isDirectory()) {
+          walk(full);
+        } else if (entry.endsWith(".json")) {
+          try {
+            results.push({ path: full, config: JSON.parse(readFileSync(full, "utf8")) });
+          } catch {}
+        }
+      }
+    } catch {}
+  }
+  walk(AGENTS_ROOT);
+  return results;
+}
+
+describe("Phase 4 — agent tools must superset their enabled_skills' allowed_tools", () => {
+  const agents = walkAgentConfigs();
+
+  it("there is at least one agent with enabled_skills (sanity — Phase 4 shipped)", () => {
+    const withSkills = agents.filter((a) => Array.isArray(a.config.enabled_skills) && a.config.enabled_skills.length > 0);
+    expect(withSkills.length).toBeGreaterThan(0);
+  });
+
+  for (const { path, config } of agents) {
+    const enabled: string[] = Array.isArray(config.enabled_skills) ? config.enabled_skills : [];
+    if (enabled.length === 0) continue;
+
+    const relPath = path.slice(REPO_ROOT.length + 1);
+    it(`${relPath}: tools ⊇ union(allowed_tools for each enabled skill)`, () => {
+      const agentTools = new Set<string>(Array.isArray(config.tools) ? config.tools : []);
+      const neededTools = new Set<string>();
+      for (const skillName of enabled) {
+        for (const t of skillAllowedTools(skillName)) neededTools.add(t);
+      }
+      const missing = [...neededTools].filter((t) => !agentTools.has(t));
+      expect(
+        missing,
+        `${config.name} enables [${enabled.join(", ")}] but is missing tools the skills need: ${missing.join(", ")}. ` +
+          `Either add these to the agent's tools array, or remove the skill from enabled_skills.`,
+      ).toEqual([]);
+    });
+  }
 });

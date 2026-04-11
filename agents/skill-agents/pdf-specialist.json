@@ -18,7 +18,7 @@
   },
   "max_turns": 20,
   "timeout_seconds": 300,
-  "plan": "basic",
+  "plan": "standard",
   "tags": ["pdf", "documents", "office", "reports"],
   "marketplace": {
     "category": "productivity",
