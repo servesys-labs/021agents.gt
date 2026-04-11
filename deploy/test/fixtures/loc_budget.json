@@ -2,7 +2,7 @@
   "_description": "LoC ceilings for files being actively shrunk by the thin-harness refactor. Phase 0 captures current sizes as the STARTING point; subsequent phases tighten the ceilings. CI fails if any file exceeds its current ceiling.",
   "_seed_instructions": "To regenerate: WRITE_LOC_BUDGET=1 pnpm vitest run test/refactor-phase0.test.ts",
   "ceilings": {
-    "src/runtime/skills.ts": 3627,
+    "src/runtime/skills.ts": 180,
     "src/runtime/tools.ts": 7717,
     "src/runtime/reasoning-strategies.ts": 223,
     "src/runtime/intent-router.ts": 246,
