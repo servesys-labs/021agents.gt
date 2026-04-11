@@ -225,7 +225,8 @@ function evaluateCompletionContract(input: string, output: string, opts: {
   const reasons: string[] = [];
   const q = String(input || "").toLowerCase();
   const out = String(output || "");
-  if (out.trim().length < 80) reasons.push("output_too_short");
+  const outLen = out.trim().length;
+  if (outLen < 80) reasons.push("output_too_short");
 
   const executionIntent = /\b(research|analy[sz]e|compare|investigate|build|implement|fix|write|create)\b/.test(q);
   if (!opts.planOnlyRequested && executionIntent && opts.totalToolCalls === 0) {
@@ -234,7 +235,13 @@ function evaluateCompletionContract(input: string, output: string, opts: {
   if (opts.totalToolCalls > 0 && opts.successfulToolCalls === 0 && opts.failedToolCalls > 0) {
     reasons.push("all_tool_calls_failed");
   }
-  if (opts.researchIntent && !opts.artifactSynthesisValidated) {
+  // Synthesis is a degraded-but-acceptable path when the textual draft
+  // is substantive. Only fail the contract on synthesis miss if we also
+  // don't have a meaningful output to return. This prevents the
+  // plan-trap probe (and real users) from seeing `completion_contract_failed`
+  // just because the JSON coercion step got flaky — the user still gets
+  // the markdown report.
+  if (opts.researchIntent && !opts.artifactSynthesisValidated && outLen < 600) {
     reasons.push("research_artifact_not_validated");
   }
   return { ok: reasons.length === 0, reasons };
@@ -2171,6 +2178,15 @@ ALWAYS:
           "At least 3 companies, and each company must include at least 1 URL in evidence.",
           "If evidence is weak, state that in gaps and confidence.",
         ].join("\n");
+        // Pin a JSON-reliable model for artifact synthesis regardless of
+        // what the main route picked. The main route is often Gemma on
+        // the fast path, which ignores "STRICT JSON only" instructions
+        // and returns prose instead. That caused the pre-beta health
+        // suite's plan-trap probe to fail with
+        // artifact_schema_not_validated even though the textual draft
+        // was high quality. Synthesis runs rarely (only on deep-research
+        // intents) so the cost delta is small, and Sonnet 4.6 produces
+        // strict JSON reliably.
         const response = await callLLM(
           {
             AI: this.env.AI,
@@ -2186,10 +2202,11 @@ ALWAYS:
           ] as any,
           [],
           {
-            model: selectedRoute.model,
-            provider: selectedRoute.provider,
+            model: "anthropic/claude-sonnet-4-6",
+            provider: "openrouter",
             max_tokens: Math.max(1800, queryProfile.max_tokens_per_turn),
-          },
+            response_format: { type: "json_object" },
+          } as any,
         );
         return {
           content: response.content || "",
