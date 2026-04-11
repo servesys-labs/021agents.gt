@@ -73,6 +73,7 @@ import { codemodeRoutes } from "./routes/codemode";
 import { a2aRoutes } from "./routes/a2a";
 import { githubWebhookRoutes } from "./routes/github-webhooks";
 import { featuresRoutes } from "./routes/features";
+import { skillsAdminRoutes } from "./routes/skills-admin";
 import { dashboardRoutes } from "./routes/dashboard";
 import { trainingRoutes } from "./routes/training";
 import { domainRoutes } from "./routes/domains";
@@ -418,6 +419,7 @@ app.route("/api/v1/conversations", conversationRoutes);
 
 // Feature flags
 app.route("/api/v1/features", featuresRoutes);
+app.route("/api/v1/admin/skills", skillsAdminRoutes);
 
 // Widget script serving (public, no auth)
 app.route("/", widgetServeRoutes);

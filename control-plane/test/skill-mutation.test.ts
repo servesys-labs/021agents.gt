@@ -12,6 +12,7 @@ import { describe, it, expect } from "vitest";
 
 import {
   appendRule,
+  revertSkillRule,
   sha256Hex,
   OVERLAY_JOINER,
   SKILL_MUTATION_RATE_LIMIT_PER_DAY,
@@ -299,6 +300,174 @@ describe("skill-mutation — sha integrity and overlay joiner", () => {
       expect(result.before_sha).toBe(await sha256Hex(expectedBefore));
       expect(result.after_sha).toBe(await sha256Hex(expectedAfter));
       expect(result.overlay_count).toBe(3);
+    }
+  });
+});
+
+describe("skill-mutation — revertSkillRule", () => {
+  it("rejects non-owner/admin with code=forbidden", async () => {
+    const sql = makeMockSql([]);
+    const result = await revertSkillRule(
+      sql,
+      { ...baseCtx, userRole: "member" },
+      "audit-xyz",
+    );
+    expect(result.reverted).toBe(false);
+    if (!result.reverted) expect(result.code).toBe("forbidden");
+    expect(sql.calls.length).toBe(0);
+  });
+
+  it("rejects empty audit_id with code=invalid_input", async () => {
+    const sql = makeMockSql([]);
+    const result = await revertSkillRule(sql, baseCtx, "");
+    expect(result.reverted).toBe(false);
+    if (!result.reverted) expect(result.code).toBe("invalid_input");
+    expect(sql.calls.length).toBe(0);
+  });
+
+  it("returns audit_not_found when the SELECT yields no rows", async () => {
+    const sql = makeMockSql([[]]);
+    const result = await revertSkillRule(sql, baseCtx, "missing-id");
+    expect(result.reverted).toBe(false);
+    if (!result.reverted) expect(result.code).toBe("audit_not_found");
+    expect(sql.calls.length).toBe(1);
+    expect(sql.calls[0].query).toContain("FROM skill_audit");
+  });
+
+  it("returns already_reverted when the audit row has a null overlay_id (revert or prior-revert row)", async () => {
+    const beforeContent = "some prior rule";
+    const beforeSha = await sha256Hex(beforeContent);
+    const sql = makeMockSql([
+      [{
+        audit_id: "audit-prior-revert",
+        skill_name: "debug",
+        overlay_id: null,
+        before_sha: beforeSha,
+        before_content: beforeContent,
+        after_content: "",
+        source: "revert",
+      }],
+    ]);
+    const result = await revertSkillRule(sql, baseCtx, "audit-prior-revert");
+    expect(result.reverted).toBe(false);
+    if (!result.reverted) expect(result.code).toBe("already_reverted");
+  });
+
+  it("refuses with code=tamper_detected when sha256(before_content) !== before_sha", async () => {
+    const sql = makeMockSql([
+      [{
+        audit_id: "audit-tampered",
+        skill_name: "debug",
+        overlay_id: "overlay-xyz",
+        before_sha: "0000000000000000000000000000000000000000000000000000000000000000",
+        before_content: "this is not the content that was originally hashed",
+        after_content: "irrelevant",
+        source: "improve",
+      }],
+    ]);
+    const result = await revertSkillRule(sql, baseCtx, "audit-tampered");
+    expect(result.reverted).toBe(false);
+    if (!result.reverted) {
+      expect(result.code).toBe("tamper_detected");
+      expect(result.detail).toMatchObject({
+        audit_id: "audit-tampered",
+        stored_sha: "0000000000000000000000000000000000000000000000000000000000000000",
+      });
+    }
+    // Only the audit SELECT ran — no overlay reads, no DELETE.
+    expect(sql.calls.length).toBe(1);
+  });
+
+  it("returns already_reverted when DELETE finds zero rows (race with concurrent revert)", async () => {
+    const priorContent = "rule A";
+    const priorSha = await sha256Hex(priorContent);
+    const sql = makeMockSql([
+      [{
+        audit_id: "audit-raced",
+        skill_name: "debug",
+        overlay_id: "overlay-raced",
+        before_sha: priorSha,
+        before_content: priorContent,
+        after_content: priorContent + OVERLAY_JOINER + "rule B",
+        source: "improve",
+      }],
+      [{ rule_text: priorContent }, { rule_text: "rule B" }],  // current overlays
+      [],  // DELETE returns empty — overlay already gone
+    ]);
+    const result = await revertSkillRule(sql, baseCtx, "audit-raced");
+    expect(result.reverted).toBe(false);
+    if (!result.reverted) expect(result.code).toBe("already_reverted");
+    expect(sql.calls.length).toBe(3); // SELECT audit + SELECT overlays + DELETE
+  });
+
+  it("happy path: verifies integrity, deletes overlay, writes revert audit row", async () => {
+    const priorContent = "rule A";
+    const removedRule = "rule B";
+    const priorSha = await sha256Hex(priorContent);
+
+    // After the revert, overlay state goes from [ruleA, ruleB] back to [ruleA].
+    const sql = makeMockSql([
+      // 1. SELECT audit row
+      [{
+        audit_id: "audit-forward",
+        skill_name: "debug",
+        overlay_id: "overlay-forward",
+        before_sha: priorSha,
+        before_content: priorContent,
+        after_content: priorContent + OVERLAY_JOINER + removedRule,
+        source: "improve",
+      }],
+      // 2. SELECT current overlays (before the delete)
+      [{ rule_text: priorContent }, { rule_text: removedRule }],
+      // 3. DELETE overlay — returns the deleted overlay_id
+      [{ overlay_id: "overlay-forward" }],
+      // 4. SELECT overlays again (after the delete)
+      [{ rule_text: priorContent }],
+      // 5. INSERT revert audit row
+      [{ audit_id: "audit-revert" }],
+    ]);
+
+    const result = await revertSkillRule(sql, baseCtx, "audit-forward");
+    expect(result.reverted).toBe(true);
+    if (result.reverted) {
+      expect(result.revert_audit_id).toBe("audit-revert");
+      expect(result.reverted_audit_id).toBe("audit-forward");
+      expect(result.skill_name).toBe("debug");
+      expect(result.overlay_count).toBe(1); // one rule remains after revert
+      // The sha fields describe the overlay state AT THE MOMENT OF REVERT,
+      // not the original append. before = full state, after = state minus
+      // the removed rule.
+      const expectedBeforeRevert = priorContent + OVERLAY_JOINER + removedRule;
+      const expectedAfterRevert = priorContent;
+      expect(result.before_sha).toBe(await sha256Hex(expectedBeforeRevert));
+      expect(result.after_sha).toBe(await sha256Hex(expectedAfterRevert));
+    }
+    expect(sql.calls.length).toBe(5);
+  });
+
+  it("happy path when removing the ONLY overlay: after state is empty string", async () => {
+    const onlyRule = "the only rule";
+    const onlySha = await sha256Hex("");
+    const sql = makeMockSql([
+      [{
+        audit_id: "audit-only",
+        skill_name: "debug",
+        overlay_id: "overlay-only",
+        before_sha: onlySha,              // first append: before = empty
+        before_content: "",
+        after_content: onlyRule,
+        source: "improve",
+      }],
+      [{ rule_text: onlyRule }],          // current state: just the one rule
+      [{ overlay_id: "overlay-only" }],   // DELETE succeeds
+      [],                                  // post-delete: no overlays
+      [{ audit_id: "audit-only-revert" }],
+    ]);
+    const result = await revertSkillRule(sql, baseCtx, "audit-only");
+    expect(result.reverted).toBe(true);
+    if (result.reverted) {
+      expect(result.overlay_count).toBe(0);
+      expect(result.after_sha).toBe(await sha256Hex(""));
     }
   });
 });
