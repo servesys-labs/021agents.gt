@@ -1,1 +1,0 @@
-{"name":"dispatch-test-bot","description":"Test","model":"deepseek-ai/DeepSeek-V3.2","system_prompt":"Say hello.","tools":[],"max_turns":5,"tags":["test"],"version":"0.1.0","plan":"standard","governance":{"budget_limit_usd":1.0}}
