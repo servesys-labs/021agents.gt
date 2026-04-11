@@ -108,48 +108,50 @@ export async function transferCredits(
   const now = new Date().toISOString();
 
   try {
-    const result = await sql.begin(async (tx: any) => {
-      // Atomic: deduct from sender
-      const deducted = await tx`
-        UPDATE org_credit_balance
-        SET balance_usd = balance_usd - ${amountUsd},
-            lifetime_consumed_usd = lifetime_consumed_usd + ${amountUsd},
-            updated_at = ${now}
-        WHERE org_id = ${fromOrg} AND balance_usd >= ${amountUsd}
-      `;
+    // Caller is expected to invoke this from inside a withOrgDb callback,
+    // so `sql` is already a transaction-scoped client. Nesting another
+    // sql.begin() here would fail (TransactionSql has no .begin method).
+    // All queries below run in the enclosing transaction and roll back
+    // together if any throw.
+    const deducted = await sql`
+      UPDATE org_credit_balance
+      SET balance_usd = balance_usd - ${amountUsd},
+          lifetime_consumed_usd = lifetime_consumed_usd + ${amountUsd},
+          updated_at = ${now}
+      WHERE org_id = ${fromOrg} AND balance_usd >= ${amountUsd}
+    `;
 
-      if (deducted.count === 0) {
-        throw new Error("Insufficient credits");
-      }
+    if (deducted.count === 0) {
+      throw new Error("Insufficient credits");
+    }
 
-      // Credit to receiver (minus platform fee)
-      await tx`
-        INSERT INTO org_credit_balance (org_id, balance_usd, lifetime_purchased_usd, lifetime_consumed_usd, updated_at)
-        VALUES (${toOrg}, ${receiverAmount}, ${receiverAmount}, 0, ${now})
-        ON CONFLICT (org_id) DO UPDATE
-        SET balance_usd = org_credit_balance.balance_usd + ${receiverAmount},
-            lifetime_purchased_usd = org_credit_balance.lifetime_purchased_usd + ${receiverAmount},
-            updated_at = ${now}
-      `;
+    // Credit to receiver (minus platform fee)
+    await sql`
+      INSERT INTO org_credit_balance (org_id, balance_usd, lifetime_purchased_usd, lifetime_consumed_usd, updated_at)
+      VALUES (${toOrg}, ${receiverAmount}, ${receiverAmount}, 0, ${now})
+      ON CONFLICT (org_id) DO UPDATE
+      SET balance_usd = org_credit_balance.balance_usd + ${receiverAmount},
+          lifetime_purchased_usd = org_credit_balance.lifetime_purchased_usd + ${receiverAmount},
+          updated_at = ${now}
+    `;
 
-      // Read updated balances
-      const [fromBal] = await tx`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${fromOrg}`;
+    // Read updated balances
+    const [fromBal] = await sql`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${fromOrg}`;
 
-      // Audit trail — sender
-      await tx`
-        INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
-        VALUES (${fromOrg}, 'transfer_out', ${-amountUsd}, ${Number(fromBal.balance_usd)}, ${description}, ${transferId}, 'a2a_payment', ${now})
-      `;
+    // Audit trail — sender
+    await sql`
+      INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
+      VALUES (${fromOrg}, 'transfer_out', ${-amountUsd}, ${Number(fromBal.balance_usd)}, ${description}, ${transferId}, 'a2a_payment', ${now})
+    `;
 
-      // Audit trail — receiver
-      const [toBal] = await tx`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${toOrg}`;
-      await tx`
-        INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
-        VALUES (${toOrg}, 'transfer_in', ${amountUsd}, ${Number(toBal.balance_usd)}, ${description}, ${transferId}, 'a2a_payment', ${now})
-      `;
+    // Audit trail — receiver
+    const [toBal] = await sql`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${toOrg}`;
+    await sql`
+      INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
+      VALUES (${toOrg}, 'transfer_in', ${amountUsd}, ${Number(toBal.balance_usd)}, ${description}, ${transferId}, 'a2a_payment', ${now})
+    `;
 
-      return { from_balance_after: Number(fromBal.balance_usd) };
-    });
+    const result = { from_balance_after: Number(fromBal.balance_usd) };
 
     // Referral earnings — distribute from platform fee to referrers (outside transaction, non-blocking)
     let referralPayout = 0;
@@ -235,40 +237,42 @@ export async function refundTransfer(
     `;
     if (existing.length > 0) return { success: true }; // already refunded
 
-    // Atomic: debit receiver + credit sender + audit in single transaction
-    await sql.begin(async (tx: any) => {
+    // Caller runs this inside a withOrgDb callback — `sql` is already a
+    // transaction-scoped client, so all queries below share one
+    // transaction and roll back together on throw. Nesting sql.begin()
+    // would fail (TransactionSql has no .begin method).
+    {
       // Deduct from receiver (only if they have enough)
-      const deducted = await tx`
+      const deducted = await sql`
         UPDATE org_credit_balance
         SET balance_usd = balance_usd - ${amountUsd}, updated_at = ${now}
         WHERE org_id = ${toOrg} AND balance_usd >= ${amountUsd}
       `;
       if (deducted.count === 0) {
         // Receiver doesn't have enough — partial refund of what they have
-        const [receiverBal] = await tx`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${toOrg}`;
+        const [receiverBal] = await sql`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${toOrg}`;
         const available = Math.max(0, Number(receiverBal?.balance_usd || 0));
         if (available > 0) {
-          await tx`UPDATE org_credit_balance SET balance_usd = 0, updated_at = ${now} WHERE org_id = ${toOrg}`;
-          await tx`UPDATE org_credit_balance SET balance_usd = balance_usd + ${available}, updated_at = ${now} WHERE org_id = ${fromOrg}`;
-          const [senderBalPartial] = await tx`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${fromOrg}`;
-          await tx`INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
+          await sql`UPDATE org_credit_balance SET balance_usd = 0, updated_at = ${now} WHERE org_id = ${toOrg}`;
+          await sql`UPDATE org_credit_balance SET balance_usd = balance_usd + ${available}, updated_at = ${now} WHERE org_id = ${fromOrg}`;
+          const [senderBalPartial] = await sql`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${fromOrg}`;
+          await sql`INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
             VALUES (${fromOrg}, 'refund', ${available}, ${Number(senderBalPartial.balance_usd)}, ${reason + ' (partial)'}, ${refundId}, 'a2a_refund', ${now})`;
           console.warn(`[refund] Partial refund $${available} of $${amountUsd} — receiver ${toOrg} had insufficient balance`);
         }
-        return;
+      } else {
+        // Full refund path
+        await sql`UPDATE org_credit_balance SET balance_usd = balance_usd + ${amountUsd}, updated_at = ${now} WHERE org_id = ${fromOrg}`;
+
+        // Audit trails
+        const [senderBal] = await sql`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${fromOrg}`;
+        const [receiverBal] = await sql`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${toOrg}`;
+        await sql`INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
+          VALUES (${fromOrg}, 'refund', ${amountUsd}, ${Number(senderBal.balance_usd)}, ${reason}, ${refundId}, 'a2a_refund', ${now})`;
+        await sql`INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
+          VALUES (${toOrg}, 'refund', ${-amountUsd}, ${Number(receiverBal.balance_usd)}, ${'Refund debit: ' + reason}, ${refundId + '-debit'}, 'a2a_refund', ${now})`;
       }
-
-      // Full refund path
-      await tx`UPDATE org_credit_balance SET balance_usd = balance_usd + ${amountUsd}, updated_at = ${now} WHERE org_id = ${fromOrg}`;
-
-      // Audit trails
-      const [senderBal] = await tx`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${fromOrg}`;
-      const [receiverBal] = await tx`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${toOrg}`;
-      await tx`INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
-        VALUES (${fromOrg}, 'refund', ${amountUsd}, ${Number(senderBal.balance_usd)}, ${reason}, ${refundId}, 'a2a_refund', ${now})`;
-      await tx`INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
-        VALUES (${toOrg}, 'refund', ${-amountUsd}, ${Number(receiverBal.balance_usd)}, ${'Refund debit: ' + reason}, ${refundId + '-debit'}, 'a2a_refund', ${now})`;
-    });
+    }
 
     return { success: true };
   } catch (err: any) {
