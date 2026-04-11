@@ -819,248 +819,45 @@ describe("002_skill_learning — overlays + audit migration", () => {
 });
 
 // ══════════════════════════════════════════════════════════════════
-// 16. PHASE 7.2 — META_SKILL_BODIES shape + byte-identity extraction
+// 16. PHASE 7 — META_SKILL_BODIES shape (ongoing drift guard: CI
+//    freshness gate on meta-skill-bodies.generated.ts)
 // ══════════════════════════════════════════════════════════════════
 //
-// Section was "7.2a scaffold" and asserted the map was empty. 7.2b
-// extracted DEMO_MODE_INSTRUCTIONS to skills/meta/mode-demo/SKILL.md
-// and folded in the Path B regex fix (FRONTMATTER_RE now uses
-// `[ \t]*\n` instead of `\s*\n` so leading newlines in bodies are
-// preserved). The byte-identity test proves both halves: extraction
-// + regex fix are lossless. Remove this specific byte-identity test
-// at 7.3's exit audit — once LIVE is also extracted, the CI
-// freshness gate on meta-skill-bodies.generated.ts becomes the
-// ongoing drift guard.
+// The 5 byte-identity tests (mode-demo, mode-live, workflows-concat,
+// diagnose-session, infra-summary) that locked each extraction to its
+// pre-extraction sha were removed in the Phase 7-exit commit once the
+// extraction chain was complete and all 8 commits had validated under
+// CI. The ongoing drift guard is now the CI freshness step in
+// .github/workflows/ci.yml which runs the bundler and git diffs both
+// generated files on every push. This section keeps a lightweight
+// shape check so a missing or corrupted map trips a test regardless
+// of what the CI gate catches.
 // ══════════════════════════════════════════════════════════════════
 
-import { createHash } from "node:crypto";
 import { META_SKILL_BODIES } from "../src/lib/meta-skill-bodies.generated";
 
-describe("Phase 7.2 — META_SKILL_BODIES shape", () => {
+describe("Phase 7 — META_SKILL_BODIES shape", () => {
   it("is importable and is a plain object", () => {
     expect(typeof META_SKILL_BODIES).toBe("object");
     expect(META_SKILL_BODIES).not.toBeNull();
     expect(Array.isArray(META_SKILL_BODIES)).toBe(false);
   });
 
-  it("contains both mode-demo (7.2b) and mode-live (7.3)", () => {
-    expect(META_SKILL_BODIES["mode-demo"]).toBeDefined();
-    expect(META_SKILL_BODIES["mode-live"]).toBeDefined();
-    expect(typeof META_SKILL_BODIES["mode-demo"]).toBe("string");
-    expect(typeof META_SKILL_BODIES["mode-live"]).toBe("string");
-  });
-});
-
-describe("Phase 7.2b — META_SKILL_BODIES['mode-demo'] byte identity", () => {
-  // sha computed against the pre-extraction DEMO_MODE_INSTRUCTIONS
-  // constant at commit f811ca3e (the last commit that had the constant
-  // inline). After the Path B regex fix landed in 7.2b, the bundled
-  // body is byte-identical to that constant — leading `\n` preserved,
-  // middle + trailing preserved, 3342 chars total. If this drifts
-  // after 7.2b, either the SKILL.md was edited OR someone reverted
-  // the FRONTMATTER_RE fix. Either is load-bearing, fail loudly.
-  //
-  // This test is scheduled for removal in a separate 7.3-exit commit
-  // (NOT this commit). During the window between 7.3 and the exit
-  // commit, DEMO + LIVE byte-identity coexist as belt-and-suspenders
-  // coverage. After the exit commit, the CI freshness gate on
-  // meta-skill-bodies.generated.ts takes over as the ongoing drift
-  // guard for both modes.
-  const EXPECTED_SHA = "48508bce4c6920a1deda1bd470c8eea1c5826f674a058914207fe6ce2a60cdfd";
-  const EXPECTED_LENGTH = 3342;
-
-  it("matches sha256 of pre-extraction DEMO_MODE_INSTRUCTIONS", () => {
-    const body = META_SKILL_BODIES["mode-demo"];
-    const actual = createHash("sha256").update(body, "utf8").digest("hex");
-
-    if (actual !== EXPECTED_SHA) {
-      throw new Error(
-        `META_SKILL_BODIES["mode-demo"] drifted from pre-extraction constant.\n` +
-        `  expected sha256: ${EXPECTED_SHA}\n` +
-        `  actual sha256:   ${actual}\n` +
-        `  expected length: ${EXPECTED_LENGTH}\n` +
-        `  actual length:   ${body.length}\n` +
-        `  first 80 chars:  ${JSON.stringify(body.slice(0, 80))}\n` +
-        `  last  80 chars:  ${JSON.stringify(body.slice(-80))}\n` +
-        `\n` +
-        `If you intentionally modified the body, recompute the sha and\n` +
-        `update EXPECTED_SHA. Otherwise investigate:\n` +
-        `  1. skills/meta/mode-demo/SKILL.md — was it edited?\n` +
-        `  2. control-plane/scripts/bundle-skill-catalog.mjs FRONTMATTER_RE —\n` +
-        `     was it reverted from '[ \\t]*\\n' back to '\\s*\\n'? That\n` +
-        `     regex consumes leading newlines in bodies (see the inline\n` +
-        `     comment in the bundler for why).\n` +
-        `  3. Run 'node control-plane/scripts/bundle-skill-catalog.mjs' and\n` +
-        `     inspect the diff on meta-skill-bodies.generated.ts.`,
-      );
+  it("contains all 19 meta skills (2 modes + 2 sections + 15 workflows)", () => {
+    const expectedKeys = [
+      "mode-demo", "mode-live",
+      "diagnose-session", "infra-summary",
+      "wf-health-check", "wf-improve", "wf-bad-answers", "wf-start-training",
+      "wf-marketplace-publish", "wf-test-suite", "wf-add-connector", "wf-delegate",
+      "wf-mid-task-stop", "wf-forgot-context", "wf-truncated-results", "wf-tool-blocked",
+      "wf-audit-log", "wf-feature-flags", "wf-cost-analysis",
+    ];
+    for (const key of expectedKeys) {
+      expect(META_SKILL_BODIES[key], `missing meta skill: ${key}`).toBeDefined();
+      expect(typeof META_SKILL_BODIES[key]).toBe("string");
+      expect(META_SKILL_BODIES[key]!.length).toBeGreaterThan(0);
     }
-  });
-});
-
-describe("Phase 7.6 — META_SKILL_BODIES['infra-summary'] byte identity", () => {
-  // sha computed against the pre-extraction Runtime Infrastructure
-  // (summary) body at commit ebfd3900 (the last commit that had it
-  // inline). Single-section extraction, no placeholders, no
-  // concatenation — mechanically identical to 7.5 (diagnose-session).
-  // Removed alongside the DEMO/LIVE/workflows/diagnose-session tests
-  // in the Phase 7-exit commit.
-  const EXPECTED_SHA = "e4a92bfd748416362af9b294b7e898c82c5d404f43de618d6c5c051e901f9c8f";
-  const EXPECTED_LENGTH = 1386;
-
-  it("matches sha256 of pre-extraction Runtime Infrastructure (summary) body", () => {
-    const body = META_SKILL_BODIES["infra-summary"];
-    const actual = createHash("sha256").update(body, "utf8").digest("hex");
-
-    if (actual !== EXPECTED_SHA) {
-      throw new Error(
-        `META_SKILL_BODIES["infra-summary"] drifted from pre-extraction body.\n` +
-        `  expected sha256: ${EXPECTED_SHA}\n` +
-        `  actual sha256:   ${actual}\n` +
-        `  expected length: ${EXPECTED_LENGTH}\n` +
-        `  actual length:   ${body.length}\n` +
-        `  first 80 chars:  ${JSON.stringify(body.slice(0, 80))}\n` +
-        `  last  80 chars:  ${JSON.stringify(body.slice(-80))}\n` +
-        `\n` +
-        `Investigate:\n` +
-        `  1. skills/meta/infra-summary/SKILL.md — was it edited?\n` +
-        `  2. bundle-skill-catalog.mjs FRONTMATTER_RE — Path B fix reverted?\n` +
-        `  3. Run 'node control-plane/scripts/bundle-skill-catalog.mjs' and\n` +
-        `     inspect the diff on meta-skill-bodies.generated.ts.\n`,
-      );
-    }
-  });
-});
-
-describe("Phase 7.5 — META_SKILL_BODIES['diagnose-session'] byte identity", () => {
-  // sha computed against the pre-extraction Diagnostic Mindset body at
-  // commit 27c02468 (the last commit that had Diagnostic Mindset inline).
-  // Single-section extraction, no placeholders, no concatenation — the
-  // simplest byte-identity proof in Phase 7. Removed alongside the
-  // DEMO / LIVE / workflows byte-identity tests in the Phase 7-exit commit.
-  const EXPECTED_SHA = "b7cb5a20676acba20b9a45022bff338d7a2f27ff3453dca3af6e3aebaf9546e6";
-  const EXPECTED_LENGTH = 1135;
-
-  it("matches sha256 of pre-extraction Diagnostic Mindset body", () => {
-    const body = META_SKILL_BODIES["diagnose-session"];
-    const actual = createHash("sha256").update(body, "utf8").digest("hex");
-
-    if (actual !== EXPECTED_SHA) {
-      throw new Error(
-        `META_SKILL_BODIES["diagnose-session"] drifted from pre-extraction body.\n` +
-        `  expected sha256: ${EXPECTED_SHA}\n` +
-        `  actual sha256:   ${actual}\n` +
-        `  expected length: ${EXPECTED_LENGTH}\n` +
-        `  actual length:   ${body.length}\n` +
-        `  first 80 chars:  ${JSON.stringify(body.slice(0, 80))}\n` +
-        `  last  80 chars:  ${JSON.stringify(body.slice(-80))}\n` +
-        `\n` +
-        `Investigate:\n` +
-        `  1. skills/meta/diagnose-session/SKILL.md — was it edited?\n` +
-        `  2. bundle-skill-catalog.mjs FRONTMATTER_RE — Path B fix reverted?\n` +
-        `  3. Run 'node control-plane/scripts/bundle-skill-catalog.mjs' and\n` +
-        `     inspect the diff on meta-skill-bodies.generated.ts.\n`,
-      );
-    }
-  });
-});
-
-describe("Phase 7.4 — workflows concatenation byte identity", () => {
-  // sha computed against the pre-extraction interpolated workflows slice
-  // at commit 40adb7f2 (the last commit that had "## Common workflows"
-  // inline). Target: WORKFLOW_ORDER.map(k => META_SKILL_BODIES[`wf-${k}`])
-  // .join("").replace(/\{\{AGENT_NAME\}\}/g, TEST_AGENT_NAME). If this
-  // drifts, the extraction is lossy OR the WORKFLOW_ORDER drifted OR the
-  // Path B regex fix was reverted OR the {{AGENT_NAME}} substitution
-  // was removed from the builder.
-  //
-  // Removed alongside the DEMO/LIVE byte-identity tests in the single
-  // Phase 7-exit commit once all three mechanical extractions (7.2b,
-  // 7.3, 7.4) have been validated by CI and the freshness gate takes
-  // over as the ongoing drift guard.
-  const TEST_AGENT_NAME = "test-agent-for-phase-7-4";
-  const EXPECTED_SHA = "42d5f6508f926a9484b9ddc69c38e51ff4a51d398db8992971e1d1706b835c9a";
-  const WORKFLOW_ORDER = [
-    "health-check", "improve", "bad-answers", "start-training",
-    "marketplace-publish", "test-suite", "add-connector", "delegate",
-    "mid-task-stop", "forgot-context", "truncated-results", "tool-blocked",
-    "audit-log", "feature-flags", "cost-analysis",
-  ] as const;
-
-  it("concatenated + substituted workflow bodies match pre-extraction slice", () => {
-    const bodies = WORKFLOW_ORDER.map((k) => META_SKILL_BODIES[`wf-${k}`]);
-    const missing = WORKFLOW_ORDER.filter((k) => !META_SKILL_BODIES[`wf-${k}`]);
-    if (missing.length > 0) {
-      throw new Error(
-        `META_SKILL_BODIES missing workflow entries: ${missing.join(", ")}\n` +
-        `Run 'node control-plane/scripts/bundle-skill-catalog.mjs' and ensure\n` +
-        `all 15 skills/meta/wf-*/SKILL.md files exist.`,
-      );
-    }
-
-    const concatenated = bodies.join("");
-    const substituted = concatenated.replace(/\{\{AGENT_NAME\}\}/g, TEST_AGENT_NAME);
-    const actual = createHash("sha256").update(substituted, "utf8").digest("hex");
-
-    if (actual !== EXPECTED_SHA) {
-      throw new Error(
-        `Phase 7.4 workflows concatenation drifted from pre-extraction slice.\n` +
-        `  expected sha256: ${EXPECTED_SHA}\n` +
-        `  actual sha256:   ${actual}\n` +
-        `  test agent name: ${TEST_AGENT_NAME}\n` +
-        `  concatenated length: ${concatenated.length}\n` +
-        `  substituted length:  ${substituted.length}\n` +
-        `  first 120 chars:     ${JSON.stringify(substituted.slice(0, 120))}\n` +
-        `  last  120 chars:     ${JSON.stringify(substituted.slice(-120))}\n` +
-        `  WORKFLOW_ORDER keys: ${JSON.stringify(WORKFLOW_ORDER)}\n` +
-        `\n` +
-        `Investigate, in order of likelihood:\n` +
-        `  1. One of the skills/meta/wf-*/SKILL.md files was edited\n` +
-        `  2. WORKFLOW_ORDER was reordered in control-plane/src/prompts/meta-agent-chat.ts\n` +
-        `  3. buildMetaAgentChatPrompt's {{AGENT_NAME}} .replace() was removed\n` +
-        `  4. control-plane/scripts/bundle-skill-catalog.mjs FRONTMATTER_RE\n` +
-        `     was reverted from '[ \\t]*\\n' back to '\\s*\\n' (Path B fix)\n` +
-        `  5. A new template placeholder like {{ORG_ID}} was added without\n` +
-        `     extending this test's substitution step\n` +
-        `  6. Run 'node control-plane/scripts/bundle-skill-catalog.mjs' and\n` +
-        `     inspect the diff on meta-skill-bodies.generated.ts\n`,
-      );
-    }
-  });
-});
-
-describe("Phase 7.3 — META_SKILL_BODIES['mode-live'] byte identity", () => {
-  // sha computed against the pre-extraction LIVE_MODE_INSTRUCTIONS
-  // constant at commit 910edd17 (last commit that had LIVE inline).
-  // Same Path B regex fix as DEMO — transitive proof that the fix
-  // generalizes to any body starting with `\n`. Landed on first try,
-  // no whitespace surgery required. Removed alongside the DEMO
-  // byte-identity test in the 7.3-exit commit.
-  const EXPECTED_SHA = "0c5503bf912bc4001ccafb928eb1802e8586b874cc1d73918511d6f4cf5adc63";
-  const EXPECTED_LENGTH = 3521;
-
-  it("matches sha256 of pre-extraction LIVE_MODE_INSTRUCTIONS", () => {
-    const body = META_SKILL_BODIES["mode-live"];
-    const actual = createHash("sha256").update(body, "utf8").digest("hex");
-
-    if (actual !== EXPECTED_SHA) {
-      throw new Error(
-        `META_SKILL_BODIES["mode-live"] drifted from pre-extraction constant.\n` +
-        `  expected sha256: ${EXPECTED_SHA}\n` +
-        `  actual sha256:   ${actual}\n` +
-        `  expected length: ${EXPECTED_LENGTH}\n` +
-        `  actual length:   ${body.length}\n` +
-        `  first 80 chars:  ${JSON.stringify(body.slice(0, 80))}\n` +
-        `  last  80 chars:  ${JSON.stringify(body.slice(-80))}\n` +
-        `\n` +
-        `If you intentionally modified the body, recompute the sha and\n` +
-        `update EXPECTED_SHA. Otherwise investigate:\n` +
-        `  1. skills/meta/mode-live/SKILL.md — was it edited?\n` +
-        `  2. control-plane/scripts/bundle-skill-catalog.mjs FRONTMATTER_RE —\n` +
-        `     was it reverted from '[ \\t]*\\n' back to '\\s*\\n'?\n` +
-        `  3. Run 'node control-plane/scripts/bundle-skill-catalog.mjs' and\n` +
-        `     inspect the diff on meta-skill-bodies.generated.ts.`,
-      );
-    }
+    expect(Object.keys(META_SKILL_BODIES).length).toBe(expectedKeys.length);
   });
 });
 

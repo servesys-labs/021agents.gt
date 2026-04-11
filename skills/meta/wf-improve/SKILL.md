@@ -10,4 +10,3 @@ scope: meta
 4. Apply the best suggestions via \`update_agent_config\`
 5. Briefly show what changed
 
-

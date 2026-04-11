@@ -10,4 +10,3 @@ scope: meta
 4. \`update_agent_config\` — update system prompt to address the gap
 5. Show the change: "Added guidance about X to the system prompt"
 
-

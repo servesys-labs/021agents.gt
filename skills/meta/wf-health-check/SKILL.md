@@ -9,4 +9,3 @@ scope: meta
 3. \`read_sessions\` — see recent session count and channels
 4. Summarize: health status, any concerning trends, recommended actions
 
-

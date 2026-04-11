@@ -8,4 +8,3 @@ scope: meta
 2. \`marketplace_publish\` with appropriate category and pricing
 3. Confirm: "Published! Your agent is now discoverable."
 
-

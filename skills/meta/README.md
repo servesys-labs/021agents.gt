@@ -23,17 +23,47 @@ never surfaced to user-facing agents.
   skills are not orphans — their contract is "exist on disk, appear in
   `META_SKILL_BODIES`, consumed by the prompt builder."
 
-## Phase 7 inventory
+## Phase 7 inventory — complete
 
-| Name | Consumer | Added in commit |
-|---|---|---|
-| _(bundler scaffolding)_ | — | 7.2a ✅ |
-| `mode-demo` | `buildMetaAgentChatPrompt(mode="demo")` | 7.2b ✅ |
-| `mode-live` | `buildMetaAgentChatPrompt(mode="live")` | 7.3 ✅ |
-| `wf-health-check`, `wf-improve`, `wf-bad-answers`, `wf-start-training`, `wf-marketplace-publish`, `wf-test-suite`, `wf-add-connector`, `wf-delegate`, `wf-mid-task-stop`, `wf-forgot-context`, `wf-truncated-results`, `wf-tool-blocked`, `wf-audit-log`, `wf-feature-flags`, `wf-cost-analysis` | Concatenated via `WORKFLOW_ORDER` into the `## Common workflows` section | 7.4 ✅ |
-| `diagnose-session` | `## Diagnostic Mindset` section | 7.5 ✅ |
-| `infra-summary` | `## Runtime Infrastructure (summary)` section | 7.6 ✅ |
-| _(deferred)_ | `## Your tools` catalog — deferred to Phase 9 alongside tool consolidation | — |
+Phase 7 closed at prompt file size **16,597** code units (down from
+31,714 at Phase 5 end — a 47.7% cut). 19 meta skills live, all
+consumed by `buildMetaAgentChatPrompt`:
+
+| # | Name | Consumer | Commit |
+|---|---|---|---|
+| 1 | `mode-demo` | `${META_SKILL_BODIES['mode-demo']}` when `mode="demo"` | 7.2b |
+| 2 | `mode-live` | `${META_SKILL_BODIES['mode-live']}` when `mode="live"` | 7.3 |
+| 3 | `diagnose-session` | `## Diagnostic Mindset` section body | 7.5 |
+| 4 | `infra-summary` | `## Runtime Infrastructure (summary)` section body | 7.6 |
+| 5 | `wf-health-check` | `## Common workflows` via `WORKFLOW_ORDER` + `join("\n")` | 7.4 |
+| 6 | `wf-improve` | ↑ | 7.4 |
+| 7 | `wf-bad-answers` | ↑ | 7.4 |
+| 8 | `wf-start-training` | ↑ | 7.4 |
+| 9 | `wf-marketplace-publish` | ↑ | 7.4 |
+| 10 | `wf-test-suite` | ↑ | 7.4 |
+| 11 | `wf-add-connector` | ↑ | 7.4 |
+| 12 | `wf-delegate` | ↑ | 7.4 |
+| 13 | `wf-mid-task-stop` | ↑ | 7.4 |
+| 14 | `wf-forgot-context` | ↑ | 7.4 |
+| 15 | `wf-truncated-results` | ↑ | 7.4 |
+| 16 | `wf-tool-blocked` | ↑ | 7.4 |
+| 17 | `wf-audit-log` | ↑ | 7.4 |
+| 18 | `wf-feature-flags` | ↑ | 7.4 |
+| 19 | `wf-cost-analysis` | ↑ (with `{{AGENT_NAME}}` substitution) | 7.4 |
+
+**Uniform trailing whitespace convention (Phase 7-exit normalization):**
+every `wf-*/SKILL.md` file ends with exactly `\n\n` at EOF, so after
+the bundler's trailing-newline strip each body ends with a single `\n`.
+The workflow builder joins with `"\n"` to produce the blank-line
+separator between subsections. Adding a new workflow: write the file
+ending with one blank line, add the slug to `WORKFLOW_ORDER`, add the
+`wf-<slug>` entry to `REQUIRED_META_SKILLS`, regenerate the bundle.
+
+**Deferred to Phase 9:** the `## Your tools` catalog (~5,428 chars)
+is load-bearing for tool-use quality and cannot be safely extracted
+without behavioral evals. Phase 9's `tools.ts` consolidation
+(40 tools → ~10 verbs) will shrink the catalog description
+proportionally and unlock the final ~3,000-char drop to ~13,500.
 
 ## Adding a meta skill
 

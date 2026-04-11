@@ -4,7 +4,41 @@ A comprehensive phased refactor to invert this repo from "fat harness, thin skil
 
 ## ▶︎ Resume here (2026-04-11)
 
-**Status:** Phases 0, 1, 2, 3, 4, 5 ✅ done. **Phase 6 in progress — commits 1-5 merged to main at `7486598b`.** Remaining: admin revert endpoint (new commit 6) and round-trip regression test (new commit 7).
+**Status:** Phases 0, 1, 2, 3, 4, 5, 6, **7 ✅ done**. **Resume at Phase 6.5** (second-ask detector + auto-fire wiring, deferred from Phase 6).
+
+### Phase 7 snapshot — complete
+
+Phase 7 landed in 8 commits on main between `325242f1` (7.1) and the Phase 7-exit commit. Cumulative cut: **31,714 → 16,597 code units (−47.7%)**. The original aspirational target of 14,000 was replaced with a measured floor: Phase 7's real floor without touching the 5,428-char "Your tools" catalog is ~16,600. The remaining ~3,000-char gap to 13,500 is gated on Phase 9's `tools.ts` consolidation (40 tools → ~10 verbs), which will shrink the catalog description proportionally.
+
+| # | Commit | Ref | Cut | Cumulative |
+|---|---|---|---|---|
+| 7.1 | Delete dead `TOOL_CATALOG_DOCS` + `read_tool_catalog` reference | `325242f1` | −2,512 | −2,512 |
+| 7.2a | `skills/meta/` scaffold + bundler walker + `META_SKILL_BODIES` empty map | `f811ca3e` | +168 | −2,344 |
+| 7.2b | Extract `DEMO_MODE_INSTRUCTIONS` + Path B regex fix (`[ \t]*\n` symmetric) | `910edd17` | −2,489 | −4,833 |
+| 7.3 | Extract `LIVE_MODE_INSTRUCTIONS` + collapse mode ternary to pure lookup | `40adb7f2` | −3,797 | −8,630 |
+| 7.4 | Extract 15 Common workflows + `WORKFLOW_ORDER` + `{{AGENT_NAME}}` placeholder | `27c02468` | −3,683 | −12,313 |
+| 7.5 | Extract `## Diagnostic Mindset` body | `ebfd3900` | −1,073 | −13,386 |
+| 7.6 | Extract `## Runtime Infrastructure (summary)` body | `444978a6` | −1,330 | −14,716 |
+| 7-exit | Normalize workflow whitespace + `join("\n")` + remove 5 byte-identity tests + docs | _this commit_ | −401 | −15,117 |
+
+**Architectural shifts in Phase 7:**
+
+- **`skills/meta/` as a new root** (7.2a) — meta-agent-only skills, discovered by control-plane bundler ONLY (never by `deploy/scripts/bundle-skills.mjs`). Directory-based scoping, not frontmatter-based — a typo on a `scope: meta` field cannot misroute a file into the public catalog.
+- **Path B regex fix** (7.2b) — `control-plane/scripts/bundle-skill-catalog.mjs`'s `FRONTMATTER_RE` changed from `\s*\n` to `[ \t]*\n` symmetrically. Preserves leading newlines in bodies. Deploy bundler intentionally untouched (Phase 0 hash-locked).
+- **`META_SKILL_BODIES` generated map** — 19 entries at Phase 7 end (2 modes + 2 sections + 15 workflows), consumed via direct lookup (`${META_SKILL_BODIES[key]}`) in `buildMetaAgentChatPrompt`. `REQUIRED_META_SKILLS` module-load assert fails loudly at worker boot if any entry is missing.
+- **`{{AGENT_NAME}}` placeholder convention** (7.4) — meta skill bodies are plain markdown, not TS template literals. `${…}` interpolation does not evaluate when bodies are spliced back into the prompt. Runtime values use `{{UPPERCASE_SNAKE}}` placeholders substituted explicitly at build time. First consumer: `wf-cost-analysis` SQL queries.
+- **`WORKFLOW_ORDER` + uniform `\n` trailing + `join("\n")`** (7.4 → 7-exit) — explicit semantic ordering at the consumer site, uniform trailing whitespace across all 15 workflow bodies, explicit separator in the join. Reordering workflows is a one-line array swap.
+- **CI freshness gate** (extended at 7.2a) — the existing skill-catalog freshness step in `.github/workflows/ci.yml` now also runs `git diff --exit-code` on `meta-skill-bodies.generated.ts`. This is the ongoing drift guard for all 19 meta skills after the 5 byte-identity tests were removed in Phase 7-exit.
+
+**Validation at Phase 7 close:**
+- control-plane: 766/766 tests green (was 771 at 7.6; −5 byte-identity tests retired into the freshness gate)
+- deploy phase-0 drift guards: all green (prompt budget, LoC, snapshots)
+- Every Phase 7 commit green in CI on push (8 consecutive, starting from the lockfile fix at `183b4f86`)
+- 19/19 meta skill bodies byte-identical to their pre-extraction source at every commit, verified by byte-identity tests during the chain before retirement in 7-exit
+
+---
+
+### Original resume (historical, 2026-04-11 preserved for context)
 
 ### Phase 6 progress snapshot
 

@@ -10,4 +10,3 @@ scope: meta
 4. Tell user: "Training started. I'll monitor progress."
 5. When asked for status: \`read_training_status\`
 
-

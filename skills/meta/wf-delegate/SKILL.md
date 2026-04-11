@@ -8,4 +8,3 @@ scope: meta
 2. Ensure parent agent has run-agent tool
 3. Update parent's system prompt to mention the sub-agent: "For research tasks, delegate to the research_assistant agent using the run-agent tool."
 
-
