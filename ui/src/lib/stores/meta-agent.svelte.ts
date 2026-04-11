@@ -30,6 +30,35 @@ function sessionKey(agentName: string): string {
   return `${STORAGE_PREFIX}session_${agentName}`;
 }
 
+/**
+ * Cap the history replayed to the meta-chat endpoint at the most
+ * recent MAX_HISTORY_TURNS user/assistant pairs.
+ *
+ * The meta-chat server is stateless w.r.t. history — every request
+ * includes the full prior conversation as the LLM context. Because
+ * meta-chat runs against Claude Sonnet 4.6 (premium pricing), every
+ * replayed turn costs real money. Without a cap, a single debugging
+ * session can drift into 50+ turns and burn tens of dollars.
+ *
+ * The full conversation stays visible in the UI — we only trim what
+ * we SEND to the server. Old turns stop influencing the model's
+ * context but the user can still scroll up to reference them.
+ *
+ * Trim strategy: keep the last N×2 messages, then advance the start
+ * pointer until the first kept message is a user turn — this avoids
+ * stranding an orphan assistant reply whose prompting user message
+ * was dropped (the LLM would see it as unexplained output).
+ */
+const MAX_HISTORY_TURNS = 20;
+
+function trimHistory<T extends { role: string; content: string }>(history: T[]): T[] {
+  const cap = MAX_HISTORY_TURNS * 2;
+  if (history.length <= cap) return history;
+  let start = history.length - cap;
+  while (start < history.length && history[start].role !== "user") start++;
+  return history.slice(start);
+}
+
 class MetaAgentStore {
   /** Per-agent message histories, keyed by agent name */
   messages = $state<Record<string, MetaAgentMessage[]>>({});
@@ -113,11 +142,15 @@ class MetaAgentStore {
     this.startedAt = Date.now();
     this.statusText = "Thinking...";
 
-    // Build history from previous messages for multi-turn context
-    const history = this.messages[agentName].slice(0, -2).map(m => ({
-      role: m.role,
-      content: m.content,
-    }));
+    // Build history from previous messages for multi-turn context.
+    // Trim to the last MAX_HISTORY_TURNS pairs so we don't replay the
+    // entire conversation every turn at Sonnet 4.6 prices.
+    const history = trimHistory(
+      this.messages[agentName].slice(0, -2).map(m => ({
+        role: m.role,
+        content: m.content,
+      })),
+    );
 
     const { abort } = streamMetaAgent(
       agentName,

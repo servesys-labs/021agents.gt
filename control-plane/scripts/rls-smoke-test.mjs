@@ -32,14 +32,24 @@
  * preserves that state. Only the schema contents get nuked.
  *
  * Usage:
- *   # Phase 1 only (schema verification)
- *   node control-plane/scripts/rls-smoke-test.mjs
+ *   # Phase 1 only (schema verification) — requires --allow-wipe if the
+ *   # target DB already has any real user rows. This is a destructive
+ *   # test; the guard is there to prevent accidental runs against a
+ *   # live dev session.
+ *   node control-plane/scripts/rls-smoke-test.mjs --allow-wipe
  *
  *   # Phase 1 + Phase 2 (runtime enforcement)
  *   APP_USER_DATABASE_URL='postgresql://app_user.<ref>:<pwd>@<pooler>/postgres' \
- *     node control-plane/scripts/rls-smoke-test.mjs
+ *     node control-plane/scripts/rls-smoke-test.mjs --allow-wipe
  *
  * Reads DATABASE_URL and APP_USER_DATABASE_URL from ../../.env or env.
+ *
+ * Env toggles:
+ *   ALLOW_WIPE=1   — equivalent to --allow-wipe flag
+ *
+ * The script will refuse to run if `users` has rows or `orgs` has any
+ * rows other than the smoke test's own seed (org_a / org_b / org_c),
+ * unless --allow-wipe is passed.
  */
 
 import { readFileSync } from "fs";
@@ -134,6 +144,43 @@ async function phase1Admin() {
       "[rls-smoke] WARNING: admin role is not BYPASSRLS. If the schema drop fails, " +
       "you may need a connection with schema-owner privileges.",
     );
+  }
+
+  // ── Safety guard: refuse to wipe a DB with real user data ──
+  // This test DROPs the entire public schema — fine for a dev/prototype
+  // DB, catastrophic if run against anything with real rows. The earlier
+  // run of this script nuked a live dev session's founder account + a
+  // real referral chain because it was queued as a background task
+  // without the caller realising what it would destroy. The guard below
+  // makes that impossible without an explicit opt-in flag.
+  //
+  // Pass --allow-wipe (or ALLOW_WIPE=1) to acknowledge that the wipe
+  // is intentional. The seed org_ids the smoke test itself creates
+  // (org_a/org_b/org_c) are allowed to remain from a prior run.
+  const allowWipe =
+    process.argv.includes("--allow-wipe") || process.env.ALLOW_WIPE === "1";
+  const SEED_ORG_IDS = new Set(["org_a", "org_b", "org_c"]);
+  const [{ user_count }] = await sql`
+    SELECT COUNT(*)::int AS user_count FROM users
+  `.catch(() => [{ user_count: 0 }]);
+  const nonSeedOrgs = await sql`
+    SELECT org_id, slug FROM orgs
+  `.catch(() => []);
+  const realOrgs = nonSeedOrgs.filter((o) => !SEED_ORG_IDS.has(String(o.org_id)));
+  if (!allowWipe && (user_count > 0 || realOrgs.length > 0)) {
+    console.error("");
+    console.error("[rls-smoke] ❌ Refusing to wipe a DB with real data.");
+    console.error(`[rls-smoke]    users: ${user_count}`);
+    console.error(`[rls-smoke]    non-seed orgs: ${realOrgs.length}${realOrgs.length > 0 ? " (" + realOrgs.map((o) => o.slug).join(", ") + ")" : ""}`);
+    console.error("");
+    console.error("[rls-smoke] This script DROPs the entire public schema, which would");
+    console.error("[rls-smoke] destroy every row. If you're SURE you want to wipe (e.g.");
+    console.error("[rls-smoke] you just reset a prototype dev DB), re-run with:");
+    console.error("[rls-smoke]");
+    console.error("[rls-smoke]   node control-plane/scripts/rls-smoke-test.mjs --allow-wipe");
+    console.error("[rls-smoke]");
+    console.error("[rls-smoke] Or set ALLOW_WIPE=1 in the environment.");
+    process.exit(2);
   }
 
   // ── 1a. Nuke + recreate schema ──────────────────────────────
@@ -557,6 +604,20 @@ async function main() {
   } else {
     console.log("[rls-smoke] All tests passed. RLS enforcement verified end-to-end.");
   }
+
+  // ── Browser-side state reminder ───────────────────────────────
+  // The smoke test wipes Postgres, but meta-chat history and some UI
+  // state live in browser localStorage, not Postgres. A true fresh
+  // dev environment also needs a client-side reset. Print the snippet
+  // so it's one paste-and-run away from a devtools console on the
+  // portal.
+  console.log("");
+  console.log("[rls-smoke] NOTE: meta-chat history is stored in browser localStorage, not Postgres.");
+  console.log("[rls-smoke] To fully reset a dev session, run this in the portal devtools console:");
+  console.log("[rls-smoke]   Object.keys(localStorage)");
+  console.log("[rls-smoke]     .filter(k => k.startsWith('oneshots_meta_agent_'))");
+  console.log("[rls-smoke]     .forEach(k => localStorage.removeItem(k));");
+  console.log("[rls-smoke] (Or just open an incognito window for the same effect.)");
 }
 
 main().catch((err) => {
