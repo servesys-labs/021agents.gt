@@ -168,11 +168,27 @@ There is no path by which the meta-agent composes an agent from reusable skills.
 
 ---
 
-### Phase 1 — Dead-code sweep ✅ DONE
+### Phase 1 — Dead-code sweep ✅ DONE (full Python nuke)
 
-**Scope expanded mid-execution.** Original plan: delete `agentos/tools/` tree. **Actually executed:** that, plus `agentos/builder.py` (entirely dead — nobody was calling the Python AgentBuilder, the real meta-agent is TS), plus 95% of `agentos/cli.py` (rewritten as a ~113-line stub that only exposes `agentos codemap`), plus `tests/test_builder.py`, `tests/test_cli.py`, and the already-broken `scripts/showcase_cli_lifecycle.sh`.
+**Scope expanded twice mid-execution.** Final state: **the entire Python lineage has been deleted.** The repo is now pure TypeScript on Cloudflare Workers.
 
-**Net result:** −25,756 lines. Python test suite: 353/353 green. Deploy suite: 22/22 green. `agentos codemap` still regenerates clean (117 nodes, 147 edges — down from 118/183 with stale refs).
+**First sweep:** delete `agentos/tools/`, `agentos/builder.py`, rewrite `agentos/cli.py` to codemap-stub, delete tombstoned tests, delete `scripts/showcase_cli_lifecycle.sh`. Net −25,756 lines.
+
+**Second sweep (subdir audit):** delete 7 zero-ref `agentos/` subdirs (`a2a`, `config`, `dashboard`, `integrations`, `observability`, `security`, `issues`), plus `tests/test_issues.py`, the top-level `tools/` (14 stale JSON plugin defs), `docs/misc/portal-definitive-blueprint.md`, `docs/misc/WORKFLOW_ANALYSIS.md`, `archive/mvp_depricated-donotuse/` (~500 MB).
+
+**Third sweep (full nuke):** delete `agentos/` entirely (including `analysis/codemap.py`), delete `tests/` entirely, delete `pyproject.toml`, `agentos.egg-info/`, `uv.lock`, delete the already-broken `Dockerfile` + `docker-compose.yml` (they referenced `agentos.api.app` which stopped existing long ago), delete `scripts/prod_check.sh` (pytest driver), delete `cli/src/commands/codemap.ts` (broken stub calling `/api/v1/codemap` which doesn't exist), delete stale `data/codemap.json` + `data/agent.db` + `data/rag_chunks.db` + `docs/codemap.dot` + `docs/codemap.svg`.
+
+**Final Python surface:** zero. The repo has no `agentos` package, no `pyproject.toml`, no `Dockerfile`, no Python tests. Residual `python3` invocations in `scripts/*.sh` are stdlib-only JSON-parsing helpers in shell heredocs — they need the interpreter, not any package.
+
+**Codemap decision.** The Python `agentos/analysis/codemap.py` was the only working codemap generator; its TS twin at `cli/src/commands/codemap.ts` was a thin stub calling a non-existent control-plane endpoint. Since `data/codemap.json` has zero live consumers in runtime/CLI/control-plane code, both sides were deleted.
+
+**README.md truncated** from 845 lines to 133 lines — the bottom 700 lines described Python-era subsystems that no longer exist. Kept: title, quick start, architecture, CLI reference, subsystems, license.
+
+**Validation post-nuke:**
+- Python tests: N/A (deleted)
+- Deploy tests: 414/414 green
+- oneshots CLI: `tsc --noEmit` clean, smoke test updated
+- Phase 0 drift guards: 10/10 green (the guards live in `deploy/test/`, not Python)
 
 **Goal:** delete the entire `agentos/tools/` tree and its tombstoned tests. Refactor the two live imports (`builder.py`, `cli.py`) so they no longer depend on the dead tree.
 
