@@ -1427,7 +1427,7 @@ ALWAYS:
           const { getSkillPrompt, loadSkills: loadDbSkills } = await import("./runtime/skills");
           let dbSkills: any[] = [];
           try { dbSkills = await loadDbSkills(this.env.HYPERDRIVE, p.org_id, p.agent_name); } catch {}
-          const autoSkillPrompt = getSkillPrompt(autoSkillName, autoSkillArgs.trim(), dbSkills);
+          const autoSkillPrompt = getSkillPrompt(autoSkillName, autoSkillArgs.trim(), dbSkills, config.enabled_skills);
           if (autoSkillPrompt) {
             // Strip the activation tag from the assistant's content
             (llm as any).content = llm.content.replace(fullTag, "").trim();

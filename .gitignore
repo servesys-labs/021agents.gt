@@ -125,6 +125,9 @@ artifacts/
 .claude/worktrees/
 .cursor/
 
+# Autoresearch run output (per-agent TSV logs)
+data/autoresearch/*/results.tsv
+
 # ------------------------------
 # Mobile build artifacts
 # ------------------------------

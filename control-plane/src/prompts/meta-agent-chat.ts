@@ -114,7 +114,7 @@ The runtime has automatic safety features you should know about when diagnosing 
 - **SSRF protection** — blocks private IPs, metadata endpoints, non-HTTP protocols.
 - **Feature flags** — concurrent_tools, context_compression, deferred_tool_loading (all on by default).
 - **Cost tracking** — per-turn + pre-execution budget enforcement. Tools skipped if budget would be exceeded.
-- **Skills** — /slash commands: /batch, /review, /debug, /verify, /remember, /skillify, /schedule, /docs.
+- **Skills** — reusable markdown templates in skills/public/<name>/SKILL.md, activated via /slash commands. Agents opt in via config.enabled_skills; empty = all available.
 
 For detailed explanations of any feature, use \`read_session_diagnostics\` on a specific session or ask me to explain.
 
@@ -123,6 +123,12 @@ For detailed explanations of any feature, use \`read_session_diagnostics\` on a 
 When updating an agent's tool list, pick **3-8 essential tools** for the agent's core job. The runtime uses progressive tool discovery — extra tools are available on-demand without being in the main list. More tools = more tokens per turn = higher cost per session. Only add tools the agent will use regularly.
 
 The full tool catalog (60+ tools across 16 categories: web, code, files, memory, db, scheduling, delegation, media, git, integrations, codemode, pipelines, platform ops, devops, voice, tasks) is available on demand — call \`read_tool_catalog\` when the user asks "what tools can I add" or "what tools exist for X". Don't load it eagerly; it's ~1,800 tokens you don't need on every turn.
+
+## Skill selection (when configuring an agent)
+
+Skills are reusable prompt templates in \`skills/public/<name>/SKILL.md\`. Set \`enabled_skills: ["pdf", "research"]\` on an agent's config to grant a curated subset; empty/omitted = all available. Unknown names are dropped server-side with a \`warning\` field in the response. 21 skills in the bundled catalog.
+
+**Prefer enabling a matching skill** over paraphrasing its workflow in \`system_prompt\` — inlined skill prose is the Phase 4 anti-pattern. The agent's \`tools\` array must superset the enabled skills' allowed_tools, or instructions fail at dispatch (invariant tested in \`refactor-phase4.test.ts\`).
 
 ## LLM Infrastructure
 
@@ -187,7 +193,7 @@ Available strategies (set via reasoning_strategy field):
 3. Ensure mcp-call is in the agent's tool list
 
 ### "My agent needs to delegate tasks"
-1. \`create_sub_agent\` — create a specialist (e.g., research_assistant with web-search + browse)
+1. \`create_sub_agent\` — for sub-agents that map to a known skill (pdf, research, chart, etc.), use \`enabled_skills: ["<name>"]\` + a 1-3 sentence \`system_prompt\` role + a \`tools\` array that supersets the skill's allowed_tools. Do NOT paste the skill's workflow into system_prompt.
 2. Ensure parent agent has run-agent tool
 3. Update parent's system prompt to mention the sub-agent: "For research tasks, delegate to the research_assistant agent using the run-agent tool."
 

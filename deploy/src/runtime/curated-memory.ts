@@ -117,12 +117,11 @@ export function scanMemoryContent(content: string): string | null {
   return null;
 }
 
-async function resolveOrgId(hyperdrive: Hyperdrive, orgId?: string): Promise<string> {
-  const initial = String(orgId || "").trim();
-  if (initial) return initial;
-  const sql = await getDb(hyperdrive);
-  const rows = await sql`SELECT org_id FROM orgs LIMIT 1`;
-  return String(rows?.[0]?.org_id || "");
+// Fail-closed org resolution — do NOT fall back to "pick any org from the
+// orgs table", which was a latent cross-tenant leak. Callers that cannot
+// supply an org_id receive an empty string and must return an error.
+function resolveOrgIdStrict(orgId?: string): string {
+  return String(orgId || "").trim();
 }
 
 async function loadRowsForTarget(
@@ -230,8 +229,13 @@ export async function curatedMemoryTool(env: RuntimeEnv, args: Record<string, an
   const orgFromConfig = (env as any).__agentConfig?.org_id || (env as any).__delegationLineage?.org_id || "";
   if (!hyperdrive) return JSON.stringify({ success: false, error: "Memory unavailable (no database)." });
 
-  const orgId = await resolveOrgId(hyperdrive, orgFromConfig);
-  if (!orgId) return JSON.stringify({ success: false, error: "Memory unavailable (no org_id)." });
+  const orgId = resolveOrgIdStrict(orgFromConfig);
+  if (!orgId) {
+    return JSON.stringify({
+      success: false,
+      error: "Memory unavailable: org_id required — curated memory must not fall back to another tenant.",
+    });
+  }
 
   const sql = await getDb(hyperdrive);
   const limits = await resolveCharLimits(sql, orgId, agentName);
@@ -340,7 +344,7 @@ export async function loadCuratedMemorySnapshot(
   const hyperdrive = (env as any).HYPERDRIVE as Hyperdrive | undefined;
   if (!hyperdrive) return {};
   const agentName = String(opts.agent_name || (env as any).__agentConfig?.name || "my-assistant");
-  const orgId = await resolveOrgId(hyperdrive, opts.org_id || (env as any).__agentConfig?.org_id || "");
+  const orgId = resolveOrgIdStrict(opts.org_id || (env as any).__agentConfig?.org_id || "");
   if (!orgId) return {};
   const sql = await getDb(hyperdrive);
   const limits = await resolveCharLimits(sql, orgId, agentName);
