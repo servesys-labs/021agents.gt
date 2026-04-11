@@ -49,7 +49,7 @@ export type {
 	LiveGenerationStats,
 	AttachmentDisplayItemsOptions,
 	FileProcessingResult
-} from './chat.d';
+} from './chat';
 
 // Database types
 export type {
