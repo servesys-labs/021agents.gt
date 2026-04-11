@@ -1,7 +1,4 @@
-/**
- * Skills loader — loads SKILL.md-based skills from Supabase into edge runtime.
- * Skills are injected into the system prompt and can specify allowed tools + prompt templates.
- */
+// Skills loader: SKILL.md → runtime, injected into system prompt with allowed-tools + template.
 
 import { getDb } from "./db";
 import { log } from "./log";
@@ -15,22 +12,15 @@ export interface Skill {
   enabled: boolean;
   version: string;
   category: string;
-  /** When to auto-activate this skill — if present, the LLM can detect and activate without explicit /command. */
-  when_to_use?: string;
-  /** Minimum plan required to run this skill in the main agent context.
-   *  If the user's plan is below this, auto-delegate to delegate_agent. */
-  min_plan?: "basic" | "standard" | "premium";
-  /** Skill agent to delegate to when the user's plan is below min_plan. */
-  delegate_agent?: string;
+  when_to_use?: string;                              // auto-activate trigger if set
+  min_plan?: "basic" | "standard" | "premium";       // below this, route to delegate_agent
+  delegate_agent?: string;                           // target for plan-based delegation
 }
 
 const skillCache = new Map<string, { skills: Skill[]; expiresAt: number }>();
 const SKILL_CACHE_TTL_MS = 60_000; // 1 minute
 
-/**
- * Load enabled skills for an agent from the database.
- * Returns cached results within TTL.
- */
+// Load per-(org,agent) DB skills. TTL-cached; overlays are loaded separately (loadSkillOverlays).
 export async function loadSkills(
   hyperdrive: Hyperdrive,
   orgId: string,
@@ -66,7 +56,6 @@ export async function loadSkills(
 
     skillCache.set(cacheKey, { skills, expiresAt: Date.now() + SKILL_CACHE_TTL_MS });
 
-    // Evict old entries
     if (skillCache.size > 256) {
       const oldest = [...skillCache.entries()].sort((a, b) => a[1].expiresAt - b[1].expiresAt);
       for (let i = 0; i < 64; i++) skillCache.delete(oldest[i][0]);
@@ -77,6 +66,17 @@ export async function loadSkills(
     log.warn("[skills] Failed to load skills:", err);
     return cached?.skills ?? [];
   }
+}
+
+// Phase 6: load skill_overlays for (org, agent) as { skillName: rule_texts[] }. Merged into getSkillPrompt output.
+export async function loadSkillOverlays(hyperdrive: Hyperdrive, orgId: string, agentName: string): Promise<Record<string, string[]>> {
+  try {
+    const sql = await getDb(hyperdrive);
+    const rows = await sql`SELECT skill_name, rule_text FROM skill_overlays WHERE org_id = ${orgId} AND (agent_name = ${agentName} OR agent_name = '') ORDER BY created_at ASC`;
+    const out: Record<string, string[]> = {};
+    for (const r of rows as any[]) (out[r.skill_name] ??= []).push(r.rule_text);
+    return out;
+  } catch (err) { log.warn("[skills] loadSkillOverlays failed:", err); return {}; }
 }
 
 /** Format skills section. Default=BUILTIN_SKILLS (Phase 0 byte-id). Opt-in adds NON_BUILTIN_BUNDLED. */
@@ -130,14 +130,16 @@ export function formatSkillsPrompt(skills: Skill[], plan?: string, enabled?: rea
   return lines.join("\n");
 }
 
-/** Get skill body by name. Honors `enabled` allowlist. Searches full bundled manifest. */
-export function getSkillPrompt(skillName: string, args: string, skills: Skill[], enabled?: readonly string[]): string | null {
+/** Get skill body by name. Honors `enabled` allowlist. Phase 6: appends overlays[skillName] learned rules after the template. */
+export function getSkillPrompt(skillName: string, args: string, skills: Skill[], enabled?: readonly string[], overlays?: Record<string, string[]>): string | null {
   if (enabled?.length && !enabled.includes(skillName)) return null;
   const skill = BUNDLED_SKILLS_BY_NAME[skillName] ?? skills.find(s => s.name === skillName);
   if (!skill) return null;
 
   let prompt = skill.prompt_template;
   if (args) prompt = prompt.replace("{{ARGS}}", args).replace("{{INPUT}}", args);
+  const rules = overlays?.[skillName];
+  if (rules?.length) prompt += "\n\n---\n## Learned rules (Phase 6 overlays)\n\n" + rules.join("\n\n---\n");
   return prompt;
 }
 
