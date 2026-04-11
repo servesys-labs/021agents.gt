@@ -363,13 +363,32 @@ CREATE TABLE IF NOT EXISTS conversation_analytics (
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- conversation_scores stores per-turn quality + sentiment metrics written by
+-- the conversation-intel route. The code expects a wide metric set with a
+-- (session_id, turn_number) unique key for upsert — earlier consolidation
+-- drafts collapsed this to (id, conversation_id, score, scorer) and broke
+-- /api/v1/intelligence/summary with "column quality_overall does not exist".
 CREATE TABLE IF NOT EXISTS conversation_scores (
-  id              BIGSERIAL PRIMARY KEY,
-  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-  org_id          TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
-  score           NUMERIC(5,4) NOT NULL DEFAULT 0,
-  scorer          TEXT NOT NULL DEFAULT '',
-  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  id                    BIGSERIAL PRIMARY KEY,
+  session_id            TEXT NOT NULL DEFAULT '',
+  turn_number           INT NOT NULL DEFAULT 0,
+  org_id                TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+  agent_name            TEXT NOT NULL DEFAULT '',
+  sentiment             TEXT NOT NULL DEFAULT '',
+  sentiment_score       NUMERIC(6,4) NOT NULL DEFAULT 0,
+  sentiment_confidence  NUMERIC(6,4) NOT NULL DEFAULT 0,
+  relevance_score       NUMERIC(6,4) NOT NULL DEFAULT 0,
+  coherence_score       NUMERIC(6,4) NOT NULL DEFAULT 0,
+  helpfulness_score     NUMERIC(6,4) NOT NULL DEFAULT 0,
+  safety_score          NUMERIC(6,4) NOT NULL DEFAULT 0,
+  quality_overall       NUMERIC(6,4) NOT NULL DEFAULT 0,
+  topic                 TEXT NOT NULL DEFAULT '',
+  intent                TEXT NOT NULL DEFAULT '',
+  has_tool_failure      INT NOT NULL DEFAULT 0,
+  has_hallucination_risk INT NOT NULL DEFAULT 0,
+  scorer_model          TEXT NOT NULL DEFAULT '',
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (session_id, turn_number)
 );
 
 -- ============================================================================
@@ -974,6 +993,10 @@ CREATE TABLE IF NOT EXISTS security_scans (
   passed        INT NOT NULL DEFAULT 0,
   failed        INT NOT NULL DEFAULT 0,
   findings      JSONB NOT NULL DEFAULT '[]',
+  -- started_at is what the /api/v1/security/scans list endpoint orders by.
+  -- created_at was the consolidation's placeholder but the route expects
+  -- started_at for pending-state probes that haven't finished yet.
+  started_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -1292,21 +1315,32 @@ CREATE TABLE IF NOT EXISTS autopilot_sessions (
   UNIQUE (org_id, agent_name, channel, channel_user_id)
 );
 
+-- voice_calls is multi-platform (Vapi, Twilio, Tavus, etc.). The route
+-- upserts by (platform, call_id) and filters by platform on every list
+-- query — the consolidation used `id` as primary key which broke the
+-- ON CONFLICT (call_id) upsert path. platform + platform_agent_id are
+-- used by /api/v1/voice/vapi/calls to scope by Vapi assistant. Kept
+-- legacy call_sid / from_number / to_number columns for back-compat
+-- with the twilio ingest path.
 CREATE TABLE IF NOT EXISTS voice_calls (
-  id               TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-  org_id           TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
-  agent_name       TEXT NOT NULL DEFAULT '',
-  call_sid         TEXT,
-  direction        TEXT NOT NULL DEFAULT 'inbound',
-  from_number      TEXT,
-  to_number        TEXT,
-  status           TEXT NOT NULL DEFAULT 'initiated',
-  duration_seconds INT NOT NULL DEFAULT 0,
-  recording_url    TEXT,
-  transcript       TEXT,
-  cost_usd         NUMERIC(18,8) NOT NULL DEFAULT 0,
-  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  ended_at         TIMESTAMPTZ
+  call_id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  platform          TEXT NOT NULL DEFAULT 'twilio',
+  platform_agent_id TEXT NOT NULL DEFAULT '',
+  org_id            TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+  agent_name        TEXT NOT NULL DEFAULT '',
+  phone_number      TEXT NOT NULL DEFAULT '',
+  call_sid          TEXT,
+  direction         TEXT NOT NULL DEFAULT 'inbound',
+  from_number       TEXT,
+  to_number         TEXT,
+  status            TEXT NOT NULL DEFAULT 'initiated',
+  duration_seconds  INT NOT NULL DEFAULT 0,
+  recording_url     TEXT,
+  transcript        TEXT,
+  cost_usd          NUMERIC(18,8) NOT NULL DEFAULT 0,
+  started_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  ended_at          TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS voice_numbers (
@@ -1657,8 +1691,11 @@ CREATE TABLE IF NOT EXISTS project_configs (
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- issues uses issue_id as its primary key (routes/issues.ts INSERT names
+-- that column explicitly). The consolidation renamed it to plain `id`
+-- which broke POST /api/v1/issues with "column issue_id does not exist".
 CREATE TABLE IF NOT EXISTS issues (
-  id                TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  issue_id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
   org_id            TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
   agent_name        TEXT NOT NULL DEFAULT '',
   title             TEXT NOT NULL DEFAULT '',
@@ -1818,13 +1855,26 @@ CREATE TABLE IF NOT EXISTS retention_policies (
   created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- gold_images: canonical blessed agent configs. The route SELECTs and
+-- INSERTs name / description / version / category / config_hash /
+-- created_by / approved_by / approved_at / deleted_at and uses image_id
+-- as the primary key rather than plain `id`.
 CREATE TABLE IF NOT EXISTS gold_images (
-  id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-  org_id      TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
-  agent_name  TEXT NOT NULL DEFAULT '',
-  config      JSONB NOT NULL DEFAULT '{}',
-  score       NUMERIC(8,4) NOT NULL DEFAULT 0,
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  image_id     TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  org_id       TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+  agent_name   TEXT NOT NULL DEFAULT '',
+  name         TEXT NOT NULL DEFAULT '',
+  description  TEXT NOT NULL DEFAULT '',
+  version      TEXT NOT NULL DEFAULT '',
+  category     TEXT NOT NULL DEFAULT '',
+  config       JSONB NOT NULL DEFAULT '{}',
+  config_hash  TEXT NOT NULL DEFAULT '',
+  score        NUMERIC(8,4) NOT NULL DEFAULT 0,
+  created_by   TEXT NOT NULL DEFAULT '',
+  approved_by  TEXT NOT NULL DEFAULT '',
+  approved_at  TIMESTAMPTZ,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  deleted_at   TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS gpu_endpoints (
