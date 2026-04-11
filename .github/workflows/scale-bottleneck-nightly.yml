@@ -9,7 +9,7 @@ jobs:
   infra-gate-nightly:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Run infra gate with stress profile
         if: env.E2E_SERVICE_TOKEN != ''
         run: |
