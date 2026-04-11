@@ -166,11 +166,12 @@ async function snapshotVersion(
     // agent_versions.org_id is NOT NULL. Because this runs inside a
     // withOrgDb callback, current_org_id() returns the caller's org
     // from the transaction-local GUC — same value every other query
-    // in the same handler sees.
+    // in the same handler sees. UNIQUE is (org_id, agent_name, version)
+    // so the conflict target must include org_id too.
     await sql`
       INSERT INTO agent_versions (agent_name, org_id, version, config, created_by, created_at)
       VALUES (${agentName}, current_org_id(), ${version}, ${JSON.stringify(configJson)}, ${createdBy}, now())
-      ON CONFLICT (agent_name, version) DO UPDATE
+      ON CONFLICT (org_id, agent_name, version) DO UPDATE
       SET config = ${JSON.stringify(configJson)}, created_by = ${createdBy}
     `;
   } catch {
