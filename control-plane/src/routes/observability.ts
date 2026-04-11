@@ -72,7 +72,13 @@ observabilityRoutes.openapi(summaryRoute, async (c): Promise<any> => {
            COALESCE(SUM(step_count), 0) as total_steps,
            COALESCE(SUM(action_count), 0) as total_actions,
            COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END)::float / NULLIF(COUNT(*), 0), 0) as success_rate,
-           COALESCE(SUM(CASE WHEN status NOT IN ('success', 'pending') THEN 1 ELSE 0 END), 0) as error_count
+           COALESCE(SUM(CASE WHEN status NOT IN ('success', 'pending') THEN 1 ELSE 0 END), 0) as error_count,
+           COALESCE(SUM(CASE WHEN termination_reason = 'completion_contract_failed' THEN 1 ELSE 0 END), 0) as completion_contract_failed_count,
+           COALESCE(
+             SUM(CASE WHEN termination_reason = 'completion_contract_failed' THEN 1 ELSE 0 END)::float
+             / NULLIF(COUNT(*), 0),
+             0
+           ) as completion_contract_failed_rate
     FROM sessions WHERE org_id = ${user.org_id} AND created_at >= ${since}
   `;
 
@@ -141,6 +147,8 @@ observabilityRoutes.openapi(summaryRoute, async (c): Promise<any> => {
     compaction_turn_rate: Number(tokensRow.compaction_turn_rate || 0),
     success_rate: Number(sessions.success_rate),
     error_count: Number(sessions.error_count),
+    completion_contract_failed_count: Number((sessions as any).completion_contract_failed_count || 0),
+    completion_contract_failed_rate: Number((sessions as any).completion_contract_failed_rate || 0),
     total_steps: Number(sessions.total_steps),
     total_input_tokens: Number(tokensRow.input_tokens || 0),
     total_output_tokens: Number(tokensRow.output_tokens || 0),
