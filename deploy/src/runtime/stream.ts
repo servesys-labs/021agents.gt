@@ -620,6 +620,8 @@ export async function streamRun(
     let lastModel = config.model;
     let lastTurnUsed = 0;
     const sessionToolNames: string[] = [];
+    let llmFallbackCount = 0;
+    let llmFallbackAlerted = false;
 
     // Checkpointing handled by Workflow steps — no manual DO SQLite checkpoints needed.
 
@@ -701,10 +703,47 @@ export async function streamRun(
             ]);
             llmResponse = candidateResponse;
             if (i > 0) {
+              llmFallbackCount++;
               send(serializeForWebSocket({
                 type: "system",
                 message: `Model fallback activated: using ${candidate.model}`,
               } as any));
+              (env as any).TELEMETRY_QUEUE?.send?.({
+                type: "runtime_event",
+                payload: {
+                  event_type: "llm_fallback",
+                  session_id: sessionId,
+                  trace_id: traceId,
+                  org_id: config.org_id || "",
+                  agent_name: config.agent_name || agentName,
+                  status: "success",
+                  duration_ms: 0,
+                  details: {
+                    turn,
+                    depth: i,
+                    from_model: candidates[0]?.model || "",
+                    from_provider: candidates[0]?.provider || "",
+                    to_model: candidate.model,
+                    to_provider: candidate.provider,
+                  },
+                },
+              }).catch(() => {});
+              if (!llmFallbackAlerted && llmFallbackCount >= 3) {
+                llmFallbackAlerted = true;
+                (env as any).TELEMETRY_QUEUE?.send?.({
+                  type: "runtime_event",
+                  payload: {
+                    event_type: "llm_fallback_alert",
+                    session_id: sessionId,
+                    trace_id: traceId,
+                    org_id: config.org_id || "",
+                    agent_name: config.agent_name || agentName,
+                    status: "warning",
+                    duration_ms: 0,
+                    details: { fallback_count: llmFallbackCount },
+                  },
+                }).catch(() => {});
+              }
             }
             resolved = true;
             break;
