@@ -38,13 +38,35 @@
 import { detectInjection } from "./prompt-injection";
 import { SKILL_CATALOG_NAMES } from "../lib/skill-catalog.generated";
 
-export const SKILL_MUTATION_RATE_LIMIT_PER_DAY = 10;
-
 /** Separator between overlay rules when concatenating the overlay state. */
 export const OVERLAY_JOINER = "\n\n---\n";
 
 /** Max rule_text length — anything longer is two rules, split it. */
 const MAX_RULE_TEXT_LEN = 4096;
+
+/**
+ * Per-day-per-skill rate limit for HUMAN-sourced mutations (admin/owner
+ * calls via manage_skills append_rule). Unchanged from Phase 6: 10/day.
+ */
+export const SKILL_MUTATION_RATE_LIMIT_HUMAN_PER_DAY = 10;
+
+/**
+ * Per-day-per-skill rate limit for AUTO-FIRE-sourced mutations (source
+ * field starts with "auto-fire"). Tighter than the human bucket because
+ * auto-fire fires in response to telemetry without human review — the
+ * lower ceiling is the unattended-blast-radius bound. Widen only once
+ * Phase 6.6 scoring signal exists to distinguish good auto-rules from
+ * bad ones.
+ */
+export const SKILL_MUTATION_RATE_LIMIT_AUTO_PER_DAY = 5;
+
+/**
+ * @deprecated Alias preserved for backwards-compat with Phase 6 tests
+ * that reference this constant in their `it()` descriptions. The real
+ * rate limit is now source-partitioned; new code should pick a bucket
+ * explicitly via the HUMAN / AUTO constants above.
+ */
+export const SKILL_MUTATION_RATE_LIMIT_PER_DAY = SKILL_MUTATION_RATE_LIMIT_HUMAN_PER_DAY;
 
 export interface AppendRuleInput {
   skillName: string;
@@ -169,20 +191,39 @@ export async function appendRule(
   // invocations can both read COUNT=9 and both insert, overshooting 10/day.
   await sql`SELECT pg_advisory_xact_lock(hashtextextended(${`skill-rl:${ctx.orgId}:${skillName}`}, 0))`;
 
-  // Rate limit: 10 successful mutations per day per skill. RLS scopes the
-  // count to the current org, so the effective limit is per-org-per-skill.
+  // Rate limit — source-partitioned buckets. 10/day for human-sourced
+  // mutations (admin/owner calls via manage_skills append_rule) and
+  // 5/day for auto-fire mutations (source starts with "auto-fire"). RLS
+  // scopes the count to the current org, so effective limits are
+  // per-org-per-skill-per-bucket. The partition keeps auto-fire from
+  // eating the human budget on high-volume days — required by Phase 6.5
+  // before the auto-fire detector wires in (6.5.3).
+  const isAutoFire = source.startsWith("auto-fire");
   const countRows = await sql`
-    SELECT COUNT(*)::int AS n FROM skill_audit
+    SELECT
+      COUNT(*) FILTER (WHERE source LIKE 'auto-fire%')::int AS auto_count,
+      COUNT(*) FILTER (WHERE source NOT LIKE 'auto-fire%')::int AS human_count
+    FROM skill_audit
     WHERE skill_name = ${skillName}
       AND created_at > NOW() - INTERVAL '1 day'
   `;
-  const recentCount = Number(countRows?.[0]?.n ?? 0);
-  if (recentCount >= SKILL_MUTATION_RATE_LIMIT_PER_DAY) {
+  const autoCount = Number(countRows?.[0]?.auto_count ?? 0);
+  const humanCount = Number(countRows?.[0]?.human_count ?? 0);
+  const bucketCount = isAutoFire ? autoCount : humanCount;
+  const bucketLimit = isAutoFire
+    ? SKILL_MUTATION_RATE_LIMIT_AUTO_PER_DAY
+    : SKILL_MUTATION_RATE_LIMIT_HUMAN_PER_DAY;
+  const bucketName = isAutoFire ? "auto-fire" : "human";
+  if (bucketCount >= bucketLimit) {
     return {
       appended: false,
-      error: `Rate limited: ${SKILL_MUTATION_RATE_LIMIT_PER_DAY} mutations/day/skill reached for '${skillName}'`,
+      error: `Rate limited: ${bucketLimit} ${bucketName} mutations/day/skill reached for '${skillName}'`,
       code: "rate_limited",
-      detail: { recent_count: recentCount, limit: SKILL_MUTATION_RATE_LIMIT_PER_DAY },
+      detail: {
+        recent_count: bucketCount,
+        limit: bucketLimit,
+        bucket: bucketName,
+      },
     };
   }
 
