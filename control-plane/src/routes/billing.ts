@@ -264,16 +264,14 @@ const checkoutRoute = createRoute({
 });
 
 billingRoutes.openapi(checkoutRoute, async (c): Promise<any> => {
-  const body = c.req.valid("json");
-  const plan = String(body.plan || "standard");
-  const allowed = new Set(["starter", "standard", "pro", "enterprise"]);
-  if (!allowed.has(plan)) {
-    return c.json({ error: "Invalid plan" }, 400);
-  }
+  // This endpoint used to return a fake placeholder Stripe URL that 404'd
+  // when users clicked it. Instead, redirect callers to the real Stripe
+  // checkout endpoint so the failure mode is obvious and actionable.
   return c.json({
-    checkout_url: `https://checkout.stripe.com/placeholder?plan=${encodeURIComponent(plan)}`,
-    note: "Stripe integration pending",
-  });
+    error: "This endpoint is deprecated. Use POST /api/v1/stripe/checkout instead.",
+    code: "use_stripe_checkout",
+    replacement: "/api/v1/stripe/checkout",
+  }, 410);
 });
 
 // ── GET /quota ──────────────────────────────────────────────────

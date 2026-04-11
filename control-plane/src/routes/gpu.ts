@@ -90,37 +90,20 @@ const createEndpointRoute = createRoute({
   },
 });
 
-gpuRoutes.openapi(createEndpointRoute, async (c): Promise<any> => {
-  const user = c.get("user");
-  const body = c.req.valid("json");
-  const modelId = String(body.model_id || "").trim();
-  const gpuType = String(body.gpu_type || "h200");
-  const gpuCount = Math.max(1, Math.min(8, Number(body.gpu_count || 1)));
-
-  if (!modelId) return c.json({ error: "model_id is required" }, 400);
-
-  return await withOrgDb(c.env, user.org_id, async (sql) => {
-    const endpointId = genId();
-    const hourlyRate = HOURLY_RATES[gpuType] ?? 3.98;
-    const now = new Date().toISOString();
-
-    const apiBase = `https://dedicated-${endpointId}.gmi-serving.com/v1`;
-    const configJson = JSON.stringify({ gpu_type: gpuType, gpu_count: gpuCount, hourly_rate_usd: hourlyRate });
-    await sql`
-      INSERT INTO gpu_endpoints (id, org_id, name, model, url, provider, status, config, created_at)
-      VALUES (${endpointId}, ${user.org_id}, ${`gpu-${endpointId}`}, ${modelId}, ${apiBase},
-              ${"dedicated"}, 'provisioning', ${configJson}, ${now})
-    `;
-
-    return c.json({
-      endpoint_id: endpointId,
-      status: "provisioning",
-      gpu_type: gpuType,
-      gpu_count: gpuCount,
-      model_id: modelId,
-      hourly_rate_usd: hourlyRate,
-    });
-  });
+gpuRoutes.openapi(createEndpointRoute, async (_c): Promise<any> => {
+  // Dedicated GPU provisioning is not wired up to a real provider yet.
+  // The old implementation wrote a DB row with a fabricated
+  // `dedicated-<id>.gmi-serving.com` URL that never resolved, set status
+  // to "provisioning", and returned 200 OK — so callers thought they had
+  // a working endpoint. Worse, the DELETE path then billed users for
+  // hours-since-creation at $3.98/hr on compute that never existed.
+  //
+  // Until the real provisioning integration lands, refuse the create so
+  // no new phantom endpoints accumulate in the billing pipeline.
+  return _c.json({
+    error: "Dedicated GPU provisioning is not available yet. Contact support if you need this feature.",
+    code: "gpu_provisioning_unavailable",
+  }, 501);
 });
 
 // ── DELETE /endpoints/:endpoint_id — Terminate a GPU endpoint ───────
@@ -164,19 +147,27 @@ gpuRoutes.openapi(deleteEndpointRoute, async (c): Promise<any> => {
       UPDATE gpu_endpoints SET status = 'terminated', updated_at = ${now} WHERE id = ${endpointId}
     `;
 
-    // Record billing
-    try {
-      await sql`
-        INSERT INTO billing_records (org_id, cost_type, total_cost_usd, model, provider, created_at)
-        VALUES (${user.org_id}, 'gpu_compute', ${costUsd}, ${String(endpoint.model || "")}, ${"dedicated"}, ${now})
-      `;
-
-      // Fire-and-forget credit deduction for GPU compute cost
-      if (costUsd > 0) {
-        // deductCredits expects USD, not cents
-        deductCredits(sql, user.org_id, costUsd, `GPU compute: ${endpointId}`, "", "").catch(() => {});
-      }
-    } catch {}
+    // Only bill if the row actually has a provider-confirmed provisioned_at
+    // timestamp in its config. Phantom rows from the legacy create endpoint
+    // (which never provisioned anything) have no provisioned_at and must
+    // not be charged. When the real GMI integration lands it will set this
+    // field after confirming a successful provision.
+    const wasReallyProvisioned =
+      typeof (endpointConfig as any).provisioned_at === "string" &&
+      (endpointConfig as any).provisioned_at.length > 0;
+    if (wasReallyProvisioned) {
+      try {
+        await sql`
+          INSERT INTO billing_records (org_id, cost_type, total_cost_usd, model, provider, created_at)
+          VALUES (${user.org_id}, 'gpu_compute', ${costUsd}, ${String(endpoint.model || "")}, ${"dedicated"}, ${now})
+        `;
+        if (costUsd > 0) {
+          deductCredits(sql, user.org_id, costUsd, `GPU compute: ${endpointId}`, "", "").catch(() => {});
+        }
+      } catch {}
+    } else {
+      console.warn(`[gpu/terminate] Skipping billing for ${endpointId} — no provisioned_at timestamp (phantom row from legacy create endpoint).`);
+    }
 
     return c.json({
       endpoint_id: endpointId,
