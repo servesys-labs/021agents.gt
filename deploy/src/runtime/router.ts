@@ -62,6 +62,38 @@ export interface PlanRouting {
   };
 }
 
+async function applyKimiComplexCanary(
+  env: RuntimeEnv | undefined,
+  complexity: ComplexityTier,
+  route: ModelRoute | undefined,
+): Promise<ModelRoute | undefined> {
+  if (!route) return route;
+  if (complexity !== "complex") return route;
+  if (route.model !== "@cf/moonshotai/kimi-k2.5") return route;
+  if (!env) return route;
+
+  const orgId = String((env as any).__orgId || (env as any).__agentConfig?.org_id || "");
+  try {
+    const { isEnabled } = await import("./features");
+    const canUseKimi = await isEnabled(env as any, "kimi_complex_canary", orgId);
+    if (canUseKimi) return route;
+  } catch {
+    // Fail-safe: if flag lookup fails, stay on safer fallback path.
+  }
+
+  // Canary disabled for this org: use first fallback target (Gemma) if provided.
+  if (Array.isArray(route.fallback) && route.fallback.length > 0) {
+    const [first, ...rest] = route.fallback;
+    return {
+      model: first.model,
+      provider: first.provider,
+      max_tokens: route.max_tokens,
+      fallback: rest,
+    };
+  }
+  return route;
+}
+
 // ── LLM Classifier ────────────────────────────────────────────
 
 const VALID_COMPLEXITIES = new Set(["simple", "moderate", "complex"]);
@@ -328,7 +360,8 @@ export async function selectModel(
   // 1. Try category-specific route
   const categoryRoutes = planRouting[category];
   if (categoryRoutes) {
-    const route = categoryRoutes[role] || categoryRoutes[complexity];
+    const rawRoute = categoryRoutes[role] || categoryRoutes[complexity];
+    const route = await applyKimiComplexCanary(env, complexity, rawRoute);
     if (route) {
       return {
         model: route.model || defaultModel,
@@ -346,7 +379,8 @@ export async function selectModel(
   // 2. Try general routes
   const generalRoutes = planRouting["general"];
   if (generalRoutes) {
-    const route = generalRoutes[complexity] || generalRoutes["moderate"];
+    const rawRoute = generalRoutes[complexity] || generalRoutes["moderate"];
+    const route = await applyKimiComplexCanary(env, complexity, rawRoute);
     if (route) {
       return {
         model: route.model || defaultModel,

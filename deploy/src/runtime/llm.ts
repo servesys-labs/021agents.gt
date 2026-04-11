@@ -37,26 +37,59 @@ import { LLMError, RefusalError, classifyFetchError } from "./errors";
 const LLM_BREAKER_THRESHOLD = 5;        // consecutive failures before opening
 const LLM_BREAKER_COOLDOWN_MS = 30_000; // 30s cooldown before half-open probe
 
-let _llmBreakerFailures = 0;
-let _llmBreakerOpenedAt = 0;
-let _llmBreakerLastFailureAt = 0;
-let _llmBreakerLastErrorMessage: string | null = null;
-
-function recordLlmSuccess(): void {
-  _llmBreakerFailures = 0;
-  _llmBreakerOpenedAt = 0;
-  _llmBreakerLastErrorMessage = null;
+interface LlmBreakerState {
+  failures: number;
+  openedAt: number;
+  lastFailureAt: number;
+  lastError: string | null;
+  lastUsedAt: number;
 }
 
-function recordLlmFailure(message: string): void {
-  _llmBreakerFailures++;
-  _llmBreakerLastFailureAt = Date.now();
-  _llmBreakerLastErrorMessage = message.slice(0, 200);
-  if (_llmBreakerFailures >= LLM_BREAKER_THRESHOLD && _llmBreakerOpenedAt === 0) {
-    _llmBreakerOpenedAt = Date.now();
+const _llmBreakerByModel = new Map<string, LlmBreakerState>();
+const MAX_MODEL_BREAKERS = 128;
+
+function breakerKey(model: string, provider?: string): string {
+  return `${provider || "auto"}|${model}`;
+}
+
+function getBreakerState(key: string): LlmBreakerState {
+  const existing = _llmBreakerByModel.get(key);
+  if (existing) {
+    existing.lastUsedAt = Date.now();
+    return existing;
+  }
+  const created: LlmBreakerState = {
+    failures: 0,
+    openedAt: 0,
+    lastFailureAt: 0,
+    lastError: null,
+    lastUsedAt: Date.now(),
+  };
+  _llmBreakerByModel.set(key, created);
+  if (_llmBreakerByModel.size > MAX_MODEL_BREAKERS) {
+    const oldest = [..._llmBreakerByModel.entries()].sort((a, b) => a[1].lastUsedAt - b[1].lastUsedAt);
+    for (let i = 0; i < 8 && i < oldest.length; i++) _llmBreakerByModel.delete(oldest[i][0]);
+  }
+  return created;
+}
+
+function recordLlmSuccess(key: string): void {
+  const st = getBreakerState(key);
+  st.failures = 0;
+  st.openedAt = 0;
+  st.lastError = null;
+}
+
+function recordLlmFailure(key: string, message: string): void {
+  const st = getBreakerState(key);
+  st.failures++;
+  st.lastFailureAt = Date.now();
+  st.lastError = message.slice(0, 200);
+  if (st.failures >= LLM_BREAKER_THRESHOLD && st.openedAt === 0) {
+    st.openedAt = Date.now();
     console.warn(
-      `[LLM:breaker] OPEN after ${_llmBreakerFailures} consecutive failures — ` +
-      `failing fast for ${LLM_BREAKER_COOLDOWN_MS / 1000}s. Last error: ${_llmBreakerLastErrorMessage}`,
+      `[LLM:breaker] OPEN(${key}) after ${st.failures} consecutive failures — ` +
+      `failing fast for ${LLM_BREAKER_COOLDOWN_MS / 1000}s. Last error: ${st.lastError}`,
     );
   }
 }
@@ -68,12 +101,13 @@ function recordLlmFailure(message: string): void {
  * via recordLlmSuccess(). If it fails, recordLlmFailure() will re-open
  * the breaker because failures > threshold - 1.
  */
-function isLlmBreakerOpen(): boolean {
-  if (_llmBreakerFailures < LLM_BREAKER_THRESHOLD) return false;
-  if (_llmBreakerOpenedAt > 0 && Date.now() - _llmBreakerOpenedAt > LLM_BREAKER_COOLDOWN_MS) {
-    console.info("[LLM:breaker] HALF-OPEN — allowing next call through");
-    _llmBreakerFailures = LLM_BREAKER_THRESHOLD - 1; // one more failure re-opens
-    _llmBreakerOpenedAt = 0;
+function isLlmBreakerOpen(key: string): boolean {
+  const st = getBreakerState(key);
+  if (st.failures < LLM_BREAKER_THRESHOLD) return false;
+  if (st.openedAt > 0 && Date.now() - st.openedAt > LLM_BREAKER_COOLDOWN_MS) {
+    console.info(`[LLM:breaker] HALF-OPEN(${key}) — allowing next call through`);
+    st.failures = LLM_BREAKER_THRESHOLD - 1; // one more failure re-opens
+    st.openedAt = 0;
     return false;
   }
   return true;
@@ -86,26 +120,40 @@ export function getLlmBreakerState(): {
   openedAt: number;
   lastFailureAt: number;
   lastError: string | null;
+  trackedModels: number;
+  openCount: number;
+  worstModel: string | null;
 } {
   const now = Date.now();
-  // "half-open" is a transient state we only actually enter on the next call;
-  // for reporting, surface it when we're in the cooldown window.
+  const entries = [..._llmBreakerByModel.entries()];
+  const trackedModels = entries.length;
+  const openEntries = entries.filter(([, st]) =>
+    st.failures >= LLM_BREAKER_THRESHOLD &&
+    !(st.openedAt > 0 && now - st.openedAt > LLM_BREAKER_COOLDOWN_MS),
+  );
+  const openCount = openEntries.length;
+  const sorted = entries.sort((a, b) => b[1].failures - a[1].failures);
+  const worst = sorted[0];
+  const worstModel = worst ? worst[0] : null;
+  const worstState = worst ? worst[1] : {
+    failures: 0,
+    openedAt: 0,
+    lastFailureAt: 0,
+    lastError: null,
+    lastUsedAt: 0,
+  };
   let state: "closed" | "half-open" | "open" = "closed";
-  if (_llmBreakerFailures >= LLM_BREAKER_THRESHOLD) {
-    if (_llmBreakerOpenedAt > 0 && now - _llmBreakerOpenedAt > LLM_BREAKER_COOLDOWN_MS) {
-      state = "half-open";
-    } else {
-      state = "open";
-    }
-  } else if (_llmBreakerFailures > 0) {
-    state = "half-open";
-  }
+  if (openCount > 0) state = "open";
+  else if (worstState.failures > 0) state = "half-open";
   return {
     state,
-    failures: _llmBreakerFailures,
-    openedAt: _llmBreakerOpenedAt,
-    lastFailureAt: _llmBreakerLastFailureAt,
-    lastError: _llmBreakerLastErrorMessage,
+    failures: worstState.failures,
+    openedAt: worstState.openedAt,
+    lastFailureAt: worstState.lastFailureAt,
+    lastError: worstState.lastError,
+    trackedModels,
+    openCount,
+    worstModel,
   };
 }
 
@@ -139,20 +187,22 @@ export async function callLLM(
     };
   },
 ): Promise<LLMResponse> {
+  const key = breakerKey(opts.model, opts.provider);
   // ── Circuit breaker fail-fast ──
   // If we're in an outage window, don't even hit the gateway. This saves
   // ~90s per call (retry + idle watchdog) and prevents cascading failures
   // when AI Gateway or upstream providers are degraded.
-  if (isLlmBreakerOpen()) {
+  const st = getBreakerState(key);
+  if (isLlmBreakerOpen(key)) {
     const cooldownRemaining = Math.max(
       0,
-      LLM_BREAKER_COOLDOWN_MS - (Date.now() - _llmBreakerOpenedAt),
+      LLM_BREAKER_COOLDOWN_MS - (Date.now() - st.openedAt),
     );
     const retryAfterSec = Math.ceil(cooldownRemaining / 1000);
     throw new LLMError(
       opts.model,
-      `LLM circuit breaker open — ${_llmBreakerFailures} consecutive failures. ` +
-      `Retry in ${retryAfterSec}s. Last error: ${_llmBreakerLastErrorMessage ?? "unknown"}`,
+      `LLM circuit breaker open for ${key} — ${st.failures} consecutive failures. ` +
+      `Retry in ${retryAfterSec}s. Last error: ${st.lastError ?? "unknown"}`,
       {
         retryable: true,
         statusCode: 503,
@@ -162,7 +212,7 @@ export async function callLLM(
 
   try {
     const result = await _doCallLLM(env, messages, tools, opts);
-    recordLlmSuccess();
+    recordLlmSuccess(key);
     return result;
   } catch (err: any) {
     // Only count failures that signal an upstream problem (transient network,
@@ -173,7 +223,7 @@ export async function callLLM(
       err.retryable === true ||
       (err.statusCode !== undefined && err.statusCode >= 500);
     if (isUpstreamFailure) {
-      recordLlmFailure(err?.message || String(err));
+      recordLlmFailure(key, err?.message || String(err));
     }
     throw err;
   }

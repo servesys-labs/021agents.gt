@@ -34,6 +34,9 @@ const DEFAULTS: Record<string, boolean> = {
   mailbox_ipc: true,
   idle_watchdog: true,
   prompt_caching: true,
+  // Gradual rollout gate for routing complex tasks to Kimi.
+  // Keep off by default; enable per-org as part of canary.
+  kimi_complex_canary: false,
 };
 
 /**

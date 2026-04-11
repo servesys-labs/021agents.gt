@@ -7735,6 +7735,7 @@ export default {
       "session", "turn", "episode", "event",
       "runtime_event", "middleware_event", "billing_flush",
       "skill_activation", "skill_auto_activation", "loop_detected", "do_eviction",
+      "artifact_manifest",
     ]);
 
     // Connect via Postgres.js + Hyperdrive (Worker-compatible driver)
@@ -8021,6 +8022,26 @@ export default {
                 ${new Date().toISOString()}
               )`;
             }
+          } else if (type === "artifact_manifest") {
+            if (!p.session_id || !p.artifact_name) { msg.ack(); continue; }
+            await sql`INSERT INTO run_artifacts (
+              session_id, org_id, agent_name, turn_number,
+              artifact_name, artifact_kind, mime_type, size_bytes,
+              storage_key, source_tool, source_event, schema_version,
+              status, metadata, created_at
+            ) VALUES (
+              ${p.session_id || ""}, ${p.org_id || ""}, ${p.agent_name || ""},
+              ${Number(p.turn_number || 0)},
+              ${p.artifact_name || "artifact"}, ${p.artifact_kind || "generic"},
+              ${p.mime_type || "application/octet-stream"}, ${Number(p.size_bytes || 0)},
+              ${p.storage_key || ""}, ${p.source_tool || ""}, ${p.source_event || ""},
+              ${p.schema_version || null}, ${p.status || "available"},
+              ${jp(p.metadata, {})}, ${ts(p.created_at)}
+            ) ON CONFLICT (session_id, artifact_name, storage_key) DO UPDATE SET
+              status = EXCLUDED.status,
+              metadata = COALESCE(EXCLUDED.metadata, run_artifacts.metadata),
+              size_bytes = GREATEST(COALESCE(run_artifacts.size_bytes, 0), COALESCE(EXCLUDED.size_bytes, 0)),
+              updated_at = now()`;
           }
           msg.ack();
         } catch (err: any) {

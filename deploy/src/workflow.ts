@@ -82,6 +82,23 @@ type RunPhase =
   | "done"
   | "error";
 
+interface ArtifactManifestRecord {
+  session_id: string;
+  org_id: string;
+  agent_name: string;
+  turn_number: number;
+  artifact_name: string;
+  artifact_kind: string;
+  mime_type: string;
+  size_bytes: number;
+  storage_key: string;
+  source_tool: string;
+  source_event: string;
+  schema_version?: string;
+  status?: string;
+  metadata?: Record<string, unknown>;
+}
+
 function applyResultBackpressure(
   results: Array<{ result?: string; error?: string; [key: string]: any }>,
 ): void {
@@ -194,6 +211,32 @@ function renderResearchArtifactMarkdown(artifact: Record<string, unknown>): stri
   }
   lines.push("", `Confidence: ${confidence}`);
   return lines.join("\n");
+}
+
+function evaluateCompletionContract(input: string, output: string, opts: {
+  planOnlyRequested: boolean;
+  researchIntent: boolean;
+  totalToolCalls: number;
+  successfulToolCalls: number;
+  failedToolCalls: number;
+  artifactSynthesisValidated: boolean;
+}): { ok: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+  const q = String(input || "").toLowerCase();
+  const out = String(output || "");
+  if (out.trim().length < 80) reasons.push("output_too_short");
+
+  const executionIntent = /\b(research|analy[sz]e|compare|investigate|build|implement|fix|write|create)\b/.test(q);
+  if (!opts.planOnlyRequested && executionIntent && opts.totalToolCalls === 0) {
+    reasons.push("execution_intent_without_tools");
+  }
+  if (opts.totalToolCalls > 0 && opts.successfulToolCalls === 0 && opts.failedToolCalls > 0) {
+    reasons.push("all_tool_calls_failed");
+  }
+  if (opts.researchIntent && !opts.artifactSynthesisValidated) {
+    reasons.push("research_artifact_not_validated");
+  }
+  return { ok: reasons.length === 0, reasons };
 }
 
 // ── Types ────────────────────────────────────────────────────
@@ -796,11 +839,16 @@ ALWAYS:
     let totalToolCalls = 0;
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
+    let llmFallbackCount = 0;
+    let llmFallbackAlerted = false;
     let totalCacheReadTokens = 0;
     let totalCacheWriteTokens = 0;
     let repairCount = 0;
     let compactionCount = 0;
     let finalOutput = "";
+    const artifactManifestRecords: ArtifactManifestRecord[] = [];
+    let successfulToolCalls = 0;
+    let failedToolCalls = 0;
     const sessionWorkflowToolNames: string[] = [];
     let lastWorkflowTurn = 0;
     // ── Workflow step limit guard ──
@@ -870,13 +918,17 @@ ALWAYS:
     const { resolvePlanRouting } = await memo("db", () => import("./runtime/db"));
     const routerMod = await memo("router", () => import("./runtime/router"));
     const planRouting = resolvePlanRouting(config.plan, config.routing as any);
-    const selectedRoute = await routerMod.selectModel(p.input, planRouting as any, config.model, config.provider, {
-      AI: this.env.AI,
-      CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID || "",
-      AI_GATEWAY_ID: this.env.AI_GATEWAY_ID || "",
-      AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN || "",
-      CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN || "",
-    } as any);
+    const selectedRoute = await routerMod.selectModel(
+      p.input,
+      planRouting as any,
+      config.model,
+      config.provider,
+      {
+        ...(this.env as any),
+        __orgId: p.org_id || "",
+        __agentConfig: { org_id: p.org_id || "", agent_name: p.agent_name || "" },
+      } as any,
+    );
 
     for (let turn = 1; turn <= config.max_turns; turn++) {
       let turnCompactionTriggered = false;
@@ -1063,6 +1115,7 @@ ALWAYS:
           CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
           GPU_SERVICE_KEY: this.env.GPU_SERVICE_KEY,
         };
+        const telemetryQueue = (this.env as any).TELEMETRY_QUEUE;
         const fallbackChain = Array.isArray((selectedRoute as any).fallback_chain)
           ? (selectedRoute as any).fallback_chain
           : [];
@@ -1073,14 +1126,55 @@ ALWAYS:
           toolDefinitions: any[],
         ) {
           let lastErr: any = null;
-          for (const candidate of llmCandidates) {
+          for (let i = 0; i < llmCandidates.length; i++) {
+            const candidate = llmCandidates[i];
             try {
-              return await callLLM(
+              const response = await callLLM(
                 llmEnv as any,
                 promptMessages,
                 toolDefinitions,
                 { model: candidate.model, provider: candidate.provider, max_tokens: selectedRoute.max_tokens },
               );
+              if (i > 0) {
+                llmFallbackCount++;
+                telemetryQueue?.send?.({
+                  type: "runtime_event",
+                  payload: {
+                    event_type: "llm_fallback",
+                    session_id: sessionId,
+                    trace_id: traceId,
+                    org_id: p.org_id || "",
+                    agent_name: p.agent_name || "",
+                    status: "success",
+                    duration_ms: 0,
+                    details: {
+                      turn,
+                      depth: i,
+                      from_model: llmCandidates[0]?.model || "",
+                      from_provider: llmCandidates[0]?.provider || "",
+                      to_model: candidate.model,
+                      to_provider: candidate.provider,
+                    },
+                  },
+                }).catch(() => {});
+                if (!llmFallbackAlerted && llmFallbackCount >= 3) {
+                  llmFallbackAlerted = true;
+                  telemetryQueue?.send?.({
+                    type: "runtime_event",
+                    payload: {
+                      event_type: "llm_fallback_alert",
+                      session_id: sessionId,
+                      trace_id: traceId,
+                      org_id: p.org_id || "",
+                      agent_name: p.agent_name || "",
+                      status: "warning",
+                      duration_ms: 0,
+                      details: { fallback_count: llmFallbackCount },
+                    },
+                  }).catch(() => {});
+                }
+              }
+              return response;
             } catch (err: any) {
               lastErr = err;
             }
@@ -1470,6 +1564,39 @@ ALWAYS:
       const toolCostUsd = toolResultEntries.reduce((sum, tr) => sum + (tr.cost_usd || 0), 0);
       for (const tr of toolResultEntries) {
         totalCost += tr.cost_usd || 0;
+        if (tr.error) failedToolCalls++;
+        else successfulToolCalls++;
+      }
+
+      // Build first-class artifact manifest records from tool outputs.
+      for (let i = 0; i < toolResultEntries.length; i++) {
+        const tr = toolResultEntries[i];
+        const tc = executableCalls[i];
+        if (tr.error || tr.name !== "share-artifact") continue;
+        const parsed = extractJsonObject(tr.result || "");
+        if (!parsed) continue;
+        const storageKey = String(parsed.storage_key || "").trim();
+        if (!storageKey) continue;
+        const artifactName = String(parsed.artifact || "artifact").trim() || "artifact";
+        artifactManifestRecords.push({
+          session_id: sessionId,
+          org_id: p.org_id || "",
+          agent_name: p.agent_name || config?.name || "agentos",
+          turn_number: turn,
+          artifact_name: artifactName,
+          artifact_kind: "shared_file",
+          mime_type: String(parsed.mime_type || "application/octet-stream"),
+          size_bytes: Number(parsed.size_bytes || 0),
+          storage_key: storageKey,
+          source_tool: tr.name,
+          source_event: "tool_result",
+          schema_version: "artifact_manifest_v1",
+          status: "available",
+          metadata: {
+            tool_call_id: tr.tool_call_id,
+            tool_arguments: (() => { try { return JSON.parse(tc?.arguments || "{}"); } catch { return {}; } })(),
+          },
+        });
       }
 
       // ── Cloud C3.4: Inter-component backpressure ──
@@ -1843,6 +1970,25 @@ ALWAYS:
       if (artifact && validateResearchArtifact(artifact)) {
         artifactSynthesisValidated = true;
         finalOutput = renderResearchArtifactMarkdown(artifact);
+        artifactManifestRecords.push({
+          session_id: sessionId,
+          org_id: p.org_id || "",
+          agent_name: p.agent_name || config?.name || "agentos",
+          turn_number: lastWorkflowTurn || 0,
+          artifact_name: "research-report.md",
+          artifact_kind: "research_report",
+          mime_type: "text/markdown",
+          size_bytes: finalOutput.length,
+          storage_key: `inline://${sessionId}/research-report.md`,
+          source_tool: "artifact-synthesis",
+          source_event: "workflow",
+          schema_version: "research_v1",
+          status: "available",
+          metadata: {
+            confidence: artifact.confidence || "unknown",
+            companies_count: Array.isArray(artifact.companies) ? artifact.companies.length : 0,
+          },
+        });
         await this.emit(p.progress_key, {
           type: "system",
           message: "Deep-research artifact schema synthesis completed.",
@@ -1855,6 +2001,26 @@ ALWAYS:
           artifact_schema: "research_v1",
         });
       }
+    }
+
+    const completionContract = evaluateCompletionContract(p.input, finalOutput, {
+      planOnlyRequested,
+      researchIntent,
+      totalToolCalls,
+      successfulToolCalls,
+      failedToolCalls,
+      artifactSynthesisValidated,
+    });
+    if (!completionContract.ok && terminationReason !== "completion_gate_exhausted") {
+      terminationReason = "completion_contract_failed";
+      await this.emit(p.progress_key, {
+        type: "warning",
+        message: `Completion contract failed: ${completionContract.reasons.join(", ")}`,
+        completion_contract_reasons: completionContract.reasons,
+      });
+      finalOutput = finalOutput
+        ? `${finalOutput}\n\n[Completion contract flagged this run as unreliable: ${completionContract.reasons.join(", ")}]`
+        : `I could not safely finalize this run. Completion contract failed: ${completionContract.reasons.join(", ")}.`;
     }
 
     queueSessionEpisodicNote((this.env as any).HYPERDRIVE, {
@@ -1931,7 +2097,11 @@ ALWAYS:
           project_id: p.project_id || "",
           agent_name: p.agent_name,
           model: config.model || "workflow",
-          status: (result.output && result.termination_reason !== "completion_gate_exhausted") ? "success" : "error",
+          status: (
+            result.output
+            && result.termination_reason !== "completion_gate_exhausted"
+            && result.termination_reason !== "completion_contract_failed"
+          ) ? "success" : "error",
           input_text: p.input.slice(0, 2000),
           output_text: (result.output || "").slice(0, 2000),
           step_count: result.turns,
@@ -1982,6 +2152,29 @@ ALWAYS:
         });
       }
 
+      if (terminationReason === "completion_contract_failed") {
+        await queue.send({
+          type: "event",
+          payload: {
+            org_id: p.org_id || "",
+            agent_name: p.agent_name || "",
+            session_id: sessionId,
+            trace_id: traceId,
+            turn: lastWorkflowTurn || 0,
+            event_type: "completion_contract",
+            action: "failed",
+            plan: config.plan || "",
+            provider: config.provider || "",
+            model: config.model || "",
+            tool_name: "",
+            status: "failed",
+            latency_ms: 0,
+            details: { termination_reason: terminationReason },
+            created_at: Date.now(),
+          },
+        });
+      }
+
       await queue.send({
         type: "event",
         payload: {
@@ -2026,6 +2219,29 @@ ALWAYS:
             },
             created_at: Date.now(),
           },
+        });
+      }
+
+      if (artifactManifestRecords.length > 0) {
+        await Promise.all(artifactManifestRecords.map((artifact) =>
+          queue.send({
+            type: "artifact_manifest",
+            payload: {
+              ...artifact,
+              trace_id: traceId,
+              created_at: Date.now(),
+            },
+          }),
+        ));
+        await this.emit(p.progress_key, {
+          type: "artifact_index",
+          count: artifactManifestRecords.length,
+          artifacts: artifactManifestRecords.slice(0, 20).map((a) => ({
+            name: a.artifact_name,
+            kind: a.artifact_kind,
+            storage_key: a.storage_key,
+            mime_type: a.mime_type,
+          })),
         });
       }
 
