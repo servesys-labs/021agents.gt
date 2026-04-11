@@ -61,13 +61,22 @@ describe("voice routes", () => {
   beforeEach(() => {
   });
 
-  // TODO(rls-migration): the generic /{platform}/calls route now accepts
-  // any platform string and returns an empty list instead of 404.
-  it.skip("GET unknown platform calls returns 404", async () => {
-    mockSql = (async () => []) as unknown as MockSqlFn;
+  it("GET unknown platform calls is treated as an agent_name lookup", async () => {
+    // The /{platform}/calls route changed semantics: if the path segment
+    // isn't a known voice platform (vapi, tavus, etc.), it's treated as
+    // an agent_name filter and returns the agent's call history from
+    // voice_calls. Result: 200 with `platform: "all"` instead of 404.
+    mockSql = (async (strings: TemplateStringsArray) => {
+      const q = strings.join("?");
+      if (q.includes("FROM voice_calls") && q.includes("agent_name")) return [];
+      return [];
+    }) as unknown as MockSqlFn;
     const app = buildApp();
     const res = await app.request("/elevenlabs/calls", { method: "GET" }, mockEnv());
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { calls: unknown[]; platform: string };
+    expect(body.platform).toBe("all");
+    expect(Array.isArray(body.calls)).toBe(true);
   });
 
   it("GET vapi call detail is org-scoped (404 other org)", async () => {
@@ -137,9 +146,11 @@ describe("voice routes", () => {
     expect(body.events.length).toBe(1);
   });
 
-  // TODO(rls-migration): verifyWebhookHmac now rejects empty-secret paths;
-  // webhook route returns 401 when VAPI_WEBHOOK_SECRET is undefined.
-  it.skip("POST /vapi/webhook accepts when webhook secret unset", async () => {
+  it("POST /vapi/webhook rejects unsigned payload when secret unset (hardened)", async () => {
+    // April 2026 hardening: verifyWebhookHmac now rejects empty-secret
+    // configs so an unconfigured webhook can't accept arbitrary Vapi
+    // payloads. Production this surfaces as a 401 in wrangler logs
+    // and tells the operator they forgot to set VAPI_WEBHOOK_SECRET.
     mockSql = (async () => []) as unknown as MockSqlFn;
     const app = buildApp();
     const payload = { message: { type: "call.started", call: { id: "c1" } } };
@@ -148,10 +159,7 @@ describe("voice routes", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     }, mockEnv({ VAPI_WEBHOOK_SECRET: undefined }));
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { processed?: boolean; call_id?: string };
-    expect(body.processed).toBe(true);
-    expect(body.call_id).toBe("c1");
+    expect(res.status).toBe(401);
   });
 
   it("POST /vapi/webhook rejects bad signature when secret set", async () => {
@@ -195,9 +203,9 @@ describe("voice routes", () => {
     expect(res.status).toBe(404);
   });
 
-  // TODO(rls-migration): tavus webhook now requires signature even without
-  // secret configured — same verifyWebhookHmac hardening.
-  it.skip("POST /tavus/webhook accepts payload without secret", async () => {
+  it("POST /tavus/webhook rejects unsigned payload without secret (hardened)", async () => {
+    // Same hardening as /vapi/webhook — a Tavus webhook with no
+    // TAVUS_WEBHOOK_SECRET configured cannot accept unsigned events.
     mockSql = (async () => []) as unknown as MockSqlFn;
     const app = buildApp();
     const res = await app.request("/tavus/webhook", {
@@ -205,7 +213,7 @@ describe("voice routes", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ event: "conversation.started", conversation_id: "t1" }),
     }, mockEnv());
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(401);
   });
 
   it("POST /vapi/calls returns 400 without API key", async () => {
@@ -302,10 +310,17 @@ describe("voice routes", () => {
 });
 
 describe("verifyWebhookHmac", () => {
-  // TODO(rls-migration): verifyWebhookHmac now returns false for empty secret
-  // (hardening change in the April 2026 audit), not part of db migration.
-  it.skip("returns true when secret empty", async () => {
+  it("returns false when secret empty (hardened)", async () => {
+    // April 2026 hardening: empty secret = unconfigured webhook = reject.
+    // Any 200 here would mean the webhook accepts arbitrary payloads
+    // without verification, which is the exact attack surface the
+    // hardening was added to close.
     const ok = await verifyWebhookHmac("", new ArrayBuffer(0), "");
-    expect(ok).toBe(true);
+    expect(ok).toBe(false);
+  });
+
+  it("returns false when signature missing even with valid secret", async () => {
+    const ok = await verifyWebhookHmac("whsec", new ArrayBuffer(0), "");
+    expect(ok).toBe(false);
   });
 });
