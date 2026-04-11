@@ -9,12 +9,14 @@
 # Usage:
 #   ./scripts/sync_service_token.sh
 #   ./scripts/sync_service_token.sh --runtime-url https://runtime.oneshots.co
+#   ./scripts/sync_service_token.sh --service-token "$SERVICE_TOKEN"
 #   ./scripts/sync_service_token.sh --skip-smoke
 
 set -euo pipefail
 
 RUNTIME_URL="https://runtime.oneshots.co"
 SKIP_SMOKE="0"
+SERVICE_TOKEN_OVERRIDE=""
 
 RED="\033[31m"
 GREEN="\033[32m"
@@ -33,6 +35,7 @@ sync_service_token.sh
 
 Options:
   --runtime-url <url>   Runtime base URL for smoke check
+  --service-token <v>   Token override (else SERVICE_TOKEN env/.env)
   --skip-smoke          Skip live runtime auth smoke test
   -h, --help            Show this help
 EOF
@@ -48,6 +51,11 @@ while [[ $# -gt 0 ]]; do
     --skip-smoke)
       SKIP_SMOKE="1"
       shift
+      ;;
+    --service-token)
+      [[ $# -ge 2 ]] || fail "--service-token requires a value"
+      SERVICE_TOKEN_OVERRIDE="$2"
+      shift 2
       ;;
     -h|--help)
       usage
@@ -70,13 +78,15 @@ RUNTIME_URL="${RUNTIME_URL%/}"
 [[ -d "$DEPLOY_DIR" ]] || fail "Missing ${DEPLOY_DIR}"
 [[ -d "$CONTROL_PLANE_DIR" ]] || fail "Missing ${CONTROL_PLANE_DIR}"
 
-set -a
-# shellcheck disable=SC1090
-source "$ENV_FILE"
-set +a
-
-SERVICE_TOKEN="${SERVICE_TOKEN:-}"
-[[ -n "$SERVICE_TOKEN" ]] || fail "SERVICE_TOKEN is empty in ${ENV_FILE}"
+SERVICE_TOKEN="${SERVICE_TOKEN_OVERRIDE:-${SERVICE_TOKEN:-}}"
+if [[ -z "$SERVICE_TOKEN" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
+  SERVICE_TOKEN="${SERVICE_TOKEN_OVERRIDE:-${SERVICE_TOKEN:-}}"
+fi
+[[ -n "$SERVICE_TOKEN" ]] || fail "SERVICE_TOKEN is empty (set env, --service-token, or ${ENV_FILE})"
 
 sync_secret() {
   local worker_dir="$1"

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Pre-beta health suite
 # - Runs infra gate (optional)
+# - Runs runtime-proxy auth canary (optional, enabled by default)
 # - Verifies runtime completion contract on plan-heavy prompts
 # - Confirms session/turn persistence for traced runs
 
@@ -14,10 +15,12 @@ USER_EMAIL="${E2E_USER_EMAIL:-}"
 USER_PASSWORD="${E2E_USER_PASSWORD:-}"
 TIMEOUT_SECONDS="${E2E_TIMEOUT_SECONDS:-180}"
 RUN_INFRA_GATE="${PREBETA_RUN_INFRA_GATE:-1}"
+RUN_AUTH_CANARY="${PREBETA_RUN_AUTH_CANARY:-1}"
 REPORT_DIR="${PREBETA_REPORT_DIR:-artifacts/prebeta-health}"
 MAX_TTFT_P95_MS="${PREBETA_MAX_TTFT_P95_MS:-12000}"
 MAX_DONE_MISSING_RATE="${PREBETA_MAX_DONE_MISSING_RATE:-0.20}"
 MAX_COMPLETION_GATE_EXHAUSTED_RATE="${PREBETA_MAX_COMPLETION_GATE_EXHAUSTED_RATE:-0.05}"
+MAX_COMPLETION_CONTRACT_FAILED_RATE="${PREBETA_MAX_COMPLETION_CONTRACT_FAILED_RATE:-0.05}"
 RUN_REAL_TASK_CHAIN="${PREBETA_RUN_REAL_TASK_CHAIN:-1}"
 MIN_REAL_TASK_TOOL_CALLS="${PREBETA_MIN_REAL_TASK_TOOL_CALLS:-3}"
 
@@ -39,6 +42,16 @@ require_env() {
   [[ -n "$ORG_ID" ]] || fail "Missing E2E_ORG_ID"
   [[ -n "$USER_EMAIL" ]] || fail "Missing E2E_USER_EMAIL"
   [[ -n "$USER_PASSWORD" ]] || fail "Missing E2E_USER_PASSWORD"
+  if [[ "$RUN_AUTH_CANARY" == "1" ]]; then
+    [[ -n "${E2E_SERVICE_TOKEN:-}" ]] || fail "Missing E2E_SERVICE_TOKEN (required when PREBETA_RUN_AUTH_CANARY=1)"
+  fi
+}
+
+run_auth_canary() {
+  local rt_url="${E2E_RUNTIME_URL:-https://runtime.oneshots.co}"
+  rt_url="${rt_url%/}"
+  E2E_RUNTIME_URL="$rt_url" E2E_SERVICE_TOKEN="${E2E_SERVICE_TOKEN:-}" \
+    bash scripts/auth_canary_check.sh
 }
 
 login_token() {
@@ -87,6 +100,7 @@ summary = {
     "frames": len(lines),
     "event_counts": counts,
     "warnings": warnings,
+    "stream_done_found": bool(done),
     "done_found": bool(done),
     "session_id": (done or {}).get("session_id","") or locals().get("session_hint",""),
     "termination_reason": (done or {}).get("termination_reason",""),
@@ -95,6 +109,9 @@ summary = {
     "completion_gate_interventions": int((done or {}).get("completion_gate_interventions", 0) or 0),
     "completion_gate_reason": (done or {}).get("completion_gate_reason",""),
     "done_latency_ms": int((done or {}).get("latency_ms", 0) or 0),
+    "run_phase": (done or {}).get("run_phase",""),
+    "artifact_schema": (done or {}).get("artifact_schema",""),
+    "artifact_schema_validated": bool((done or {}).get("artifact_schema_validated", False)),
     "output_len": len(str(out)),
     "has_plan_markers": bool(re.search(r"##\s*Plan|Step\s*1|Executing now", str(out), re.I)),
     "output_head": str(out)[:220].replace("\n", " "),
@@ -199,6 +216,7 @@ if not isinstance(turns, list):
     turns = []
 tool_turns = sum(1 for r in turns if isinstance(r, dict) and str(r.get("stop_reason","")) == "tool_calls")
 summary["done_found"] = True
+summary["stream_done_found"] = bool(summary.get("stream_done_found", False))
 summary["termination_reason"] = str(session.get("termination_reason", summary.get("termination_reason","")))
 summary["turns"] = max(int(summary.get("turns", 0) or 0), len(turns))
 summary["tool_calls"] = max(int(summary.get("tool_calls", 0) or 0), tool_turns)
@@ -225,6 +243,14 @@ if len(rows) < 2:
     print("too_few_turns")
     raise SystemExit(1)
 has_tool_turn = any(str(r.get("stop_reason","")) == "tool_calls" for r in rows if isinstance(r, dict))
+if not has_tool_turn:
+    has_tool_turn = any(
+        isinstance(r, dict) and (
+            len(r.get("tool_calls") or []) > 0
+            or len(r.get("tool_results") or []) > 0
+        )
+        for r in rows
+    )
 if not has_tool_turn:
     print("missing_tool_execution_turn")
     raise SystemExit(1)
@@ -289,11 +315,51 @@ else:
 PY
 }
 
+validate_session_artifacts_manifest() {
+  local token="$1"
+  local session_id="$2"
+  local expected_kind="${3:-research_report}"
+  local artifacts_json=""
+  local attempt
+  for attempt in 1 2 3; do
+    artifacts_json="$(http_get_json "$token" "/api/v1/sessions/${session_id}/artifacts" || true)"
+    if python3 - <<'PY' "$artifacts_json" "$expected_kind"
+import json, sys
+raw = sys.argv[1]
+expected_kind = sys.argv[2]
+try:
+    rows = json.loads(raw) if raw.strip() else []
+except Exception:
+    print("artifacts_json_invalid")
+    raise SystemExit(1)
+expected_kind = sys.argv[2]
+if not isinstance(rows, list):
+    print("artifacts_not_list")
+    raise SystemExit(1)
+if len(rows) < 1:
+    print("missing_artifact_manifest_rows")
+    raise SystemExit(1)
+if expected_kind:
+    has_kind = any(isinstance(r, dict) and str(r.get("artifact_kind","")) == expected_kind for r in rows)
+    if not has_kind:
+        print(f"missing_expected_artifact_kind:{expected_kind}")
+        raise SystemExit(1)
+print("ok")
+PY
+    then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
 main() {
   require_env
   local probe_attempts_total=0
   local probe_done_missing=0
   local completion_gate_exhausted_count=0
+  local completion_contract_failed_count=0
   local completion_gate_eval_count=0
   local ttft_series=""
   local baseline_session_id=""
@@ -306,6 +372,14 @@ main() {
     bash scripts/e2e_infra_gate.sh
   else
     warn "Skipping infra gate (PREBETA_RUN_INFRA_GATE=${RUN_INFRA_GATE})"
+  fi
+
+  if [[ "$RUN_AUTH_CANARY" == "1" ]]; then
+    info "Running auth canary before beta probes"
+    run_auth_canary
+    ok "Auth canary passed"
+  else
+    warn "Skipping auth canary (PREBETA_RUN_AUTH_CANARY=${RUN_AUTH_CANARY})"
   fi
 
   info "Logging in with beta test user"
@@ -338,6 +412,8 @@ s = json.loads(sys.argv[1])
 assert s["done_found"], "missing_done_event"
 assert s["termination_reason"], "missing_termination_reason"
 assert s["session_id"], "missing_session_id"
+if bool(s.get("stream_done_found", False)):
+    assert str(s.get("run_phase","")) in ("done", "finalizing"), "missing_terminal_run_phase"
 print("ok")
 PY
   ok "Baseline done contract verified"
@@ -375,6 +451,10 @@ import json, sys
 s = json.loads(sys.argv[1])
 assert s["done_found"], "missing_done_event"
 assert s["session_id"], "missing_session_id"
+if bool(s.get("stream_done_found", False)):
+    assert str(s.get("run_phase","")) in ("done", "finalizing"), "missing_terminal_run_phase"
+    assert str(s.get("artifact_schema","")) == "research_v1", "missing_research_artifact_schema"
+    assert bool(s.get("artifact_schema_validated", False)), "artifact_schema_not_validated"
 executed_after_gate = s["completion_gate_interventions"] >= 1 and s["tool_calls"] >= 1
 guarded_terminal = (
     str(s.get("termination_reason","")) == "completion_gate_exhausted"
@@ -394,6 +474,10 @@ PY
   MODE2="${SESSION_MODE##*|}"
   ok "Completion contract enforced (session=${SESSION2}, mode=${MODE2})"
   completion_gate_eval_count=$((completion_gate_eval_count + 1))
+  term2="$(json_field "$SUM2" 'str(d.get("termination_reason",""))')"
+  if [[ "$term2" == "completion_contract_failed" ]]; then
+    completion_contract_failed_count=$((completion_contract_failed_count + 1))
+  fi
   if [[ "$MODE2" == "guarded_terminal" ]]; then
     completion_gate_exhausted_count=$((completion_gate_exhausted_count + 1))
   fi
@@ -416,6 +500,8 @@ PY
   else
     ok "Natural non-plan completion detected (gate did not need intervention)"
   fi
+  validate_session_artifacts_manifest "$TOKEN" "$SESSION2" "research_report" >/dev/null
+  ok "Run artifact manifest persisted for research session"
 
   if [[ "$RUN_REAL_TASK_CHAIN" == "1" ]]; then
     info "Probe 4: real-task orchestration chain (md -> docx -> pdf -> extract -> chart)"
@@ -470,6 +556,7 @@ PY
   fi
 
   local done_missing_rate ttft_p95_ms completion_gate_exhausted_rate
+  local completion_contract_failed_rate
   done_missing_rate="$(python3 - <<'PY' "$probe_done_missing" "$probe_attempts_total"
 import sys
 m = int(sys.argv[1]); n = int(sys.argv[2])
@@ -483,29 +570,38 @@ e = int(sys.argv[1]); n = int(sys.argv[2])
 print((e / n) if n else 0.0)
 PY
 )"
+  completion_contract_failed_rate="$(python3 - <<'PY' "$completion_contract_failed_count" "$completion_gate_eval_count"
+import sys
+e = int(sys.argv[1]); n = int(sys.argv[2])
+print((e / n) if n else 0.0)
+PY
+)"
 
   python3 - <<'PY' \
     "$done_missing_rate" "$MAX_DONE_MISSING_RATE" \
     "$ttft_p95_ms" "$MAX_TTFT_P95_MS" \
-    "$completion_gate_exhausted_rate" "$MAX_COMPLETION_GATE_EXHAUSTED_RATE"
+    "$completion_gate_exhausted_rate" "$MAX_COMPLETION_GATE_EXHAUSTED_RATE" \
+    "$completion_contract_failed_rate" "$MAX_COMPLETION_CONTRACT_FAILED_RATE"
 import sys
-dmr, dmr_max, ttft, ttft_max, cgr, cgr_max = map(float, sys.argv[1:])
+dmr, dmr_max, ttft, ttft_max, cgr, cgr_max, ccfr, ccfr_max = map(float, sys.argv[1:])
 if dmr > dmr_max:
     raise SystemExit(f"done_missing_rate {dmr:.4f} exceeds {dmr_max:.4f}")
 if ttft > ttft_max:
     raise SystemExit(f"ttft_p95_ms {ttft:.0f} exceeds {ttft_max:.0f}")
 if cgr > cgr_max:
     raise SystemExit(f"completion_gate_exhausted_rate {cgr:.4f} exceeds {cgr_max:.4f}")
+if ccfr > ccfr_max:
+    raise SystemExit(f"completion_contract_failed_rate {ccfr:.4f} exceeds {ccfr_max:.4f}")
 PY
   ok "SLO thresholds passed"
 
   python3 - <<'PY' \
     "$SUMMARY_JSON_PATH" "$SUM1" "$SUM2" \
     "$chain_summary_json" \
-    "$done_missing_rate" "$ttft_p95_ms" "$completion_gate_exhausted_rate" \
-    "$MAX_DONE_MISSING_RATE" "$MAX_TTFT_P95_MS" "$MAX_COMPLETION_GATE_EXHAUSTED_RATE"
+    "$done_missing_rate" "$ttft_p95_ms" "$completion_gate_exhausted_rate" "$completion_contract_failed_rate" \
+    "$MAX_DONE_MISSING_RATE" "$MAX_TTFT_P95_MS" "$MAX_COMPLETION_GATE_EXHAUSTED_RATE" "$MAX_COMPLETION_CONTRACT_FAILED_RATE"
 import json, pathlib, sys
-path, s1, s2, chain, dmr, ttft, cgr, dmr_max, ttft_max, cgr_max = sys.argv[1:]
+path, s1, s2, chain, dmr, ttft, cgr, ccfr, dmr_max, ttft_max, cgr_max, ccfr_max = sys.argv[1:]
 payload = {
   "overall_status": "pass",
   "probes": {
@@ -517,6 +613,7 @@ payload = {
     "done_missing_rate": {"actual": float(dmr), "max": float(dmr_max)},
     "ttft_p95_ms": {"actual": float(ttft), "max": float(ttft_max)},
     "completion_gate_exhausted_rate": {"actual": float(cgr), "max": float(cgr_max)},
+    "completion_contract_failed_rate": {"actual": float(ccfr), "max": float(ccfr_max)},
   }
 }
 pathlib.Path(path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -529,6 +626,7 @@ PY
     echo "- done_missing_rate: ${done_missing_rate} (max ${MAX_DONE_MISSING_RATE})"
     echo "- ttft_p95_ms: ${ttft_p95_ms} (max ${MAX_TTFT_P95_MS})"
     echo "- completion_gate_exhausted_rate: ${completion_gate_exhausted_rate} (max ${MAX_COMPLETION_GATE_EXHAUSTED_RATE})"
+    echo "- completion_contract_failed_rate: ${completion_contract_failed_rate} (max ${MAX_COMPLETION_CONTRACT_FAILED_RATE})"
     echo
     echo "## Probe Summaries"
     echo
