@@ -435,8 +435,8 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     // STEP 1: BOOTSTRAP — load config, skills, reasoning strategy
     // ═══════════════════════════════════════════════════════════
     //
-    // Latency: this used to live inside `step.do("bootstrap", ...)`, but every
-    // step.do adds ~300-1000ms of Workflow checkpoint overhead. All the work
+    // Latency: this used to live inside a dedicated bootstrap Workflow step,
+    // but every step.do adds ~300-1000ms of checkpoint overhead. All the work
     // here is idempotent (config load, module-cached imports, flag checks
     // with their own fallbacks) so we inline it. On workflow resume the body
     // re-runs — cheap, and each sub-call already handles its own failure.
@@ -596,8 +596,8 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
 
     // ── Latency: sandbox hydration runs as a background barrier, not a blocking step ──
     //
-    // Old behavior: `await step.do("hydrate-workspace", ...)` sat on the critical
-    // path between bootstrap and the first LLM turn. Cold sandbox container boot
+    // Old behavior: hydrate-workspace sat in its own Workflow step on the
+    // critical path between bootstrap and the first LLM turn. Cold sandbox boot
     // (5-10s) plus per-file R2 get + writeFile RPCs meant turn_start didn't fire
     // until hydration was fully done, even though the first LLM turn usually
     // just plans and doesn't touch /workspace.
@@ -1513,15 +1513,13 @@ ALWAYS:
           : 0;
         terminationReason = llm.stop_reason || "completed";
         finalOutput = llm.content;
-        // Emit content as token chunks so frontend shows streaming
-        const words = llm.content.split(/(\s+)/);
-        let chunk = "";
-        for (let i = 0; i < words.length; i++) {
-          chunk += words[i];
-          if (chunk.length > 40 || i === words.length - 1) {
-            await this.emit(p.progress_key, { type: "token", content: chunk });
-            chunk = "";
-          }
+        // Emit the full content as a single token event. The LLM call already
+        // returned the complete response — chopping it into 40-char chunks
+        // here was fake streaming that added 300-500ms of pure KV-put
+        // overhead with no user benefit. Real streaming would have to come
+        // from callLLM yielding chunks and isn't in scope for this fix.
+        if (llm.content) {
+          await this.emit(p.progress_key, { type: "token", content: llm.content });
         }
         await this.emit(p.progress_key, {
           type: "turn_end", turn, model: llm.model, cost_usd: llm.cost_usd,
@@ -1623,9 +1621,11 @@ ALWAYS:
           (sum, tc) => sum + estimateToolCost(tc.name), 0
         );
         if (totalCost + estimatedBatchCost > config.budget_limit_usd) {
+          const remainingBudget = Math.max(0, config.budget_limit_usd - totalCost);
           await this.emit(p.progress_key, {
-            type: "warning",
-            message: `Budget guard: estimated tool cost $${estimatedBatchCost.toFixed(4)} would exceed remaining budget $${(config.budget_limit_usd - totalCost).toFixed(4)}. Skipping tool execution.`,
+            type: "error",
+            message: `Stopped: running the next tools would exceed your $${config.budget_limit_usd.toFixed(2)} budget. Remaining budget is $${remainingBudget.toFixed(4)}; estimated next batch costs $${estimatedBatchCost.toFixed(4)}. Increase the budget or start a new session to continue.`,
+            code: "BUDGET_GUARD_STOP",
           });
           // Inject one assistant message with all tool_calls, then individual results
           // (LLM expects one assistant with all tool_calls, not N separate messages)
@@ -1636,7 +1636,8 @@ ALWAYS:
               content: "[Tool execution skipped — budget limit would be exceeded]",
             });
           }
-          finalOutput = llm.content || "Budget limit reached. Tool execution was skipped.";
+          terminationReason = "budget_exhausted";
+          finalOutput = llm.content || `I stopped before running more tools because it would exceed your $${config.budget_limit_usd.toFixed(2)} budget. Increase the budget or start a new session to continue.`;
           break;
         }
       }
@@ -1658,36 +1659,56 @@ ALWAYS:
             // (web-search, rag, memory, etc.) never wait.
             await awaitHydrationIfNeeded(tc.name);
 
+            // ── Heartbeat: keep the UI alive during long-running tool calls ──
+            // Without this, a bash command or browser-render taking 60-120s
+            // shows the same spinner the whole time and users assume the app
+            // has hung. setInterval first fires after 5s, so tools that
+            // finish in under 5s never emit a heartbeat.
+            const toolStartedAt = Date.now();
+            const heartbeatTimer: ReturnType<typeof setInterval> = setInterval(() => {
+              this.emit(p.progress_key, {
+                type: "tool_heartbeat",
+                name: tc.name,
+                tool_call_id: tc.id,
+                elapsed_ms: Date.now() - toolStartedAt,
+              }).catch(() => {});
+            }, 5000);
+
             const { executeTools } = await memo("tools", () => import("./runtime/tools"));
-            const results = await executeTools(
-              {
-                AI: this.env.AI, HYPERDRIVE: this.env.HYPERDRIVE,
-                VECTORIZE: this.env.VECTORIZE, STORAGE: this.env.STORAGE,
-                SANDBOX: this.env.SANDBOX, LOADER: this.env.LOADER,
-                BROWSER: this.env.BROWSER,
-                CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID,
-                CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
-                AI_GATEWAY_ID: this.env.AI_GATEWAY_ID,
-                AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN,
-                AGENT_RUN_WORKFLOW: this.env.AGENT_RUN_WORKFLOW,
-                AGENT_PROGRESS_KV: this.env.AGENT_PROGRESS_KV,
-                TELEMETRY_QUEUE: (this.env as any).TELEMETRY_QUEUE,
-                SERVICE_TOKEN: (this.env as any).SERVICE_TOKEN,
-                GPU_SERVICE_KEY: (this.env as any).GPU_SERVICE_KEY,
-                CONTROL_PLANE_URL: (this.env as any).CONTROL_PLANE_URL,
-                LOCAL_SEARCH_URL: (this.env as any).LOCAL_SEARCH_URL,
-                // MVP: No paid model API keys — Gemma only
-                DO_SESSION_ID: p.do_session_id,
-                __agentConfig: config,
-                __orgId: p.org_id || "default",
-                __agentName: p.agent_name || config?.name || "agent",
-                __channelUserId: p.channel_user_id || "",
-              } as any,
-              [{ id: tc.id, name: tc.name, arguments: tc.arguments }],
-              sessionId,
-              false,
-              config.tools,
-            );
+            let results;
+            try {
+              results = await executeTools(
+                {
+                  AI: this.env.AI, HYPERDRIVE: this.env.HYPERDRIVE,
+                  VECTORIZE: this.env.VECTORIZE, STORAGE: this.env.STORAGE,
+                  SANDBOX: this.env.SANDBOX, LOADER: this.env.LOADER,
+                  BROWSER: this.env.BROWSER,
+                  CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID,
+                  CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
+                  AI_GATEWAY_ID: this.env.AI_GATEWAY_ID,
+                  AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN,
+                  AGENT_RUN_WORKFLOW: this.env.AGENT_RUN_WORKFLOW,
+                  AGENT_PROGRESS_KV: this.env.AGENT_PROGRESS_KV,
+                  TELEMETRY_QUEUE: (this.env as any).TELEMETRY_QUEUE,
+                  SERVICE_TOKEN: (this.env as any).SERVICE_TOKEN,
+                  GPU_SERVICE_KEY: (this.env as any).GPU_SERVICE_KEY,
+                  CONTROL_PLANE_URL: (this.env as any).CONTROL_PLANE_URL,
+                  LOCAL_SEARCH_URL: (this.env as any).LOCAL_SEARCH_URL,
+                  // MVP: No paid model API keys — Gemma only
+                  DO_SESSION_ID: p.do_session_id,
+                  __agentConfig: config,
+                  __orgId: p.org_id || "default",
+                  __agentName: p.agent_name || config?.name || "agent",
+                  __channelUserId: p.channel_user_id || "",
+                } as any,
+                [{ id: tc.id, name: tc.name, arguments: tc.arguments }],
+                sessionId,
+                false,
+                config.tools,
+              );
+            } finally {
+              clearInterval(heartbeatTimer);
+            }
             const r = results[0];
             let resultStr = typeof r?.result === "string" ? r.result : JSON.stringify(r?.result || "");
 
@@ -1797,9 +1818,22 @@ ALWAYS:
       // Emit tool results + file_change events for write-file/edit-file
       for (let i = 0; i < toolResultEntries.length; i++) {
         const tr = toolResultEntries[i];
+        // UI cap is 10KB (or MAX_RESULT_CHARS, whichever is smaller). If the
+        // full result is bigger, append a visible footer so the user knows
+        // there's more — without this, the UI looks truncated and the user
+        // can't tell why the agent seems to know "more than was shown".
+        const uiCap = Math.min(10_000, MAX_RESULT_CHARS);
+        const fullResult = tr.result || "";
+        let uiResult: string;
+        if (fullResult.length > uiCap) {
+          const remaining = fullResult.length - uiCap;
+          uiResult = fullResult.slice(0, uiCap) + `\n\n… [${remaining.toLocaleString()} more characters not shown — agent sees the full result]`;
+        } else {
+          uiResult = fullResult;
+        }
         await this.emit(p.progress_key, {
           type: "tool_result", name: tr.name, tool_call_id: tr.tool_call_id,
-          result: (tr.result || "").slice(0, Math.min(10_000, MAX_RESULT_CHARS)),
+          result: uiResult,
           error: tr.error, latency_ms: tr.latency_ms,
           cost_usd: tr.cost_usd || 0,
         });
@@ -2061,6 +2095,14 @@ ALWAYS:
     // If loop ended without final answer, do one more LLM call without tools
     if (!finalOutput && totalToolCalls > 0) {
       transitionPhase("synthesizing");
+      // Tell the UI something is happening — recovery-llm can run for up
+      // to 2 minutes (with retries) and emits nothing from inside the step.
+      // Without this the UI shows dead air between turn_end and done.
+      await this.emit(p.progress_key, {
+        type: "system",
+        message: "Synthesizing final answer from the tool results…",
+        phase: "recovery",
+      });
       const recovery = await step.do("recovery-llm", {
         retries: { limit: 2, delay: "3 seconds", backoff: "exponential" },
         timeout: "2 minutes",
@@ -2095,6 +2137,14 @@ ALWAYS:
     // Build a canonical structured artifact first, then render final markdown.
     if (researchIntent && finalOutput) {
       artifactSynthesisAttempted = true;
+      // Same latency concern as recovery-llm above — this step can run for
+      // up to 2 minutes building the canonical research artifact. Let the UI
+      // show a "synthesizing" state instead of sitting silent.
+      await this.emit(p.progress_key, {
+        type: "system",
+        message: "Building structured research artifact…",
+        phase: "artifact_synthesis",
+      });
       const synthesized = await step.do("artifact-synthesis", {
         retries: { limit: 2, delay: "3 seconds", backoff: "linear" },
         timeout: "2 minutes",
