@@ -17,8 +17,10 @@ import { SKILL_CATALOG_NAMES } from "../lib/skill-catalog.generated";
  * Normalize an enabled_skills input from the LLM: coerce to string[],
  * drop unknowns (with a captured list for logging), and de-dupe.
  * Returns { valid, dropped } so callers can surface warnings.
+ *
+ * Exported for direct testing in meta-agent-chat.test.ts.
  */
-function normalizeEnabledSkills(raw: unknown): { valid: string[]; dropped: string[] } {
+export function normalizeEnabledSkills(raw: unknown): { valid: string[]; dropped: string[] } {
   if (!Array.isArray(raw)) return { valid: [], dropped: [] };
   const valid: string[] = [];
   const dropped: string[] = [];
