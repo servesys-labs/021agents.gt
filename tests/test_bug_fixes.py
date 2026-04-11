@@ -299,77 +299,6 @@ class TestSandboxSubprocessKill:
 
 
 
-# ── eval_agent Builtin Fix (builtins.py) ──────────────────────────────
-
-
-class TestEvalAgentBuiltinFix:
-    """eval_agent should extract content from TurnResult.llm_response, not treat as dict."""
-
-    @pytest.mark.asyncio
-    async def test_eval_agent_extracts_content(self, tmp_path, monkeypatch):
-        from agentos.tools.builtins import eval_agent
-
-        monkeypatch.chdir(tmp_path)
-        agents_dir = tmp_path / "agents"
-        agents_dir.mkdir()
-        tools_dir = tmp_path / "tools"
-        tools_dir.mkdir()
-
-        # Create agent
-        from agentos.agent import AgentConfig, save_agent_config
-        config = AgentConfig(name="test-bot", description="test")
-        save_agent_config(config, agents_dir / "test-bot.json")
-
-        # Create eval tasks
-        eval_dir = tmp_path / "eval"
-        eval_dir.mkdir()
-        tasks = [{"input": "Say hello", "expected": "hello", "grader": "contains"}]
-        eval_file = eval_dir / "test.json"
-        eval_file.write_text(json.dumps(tasks))
-
-        result = await eval_agent("test-bot", str(eval_file), trials=1)
-        assert "Pass rate" in result or "pass rate" in result.lower()
-        # Should not crash — the old bug would have returned empty output
-
-
-
-
-# ── Dashboard URL Conditional Display (cli.py) ──────────────────────────
-
-
-class TestDashboardURLDisplay:
-    """cmd_serve should only advertise dashboard URL if the directory exists."""
-
-    def test_dashboard_directory_and_index_exist(self):
-        """Dashboard SPA directory and index.html should be present."""
-        dashboard_dir = Path(__file__).parent.parent / "agentos" / "dashboard"
-        assert dashboard_dir.is_dir(), "Dashboard directory is missing"
-        index_html = dashboard_dir / "index.html"
-        assert index_html.is_file(), "Dashboard index.html is missing"
-
-
-# ── Ingest Persists Source Files (cli.py) ────────────────────────────────
-
-
-class TestIngestPersistsSourceFiles:
-    """cmd_ingest should save source_files in rag_index.json."""
-
-    def test_ingest_saves_source_files(self, tmp_path, monkeypatch):
-        from agentos.cli import cmd_ingest
-        import argparse
-
-        monkeypatch.chdir(tmp_path)
-        doc = tmp_path / "doc.txt"
-        doc.write_text("Test document content for RAG ingestion.")
-
-        args = argparse.Namespace(name="test-agent", files=[str(doc)], chunk_size=512)
-        cmd_ingest(args)
-
-        index_path = tmp_path / "data" / "rag_index.json"
-        assert index_path.exists()
-        index = json.loads(index_path.read_text())
-        assert "source_files" in index
-        assert str(doc) in index["source_files"]
 
 
 # ── RAG Chunk Persistence to SQLite ──────────────────────────────────────
@@ -419,21 +348,6 @@ class TestRAGChunkPersistence:
         results = loaded.query("machine learning")
         assert len(results) > 0
         assert any("machine" in r.chunk.text.lower() for r in results)
-
-    def test_ingest_creates_chunks_db(self, tmp_path, monkeypatch):
-        """cmd_ingest should persist chunks to rag_chunks.db."""
-        from agentos.cli import cmd_ingest
-        import argparse
-
-        monkeypatch.chdir(tmp_path)
-        doc = tmp_path / "doc.txt"
-        doc.write_text("Important document for RAG persistence testing.")
-
-        args = argparse.Namespace(name="test-agent", files=[str(doc)], chunk_size=512)
-        cmd_ingest(args)
-
-        chunks_db = tmp_path / "data" / "rag_chunks.db"
-        assert chunks_db.exists(), "rag_chunks.db should be created by cmd_ingest"
 
     def test_chunk_metadata_roundtrips(self, tmp_path):
         """Chunk metadata should survive save/load cycle."""

@@ -1,0 +1,94 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`refactor Phase 0 — formatSkillsPrompt output snapshot > basic plan output is stable 1`] = `
+"
+## Available Skills
+
+When the user's request matches a skill below, activate it by starting your response with: <activate-skill name="skill-name">user's request</activate-skill>
+
+**Auto-detect skills** (activate when criteria match):
+- /batch — Decompose a large task into independent sub-tasks and execute them in parallel via delegated agents. USE WHEN: When the user has a large task that can be decomposed into independent parallel sub-tasks, or explicitly asks to batch/parallelize work.
+- /review — Review changed code through 3 parallel lenses: reuse, quality, and efficiency. Then fix found issues. USE WHEN: When the user asks to review code changes, check code quality, audit recent commits, or do a code review.
+- /debug — Diagnose issues with the current agent: check error rates, circuit breaker status, recent failures, and tool health. USE WHEN: When the user reports an error, asks why something is broken, or needs help diagnosing agent or tool failures.
+- /verify — Verify that a change works by running the agent's eval test cases against it. USE WHEN: When the user asks to verify a change works, run tests, or check for regressions.
+- /remember — Review and curate the agent's memory: deduplicate facts, promote useful patterns to procedural memory, clean stale entries. USE WHEN: When the user asks to clean up, deduplicate, or curate the agent's memory.
+- /research — Deep iterative research with multi-source evidence gathering, cross-referencing, and structured synthesis. USE WHEN: When the user asks a question requiring investigation, fact-checking, market analysis, competitive analysis, or any query that benefits from searching multiple sources and synthesizing findings with citations. *(standard+ plan recommended; auto-delegates to \`research-analyst\` on current plan)*
+- /report — Generate a structured markdown research report with citations, data visualizations, and executive summary. USE WHEN: When the user asks for a written report, white paper, briefing document, research summary, or any structured deliverable with citations and analysis. *(standard+ plan recommended; auto-delegates to \`research-analyst\` on current plan)*
+- /design — Apply professional design foundations — color palettes, typography, data visualization rules, accessibility standards. Use when creating any visual output. USE WHEN: When the user asks to design something visual, choose colors, create a palette, select typography, or needs design guidance for any output format (web, PDF, slides, charts).
+- /chart — Generate publication-quality charts, graphs, and data visualizations using Python. USE WHEN: When the user asks to create a chart, graph, plot, visualization, or visual representation of data. *(standard+ plan recommended; auto-delegates to \`data-analyst\` on current plan)*
+- /pdf — Create, read, extract, or fill PDF documents. Supports text extraction, table extraction, PDF generation, and form filling. USE WHEN: When the user asks to create, read, extract text from, merge, split, fill forms in, or convert a PDF document. *(standard+ plan recommended; auto-delegates to \`pdf-specialist\` on current plan)*
+- /spreadsheet — Create or analyze Excel spreadsheets with formulas, formatting, charts, and data analysis. USE WHEN: When the user asks to create, edit, or analyze an Excel spreadsheet, .xlsx file, or asks for data in spreadsheet format with formatting. *(standard+ plan recommended; auto-delegates to \`data-analyst\` on current plan)*
+- /analyze — Analyze data files (CSV, JSON, Excel) — clean, summarize, find patterns, and generate insights. USE WHEN: When the user provides or references data and asks for analysis, insights, trends, patterns, statistics, or summaries. *(standard+ plan recommended; auto-delegates to \`data-analyst\` on current plan)*
+- /website — Build a complete website or web app — design, code, and test. Covers landing pages, portfolios, web apps, and browser games. USE WHEN: When the user asks to build a website, web app, landing page, portfolio site, or any web-based project.
+- /game — Build a browser game — 2D Canvas or 3D WebGL with Three.js. Covers game loop, physics, input, audio, and deployment. USE WHEN: When the user asks to build a browser game, 2D game, 3D game, or interactive game experience.
+- /docx — Create, edit, and convert Word documents (.docx). Supports creation from scratch, template editing, PDF-to-Word conversion, and text extraction. USE WHEN: When the user asks to create, edit, convert, or extract text from a Word document, .docx file, or asks for a formatted document output.
+- /pptx — Create and edit PowerPoint presentations (.pptx). Professional slide design with data visualization, layout variety, and consistent typography. USE WHEN: When the user asks to create, edit, or design a PowerPoint presentation, slide deck, or .pptx file.
+
+**Manual skills** (invoke with /command):
+- /skillify — Extract a repeatable process from this conversation into a reusable skill definition.
+- /schedule — Schedule an agent to run a task on a recurring interval (e.g., 'every morning at 9am check for new issues').
+- /docs — Load relevant API documentation, SDK reference, or framework guides based on the current project context.
+"
+`;
+
+exports[`refactor Phase 0 — formatSkillsPrompt output snapshot > premium plan output is stable 1`] = `
+"
+## Available Skills
+
+When the user's request matches a skill below, activate it by starting your response with: <activate-skill name="skill-name">user's request</activate-skill>
+
+**Auto-detect skills** (activate when criteria match):
+- /batch — Decompose a large task into independent sub-tasks and execute them in parallel via delegated agents. USE WHEN: When the user has a large task that can be decomposed into independent parallel sub-tasks, or explicitly asks to batch/parallelize work.
+- /review — Review changed code through 3 parallel lenses: reuse, quality, and efficiency. Then fix found issues. USE WHEN: When the user asks to review code changes, check code quality, audit recent commits, or do a code review.
+- /debug — Diagnose issues with the current agent: check error rates, circuit breaker status, recent failures, and tool health. USE WHEN: When the user reports an error, asks why something is broken, or needs help diagnosing agent or tool failures.
+- /verify — Verify that a change works by running the agent's eval test cases against it. USE WHEN: When the user asks to verify a change works, run tests, or check for regressions.
+- /remember — Review and curate the agent's memory: deduplicate facts, promote useful patterns to procedural memory, clean stale entries. USE WHEN: When the user asks to clean up, deduplicate, or curate the agent's memory.
+- /research — Deep iterative research with multi-source evidence gathering, cross-referencing, and structured synthesis. USE WHEN: When the user asks a question requiring investigation, fact-checking, market analysis, competitive analysis, or any query that benefits from searching multiple sources and synthesizing findings with citations.
+- /report — Generate a structured markdown research report with citations, data visualizations, and executive summary. USE WHEN: When the user asks for a written report, white paper, briefing document, research summary, or any structured deliverable with citations and analysis.
+- /design — Apply professional design foundations — color palettes, typography, data visualization rules, accessibility standards. Use when creating any visual output. USE WHEN: When the user asks to design something visual, choose colors, create a palette, select typography, or needs design guidance for any output format (web, PDF, slides, charts).
+- /chart — Generate publication-quality charts, graphs, and data visualizations using Python. USE WHEN: When the user asks to create a chart, graph, plot, visualization, or visual representation of data.
+- /pdf — Create, read, extract, or fill PDF documents. Supports text extraction, table extraction, PDF generation, and form filling. USE WHEN: When the user asks to create, read, extract text from, merge, split, fill forms in, or convert a PDF document.
+- /spreadsheet — Create or analyze Excel spreadsheets with formulas, formatting, charts, and data analysis. USE WHEN: When the user asks to create, edit, or analyze an Excel spreadsheet, .xlsx file, or asks for data in spreadsheet format with formatting.
+- /analyze — Analyze data files (CSV, JSON, Excel) — clean, summarize, find patterns, and generate insights. USE WHEN: When the user provides or references data and asks for analysis, insights, trends, patterns, statistics, or summaries.
+- /website — Build a complete website or web app — design, code, and test. Covers landing pages, portfolios, web apps, and browser games. USE WHEN: When the user asks to build a website, web app, landing page, portfolio site, or any web-based project.
+- /game — Build a browser game — 2D Canvas or 3D WebGL with Three.js. Covers game loop, physics, input, audio, and deployment. USE WHEN: When the user asks to build a browser game, 2D game, 3D game, or interactive game experience.
+- /docx — Create, edit, and convert Word documents (.docx). Supports creation from scratch, template editing, PDF-to-Word conversion, and text extraction. USE WHEN: When the user asks to create, edit, convert, or extract text from a Word document, .docx file, or asks for a formatted document output.
+- /pptx — Create and edit PowerPoint presentations (.pptx). Professional slide design with data visualization, layout variety, and consistent typography. USE WHEN: When the user asks to create, edit, or design a PowerPoint presentation, slide deck, or .pptx file.
+
+**Manual skills** (invoke with /command):
+- /skillify — Extract a repeatable process from this conversation into a reusable skill definition.
+- /schedule — Schedule an agent to run a task on a recurring interval (e.g., 'every morning at 9am check for new issues').
+- /docs — Load relevant API documentation, SDK reference, or framework guides based on the current project context.
+"
+`;
+
+exports[`refactor Phase 0 — formatSkillsPrompt output snapshot > standard plan output is stable 1`] = `
+"
+## Available Skills
+
+When the user's request matches a skill below, activate it by starting your response with: <activate-skill name="skill-name">user's request</activate-skill>
+
+**Auto-detect skills** (activate when criteria match):
+- /batch — Decompose a large task into independent sub-tasks and execute them in parallel via delegated agents. USE WHEN: When the user has a large task that can be decomposed into independent parallel sub-tasks, or explicitly asks to batch/parallelize work.
+- /review — Review changed code through 3 parallel lenses: reuse, quality, and efficiency. Then fix found issues. USE WHEN: When the user asks to review code changes, check code quality, audit recent commits, or do a code review.
+- /debug — Diagnose issues with the current agent: check error rates, circuit breaker status, recent failures, and tool health. USE WHEN: When the user reports an error, asks why something is broken, or needs help diagnosing agent or tool failures.
+- /verify — Verify that a change works by running the agent's eval test cases against it. USE WHEN: When the user asks to verify a change works, run tests, or check for regressions.
+- /remember — Review and curate the agent's memory: deduplicate facts, promote useful patterns to procedural memory, clean stale entries. USE WHEN: When the user asks to clean up, deduplicate, or curate the agent's memory.
+- /research — Deep iterative research with multi-source evidence gathering, cross-referencing, and structured synthesis. USE WHEN: When the user asks a question requiring investigation, fact-checking, market analysis, competitive analysis, or any query that benefits from searching multiple sources and synthesizing findings with citations.
+- /report — Generate a structured markdown research report with citations, data visualizations, and executive summary. USE WHEN: When the user asks for a written report, white paper, briefing document, research summary, or any structured deliverable with citations and analysis.
+- /design — Apply professional design foundations — color palettes, typography, data visualization rules, accessibility standards. Use when creating any visual output. USE WHEN: When the user asks to design something visual, choose colors, create a palette, select typography, or needs design guidance for any output format (web, PDF, slides, charts).
+- /chart — Generate publication-quality charts, graphs, and data visualizations using Python. USE WHEN: When the user asks to create a chart, graph, plot, visualization, or visual representation of data.
+- /pdf — Create, read, extract, or fill PDF documents. Supports text extraction, table extraction, PDF generation, and form filling. USE WHEN: When the user asks to create, read, extract text from, merge, split, fill forms in, or convert a PDF document.
+- /spreadsheet — Create or analyze Excel spreadsheets with formulas, formatting, charts, and data analysis. USE WHEN: When the user asks to create, edit, or analyze an Excel spreadsheet, .xlsx file, or asks for data in spreadsheet format with formatting.
+- /analyze — Analyze data files (CSV, JSON, Excel) — clean, summarize, find patterns, and generate insights. USE WHEN: When the user provides or references data and asks for analysis, insights, trends, patterns, statistics, or summaries.
+- /website — Build a complete website or web app — design, code, and test. Covers landing pages, portfolios, web apps, and browser games. USE WHEN: When the user asks to build a website, web app, landing page, portfolio site, or any web-based project.
+- /game — Build a browser game — 2D Canvas or 3D WebGL with Three.js. Covers game loop, physics, input, audio, and deployment. USE WHEN: When the user asks to build a browser game, 2D game, 3D game, or interactive game experience.
+- /docx — Create, edit, and convert Word documents (.docx). Supports creation from scratch, template editing, PDF-to-Word conversion, and text extraction. USE WHEN: When the user asks to create, edit, convert, or extract text from a Word document, .docx file, or asks for a formatted document output.
+- /pptx — Create and edit PowerPoint presentations (.pptx). Professional slide design with data visualization, layout variety, and consistent typography. USE WHEN: When the user asks to create, edit, or design a PowerPoint presentation, slide deck, or .pptx file.
+
+**Manual skills** (invoke with /command):
+- /skillify — Extract a repeatable process from this conversation into a reusable skill definition.
+- /schedule — Schedule an agent to run a task on a recurring interval (e.g., 'every morning at 9am check for new issues').
+- /docs — Load relevant API documentation, SDK reference, or framework guides based on the current project context.
+"
+`;
