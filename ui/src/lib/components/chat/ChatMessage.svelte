@@ -108,6 +108,15 @@
 
   let { message, streaming, agentName, index = 0, onEdit, onRegenerate, onDelete }: Props = $props();
 
+  function toFiniteNumber(value: unknown): number | undefined {
+    if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+    if (typeof value === "string" && value.trim().length > 0) {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : undefined;
+    }
+    return undefined;
+  }
+
   let renderedHtml = $state("");
   let spinnerVerbIndex = $state(Math.floor(Math.random() * SPINNER_VERBS.length));
 
@@ -185,13 +194,18 @@
 
   // Statistics
   let hasStats = $derived(
-    message.model || (message.cost_usd !== undefined && message.cost_usd > 0) ||
-    message.input_tokens || message.output_tokens || message.latency_ms
+    message.model || (toFiniteNumber(message.cost_usd) ?? 0) > 0 ||
+    toFiniteNumber(message.input_tokens) || toFiniteNumber(message.output_tokens) || toFiniteNumber(message.latency_ms)
   );
 
   let totalToolLatency = $derived(
     (message.toolCalls ?? []).reduce((sum, tc) => sum + (tc.latency_ms ?? 0), 0)
   );
+
+  let safeInputTokens = $derived(toFiniteNumber(message.input_tokens));
+  let safeOutputTokens = $derived(toFiniteNumber(message.output_tokens));
+  let safeLatencyMs = $derived(toFiniteNumber(message.latency_ms));
+  let safeCostUsd = $derived(toFiniteNumber(message.cost_usd));
 </script>
 
 {#if message.role === "user"}
@@ -309,18 +323,18 @@
       {#if hasStats || totalToolLatency > 0}
         <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
           <!-- Model name hidden for MVP -->
-          {#if message.input_tokens || message.output_tokens}
+          {#if safeInputTokens !== undefined || safeOutputTokens !== undefined}
             <span class="flex items-center gap-1">
               <svg xmlns="http://www.w3.org/2000/svg" class="h-2.5 w-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
-              {#if message.input_tokens}{message.input_tokens.toLocaleString()} in{/if}
-              {#if message.input_tokens && message.output_tokens} / {/if}
-              {#if message.output_tokens}{message.output_tokens.toLocaleString()} out{/if}
+              {#if safeInputTokens !== undefined}{safeInputTokens.toLocaleString()} in{/if}
+              {#if safeInputTokens !== undefined && safeOutputTokens !== undefined} / {/if}
+              {#if safeOutputTokens !== undefined}{safeOutputTokens.toLocaleString()} out{/if}
             </span>
           {/if}
-          {#if message.latency_ms}
+          {#if safeLatencyMs !== undefined}
             <span class="flex items-center gap-1">
               <svg xmlns="http://www.w3.org/2000/svg" class="h-2.5 w-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-              {message.latency_ms < 1000 ? `${message.latency_ms}ms` : `${(message.latency_ms / 1000).toFixed(1)}s`}
+              {safeLatencyMs < 1000 ? `${safeLatencyMs}ms` : `${(safeLatencyMs / 1000).toFixed(1)}s`}
             </span>
           {/if}
           {#if totalToolLatency > 0}
@@ -331,8 +345,8 @@
               {(message.toolCalls ?? []).length} tools, {totalToolLatency < 1000 ? `${totalToolLatency}ms` : `${(totalToolLatency / 1000).toFixed(1)}s`}
             </span>
           {/if}
-          {#if message.cost_usd !== undefined && message.cost_usd > 0}
-            <span>${message.cost_usd < 0.01 ? message.cost_usd.toFixed(4) : message.cost_usd.toFixed(3)}</span>
+          {#if safeCostUsd !== undefined && safeCostUsd > 0}
+            <span>${safeCostUsd < 0.01 ? safeCostUsd.toFixed(4) : safeCostUsd.toFixed(3)}</span>
           {/if}
         </div>
       {/if}

@@ -151,12 +151,27 @@
   }
 
   /** Parse tool result for embedded images (base64 data URIs or URLs) */
+  function isValidResourceUrl(src: string): boolean {
+    if (!src || typeof src !== "string") return false;
+    if (src.startsWith("data:image/")) return true;
+    if (!src.startsWith("http://") && !src.startsWith("https://")) return false;
+    try {
+      const u = new URL(src);
+      return u.protocol === "http:" || u.protocol === "https:";
+    } catch {
+      return false;
+    }
+  }
+
   function parseResultImages(text: string): { lines: string[]; images: { src: string; alt: string }[] } {
     const images: { src: string; alt: string }[] = [];
     const urlRegex = /(data:image\/[^;]+;base64,[^\s"']+|https?:\/\/[^\s"']+\.(?:png|jpg|jpeg|gif|webp|svg))/gi;
     let match;
     while ((match = urlRegex.exec(text)) !== null) {
-      images.push({ src: match[1], alt: "Tool result image" });
+      const candidate = String(match[1] || "").trim();
+      if (isValidResourceUrl(candidate)) {
+        images.push({ src: candidate, alt: "Tool result image" });
+      }
     }
     // Truncate long results
     const maxLen = 5000;
@@ -200,7 +215,9 @@
 
   function toDataSrc(content: string, mimeType: string): string {
     if (content.startsWith("data:")) return content;
-    if (content.startsWith("http://") || content.startsWith("https://")) return content;
+    if (content.startsWith("http://") || content.startsWith("https://")) {
+      return isValidResourceUrl(content) ? content : "";
+    }
     if (mimeType === "image/svg+xml" && content.includes("<svg")) {
       return `data:image/svg+xml;utf8,${encodeURIComponent(content)}`;
     }

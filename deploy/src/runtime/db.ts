@@ -189,7 +189,7 @@ export async function loadAgentConfig(
     "create-agent", "list-agents", "run-agent",
     "marketplace-search", "a2a-send", "feed-post",
     "image-generate", "vision-analyze",
-    "memory-save", "memory-recall",
+    "memory", "memory-save", "memory-recall", "memory-health", "session-search",
     "text-to-speech", "mcp-call",
     "save-project", "load-project", "load-folder",
     "create-schedule", "list-schedules", "delete-schedule",
