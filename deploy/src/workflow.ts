@@ -2248,6 +2248,33 @@ ALWAYS:
           artifact_schema: "research_v1",
         });
       } else {
+        // Degraded path: synthesis attempted but either the LLM didn't
+        // produce parseable JSON or the structure didn't validate. Still
+        // persist a manifest row so downstream observability/audit can
+        // see that research synthesis was attempted for this session.
+        // Body is the original textual draft rather than a rendered
+        // artifact — users get the best output we could produce.
+        artifactManifestRecords.push({
+          session_id: sessionId,
+          org_id: p.org_id || "",
+          agent_name: p.agent_name || config?.name || "agentos",
+          turn_number: lastWorkflowTurn || 0,
+          artifact_name: "research-report.md",
+          artifact_kind: "research_report",
+          mime_type: "text/markdown",
+          size_bytes: finalOutput.length,
+          storage_key: `inline://${sessionId}/research-report.md`,
+          source_tool: "artifact-synthesis",
+          source_event: "workflow",
+          schema_version: "research_v1",
+          status: "failed",
+          metadata: {
+            reason: artifact
+              ? "research_v1_schema_validation_failed"
+              : "non_json_synthesis_output",
+            draft_chars: finalOutput.length,
+          },
+        });
         await this.emit(p.progress_key, {
           type: "warning",
           message: "Deep-research artifact synthesis failed validation; falling back to textual output.",
