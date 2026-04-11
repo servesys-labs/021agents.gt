@@ -421,6 +421,92 @@ memoryRoutes.openapi(clearProceduresRoute, async (c): Promise<any> => {
   });
 });
 
+const memoryHealthRoute = createRoute({
+  method: "get",
+  path: "/{agent_name}/health",
+  tags: ["Memory"],
+  summary: "Get memory health/status for an agent",
+  middleware: [requireScope("memory:read")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Memory health summary",
+      content: {
+        "application/json": {
+          schema: z.object({
+            agent: z.string(),
+            semantic_facts_count: z.number(),
+            episodic_entries_count: z.number(),
+            procedures_count: z.number(),
+            curated_entries_count: z.number(),
+            stale_facts_30d_count: z.number(),
+            latest_memory_at: z.string().nullable(),
+          }),
+        },
+      },
+    },
+    ...errorResponses(404),
+  },
+});
+memoryRoutes.openapi(memoryHealthRoute, async (c): Promise<any> => {
+  const { agent_name: agentName } = c.req.valid("param");
+  const user = c.get("user");
+
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const agentCheck = await sql`
+      SELECT 1 FROM agents WHERE name = ${agentName}
+    `;
+    if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
+
+    const [factsCountRows, episodesCountRows, proceduresCountRows, staleFactsRows, latestFactRows, latestEpisodeRows, latestProcedureRows] =
+      await Promise.all([
+        sql`SELECT COUNT(*)::int AS count FROM facts WHERE agent_name = ${agentName}`,
+        sql`SELECT COUNT(*)::int AS count FROM episodes WHERE agent_name = ${agentName}`,
+        sql`SELECT COUNT(*)::int AS count FROM procedures WHERE agent_name = ${agentName}`,
+        sql`
+          SELECT COUNT(*)::int AS count
+          FROM facts
+          WHERE agent_name = ${agentName}
+            AND created_at < NOW() - INTERVAL '30 days'
+        `,
+        sql`SELECT MAX(created_at) AS latest FROM facts WHERE agent_name = ${agentName}`,
+        sql`SELECT MAX(created_at) AS latest FROM episodes WHERE agent_name = ${agentName}`,
+        sql`SELECT MAX(updated_at) AS latest FROM procedures WHERE agent_name = ${agentName}`,
+      ]);
+
+    let curatedEntriesCount = 0;
+    try {
+      const curatedRows = await sql`
+        SELECT COUNT(*)::int AS count
+        FROM curated_memory
+        WHERE agent_name = ${agentName}
+      `;
+      curatedEntriesCount = Number(curatedRows?.[0]?.count || 0);
+    } catch {
+      curatedEntriesCount = 0;
+    }
+
+    const timestamps = [
+      latestFactRows?.[0]?.latest ? Date.parse(String(latestFactRows[0].latest)) : NaN,
+      latestEpisodeRows?.[0]?.latest ? Date.parse(String(latestEpisodeRows[0].latest)) : NaN,
+      latestProcedureRows?.[0]?.latest ? Date.parse(String(latestProcedureRows[0].latest)) : NaN,
+    ].filter((ts) => Number.isFinite(ts)) as number[];
+    const latestMemoryAt = timestamps.length > 0 ? new Date(Math.max(...timestamps)).toISOString() : null;
+
+    return c.json({
+      agent: agentName,
+      semantic_facts_count: Number(factsCountRows?.[0]?.count || 0),
+      episodic_entries_count: Number(episodesCountRows?.[0]?.count || 0),
+      procedures_count: Number(proceduresCountRows?.[0]?.count || 0),
+      curated_entries_count: curatedEntriesCount,
+      stale_facts_30d_count: Number(staleFactsRows?.[0]?.count || 0),
+      latest_memory_at: latestMemoryAt,
+    });
+  });
+});
+
 // ── Working Memory (not persisted, returns empty for edge architecture) ──
 
 const getWorkingMemoryRoute = createRoute({

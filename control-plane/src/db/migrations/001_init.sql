@@ -1177,6 +1177,29 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_facts_semantic
 CREATE UNIQUE INDEX IF NOT EXISTS uq_facts_team_content
   ON facts (org_id, content) WHERE scope = 'team';
 
+-- Hermes-style curated memory layer (stable startup snapshot source)
+CREATE TABLE IF NOT EXISTS curated_memory (
+  id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  org_id        TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+  agent_name    TEXT NOT NULL DEFAULT '',
+  target        TEXT NOT NULL CHECK (target IN ('memory', 'user')),
+  content       TEXT NOT NULL DEFAULT '',
+  content_hash  TEXT NOT NULL DEFAULT '',
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_curated_memory_agent_target
+  ON curated_memory (org_id, agent_name, target, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS curated_memory_config (
+  org_id              TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+  agent_name          TEXT NOT NULL DEFAULT '',
+  memory_char_limit   INT NOT NULL DEFAULT 2200,
+  user_char_limit     INT NOT NULL DEFAULT 1375,
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (org_id, agent_name)
+);
+
 -- Merged: episodes + episodic_memories
 CREATE TABLE IF NOT EXISTS episodes (
   id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
