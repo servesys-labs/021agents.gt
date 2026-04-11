@@ -1,6 +1,5 @@
 /**
  * Remediation engine -- generates fix suggestions for issues.
- * Ported from agentos/issues/remediation.py.
  */
 
 const FIX_TEMPLATES: Record<string, string[]> = {

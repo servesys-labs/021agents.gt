@@ -1,7 +1,6 @@
 /**
  * A2A (Agent-to-Agent) protocol routes — HTTP endpoints for agent interoperability.
  *
- * Ported from agentos/a2a/server.py
  *
  * Routes:
  *   GET  /.well-known/agent.json      — Agent card endpoint (discovery)

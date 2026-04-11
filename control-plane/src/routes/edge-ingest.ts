@@ -1,6 +1,5 @@
 /**
  * Edge ingest router — accept session/turn data from runtime worker.
- * Ported from agentos/api/routers/edge_ingest.py
  *
  * These endpoints are called by the runtime worker to persist telemetry.
  * Auth is via SERVICE_TOKEN, not user JWT.

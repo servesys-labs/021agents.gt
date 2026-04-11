@@ -1,6 +1,5 @@
 /**
  * Projects router — org > project > agents hierarchy, canvas layout, meta-agent bootstrap.
- * Ported from agentos/api/routers/projects.py
  */
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";

@@ -1,6 +1,5 @@
 /**
  * Observability router — summary, daily cost, traces, annotations, feedback, lineage, meta-control-plane.
- * Ported from agentos/api/routers/observability.py
  */
 import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";

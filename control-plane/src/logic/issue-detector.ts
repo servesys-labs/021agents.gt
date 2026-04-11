@@ -1,6 +1,5 @@
 /**
  * Issue detector -- auto-creates issues from session data.
- * Ported from agentos/issues/detector.py.
  */
 
 const QUALITY_THRESHOLD = 0.4;

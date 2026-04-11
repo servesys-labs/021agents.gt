@@ -1,6 +1,5 @@
 /**
  * Secrets router — encrypted secrets vault per org/project/env.
- * Ported from agentos/api/routers/secrets.py
  *
  * Uses Fernet encryption (AES-CBC + HMAC-SHA256) via Web Crypto.
  */

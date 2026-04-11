@@ -1,6 +1,5 @@
 /**
  * Gold images routes -- CRUD, drift detection, compliance, audit.
- * Ported from agentos/api/routers/gold_images.py.
  */
 import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";

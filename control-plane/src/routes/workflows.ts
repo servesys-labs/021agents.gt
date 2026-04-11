@@ -1,6 +1,5 @@
 /**
  * Workflows router — multi-agent DAG pipelines.
- * Ported from agentos/api/routers/workflows.py
  *
  * Topological sort + cycle detection in logic/workflow-validator.ts.
  * Run endpoint returns 410 (edge-only).

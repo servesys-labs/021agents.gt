@@ -1,6 +1,5 @@
 /**
  * Connectors router — Pipedream hub abstraction, OAuth status, tool calls.
- * Ported from agentos/api/routers/connectors.py
  */
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";

@@ -1,6 +1,5 @@
 /**
  * Voice webhook verification + payload handling (Vapi, Tavus).
- * Ported from agentos/integrations/voice_platforms/{vapi,tavus}.py
  */
 import type { Sql } from "../db/client";
 import { deductCredits } from "./credits";

@@ -1,6 +1,5 @@
 /**
  * Issues routes -- CRUD, detection, classification, remediation.
- * Ported from agentos/api/routers/issues.py.
  */
 import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";

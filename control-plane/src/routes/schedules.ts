@@ -1,6 +1,5 @@
 /**
  * Schedules router — CRUD for scheduled agent runs with cron parsing.
- * Ported from agentos/api/routers/schedules.py
  */
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";

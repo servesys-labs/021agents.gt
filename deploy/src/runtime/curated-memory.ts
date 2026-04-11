@@ -13,7 +13,7 @@ const INVISIBLE_CHARS = new Set([
 ]);
 
 const THREAT_PATTERNS: Array<{ regex: RegExp; id: string }> = [
-  { regex: /ignore\s+(previous|all|above|prior)\s+instructions/i, id: "prompt_injection" },
+  { regex: /ignore\s+(?:(?:previous|all|above|prior)\s+)+instructions/i, id: "prompt_injection" },
   { regex: /you\s+are\s+now\s+/i, id: "role_hijack" },
   { regex: /do\s+not\s+tell\s+the\s+user/i, id: "deception_hide" },
   { regex: /system\s+prompt\s+override/i, id: "sys_prompt_override" },

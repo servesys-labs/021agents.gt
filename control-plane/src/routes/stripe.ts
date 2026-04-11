@@ -1,6 +1,5 @@
 /**
  * Stripe billing router — checkout, portal, webhooks, subscription status.
- * Ported from agentos/api/routers/stripe_billing.py
  *
  * Uses Stripe npm package via c.env.STRIPE_SECRET_KEY.
  */

@@ -1,6 +1,5 @@
 /**
  * Middleware status router — status, stats, and event history.
- * Ported from agentos/api/routers/middleware.py
  */
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";

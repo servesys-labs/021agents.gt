@@ -1,6 +1,5 @@
 /**
  * Voice router — Vapi call listing/detail, platform calls, cross-platform summary.
- * Ported from agentos/api/routers/voice_webhooks.py
  */
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";

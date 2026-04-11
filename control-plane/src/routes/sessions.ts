@@ -1,6 +1,5 @@
 /**
  * Sessions router — list, detail, turns, traces, feedback.
- * Ported from agentos/api/routers/sessions.py
  */
 import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";

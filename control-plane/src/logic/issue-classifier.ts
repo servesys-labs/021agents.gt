@@ -1,6 +1,5 @@
 /**
  * Issue classifier -- categorizes issues by type and severity.
- * Ported from agentos/issues/classifier.py.
  */
 
 const CATEGORY_PATTERNS: Record<string, RegExp[]> = {

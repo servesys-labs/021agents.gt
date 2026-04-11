@@ -1,6 +1,5 @@
 /**
  * Retention router — data lifecycle, redaction policies.
- * Ported from agentos/api/routers/retention.py
  */
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";

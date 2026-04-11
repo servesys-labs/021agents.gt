@@ -1,6 +1,5 @@
 /**
  * RAG router — document ingestion via R2, chunking, vectorize embedding.
- * Ported from agentos/api/routers/rag.py
  */
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";

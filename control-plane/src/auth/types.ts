@@ -1,6 +1,5 @@
 /**
  * Auth types — CurrentUser, scopes, role hierarchy.
- * Ported from agentos/api/deps.py.
  */
 
 export const ROLE_HIERARCHY: Record<string, number> = {

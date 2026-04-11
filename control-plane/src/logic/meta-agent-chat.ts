@@ -11,7 +11,7 @@
 import { withOrgDb } from "../db/client";
 import { generateEvolutionSuggestions } from "./meta-agent";
 import { parseJsonColumn } from "../lib/parse-json-column";
-import { SKILL_CATALOG_NAMES } from "../lib/skill-catalog.generated";
+import { SKILL_CATALOG, SKILL_CATALOG_NAMES } from "../lib/skill-catalog.generated";
 
 /**
  * Normalize an enabled_skills input from the LLM: coerce to string[],
@@ -2632,17 +2632,16 @@ async function executeTool(
             WHERE org_id = ${ctx.orgId} AND (agent_name IS NULL OR agent_name = ${ctx.agentName})
             ORDER BY name
           `;
-          // Also list built-in skills
-          const builtIn = [
-            { name: "/batch", description: "Parallel task decomposition", category: "workflow", built_in: true },
-            { name: "/review", description: "Three-lens code review (reuse, quality, efficiency)", category: "code", built_in: true },
-            { name: "/debug", description: "Session diagnostics and error analysis", category: "ops", built_in: true },
-            { name: "/verify", description: "Run tests against changes", category: "code", built_in: true },
-            { name: "/remember", description: "Memory curation and deduplication", category: "workflow", built_in: true },
-            { name: "/skillify", description: "Extract reusable skill from a process", category: "workflow", built_in: true },
-            { name: "/schedule", description: "Create recurring scheduled tasks", category: "ops", built_in: true },
-            { name: "/docs", description: "Load reference documentation", category: "data", built_in: true },
-          ];
+          // Bundled skills — source of truth is skills/public/<name>/SKILL.md,
+          // emitted into SKILL_CATALOG by the control-plane catalog bundler.
+          const builtIn = SKILL_CATALOG.map((s) => ({
+            name: `/${s.name}`,
+            description: s.description,
+            when_to_use: s.when_to_use,
+            min_plan: s.min_plan,
+            delegate_agent: s.delegate_agent,
+            built_in: true,
+          }));
           return JSON.stringify({
             built_in_skills: builtIn,
             custom_skills: rows.map((r: any) => ({

@@ -164,7 +164,6 @@ export interface ToolDefinition {
 }
 
 // ── Events (telemetry) ─────────────────────────────────────────
-// Event types aligned with backend agentos/core/events.py EventType enum.
 
 export type RuntimeEventType =
   // Core lifecycle

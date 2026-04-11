@@ -2,7 +2,6 @@
  * AIVSS -- AI Vulnerability Scoring System.
  *
  * CVSS-like scoring for AI agent vulnerabilities.
- * Ported from agentos/security/aivss.py.
  */
 
 // Score weights per component value

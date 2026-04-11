@@ -1,6 +1,5 @@
 /**
  * SLOs router — success rate, latency, cost thresholds.
- * Ported from agentos/api/routers/slos.py
  */
 import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";

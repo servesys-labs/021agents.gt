@@ -1,6 +1,5 @@
 /**
  * Agents router — CRUD, versions, clone, import/export, create-from-description.
- * Ported from agentos/api/routers/agents.py.
  */
 import { createRoute, z } from "@hono/zod-openapi";
 import type { Env } from "../env";
