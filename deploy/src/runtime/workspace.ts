@@ -25,6 +25,7 @@
  */
 
 import type { RuntimeEnv } from "./types";
+import { log } from "./log";
 
 export interface FileEntry {
   path: string;
@@ -147,33 +148,51 @@ export async function hydrateWorkspace(
 
   await sandbox.exec("mkdir -p /workspace", { timeout: 5 }).catch(() => {});
 
-  let restored = 0;
-  let skipped = 0;
-
+  // Pre-create every directory the manifest needs in a SINGLE shell call.
+  // The old per-file `mkdir -p` inside the loop did one RPC per file.
+  const dirs = new Set<string>();
   for (const entry of manifest.files) {
     const localPath = `/workspace/${entry.path}`;
-
-    // Always re-download — hash comparison is unreliable across sandbox restarts.
-    // The sha256sum shell command had quoting issues and the hash encoding could
-    // diverge from the JS quickHash. The overhead is acceptable: files are cached
-    // in R2 and reads are fast.
-
-    // Download from R2 and write to sandbox
-    const key = fileKey(org, agent, localPath, userId);
-    const obj = await storage.get(key);
-    if (!obj) {
-      console.warn(`[workspace] Manifest lists ${entry.path} but R2 object not found — skipping (possible partial delete)`);
-      continue;
-    }
-
-    const content = await obj.text();
     const dir = localPath.substring(0, localPath.lastIndexOf("/"));
-    if (dir) await sandbox.exec(`mkdir -p "${dir}"`, { timeout: 5 }).catch(() => {});
-    await sandbox.writeFile(localPath, content);
-    restored++;
+    if (dir) dirs.add(dir);
+  }
+  if (dirs.size > 0) {
+    const mkdirArgs = [...dirs].map((d) => `"${d.replace(/"/g, '\\"')}"`).join(" ");
+    await sandbox.exec(`mkdir -p ${mkdirArgs}`, { timeout: 10 }).catch(() => {});
   }
 
-  return { restored, skipped };
+  // Bounded-parallel hydration. Each file is an independent R2 get + sandbox
+  // writeFile RPC — awaiting them sequentially used to add 100-500ms per file
+  // on the critical path before turn_start.
+  const CONCURRENCY = 8;
+  const results = { restored: 0, skipped: 0 };
+  const queue = [...manifest.files];
+
+  async function worker(): Promise<void> {
+    while (queue.length > 0) {
+      const entry = queue.shift();
+      if (!entry) return;
+      const localPath = `/workspace/${entry.path}`;
+      const key = fileKey(org, agent, localPath, userId);
+      try {
+        const obj = await storage.get(key);
+        if (!obj) {
+          log.warn(`[workspace] Manifest lists ${entry.path} but R2 object not found — skipping (possible partial delete)`);
+          results.skipped++;
+          continue;
+        }
+        const content = await obj.text();
+        await sandbox.writeFile(localPath, content);
+        results.restored++;
+      } catch (err) {
+        log.warn(`[workspace] Failed to hydrate ${entry.path}: ${err instanceof Error ? err.message : err}`);
+        results.skipped++;
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, manifest.files.length) }, () => worker()));
+  return results;
 }
 
 /**
