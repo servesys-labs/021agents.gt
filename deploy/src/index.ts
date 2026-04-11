@@ -1427,77 +1427,34 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           try {
             const raw = await this.env.AGENT_PROGRESS_KV.get(progressKey);
             kvConsecutiveFailures = 0; // reset on successful read
-            if (!raw) {
-              // No KV data yet — check Workflow status every 5th poll to detect completion/error
-              if (pollCount % 5 === 0) {
-                try {
-                  const st = await instance.status();
-                  if (st.status === "complete") {
-                    // Workflow finished but KV didn't get the done event — synthesize one
-                    // Guard: only send if we haven't sent a done already in this run
-                    const out = (st as any).output as { output?: string; session_id?: string; trace_id?: string; cost_usd?: number; tool_calls?: number; input_tokens?: number; output_tokens?: number; turns?: number; latency_ms?: number; termination_reason?: string } | undefined;
-                    const doneEvt = this._buildDoneEvent(out, { source: "workflow_status_fallback", seq: lastIdx + 1 });
-                    if (!doneSent) {
-                      try { connection.send(JSON.stringify(doneEvt)); } catch {}
-                      this._appendConversationMessage("assistant", String(doneEvt.output || ""), data.channel || "websocket");
-                      this._storeLastResult(doneEvt);
-                      doneSent = true;
-                    }
-                    done = true;
-                  } else if (st.status === "errored" || st.status === "terminated") {
-                    connection.send(JSON.stringify({ type: "error", message: (st as any).error?.message || "Run failed" }));
-                    done = true;
-                  }
-                } catch {}
-              }
-              continue;
-            }
-            const events = JSON.parse(raw) as any[];
-            for (let i = lastIdx; i < events.length; i++) {
-              // Skip KV done if we already synthesized one from Workflow status
-              if (events[i].type === "done" && doneSent) { done = true; break; }
-              try { connection.send(JSON.stringify(events[i])); } catch { done = true; break; }
-              if (events[i].type === "done") {
-                done = true;
-                doneSent = true;
-                // User message already saved before workflow started
-                this._appendConversationMessage("assistant", events[i].output || "", data.channel || "websocket");
-                this._storeLastResult(events[i]);
-                // Billing
-                if (this.env.HYPERDRIVE && events[i].cost_usd > 0) {
-                  const { writeBillingRecord } = await import("./runtime/db");
-                  writeBillingRecord(this.env.HYPERDRIVE, {
-                    session_id: events[i].session_id || "", org_id: data.org_id || "",
-                    agent_name: wsAgentName, model: "workflow",
-                    input_tokens: events[i].input_tokens || 0,
-                    output_tokens: events[i].output_tokens || 0,
-                    cost_usd: events[i].cost_usd || 0, plan: this.state?.config?.plan || this.env.DEFAULT_PLAN || "free",
-                    trace_id: events[i].trace_id || "",
-                  }, this.env.AGENT_PROGRESS_KV).catch(() => {});
-                }
-              }
-              if (events[i].type === "error") done = true;
-            }
-            lastIdx = events.length;
-
-            // If KV has data but no new events for a while, check Workflow status
-            // directly. KV eventual consistency can delay the done event by 1-60s.
-            if (!done && pollCount % 10 === 0) {
-              try {
-                const st = await instance.status();
-                if (st.status === "complete" && !doneSent) {
-                  const out = (st as any).output as { output?: string; session_id?: string; trace_id?: string; cost_usd?: number; tool_calls?: number; input_tokens?: number; output_tokens?: number; turns?: number; latency_ms?: number; termination_reason?: string } | undefined;
-                  const doneEvt = this._buildDoneEvent(out, { source: "workflow_status_fallback", seq: lastIdx + 1 });
-                  try { connection.send(JSON.stringify(doneEvt)); } catch {}
-                  this._appendConversationMessage("assistant", String(doneEvt.output || ""), data.channel || "websocket");
-                  this._storeLastResult(doneEvt);
+            if (raw) {
+              const events = JSON.parse(raw) as any[];
+              for (let i = lastIdx; i < events.length; i++) {
+                // Skip KV done if we already synthesized one from Workflow status
+                if (events[i].type === "done" && doneSent) { done = true; break; }
+                try { connection.send(JSON.stringify(events[i])); } catch { done = true; break; }
+                if (events[i].type === "done") {
+                  done = true;
                   doneSent = true;
-                  done = true;
-                } else if (st.status === "errored" || st.status === "terminated") {
-                  try { connection.send(JSON.stringify({ type: "error", message: (st as any).error?.message || "Run failed" })); } catch {}
-                  done = true;
+                  // User message already saved before workflow started
+                  this._appendConversationMessage("assistant", events[i].output || "", data.channel || "websocket");
+                  this._storeLastResult(events[i]);
+                  // Billing
+                  if (this.env.HYPERDRIVE && events[i].cost_usd > 0) {
+                    const { writeBillingRecord } = await import("./runtime/db");
+                    writeBillingRecord(this.env.HYPERDRIVE, {
+                      session_id: events[i].session_id || "", org_id: data.org_id || "",
+                      agent_name: wsAgentName, model: "workflow",
+                      input_tokens: events[i].input_tokens || 0,
+                      output_tokens: events[i].output_tokens || 0,
+                      cost_usd: events[i].cost_usd || 0, plan: this.state?.config?.plan || this.env.DEFAULT_PLAN || "free",
+                      trace_id: events[i].trace_id || "",
+                    }, this.env.AGENT_PROGRESS_KV).catch(() => {});
+                  }
                 }
-              } catch {}
+                if (events[i].type === "error") done = true;
+              }
+              lastIdx = events.length;
             }
           } catch (kvErr) {
             kvConsecutiveFailures++;
@@ -1514,29 +1471,47 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
             }
           }
 
-          // Check Workflow status periodically (every 10th poll when we have KV data)
-          // Only synthesize done if KV didn't already deliver it (prevents double-done)
-          if (!done && pollCount % 10 === 0) {
-            try {
-              const st = await instance.status();
-              if (st.status === "complete" && lastIdx > 0) {
-                // KV has events but no done — check if we already sent a done
-                const kvEvents = JSON.parse(await this.env.AGENT_PROGRESS_KV.get(progressKey) || "[]");
-                const kvHasDone = kvEvents.some((ev: any) => ev.type === "done");
-                if (!kvHasDone && !doneSent) {
-                  const out = (st as any).output as { output?: string; session_id?: string; trace_id?: string; cost_usd?: number; tool_calls?: number; input_tokens?: number; output_tokens?: number; turns?: number; latency_ms?: number; termination_reason?: string } | undefined;
-                  const doneEvt = this._buildDoneEvent(out, { source: "workflow_status_fallback", seq: kvEvents.length + 1 });
-                  try { connection.send(JSON.stringify(doneEvt)); } catch {}
-                  this._appendConversationMessage("assistant", String(doneEvt.output || ""), data.channel || "websocket");
-                  this._storeLastResult(doneEvt);
-                  doneSent = true;
+          // ── Consolidated workflow-status fallback ──
+          // KV eventual consistency can delay the done event by 1-60s.
+          // Poll workflow.status() periodically as a safety net. Cadence
+          // is faster before we've seen any KV events (5x) and slower once
+          // events are flowing (10x), so early detection of completion
+          // doesn't have to wait on KV propagation. Single entry point —
+          // previously three separate blocks synthesized done from three
+          // different code paths and could race.
+          if (!done) {
+            const fallbackEvery = lastIdx === 0 ? 5 : 10;
+            if (pollCount % fallbackEvery === 0) {
+              try {
+                const st = await instance.status();
+                if (st.status === "complete") {
+                  if (!doneSent) {
+                    // Re-read KV one last time in case the done event just landed
+                    // while we were awaiting status — avoid double-sending.
+                    let kvHasDone = false;
+                    try {
+                      const kvRaw = await this.env.AGENT_PROGRESS_KV.get(progressKey);
+                      if (kvRaw) {
+                        const kvEvents = JSON.parse(kvRaw) as any[];
+                        kvHasDone = kvEvents.some((ev: any) => ev.type === "done");
+                      }
+                    } catch { /* best-effort */ }
+                    if (!kvHasDone) {
+                      const out = (st as any).output as { output?: string; session_id?: string; trace_id?: string; cost_usd?: number; tool_calls?: number; input_tokens?: number; output_tokens?: number; turns?: number; latency_ms?: number; termination_reason?: string } | undefined;
+                      const doneEvt = this._buildDoneEvent(out, { source: "workflow_status_fallback", seq: lastIdx + 1 });
+                      try { connection.send(JSON.stringify(doneEvt)); } catch {}
+                      this._appendConversationMessage("assistant", String(doneEvt.output || ""), data.channel || "websocket");
+                      this._storeLastResult(doneEvt);
+                      doneSent = true;
+                    }
+                  }
+                  done = true;
+                } else if (st.status === "errored" || st.status === "terminated") {
+                  try { connection.send(JSON.stringify({ type: "error", message: (st as any).error?.message || "Run failed" })); } catch {}
+                  done = true;
                 }
-                done = true;
-              } else if (st.status === "errored" || st.status === "terminated") {
-                connection.send(JSON.stringify({ type: "error", message: (st as any).error?.message || "Run failed" }));
-                done = true;
-              }
-            } catch {}
+              } catch { /* best-effort — status API can fail transiently */ }
+            }
           }
         }
 
@@ -1570,9 +1545,23 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         if (progressKey) this._untrackWorkflow(progressKey);
         this._activeRun = false;
         this._activeWorkflow = null;
-        try { connection.send(JSON.stringify({ type: "error", message: String(err) })); } catch {}
-        this._appendConversationMessage("user", inputText, data.channel || "websocket");
-        this._appendConversationMessage("assistant", "[Error]", data.channel || "websocket");
+        // Log the raw error internally with a correlation id. User-facing
+        // payload is a sanitized generic message — never stack traces.
+        const errId = crypto.randomUUID().slice(0, 8);
+        console.error(`[ws-run] workflow failed (err_id=${errId}):`, err);
+        const userFacing =
+          err instanceof Error && /workflow bindings not configured/i.test(err.message)
+            ? "This deployment is missing a required binding. Please contact support."
+            : `Sorry, I couldn't run your request. Please try again in a moment. (ref: ${errId})`;
+        try { connection.send(JSON.stringify({ type: "error", message: userFacing, err_id: errId })); } catch {}
+        // NOTE: do NOT re-append the user message here — it was already
+        // persisted above (line ~1334) before the workflow was created.
+        // The previous code double-wrote the user turn on every failure.
+        this._appendConversationMessage(
+          "assistant",
+          `Sorry, I couldn't complete that request. Please try again. (ref: ${errId})`,
+          data.channel || "websocket",
+        );
       }
     }
   }
