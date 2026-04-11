@@ -302,13 +302,17 @@ export async function tickAutopilotSessions(env: any): Promise<{ dispatched: num
         if (sessions.length === 0) break;
         lastId = sessions[sessions.length - 1].id;
 
-        // Optimistically mark as ticked (prevents re-dispatch on next cron)
+        // Optimistically mark as ticked (prevents re-dispatch on next cron).
+        // IN ${sql(array)} (no parens) — see dashboard.ts for why ANY(${array})
+        // breaks under Hyperdrive's prepare:false.
         const ids = sessions.map((s: any) => s.id);
-        await sql`
-          UPDATE autopilot_sessions
-          SET last_tick_at = NOW(), tick_count = tick_count + 1, updated_at = NOW()
-          WHERE id = ANY(${ids})
-        `;
+        if (ids.length > 0) {
+          await sql`
+            UPDATE autopilot_sessions
+            SET last_tick_at = NOW(), tick_count = tick_count + 1, updated_at = NOW()
+            WHERE id IN ${sql(ids)}
+          `;
+        }
 
         // Fan out to queue — batch send for efficiency
         // CF Queue.send() is fast (~1ms) so even 500 sends complete in <1s

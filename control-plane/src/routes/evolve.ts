@@ -109,7 +109,7 @@ evolveRoutes.openapi(analyzeRoute, async (c): Promise<any> => {
     ? await sql`
         SELECT session_id, turn_number, model_used, tool_calls, tool_results, error
         FROM turns
-        WHERE session_id = ANY(${allSessionIds})
+        WHERE session_id IN ${sql(allSessionIds)}
         ORDER BY session_id, turn_number ASC
       `.catch(() => [])
     : [];
@@ -1100,7 +1100,7 @@ async function computeAgentMetrics(
     const qualityRows = await sql`
       SELECT AVG(avg_quality) as avg_q
       FROM conversation_analytics
-      WHERE session_id = ANY(${sessionIds})
+      WHERE session_id IN ${sql(sessionIds)}
     `.catch(() => []);
     if (qualityRows.length > 0 && qualityRows[0].avg_q != null) {
       avgQuality = Number(qualityRows[0].avg_q);

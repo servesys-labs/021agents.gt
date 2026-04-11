@@ -156,8 +156,10 @@ export async function computeRewardForSessions(
   const breakdown: Record<string, number> = {};
   const sourcesUsed: string[] = [];
 
-  // Success rate from sessions
+  // Success rate from sessions.
+  // IN ${sql(array)} — see routes/dashboard.ts for Hyperdrive prepare:false notes.
   try {
+    if (sessionIds.length === 0) throw new Error("no sessions");
     const rows = await sql`
       SELECT
         COUNT(*) FILTER (WHERE status = 'completed') as completed,
@@ -165,7 +167,7 @@ export async function computeRewardForSessions(
         AVG(cost_total_usd) as avg_cost,
         AVG(wall_clock_seconds) as avg_wall_clock
       FROM sessions
-      WHERE session_id = ANY(${sessionIds})
+      WHERE session_id IN ${sql(sessionIds)}
         AND org_id = ${orgId}
     `;
     if (rows.length > 0 && Number(rows[0].total) > 0) {
