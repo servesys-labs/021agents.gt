@@ -15,7 +15,7 @@
 import { describe, it, expect } from "vitest";
 
 import { scanMemoryContent } from "../src/runtime/curated-memory";
-import { sessionSearch, memoryHealth } from "../src/runtime/memory-tools";
+import { sessionSearch, memoryHealth } from "../src/runtime/tools";
 
 // ── scanMemoryContent — threat scanner ────────────────────────────
 

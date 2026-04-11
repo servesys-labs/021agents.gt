@@ -3,8 +3,8 @@ import type { RuntimeEnv } from "./types";
 import { getDb } from "./db";
 
 const ENTRY_DELIMITER = "\n§\n";
-const MEMORY_CHAR_LIMIT = 2200;
-const USER_CHAR_LIMIT = 1375;
+const DEFAULT_MEMORY_CHAR_LIMIT = 2200;
+const DEFAULT_USER_CHAR_LIMIT = 1375;
 const KEY_PREFIX = "curated:";
 
 const INVISIBLE_CHARS = new Set([
@@ -50,7 +50,7 @@ interface CuratedSnapshot {
 }
 
 function charLimitForTarget(target: CuratedTarget): number {
-  return target === "user" ? USER_CHAR_LIMIT : MEMORY_CHAR_LIMIT;
+  return target === "user" ? DEFAULT_USER_CHAR_LIMIT : DEFAULT_MEMORY_CHAR_LIMIT;
 }
 
 function keyPrefixForTarget(target: CuratedTarget): string {
@@ -69,23 +69,38 @@ function normalizeEntries(rows: CuratedRow[]): string[] {
   return rows.map((r) => String(r.value || "").trim()).filter(Boolean);
 }
 
-function usageString(entries: string[], target: CuratedTarget): string {
+function usageString(entries: string[], target: CuratedTarget, limitOverride?: number): string {
   const current = entries.length > 0 ? entries.join(ENTRY_DELIMITER).length : 0;
-  const limit = charLimitForTarget(target);
+  const limit = limitOverride || charLimitForTarget(target);
   const pct = Math.min(100, Math.floor((current / limit) * 100));
   return `${pct}% - ${current}/${limit} chars`;
 }
 
-function formatPromptBlock(target: CuratedTarget, entries: string[]): string {
+function formatPromptBlock(target: CuratedTarget, entries: string[], limitOverride?: number): string {
   if (entries.length === 0) return "";
   const current = entries.join(ENTRY_DELIMITER).length;
-  const limit = charLimitForTarget(target);
+  const limit = limitOverride || charLimitForTarget(target);
   const pct = Math.min(100, Math.floor((current / limit) * 100));
   const title = target === "user"
     ? `USER PROFILE (who the user is) [${pct}% - ${current}/${limit} chars]`
     : `MEMORY (persistent notes) [${pct}% - ${current}/${limit} chars]`;
   const sep = "═".repeat(46);
   return `${sep}\n${title}\n${sep}\n${entries.join(ENTRY_DELIMITER)}`;
+}
+
+function rowContent(row: CuratedRow): string {
+  return String(row.value || "");
+}
+
+function isLegacyFactsRow(row: CuratedRow): boolean {
+  return String(row.key || "").startsWith(KEY_PREFIX);
+}
+
+async function sha256Hex(content: string): Promise<string> {
+  const bytes = new TextEncoder().encode(content);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const arr = Array.from(new Uint8Array(digest));
+  return arr.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 export function scanMemoryContent(content: string): string | null {
@@ -110,46 +125,87 @@ function resolveOrgIdStrict(orgId?: string): string {
 }
 
 async function loadRowsForTarget(
-  hyperdrive: Hyperdrive,
+  sql: any,
   agentName: string,
   orgId: string,
   target: CuratedTarget,
 ): Promise<CuratedRow[]> {
-  const sql = await getDb(hyperdrive);
-  const rows = await sql`
-    SELECT id, key, value, category, created_at
-    FROM facts
-    WHERE agent_name = ${agentName}
-      AND org_id = ${orgId}
-      AND scope = 'agent'
-      AND key LIKE ${`${keyPrefixForTarget(target)}%`}
-    ORDER BY created_at ASC
-    LIMIT 200
-  `;
-  return (rows as Array<Record<string, unknown>>).map((r) => ({
-    id: String(r.id || ""),
-    key: String(r.key || ""),
-    value: String(r.value || ""),
-    category: String(r.category || ""),
-    created_at: r.created_at ? String(r.created_at) : undefined,
-  }));
+  try {
+    const rows = await sql`
+      SELECT id, target, content, updated_at
+      FROM curated_memory
+      WHERE agent_name = ${agentName}
+        AND org_id = ${orgId}
+        AND target = ${target}
+      ORDER BY updated_at ASC
+      LIMIT 200
+    `;
+    return (rows as Array<Record<string, unknown>>).map((r) => ({
+      id: String(r.id || ""),
+      key: "",
+      value: String(r.content || ""),
+      category: String(r.target || target),
+      created_at: r.updated_at ? String(r.updated_at) : undefined,
+    }));
+  } catch {
+    // Backward compatibility for deployments that have not applied SQL migration yet.
+    const rows = await sql`
+      SELECT id, key, value, category, created_at
+      FROM facts
+      WHERE agent_name = ${agentName}
+        AND org_id = ${orgId}
+        AND scope = 'agent'
+        AND key LIKE ${`${keyPrefixForTarget(target)}%`}
+      ORDER BY created_at ASC
+      LIMIT 200
+    `;
+    return (rows as Array<Record<string, unknown>>).map((r) => ({
+      id: String(r.id || ""),
+      key: String(r.key || ""),
+      value: String(r.value || ""),
+      category: String(r.category || ""),
+      created_at: r.created_at ? String(r.created_at) : undefined,
+    }));
+  }
 }
 
-function buildSuccess(target: CuratedTarget, entries: string[], message: string): CuratedResult {
+async function resolveCharLimits(sql: any, orgId: string, agentName: string): Promise<{ memory: number; user: number }> {
+  try {
+    const rows = await sql`
+      SELECT memory_char_limit, user_char_limit
+      FROM curated_memory_config
+      WHERE org_id = ${orgId}
+        AND agent_name = ${agentName}
+      LIMIT 1
+    `;
+    const row = rows?.[0] || {};
+    const memory = Math.max(200, Number(row.memory_char_limit) || DEFAULT_MEMORY_CHAR_LIMIT);
+    const user = Math.max(200, Number(row.user_char_limit) || DEFAULT_USER_CHAR_LIMIT);
+    return { memory, user };
+  } catch {
+    return { memory: DEFAULT_MEMORY_CHAR_LIMIT, user: DEFAULT_USER_CHAR_LIMIT };
+  }
+}
+
+function limitForTarget(target: CuratedTarget, limits: { memory: number; user: number }): number {
+  return target === "user" ? limits.user : limits.memory;
+}
+
+function buildSuccess(target: CuratedTarget, entries: string[], limit: number, message: string): CuratedResult {
   return {
     success: true,
     target,
-    usage: usageString(entries, target),
+    usage: usageString(entries, target, limit),
     entry_count: entries.length,
     message,
   };
 }
 
-function buildError(target: CuratedTarget, entries: string[], error: string, matches?: string[]): CuratedResult {
+function buildError(target: CuratedTarget, entries: string[], limit: number, error: string, matches?: string[]): CuratedResult {
   return {
     success: false,
     target,
-    usage: usageString(entries, target),
+    usage: usageString(entries, target, limit),
     entry_count: entries.length,
     error,
     ...(matches && matches.length > 0 ? { matches } : {}),
@@ -182,75 +238,103 @@ export async function curatedMemoryTool(env: RuntimeEnv, args: Record<string, an
   }
 
   const sql = await getDb(hyperdrive);
-  const rows = await loadRowsForTarget(hyperdrive, agentName, orgId, target);
+  const limits = await resolveCharLimits(sql, orgId, agentName);
+  const limit = limitForTarget(target, limits);
+  const rows = await loadRowsForTarget(sql, agentName, orgId, target);
   const entries = normalizeEntries(rows);
-  const limit = charLimitForTarget(target);
 
   if (action === "add") {
-    if (!content) return JSON.stringify(buildError(target, entries, "content is required for add."));
+    if (!content) return JSON.stringify(buildError(target, entries, limit, "content is required for add."));
     const scanErr = scanMemoryContent(content);
-    if (scanErr) return JSON.stringify(buildError(target, entries, scanErr));
-    if (entries.includes(content)) return JSON.stringify(buildSuccess(target, entries, "Entry already exists (no duplicate added)."));
+    if (scanErr) return JSON.stringify(buildError(target, entries, limit, scanErr));
+    if (entries.includes(content)) return JSON.stringify(buildSuccess(target, entries, limit, "Entry already exists (no duplicate added)."));
     const next = [...entries, content];
     const nextChars = next.join(ENTRY_DELIMITER).length;
     if (nextChars > limit) {
-      return JSON.stringify(buildError(target, entries, `Memory at ${usageString(entries, target)}. Adding this entry would exceed limit.`));
+      return JSON.stringify(buildError(target, entries, limit, `Memory at ${usageString(entries, target, limit)}. Adding this entry would exceed limit.`));
     }
-    await sql`
-      INSERT INTO facts (id, agent_name, org_id, scope, key, value, category, created_at)
-      VALUES (
-        ${shortId()},
-        ${agentName},
-        ${orgId},
-        'agent',
-        ${`${keyPrefixForTarget(target)}${Date.now().toString(36)}:${shortId().slice(0, 6)}`},
-        ${content},
-        ${categoryForTarget(target)},
-        ${new Date().toISOString()}
-      )
-    `;
-    return JSON.stringify(buildSuccess(target, next, "Entry added."));
+    try {
+      await sql`
+        INSERT INTO curated_memory (id, org_id, agent_name, target, content, content_hash, updated_at)
+        VALUES (
+          ${shortId()},
+          ${orgId},
+          ${agentName},
+          ${target},
+          ${content},
+          ${await sha256Hex(content)},
+          ${new Date().toISOString()}
+        )
+      `;
+    } catch {
+      await sql`
+        INSERT INTO facts (id, agent_name, org_id, scope, key, value, category, created_at)
+        VALUES (
+          ${shortId()},
+          ${agentName},
+          ${orgId},
+          'agent',
+          ${`${keyPrefixForTarget(target)}${Date.now().toString(36)}:${shortId().slice(0, 6)}`},
+          ${content},
+          ${categoryForTarget(target)},
+          ${new Date().toISOString()}
+        )
+      `;
+    }
+    return JSON.stringify(buildSuccess(target, next, limit, "Entry added."));
   }
 
   if (!oldText) {
-    return JSON.stringify(buildError(target, entries, "old_text is required for replace/remove."));
+    return JSON.stringify(buildError(target, entries, limit, "old_text is required for replace/remove."));
   }
   const matches = rows
     .map((r, idx) => ({ idx, row: r }))
-    .filter((x) => String(x.row.value || "").includes(oldText));
+    .filter((x) => rowContent(x.row).includes(oldText));
   if (matches.length === 0) {
-    return JSON.stringify(buildError(target, entries, `No entry matched '${oldText}'.`));
+    return JSON.stringify(buildError(target, entries, limit, `No entry matched '${oldText}'.`));
   }
   if (matches.length > 1) {
-    const previews = matches.map((m) => String(m.row.value || "").slice(0, 80));
-    return JSON.stringify(buildError(target, entries, `Multiple entries matched '${oldText}'. Be more specific.`, previews));
+    const previews = matches.map((m) => rowContent(m.row).slice(0, 80));
+    return JSON.stringify(buildError(target, entries, limit, `Multiple entries matched '${oldText}'. Be more specific.`, previews));
   }
 
   const match = matches[0]!;
   if (action === "remove") {
-    await sql`DELETE FROM facts WHERE id = ${match.row.id} AND agent_name = ${agentName} AND org_id = ${orgId}`;
+    if (isLegacyFactsRow(match.row)) {
+      await sql`DELETE FROM facts WHERE id = ${match.row.id} AND agent_name = ${agentName} AND org_id = ${orgId}`;
+    } else {
+      await sql`DELETE FROM curated_memory WHERE id = ${match.row.id} AND agent_name = ${agentName} AND org_id = ${orgId}`;
+    }
     const next = entries.filter((_, i) => i !== match.idx);
-    return JSON.stringify(buildSuccess(target, next, "Entry removed."));
+    return JSON.stringify(buildSuccess(target, next, limit, "Entry removed."));
   }
 
   if (!content) {
-    return JSON.stringify(buildError(target, entries, "content is required for replace."));
+    return JSON.stringify(buildError(target, entries, limit, "content is required for replace."));
   }
   const scanErr = scanMemoryContent(content);
-  if (scanErr) return JSON.stringify(buildError(target, entries, scanErr));
+  if (scanErr) return JSON.stringify(buildError(target, entries, limit, scanErr));
 
   const next = [...entries];
   next[match.idx] = content;
   const nextChars = next.join(ENTRY_DELIMITER).length;
   if (nextChars > limit) {
-    return JSON.stringify(buildError(target, entries, `Replacement would exceed limit (${limit} chars).`));
+    return JSON.stringify(buildError(target, entries, limit, `Replacement would exceed limit (${limit} chars).`));
   }
-  await sql`
-    UPDATE facts
-    SET value = ${content}, category = ${categoryForTarget(target)}, updated_at = ${new Date().toISOString()}
-    WHERE id = ${match.row.id} AND agent_name = ${agentName} AND org_id = ${orgId}
-  `;
-  return JSON.stringify(buildSuccess(target, next, "Entry replaced."));
+  if (isLegacyFactsRow(match.row)) {
+    await sql`
+      UPDATE facts
+      SET value = ${content}, category = ${categoryForTarget(target)}, updated_at = ${new Date().toISOString()}
+      WHERE id = ${match.row.id} AND agent_name = ${agentName} AND org_id = ${orgId}
+    `;
+  } else {
+    await sql`
+      UPDATE curated_memory
+      SET content = ${content}, content_hash = ${await sha256Hex(content)}, updated_at = ${new Date().toISOString()}
+      WHERE id = ${match.row.id} AND agent_name = ${agentName} AND org_id = ${orgId}
+    `;
+  }
+  return JSON.stringify(buildSuccess(target, next, limit, "Entry replaced."));
 }
 
 export async function loadCuratedMemorySnapshot(
@@ -262,14 +346,16 @@ export async function loadCuratedMemorySnapshot(
   const agentName = String(opts.agent_name || (env as any).__agentConfig?.name || "my-assistant");
   const orgId = resolveOrgIdStrict(opts.org_id || (env as any).__agentConfig?.org_id || "");
   if (!orgId) return {};
+  const sql = await getDb(hyperdrive);
+  const limits = await resolveCharLimits(sql, orgId, agentName);
   const [memoryRows, userRows] = await Promise.all([
-    loadRowsForTarget(hyperdrive, agentName, orgId, "memory").catch(() => []),
-    loadRowsForTarget(hyperdrive, agentName, orgId, "user").catch(() => []),
+    loadRowsForTarget(sql, agentName, orgId, "memory").catch(() => []),
+    loadRowsForTarget(sql, agentName, orgId, "user").catch(() => []),
   ]);
   const memoryEntries = normalizeEntries(memoryRows);
   const userEntries = normalizeEntries(userRows);
   return {
-    memory_block: formatPromptBlock("memory", memoryEntries) || undefined,
-    user_block: formatPromptBlock("user", userEntries) || undefined,
+    memory_block: formatPromptBlock("memory", memoryEntries, limits.memory) || undefined,
+    user_block: formatPromptBlock("user", userEntries, limits.user) || undefined,
   };
 }

@@ -171,4 +171,37 @@ describe("memory routes: working snapshot", () => {
     expect(payload.facts?.[0]?.key).toBe("k1");
     expect(payload.facts?.[0]?.value).toBe("{\"v\":1}");
   });
+
+  it("memory health returns aggregate counts", async () => {
+    mockSql = (async (strings: TemplateStringsArray) => {
+      const query = Array.from(strings).join(" ");
+      if (query.includes("FROM agents WHERE name")) return [{ "?column?": 1 }];
+      if (query.includes("COUNT(*)::int AS count FROM facts WHERE agent_name")) return [{ count: 12 }];
+      if (query.includes("COUNT(*)::int AS count FROM episodes WHERE agent_name")) return [{ count: 4 }];
+      if (query.includes("COUNT(*)::int AS count FROM procedures WHERE agent_name")) return [{ count: 3 }];
+      if (query.includes("INTERVAL '30 days'")) return [{ count: 2 }];
+      if (query.includes("MAX(created_at) AS latest FROM facts")) return [{ latest: "2026-04-01T00:00:00.000Z" }];
+      if (query.includes("MAX(created_at) AS latest FROM episodes")) return [{ latest: "2026-04-02T00:00:00.000Z" }];
+      if (query.includes("MAX(updated_at) AS latest FROM procedures")) return [{ latest: "2026-04-03T00:00:00.000Z" }];
+      if (query.includes("FROM curated_memory")) return [{ count: 6 }];
+      return [];
+    }) as unknown as MockSqlFn;
+    const app = buildApp("org-a");
+    const res = await app.request("/agent-a/health", { method: "GET" }, mockEnv());
+    expect(res.status).toBe(200);
+    const payload = await res.json() as {
+      semantic_facts_count?: number;
+      episodic_entries_count?: number;
+      procedures_count?: number;
+      curated_entries_count?: number;
+      stale_facts_30d_count?: number;
+      latest_memory_at?: string | null;
+    };
+    expect(payload.semantic_facts_count).toBe(12);
+    expect(payload.episodic_entries_count).toBe(4);
+    expect(payload.procedures_count).toBe(3);
+    expect(payload.curated_entries_count).toBe(6);
+    expect(payload.stale_facts_30d_count).toBe(2);
+    expect(payload.latest_memory_at).toBe("2026-04-03T00:00:00.000Z");
+  });
 });

@@ -1279,7 +1279,7 @@ function emitToolExecEvent(queue: any, toolName: string, latencyMs: number, stat
 
 function emitMemoryEvent(
   queue: any,
-  eventType: "memory_write" | "memory_write_rejected" | "memory_read",
+  eventType: "memory_write" | "memory_write_rejected" | "memory_read" | "memory_hit" | "memory_miss",
   sessionId: string,
   orgId: string,
   details: Record<string, unknown>,
@@ -1720,12 +1720,24 @@ async function dispatch(
     case "memory-recall":
       {
         const result = await memoryRecall(env, args);
+        let count = 0;
+        try {
+          count = Number(JSON.parse(result)?.count || 0);
+        } catch {}
+        const orgId = resolveTelemetryOrgId(env) || "";
         emitMemoryEvent(
           (env as any).TELEMETRY_QUEUE,
           "memory_read",
           sessionId,
-          resolveTelemetryOrgId(env) || "",
+          orgId,
           { tool: "memory-recall", query: String(args.query || args.key || ""), type: String(args.type || "all") },
+        );
+        emitMemoryEvent(
+          (env as any).TELEMETRY_QUEUE,
+          count > 0 ? "memory_hit" : "memory_miss",
+          sessionId,
+          orgId,
+          { tool: "memory-recall", count, query: String(args.query || args.key || ""), type: String(args.type || "all") },
         );
         return result;
       }
@@ -1772,6 +1784,9 @@ async function dispatch(
 
     case "sync-workspace-memory":
       return syncWorkspaceMemory(env, sessionId);
+
+    case "sync-workspace-procedures":
+      return syncWorkspaceProcedures(env, sessionId, args);
 
     case "team-fact-write": {
       const content = String(args.content || "");
@@ -4244,12 +4259,24 @@ return { mode: "codemode", total_tasks: tasks.length, results };
     case "session-search": {
       const { sessionSearch } = await import("./memory-tools");
       const result = await sessionSearch(env, args);
+      let count = 0;
+      try {
+        count = Number(JSON.parse(result)?.count || 0);
+      } catch {}
+      const orgId = resolveTelemetryOrgId(env) || "";
       emitMemoryEvent(
         (env as any).TELEMETRY_QUEUE,
         "memory_read",
         sessionId,
-        resolveTelemetryOrgId(env) || "",
+        orgId,
         { tool: "session-search", query: String(args.query || ""), limit: Number(args.limit || 5) },
+      );
+      emitMemoryEvent(
+        (env as any).TELEMETRY_QUEUE,
+        count > 0 ? "memory_hit" : "memory_miss",
+        sessionId,
+        orgId,
+        { tool: "session-search", count, query: String(args.query || ""), limit: Number(args.limit || 5) },
       );
       return result;
     }
@@ -4467,7 +4494,90 @@ async function parallelWebSearch(env: RuntimeEnv, args: Record<string, any>): Pr
   return output.join("\n\n---\n\n");
 }
 
-// ── sessionSearch moved to memory-tools.ts (M2 ceiling recovery) ─
+// ── Session Search — full-text search across past conversations ──
+// Exported so deploy/test/memory-tools.test.ts can exercise fail-closed behavior
+// without a full dispatch loop. Internal callers use the `session-search` case
+// in the switch statement above.
+
+export async function sessionSearch(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
+  const query = String(args.query || "").trim();
+  const limit = Math.max(1, Math.min(Number(args.limit) || 5, 20));
+
+  // Fail-closed on org_id: do NOT fall back to "pick any org from the orgs table"
+  // (latent cross-tenant leak pattern). Agents that cannot supply an org_id
+  // receive a structured error.
+  const agentName = (env as any).__agentConfig?.name || "";
+  const orgId = String(
+    (env as any).__agentConfig?.org_id || (env as any).__agentConfig?.orgId || "",
+  ).trim();
+  if (!orgId) {
+    return JSON.stringify({
+      success: false,
+      tool: "session-search",
+      error: "org_id required — session-search must not fall back to another tenant.",
+    });
+  }
+
+  try {
+    const { getDb } = await import("./db");
+    const sql = await getDb(env.HYPERDRIVE);
+
+    const rows = query
+      ? await sql`
+          SELECT session_id, input_text, output_text, status, created_at, cost_total_usd, step_count
+          FROM sessions
+          WHERE org_id = ${orgId}
+            AND (${agentName} = '' OR agent_name = ${agentName})
+            AND (LOWER(input_text) LIKE ${"%" + query.toLowerCase() + "%"} OR LOWER(output_text) LIKE ${"%" + query.toLowerCase() + "%"})
+          ORDER BY created_at DESC
+          LIMIT ${limit}
+        `
+      : await sql`
+          SELECT session_id, input_text, output_text, status, created_at, cost_total_usd, step_count
+          FROM sessions
+          WHERE org_id = ${orgId}
+            AND (${agentName} = '' OR agent_name = ${agentName})
+          ORDER BY created_at DESC
+          LIMIT ${limit}
+        `;
+
+    if (!rows.length) {
+      return JSON.stringify({
+        success: true,
+        message: query ? "No matching sessions found." : "No recent sessions found.",
+        mode: query ? "search" : "recent",
+        query: query || undefined,
+        usage: "0 entries",
+        entry_count: 0,
+        count: 0,
+        results: [],
+      });
+    }
+
+    const results = (rows as any[]).map((r: any) => ({
+      session_id: String(r.session_id || ""),
+      created_at: String(r.created_at || ""),
+      status: String(r.status || ""),
+      user_request: String(r.input_text || "").slice(0, 220),
+      outcome: String(r.output_text || "").slice(0, 260),
+      turns: Number(r.step_count || 0),
+      cost_usd: Number(r.cost_total_usd || 0),
+    }));
+
+    return JSON.stringify({
+      success: true,
+      message: `Found ${results.length} session summaries.`,
+      mode: query ? "search" : "recent",
+      query: query || undefined,
+      usage: `${results.length} entries`,
+      entry_count: results.length,
+      count: results.length,
+      results,
+    });
+  } catch (err: any) {
+    return JSON.stringify({ success: false, tool: "session-search", error: `Session search failed: ${err?.message || String(err)}` });
+  }
+}
 
 // ── User Profile Memory — persistent per-user learning ──────
 
@@ -5091,7 +5201,16 @@ async function memorySave(env: RuntimeEnv, args: Record<string, any>): Promise<s
         INSERT INTO episodes (id, agent_name, org_id, content, source, metadata, created_at)
         VALUES (${id}, ${agentName}, ${orgId}, ${content}, 'agent', ${JSON.stringify(key ? { key, category } : { category })}, ${now})
       `;
-      return JSON.stringify({ success: true, tool: "memory-save", saved: true, type: "episodic", id });
+      return JSON.stringify({
+        success: true,
+        tool: "memory-save",
+        saved: true,
+        type: "episodic",
+        id,
+        message: "Episodic memory saved.",
+        usage: "n/a",
+        entry_count: 1,
+      });
     } else {
       const factKey = key || content.slice(0, 50);
       // Upsert: check if fact with same key exists for this agent, update if so
@@ -5109,7 +5228,18 @@ async function memorySave(env: RuntimeEnv, args: Record<string, any>): Promise<s
           VALUES (${id}, ${agentName}, ${orgId}, 'agent', ${factKey}, ${content}, ${category}, ${now})
         `;
       }
-      return JSON.stringify({ success: true, tool: "memory-save", saved: true, type: "semantic", id, key: factKey, category });
+      return JSON.stringify({
+        success: true,
+        tool: "memory-save",
+        saved: true,
+        type: "semantic",
+        id,
+        key: factKey,
+        category,
+        message: "Semantic memory saved.",
+        usage: "n/a",
+        entry_count: 1,
+      });
     }
   } catch (err: any) {
     return JSON.stringify({ success: false, tool: "memory-save", error: `Memory save failed: ${err.message}` });
@@ -5177,6 +5307,66 @@ async function syncWorkspaceMemory(env: RuntimeEnv, sessionId: string): Promise<
   }
 }
 
+async function syncWorkspaceProcedures(
+  env: RuntimeEnv,
+  sessionId: string,
+  args: Record<string, any>,
+): Promise<string> {
+  const agentName = (env as any).__agentConfig?.name || "my-assistant";
+  // Fail-closed on org_id — do NOT fall back to "pick any org from the orgs
+  // table", which is the cross-tenant leak pattern.
+  const orgId = String(
+    (env as any).__agentConfig?.org_id || (env as any).__delegationLineage?.org_id || "",
+  ).trim();
+  const hyperdrive = (env as any).HYPERDRIVE;
+  if (!hyperdrive) return JSON.stringify({ ok: false, tool: "sync-workspace-procedures", error: "no database" });
+  if (!orgId) {
+    return JSON.stringify({
+      ok: false,
+      tool: "sync-workspace-procedures",
+      error: "org_id required — must not fall back to another tenant.",
+    });
+  }
+
+  try {
+    const { getDb } = await import("./db");
+    const sql = await getDb(hyperdrive);
+
+    const { exportProceduresMarkdown } = await import("./memory");
+    const { markdown, count } = await exportProceduresMarkdown(hyperdrive, {
+      agent_name: agentName,
+      org_id: orgId,
+      limit: Number(args.limit) || 50,
+    });
+    if (!markdown || count === 0) {
+      return JSON.stringify({
+        ok: true,
+        tool: "sync-workspace-procedures",
+        path: "/workspace/PROCEDURES.md",
+        exported: 0,
+        message: "No procedures available for export.",
+      });
+    }
+
+    const maxBytes = 25_000;
+    const body = markdown.length > maxBytes
+      ? markdown.slice(0, maxBytes) + "\n\n> Truncated at 25000 bytes.\n"
+      : markdown;
+    const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
+    const path = "/workspace/PROCEDURES.md";
+    await sandbox.writeFile(path, body);
+    return JSON.stringify({
+      ok: true,
+      tool: "sync-workspace-procedures",
+      path,
+      exported: count,
+      bytes: body.length,
+    });
+  } catch (err: any) {
+    return JSON.stringify({ ok: false, tool: "sync-workspace-procedures", error: err?.message || String(err) });
+  }
+}
+
 async function memoryRecall(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
   const query = String(args.query || args.key || "").trim();
   const memoryType = String(args.type || "all").trim();
@@ -5207,7 +5397,10 @@ async function memoryRecall(env: RuntimeEnv, args: Record<string, any>): Promise
     return JSON.stringify({
       success: true,
       tool: "memory-recall",
+      message: `Returned ${results.length} memory entries.`,
       query: query || undefined,
+      usage: `${results.length} entries`,
+      entry_count: results.length,
       count: results.length,
       results,
     });
@@ -5232,7 +5425,15 @@ async function memoryDelete(env: RuntimeEnv, args: Record<string, any>): Promise
       } else {
         await sql`DELETE FROM facts WHERE key = ${args.key} AND agent_name = ${agentName} AND org_id = ${orgId}`;
       }
-      return JSON.stringify({ success: true, tool: "memory-delete", deleted: true, type: "semantic" });
+      return JSON.stringify({
+        success: true,
+        tool: "memory-delete",
+        deleted: true,
+        type: "semantic",
+        message: "Memory entry deleted.",
+        usage: "n/a",
+        entry_count: 0,
+      });
     }
     return JSON.stringify({ success: false, tool: "memory-delete", error: "memory-delete requires type and fact_id or key" });
   } catch (err: any) {
@@ -5240,7 +5441,70 @@ async function memoryDelete(env: RuntimeEnv, args: Record<string, any>): Promise
   }
 }
 
-// ── memoryHealth moved to memory-tools.ts (M2 ceiling recovery) ─
+// ── Memory Health — summary of memory tier state for an agent ──
+// Exported for deploy/test/memory-tools.test.ts. Fail-closed on org_id.
+
+export async function memoryHealth(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
+  const agentName = (env as any).__agentConfig?.name || "my-assistant";
+  const hyperdrive = (env as any).HYPERDRIVE;
+  if (!hyperdrive) {
+    return JSON.stringify({
+      success: false,
+      tool: "memory-health",
+      error: "Memory not available (no database binding)",
+    });
+  }
+  const orgId = String((env as any).__agentConfig?.org_id || "").trim();
+  if (!orgId) {
+    return JSON.stringify({
+      success: false,
+      tool: "memory-health",
+      error: "org_id required — memory-health must not fall back to another tenant.",
+    });
+  }
+  try {
+    const { getDb } = await import("./db");
+    const sql = await getDb(hyperdrive);
+    const limit = Math.max(1, Math.min(Number(args.limit) || 20, 100));
+    const [factsRows, episodesRows] = await Promise.all([
+      sql`
+        SELECT key, value, category, created_at
+        FROM facts
+        WHERE agent_name = ${agentName} AND org_id = ${orgId}
+        ORDER BY created_at DESC
+        LIMIT ${limit}
+      `,
+      sql`
+        SELECT content, created_at
+        FROM episodes
+        WHERE agent_name = ${agentName} AND org_id = ${orgId}
+        ORDER BY created_at DESC
+        LIMIT ${limit}
+      `,
+    ]);
+    const now = Date.now();
+    const dayMs = 86_400_000;
+    const staleFacts = (factsRows as any[]).filter((r) => {
+      const ts = Date.parse(String(r.created_at || ""));
+      return Number.isFinite(ts) && now - ts > dayMs * 30;
+    }).length;
+    return JSON.stringify({
+      success: true,
+      tool: "memory-health",
+      message: "Memory health sample generated.",
+      agent_name: agentName,
+      org_id: orgId,
+      usage: `${(factsRows as any[]).length + (episodesRows as any[]).length} sampled entries`,
+      entry_count: (factsRows as any[]).length + (episodesRows as any[]).length,
+      semantic_facts_count: (factsRows as any[]).length,
+      episodic_entries_count: (episodesRows as any[]).length,
+      stale_facts_30d_count: staleFacts,
+      sample_limit: limit,
+    });
+  } catch (err: any) {
+    return JSON.stringify({ success: false, tool: "memory-health", error: `memory-health failed: ${err?.message || String(err)}` });
+  }
+}
 
 // ── TTS (Workers AI Deepgram) ─────────────────────────────────
 
@@ -5763,6 +6027,7 @@ const TOOL_KEYWORDS: Record<string, string[]> = {
     "session-search",
     "memory-delete",
     "sync-workspace-memory",
+    "sync-workspace-procedures",
     "team-fact-write",
     "team-observation",
   ],
@@ -6255,6 +6520,20 @@ const TOOL_CATALOG: ToolDefinition[] = [
       parameters: {
         type: "object",
         properties: {},
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "sync-workspace-procedures",
+      description:
+        "Write /workspace/PROCEDURES.md from learned procedural memory (high-confidence tool sequences). Use to review reusable workflows and playbooks.",
+      parameters: {
+        type: "object",
+        properties: {
+          limit: { type: "number", description: "Maximum procedures to export (default 50, max 200)." },
+        },
       },
     },
   },
