@@ -12,7 +12,8 @@
     "python-exec", "bash",
     "read-file", "write-file",
     "web-search", "http-request",
-    "memory-save", "memory-recall"
+    "memory-save", "memory-recall",
+    "image-generate"
   ],
   "governance": {
     "budget_limit_usd": 3.0

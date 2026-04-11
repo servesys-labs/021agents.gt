@@ -9,7 +9,7 @@
   "max_tokens": 16384,
   "temperature": 0.2,
   "tools": [
-    "web-search", "browse", "web-crawl", "http-request",
+    "web-search", "parallel-web-search", "browse", "web-crawl", "http-request",
     "python-exec", "bash",
     "read-file", "write-file",
     "memory-save", "memory-recall", "knowledge-search"
