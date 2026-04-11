@@ -21,9 +21,18 @@ const REPO_ROOT = join(__dirname, "..", "..");
 const SKILLS_ROOT = join(REPO_ROOT, "skills", "public");
 
 // Skills that live in skills/public/ but are intentionally NOT in
-// BUILTIN_SKILL_ORDER — they're DB-seeded or example fixtures. Keep this list
-// deliberately tight so that a forgotten wiring (P3-F2 failure) surfaces here.
-const NON_BUILTIN_ALLOWLIST = new Set(["code-review", "deep-research"]);
+// BUILTIN_SKILL_ORDER — they're DB-seeded, example fixtures, or opt-in
+// meta-skills activated via enabled_skills on specific agents. Keep this
+// list deliberately tight so that a forgotten wiring (P3-F2 failure)
+// surfaces here.
+//
+// diarize (Phase 6): cross-source profile synthesis, invoked explicitly by
+//   /improve and by meta-agent workflows — never auto-surfaced in the
+//   default prompt, so it stays out of BUILTIN_SKILL_ORDER.
+// improve (Phase 6): reads feedback and proposes rules via manage_skills
+//   append_rule. Also meta-only — invoked deliberately by owners/admins,
+//   never auto-triggered.
+const NON_BUILTIN_ALLOWLIST = new Set(["code-review", "deep-research", "diarize", "improve"]);
 
 describe("Phase 3 — SKILL.md directory invariants", () => {
   it("every SKILL.md on disk is wired into BUILTIN_SKILLS or explicitly allowlisted", () => {
