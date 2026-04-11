@@ -6627,7 +6627,8 @@ export default {
           }
 
           // Step 3: OCR each page with fallback chain: GLM-OCR → Gemma 4 31B → error
-          const ocrServiceToken = env.SERVICE_TOKEN || "";
+          // Self-hosted GPU box accepts GPU_SERVICE_KEY; SERVICE_TOKEN is only a dev fallback.
+          const ocrServiceToken = (env as any).GPU_SERVICE_KEY || env.SERVICE_TOKEN || "";
           const allExtractedText: string[] = [];
 
           for (const page of pageImages) {
