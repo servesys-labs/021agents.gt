@@ -102,7 +102,11 @@ CREATE TABLE IF NOT EXISTS agent_versions (
   config      JSONB NOT NULL DEFAULT '{}',
   created_by  TEXT,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE (agent_name, version)
+  -- Multi-tenant uniqueness: two orgs can each have their own
+  -- `my-assistant v1.0.0`. The old UNIQUE (agent_name, version)
+  -- would have let one org's snapshot clobber another's via
+  -- ON CONFLICT DO UPDATE — a data-layer RLS violation.
+  UNIQUE (org_id, agent_name, version)
 );
 
 -- ============================================================================
@@ -1723,7 +1727,12 @@ CREATE TABLE IF NOT EXISTS event_types (
 CREATE TABLE IF NOT EXISTS referrals (
   id                  TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
   referrer_org_id     TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
-  referred_org_id     TEXT,
+  -- One referral record per referred org. Enforces the ON CONFLICT
+  -- (referred_org_id) DO NOTHING path in auth.ts so a user who signs
+  -- up with a referral code twice (account deletion + resignup, etc.)
+  -- doesn't create duplicate attribution rows. NULL is allowed for
+  -- pending referral rows that haven't been claimed yet.
+  referred_org_id     TEXT UNIQUE,
   referrer_user_id    TEXT NOT NULL DEFAULT '',
   referral_code       TEXT NOT NULL DEFAULT '',
   status              TEXT NOT NULL DEFAULT 'pending',

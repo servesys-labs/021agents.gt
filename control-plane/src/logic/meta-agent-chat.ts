@@ -815,12 +815,14 @@ async function executeTool(
       `;
 
       // Snapshot version. agent_versions.org_id is NOT NULL; we're
-      // inside withOrgDb so ctx.orgId matches current_org_id().
+      // inside withOrgDb so ctx.orgId matches current_org_id(). The
+      // UNIQUE is (org_id, agent_name, version) so the conflict target
+      // must include org_id too.
       try {
         await sql`
           INSERT INTO agent_versions (agent_name, org_id, version, config, created_by, created_at)
           VALUES (${ctx.agentName}, ${ctx.orgId}, ${newVersion}, ${JSON.stringify(config)}, ${"meta-agent"}, now())
-          ON CONFLICT (agent_name, version) DO UPDATE
+          ON CONFLICT (org_id, agent_name, version) DO UPDATE
           SET config = ${JSON.stringify(config)}, created_by = ${"meta-agent"}
         `;
       } catch {}
