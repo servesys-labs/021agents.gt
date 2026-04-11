@@ -239,3 +239,160 @@ export async function appendRule(
     after_sha: afterSha,
   };
 }
+
+// ── Revert path (Phase 6 commit 6) ─────────────────────────────────
+
+export interface RevertRuleSuccess {
+  reverted: true;
+  revert_audit_id: string;
+  reverted_audit_id: string;
+  skill_name: string;
+  overlay_count: number;
+  before_sha: string;
+  after_sha: string;
+}
+
+export type RevertRuleErrorCode =
+  | "forbidden"
+  | "invalid_input"
+  | "audit_not_found"
+  | "already_reverted"
+  | "tamper_detected"
+  | "db_error";
+
+export interface RevertRuleError {
+  reverted: false;
+  error: string;
+  code: RevertRuleErrorCode;
+  detail?: unknown;
+}
+
+export type RevertRuleResult = RevertRuleSuccess | RevertRuleError;
+
+/**
+ * Admin-only revert: given an audit_id from a prior append_rule, delete the
+ * overlay row it describes and write a new audit row capturing the revert.
+ *
+ * Integrity check: sha256(audit.before_content) MUST equal audit.before_sha.
+ * If not, the audit row has been tampered with — refuse the revert.
+ *
+ * `sql` must be an OrgSql bound inside withOrgDb (transaction + RLS scoping).
+ * The whole flow — SELECT audit / read current overlays / DELETE overlay /
+ * re-read state / INSERT revert audit — runs inside the same transaction for
+ * free (db/client.ts:79 wraps the callback in sql.begin()).
+ */
+export async function revertSkillRule(
+  sql: any,
+  ctx: AppendRuleContext,
+  auditId: string,
+): Promise<RevertRuleResult> {
+  if (ctx.userRole !== "owner" && ctx.userRole !== "admin") {
+    return {
+      reverted: false,
+      error: "Only org owners and admins can revert skill mutations.",
+      code: "forbidden",
+    };
+  }
+
+  const id = String(auditId || "").trim();
+  if (!id) {
+    return { reverted: false, error: "audit_id is required", code: "invalid_input" };
+  }
+
+  const auditRows = await sql`
+    SELECT audit_id, skill_name, overlay_id, before_sha, before_content, after_content, source
+    FROM skill_audit
+    WHERE audit_id = ${id}
+    LIMIT 1
+  `;
+  if (auditRows.length === 0) {
+    return { reverted: false, error: `No audit row found for audit_id=${id}`, code: "audit_not_found" };
+  }
+
+  const audit = auditRows[0];
+  if (!audit.overlay_id) {
+    // Revert audit rows (and previously-reverted append rows) leave overlay_id NULL.
+    return {
+      reverted: false,
+      error: `Audit ${id} has no overlay_id — already reverted or was itself a revert.`,
+      code: "already_reverted",
+    };
+  }
+
+  // Tamper check: the stored before_content must hash to the stored before_sha.
+  const recomputed = await sha256Hex(String(audit.before_content ?? ""));
+  if (recomputed !== audit.before_sha) {
+    return {
+      reverted: false,
+      error: "Integrity check failed: stored before_content does not match before_sha. Refusing revert.",
+      code: "tamper_detected",
+      detail: { audit_id: id, stored_sha: audit.before_sha, recomputed_sha: recomputed },
+    };
+  }
+
+  // Read current overlay state for this skill — the "before" side of the revert.
+  const beforeRows = await sql`
+    SELECT rule_text FROM skill_overlays
+    WHERE org_id = ${ctx.orgId}
+      AND skill_name = ${audit.skill_name}
+      AND (agent_name = ${ctx.agentName} OR agent_name = '')
+    ORDER BY created_at ASC
+  `;
+  const beforeContent = beforeRows.map((r: any) => r.rule_text).join(OVERLAY_JOINER);
+  const beforeSha = await sha256Hex(beforeContent);
+
+  // Delete the target overlay. Returns 0 rows if a concurrent revert already
+  // removed it — treat that as already_reverted rather than writing a no-op
+  // audit row.
+  const deleted = await sql`
+    DELETE FROM skill_overlays
+    WHERE overlay_id = ${audit.overlay_id}
+    RETURNING overlay_id
+  `;
+  if (deleted.length === 0) {
+    return {
+      reverted: false,
+      error: `Overlay ${audit.overlay_id} was already deleted (concurrent revert).`,
+      code: "already_reverted",
+    };
+  }
+
+  // Re-read overlay state post-delete for the "after" side.
+  const afterRows = await sql`
+    SELECT rule_text FROM skill_overlays
+    WHERE org_id = ${ctx.orgId}
+      AND skill_name = ${audit.skill_name}
+      AND (agent_name = ${ctx.agentName} OR agent_name = '')
+    ORDER BY created_at ASC
+  `;
+  const afterContent = afterRows.map((r: any) => r.rule_text).join(OVERLAY_JOINER);
+  const afterSha = await sha256Hex(afterContent);
+
+  const revertInsert = await sql`
+    INSERT INTO skill_audit (
+      org_id, skill_name, agent_name, overlay_id,
+      before_sha, after_sha, before_content, after_content,
+      reason, source
+    )
+    VALUES (
+      ${ctx.orgId}, ${audit.skill_name}, ${ctx.agentName}, ${null},
+      ${beforeSha}, ${afterSha}, ${beforeContent}, ${afterContent},
+      ${`revert of audit ${id}`}, ${"revert"}
+    )
+    RETURNING audit_id
+  `;
+  const revertAuditId = revertInsert?.[0]?.audit_id;
+  if (!revertAuditId) {
+    throw new Error("Failed to insert revert audit row — transaction will roll back");
+  }
+
+  return {
+    reverted: true,
+    revert_audit_id: revertAuditId,
+    reverted_audit_id: id,
+    skill_name: audit.skill_name,
+    overlay_count: afterRows.length,
+    before_sha: beforeSha,
+    after_sha: afterSha,
+  };
+}
