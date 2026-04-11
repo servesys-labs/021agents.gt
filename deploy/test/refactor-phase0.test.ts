@@ -164,7 +164,7 @@ describe("refactor Phase 0 — meta-agent prompt size budget", () => {
 
   it("meta-agent-chat.ts file size stays within ceiling", () => {
     const fixture = JSON.parse(readFileSync(fixturePath, "utf8"));
-    const ceilings = fixture.ceilings_chars as Record<string, number>;
+    const ceilings = fixture.ceilings_code_units as Record<string, number>;
 
     // Measure the whole source file. This is a superset of the prompt string
     // itself (includes imports, helper exports, mode instructions), but for
@@ -177,10 +177,10 @@ describe("refactor Phase 0 — meta-agent prompt size budget", () => {
     };
 
     if (process.env.WRITE_PROMPT_BUDGET === "1") {
-      fixture.ceilings_chars = measured;
+      fixture.ceilings_code_units = measured;
       fixture._seeded_at = new Date().toISOString();
       fixture._note =
-        "Measures meta-agent-chat.ts file size, not a runtime buildMetaAgentChatPrompt call, because deploy/ tsconfig doesn't include control-plane/. Drift detection is equivalent: any prompt growth changes the file.";
+        "Measures meta-agent-chat.ts file size via String.prototype.length (UTF-16 code units), not a runtime buildMetaAgentChatPrompt call, because deploy/ tsconfig doesn't include control-plane/. Drift detection is equivalent: any prompt growth changes the file.";
       writeFileSync(fixturePath, JSON.stringify(fixture, null, 2) + "\n");
       console.log(`[seed] wrote prompt-size ceiling to ${fixturePath}`);
       return;
@@ -188,7 +188,7 @@ describe("refactor Phase 0 — meta-agent prompt size budget", () => {
 
     expect(
       measured.meta_agent_chat_live,
-      `control-plane/src/prompts/meta-agent-chat.ts grew past ceiling (${ceilings.meta_agent_chat_live} → ${measured.meta_agent_chat_live} chars). Phase 7 shrinks this — it should never grow. If the growth is legitimate, rerun with WRITE_PROMPT_BUDGET=1 and commit with -fixture-bump label.`,
+      `control-plane/src/prompts/meta-agent-chat.ts grew past ceiling (${ceilings.meta_agent_chat_live} → ${measured.meta_agent_chat_live} code units). Phase 7 shrinks this — it should never grow. If the growth is legitimate, rerun with WRITE_PROMPT_BUDGET=1 and commit with -fixture-bump label.`,
     ).toBeLessThanOrEqual(ceilings.meta_agent_chat_live);
   });
 });

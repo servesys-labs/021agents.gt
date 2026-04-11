@@ -1,8 +1,6 @@
 /**
  * Security module — Red Team security scanning for AI agents.
  *
- * Ported from agentos/security/ (redteam.py, owasp_probes.py, maestro.py, aivss.py).
- *
  * @example
  * ```typescript
  * import { RedTeamRunner } from "./lib/security";
