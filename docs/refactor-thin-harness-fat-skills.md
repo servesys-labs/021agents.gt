@@ -4,6 +4,67 @@ A comprehensive phased refactor to invert this repo from "fat harness, thin skil
 
 ## ▶︎ Resume here (2026-04-11)
 
+**Status:** Phases 0, 1, 2, 3, 4, 5 ✅ done. **Phase 6 in progress — commits 1-5 merged to main at `7486598b`.** Remaining: admin revert endpoint (new commit 6) and round-trip regression test (new commit 7).
+
+### Phase 6 progress snapshot
+
+Phase 6 was originally scoped as 8 commits. Commits 1-5 are on main. Commit 6 (deploy-side `skill-mutation.ts` client + `tools.ts` wiring) was **deliberately skipped** as Shape A — see the "Commit 6 skip rationale" block below. Phase 6 therefore shrinks to **7 commits total**:
+
+| # | Commit | Status | Git ref |
+|---|---|---|---|
+| 1 | `skill_overlays` + `skill_audit` migration (002_skill_learning.sql + inline into 001_init.sql) | ✅ | `fe05a716` |
+| 2 | `/diarize` + `/improve` SKILL.md + fixtures + bundle regen | ✅ | `1ec1fc9b` |
+| 3 | `manage_skills append_rule` handler + rate limiter + injection guard (reuses `detectInjection` from `prompt-injection.ts`) + audit writer. New helper at `control-plane/src/logic/skill-mutation.ts` | ✅ | `2427c60c` |
+| 4 | `loadSkillOverlays` + `getSkillPrompt` overlay merge in `deploy/src/runtime/skills.ts` (lands at 180/180 ceiling after JSDoc trims) | ✅ | `7486598b` |
+| 5 | ~~Deploy-side `skill-mutation.ts` client + `tools.ts` wiring~~ | ⏭ **skipped (Shape A)** | — |
+| 6 | Admin revert endpoint (reads `before_content` from `skill_audit`, asserts `sha256(before_content) === before_sha` before restoring, uses `overlay_id` for clean DELETE) | ⏳ next | — |
+| 7 | Round-trip regression test (imports `appendRule` directly from `control-plane/src/logic/skill-mutation` — no HTTP, vitest in-process) | ⏳ | — |
+
+**Deviations from the original Phase 6 plan (all auditable):**
+- `skill_audit` schema gained `before_content TEXT NOT NULL` AND `after_content TEXT NOT NULL` (not just SHAs — revert needs the bytes, audit needs a linear `SELECT` for historical reconstruction). Also gained a nullable `overlay_id TEXT` FK to `skill_overlays` so commit 6's revert is `DELETE FROM skill_overlays WHERE overlay_id = $1` instead of reverse-lookup by content hash.
+- Learned rules are stored in a new `skill_overlays` table, **not** appended into the existing `skills` DB table. Separating them avoids the shadow bug in `formatSkillsPrompt` (`[...BUILTIN_SKILLS, ...skills]` emitting duplicates when a DB row shares a BUILTIN name) and keeps row semantics single-purpose.
+- Audit content is **overlay-state**, not full effective body. Rationale in `skill-mutation.ts:1-37`: disk SKILL.md is git-versioned and can drift independently, control-plane catalog stays ~2KB (no bundled bodies), history reconstruction joins audit rows with `git show <date>:skills/public/X/SKILL.md`.
+- Rate limiter enforced **control-plane-side** in the `append_rule` handler, not deploy-side — a deploy-side limiter can be bypassed by calling `manage_skills` directly from the UI.
+- Second-ask auto-fire detection is deferred to **Phase 6.5**. Commit 5 (the deploy-side client) was the wire-up for that detector, and without the detector there's nothing to route.
+
+### Commit 6 skip rationale (Shape A)
+
+The plan originally called for `deploy/src/runtime/skill-mutation.ts` — a deploy-side HTTP client that posts to a control-plane RPC route, to be called from `tools.ts:3072 evolve-agent` and `tools.ts:3135 autoresearch` when they detect a "second-ask" pattern. This was skipped after reading the actual bodies of both tools:
+
+1. **Neither function has a hook point today.** `evolve-agent` (L3072-3133) is an on-demand analyzer that calls `CONTROL_PLANE.fetch(/api/v1/evolve/:agent/analyze)` and returns a report + proposals. `autoresearch` (L3135-3159) inserts a pending `eval_runs` row and returns the `run_id` — the actual iteration happens elsewhere. Neither has a "second-ask detected" signal to react to.
+2. **The detector itself is Phase 6.5 scope**, deferred by design because the heuristic (exact match vs embedding similarity vs tool-call pattern) needs real session-log calibration.
+3. **The reference deploy→control-plane fetch pattern already exists** at `tools.ts:3088-3097`:
+   ```ts
+   const controlPlane = (env as any).CONTROL_PLANE;
+   if (controlPlane) {
+     const resp = await controlPlane.fetch(
+       `https://internal/api/v1/skill/append-rule`,
+       { method: "POST", headers: { ... }, body: JSON.stringify({ ... }) },
+     );
+     if (resp.ok) { ... }
+   }
+   ```
+   When Phase 6.5 needs a caller, copy-pasting that 8-line snippet is the reference implementation. A dedicated client module adds indirection with zero payoff.
+4. **The round-trip regression test (new commit 7)** runs in-process under vitest and imports `appendRule` directly from `control-plane/src/logic/skill-mutation`. No HTTP, no deploy-side client. Proves the full loop: failing eval → `appendRule` → `loadSkillOverlays` → `getSkillPrompt` merge → passing eval.
+5. **Budget**: `tools.ts` is at **8078/8080** (2 lines headroom). Adding an `append-skill-rule` tool case would force a fixture bump on a file Phase 9 is explicitly trying to slash to 2500. That's the wrong direction.
+
+**Phase 6.5 handoff note.** When wiring second-ask auto-fire:
+- **Detection** (the heuristic itself) lives in a NEW file like `deploy/src/runtime/skill-feedback.ts`. Do **not** grow `skills.ts` — it is at **180/180** after commit 4, zero headroom. Any addition needs a `-fixture-bump` against `loc_budget.json`.
+- **Routing** (calling `append_rule` from the detected hook) uses the `CONTROL_PLANE.fetch` pattern at `tools.ts:3088-3097` as the template. The control-plane RPC route to call is the new admin revert endpoint's sibling — add `POST /api/v1/skill/append-rule` at the same time if needed, or (easier) reuse the existing `manage_skills append_rule` tool via the meta-agent-chat loop.
+- **Hook points** are `tools.ts:3072` (evolve-agent, after the analyzer returns with a failure_clusters field ≥ 3 occurrences of the same root cause) and `tools.ts:3135` (autoresearch, when a run repeats the same fix path it applied in a prior run within N days).
+
+### Phase 6 validation at commit-4 handoff (main @ `7486598b`)
+
+- **control-plane:** 749/749 tests green (was 726 pre-branch; +21 mutation unit tests + 2 schema assertions via `it.each`)
+- **deploy:** 477/477 tests green (was 469; +8 Phase 6 skill tests), 18 benchmark skips unchanged
+- **LoC budgets:** `skills.ts` 180/180 (at ceiling, no headroom — Phase 7 or later must fixture-bump), `tools.ts` 8078/8080 (unchanged, 2 lines headroom preserved for Phase 6.5)
+- **Prompt budget:** `meta-agent-chat.ts` 31714/31714 unchanged (edits were in `logic/meta-agent-chat.ts`, budget measures `prompts/meta-agent-chat.ts`)
+- **Phase 0/3/4 drift guards:** all green — 19 BUILTIN skill hashes unchanged (diarize + improve opt-in via `NON_BUILTIN_ALLOWLIST`), `formatSkillsPrompt([], plan)` snapshots byte-identical (Phase 6 only touched `getSkillPrompt`), phase-3 orphan allowlist updated
+
+---
+
+### Original Phase 6 plan (preserved for history)
+
 **Status:** Phases 0, 1, 2, 3, 4, 5 ✅ done. **Resume at Phase 6.**
 
 **What was done (Phase 5 — meta-agent composes skills):**
