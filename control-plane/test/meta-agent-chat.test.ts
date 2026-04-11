@@ -819,27 +819,73 @@ describe("002_skill_learning — overlays + audit migration", () => {
 });
 
 // ══════════════════════════════════════════════════════════════════
-// 16. PHASE 7.2a — META_SKILL_BODIES shape (infrastructure scaffold)
+// 16. PHASE 7.2 — META_SKILL_BODIES shape + byte-identity extraction
 // ══════════════════════════════════════════════════════════════════
 //
-// At 7.2a the map is empty — the bundler walks skills/meta/ and emits
-// an empty Record. First content lands in 7.2b (mode-demo extraction).
-// This test proves the generated file exists, type-checks, and can be
-// imported from the test runner. A future regression where the bundler
-// stops emitting the file (or emits a non-object) trips here first.
+// Section was "7.2a scaffold" and asserted the map was empty. 7.2b
+// extracted DEMO_MODE_INSTRUCTIONS to skills/meta/mode-demo/SKILL.md
+// and folded in the Path B regex fix (FRONTMATTER_RE now uses
+// `[ \t]*\n` instead of `\s*\n` so leading newlines in bodies are
+// preserved). The byte-identity test proves both halves: extraction
+// + regex fix are lossless. Remove this specific byte-identity test
+// at 7.3's exit audit — once LIVE is also extracted, the CI
+// freshness gate on meta-skill-bodies.generated.ts becomes the
+// ongoing drift guard.
 // ══════════════════════════════════════════════════════════════════
 
+import { createHash } from "node:crypto";
 import { META_SKILL_BODIES } from "../src/lib/meta-skill-bodies.generated";
 
-describe("Phase 7.2a — META_SKILL_BODIES scaffold", () => {
+describe("Phase 7.2 — META_SKILL_BODIES shape", () => {
   it("is importable and is a plain object", () => {
     expect(typeof META_SKILL_BODIES).toBe("object");
     expect(META_SKILL_BODIES).not.toBeNull();
     expect(Array.isArray(META_SKILL_BODIES)).toBe(false);
   });
 
-  it("is empty at 7.2a (first entry lands in 7.2b)", () => {
-    expect(Object.keys(META_SKILL_BODIES).length).toBe(0);
+  it("contains mode-demo (extracted in 7.2b) but not yet mode-live (extracts in 7.3)", () => {
+    expect(META_SKILL_BODIES["mode-demo"]).toBeDefined();
+    expect(typeof META_SKILL_BODIES["mode-demo"]).toBe("string");
+    expect(META_SKILL_BODIES["mode-live"]).toBeUndefined();
+  });
+});
+
+describe("Phase 7.2b — META_SKILL_BODIES['mode-demo'] byte identity", () => {
+  // sha computed against the pre-extraction DEMO_MODE_INSTRUCTIONS
+  // constant at commit f811ca3e (the last commit that had the constant
+  // inline). After the Path B regex fix landed in 7.2b, the bundled
+  // body is byte-identical to that constant — leading `\n` preserved,
+  // middle + trailing preserved, 3342 chars total. If this drifts
+  // after 7.2b, either the SKILL.md was edited OR someone reverted
+  // the FRONTMATTER_RE fix. Either is load-bearing, fail loudly.
+  const EXPECTED_SHA = "48508bce4c6920a1deda1bd470c8eea1c5826f674a058914207fe6ce2a60cdfd";
+  const EXPECTED_LENGTH = 3342;
+
+  it("matches sha256 of pre-extraction DEMO_MODE_INSTRUCTIONS", () => {
+    const body = META_SKILL_BODIES["mode-demo"];
+    const actual = createHash("sha256").update(body, "utf8").digest("hex");
+
+    if (actual !== EXPECTED_SHA) {
+      throw new Error(
+        `META_SKILL_BODIES["mode-demo"] drifted from pre-extraction constant.\n` +
+        `  expected sha256: ${EXPECTED_SHA}\n` +
+        `  actual sha256:   ${actual}\n` +
+        `  expected length: ${EXPECTED_LENGTH}\n` +
+        `  actual length:   ${body.length}\n` +
+        `  first 80 chars:  ${JSON.stringify(body.slice(0, 80))}\n` +
+        `  last  80 chars:  ${JSON.stringify(body.slice(-80))}\n` +
+        `\n` +
+        `If you intentionally modified the body, recompute the sha and\n` +
+        `update EXPECTED_SHA. Otherwise investigate:\n` +
+        `  1. skills/meta/mode-demo/SKILL.md — was it edited?\n` +
+        `  2. control-plane/scripts/bundle-skill-catalog.mjs FRONTMATTER_RE —\n` +
+        `     was it reverted from '[ \\t]*\\n' back to '\\s*\\n'? That\n` +
+        `     regex consumes leading newlines in bodies (see the inline\n` +
+        `     comment in the bundler for why).\n` +
+        `  3. Run 'node control-plane/scripts/bundle-skill-catalog.mjs' and\n` +
+        `     inspect the diff on meta-skill-bodies.generated.ts.`,
+      );
+    }
   });
 });
 
