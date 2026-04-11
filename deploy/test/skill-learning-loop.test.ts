@@ -96,11 +96,17 @@ function buildStatefulSql(orgId: string, agentName: string) {
       return Promise.resolve([]);
     }
 
-    // appendRule: rate-limit check
+    // appendRule: rate-limit check.
+    // Phase 6.5 dual bucket: partition by source LIKE 'auto-fire%'.
+    // The production query returns FILTER-partitioned columns; the mock
+    // does the same classification in-memory so the round-trip tests
+    // exercise the real column shape.
     if (query.includes("count(*)") && query.includes("skill_audit")) {
       const skillName = String(values[0]);
-      const count = audit.filter((a) => a.skill_name === skillName).length;
-      return Promise.resolve([{ n: count }]);
+      const rows = audit.filter((a) => a.skill_name === skillName);
+      const autoCount = rows.filter((a) => a.source.startsWith("auto-fire")).length;
+      const humanCount = rows.length - autoCount;
+      return Promise.resolve([{ auto_count: autoCount, human_count: humanCount }]);
     }
 
     // appendRule: custom-skill existence lookup

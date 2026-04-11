@@ -16,6 +16,8 @@ import {
   sha256Hex,
   OVERLAY_JOINER,
   SKILL_MUTATION_RATE_LIMIT_PER_DAY,
+  SKILL_MUTATION_RATE_LIMIT_HUMAN_PER_DAY,
+  SKILL_MUTATION_RATE_LIMIT_AUTO_PER_DAY,
 } from "../src/logic/skill-mutation";
 
 /**
@@ -66,7 +68,7 @@ describe("skill-mutation — permission check", () => {
 
   it("accepts role=owner", async () => {
     const sql = makeMockSql([
-      [{ n: 0 }],              // rate check
+      [{ auto_count: 0, human_count: 0 }],              // rate check
       [],                       // no prior overlays
       [{ overlay_id: "o-1" }],  // overlay insert
       [{ audit_id: "a-1" }],    // audit insert
@@ -80,7 +82,7 @@ describe("skill-mutation — permission check", () => {
 
   it("accepts role=admin", async () => {
     const sql = makeMockSql([
-      [{ n: 0 }], [], [{ overlay_id: "o-1" }], [{ audit_id: "a-1" }],
+      [{ auto_count: 0, human_count: 0 }], [], [{ overlay_id: "o-1" }], [{ audit_id: "a-1" }],
     ]);
     const result = await appendRule(
       sql,
@@ -130,7 +132,7 @@ describe("skill-mutation — input validation", () => {
 describe("skill-mutation — unknown skill", () => {
   it("accepts a known bundled skill without hitting the custom-skill lookup", async () => {
     const sql = makeMockSql([
-      [{ n: 0 }], [], [{ overlay_id: "o-1" }], [{ audit_id: "a-1" }],
+      [{ auto_count: 0, human_count: 0 }], [], [{ overlay_id: "o-1" }], [{ audit_id: "a-1" }],
     ]);
     const result = await appendRule(sql, baseCtx, {
       skillName: "debug",
@@ -159,7 +161,7 @@ describe("skill-mutation — unknown skill", () => {
   it("accepts a custom skill if the lookup returns a row", async () => {
     const sql = makeMockSql([
       [{ "?column?": 1 }],      // custom skill exists
-      [{ n: 0 }],                // rate check
+      [{ auto_count: 0, human_count: 0 }],                // rate check
       [],                         // no prior overlays
       [{ overlay_id: "o-1" }],    // overlay insert
       [{ audit_id: "a-1" }],      // audit insert
@@ -203,7 +205,7 @@ describe("skill-mutation — prompt injection guard", () => {
   it("allows benign rule text that mentions injection-adjacent words in context", async () => {
     // "rule" alone is fine; "follow the user's request literally" doesn't match any pattern.
     const sql = makeMockSql([
-      [{ n: 0 }], [], [{ overlay_id: "o-1" }], [{ audit_id: "a-1" }],
+      [{ auto_count: 0, human_count: 0 }], [], [{ overlay_id: "o-1" }], [{ audit_id: "a-1" }],
     ]);
     const result = await appendRule(sql, baseCtx, {
       skillName: "debug",
@@ -214,8 +216,8 @@ describe("skill-mutation — prompt injection guard", () => {
 });
 
 describe("skill-mutation — rate limit", () => {
-  it(`rejects at the ${SKILL_MUTATION_RATE_LIMIT_PER_DAY}th recent mutation with code=rate_limited`, async () => {
-    const sql = makeMockSql([[{ n: SKILL_MUTATION_RATE_LIMIT_PER_DAY }]]);
+  it(`rejects at the ${SKILL_MUTATION_RATE_LIMIT_PER_DAY}th recent HUMAN mutation with code=rate_limited`, async () => {
+    const sql = makeMockSql([[{ auto_count: 0, human_count: SKILL_MUTATION_RATE_LIMIT_PER_DAY }]]);
     const result = await appendRule(sql, baseCtx, {
       skillName: "debug",
       ruleText: "when: foo\nthen: bar",
@@ -226,15 +228,16 @@ describe("skill-mutation — rate limit", () => {
       expect(result.detail).toMatchObject({
         recent_count: SKILL_MUTATION_RATE_LIMIT_PER_DAY,
         limit: SKILL_MUTATION_RATE_LIMIT_PER_DAY,
+        bucket: "human",
       });
     }
     // Short-circuits after rate check — no overlay reads or inserts.
     expect(sql.calls.length).toBe(1);
   });
 
-  it(`accepts at exactly ${SKILL_MUTATION_RATE_LIMIT_PER_DAY - 1} recent mutations`, async () => {
+  it(`accepts at exactly ${SKILL_MUTATION_RATE_LIMIT_PER_DAY - 1} recent HUMAN mutations`, async () => {
     const sql = makeMockSql([
-      [{ n: SKILL_MUTATION_RATE_LIMIT_PER_DAY - 1 }],
+      [{ auto_count: 0, human_count: SKILL_MUTATION_RATE_LIMIT_PER_DAY - 1 }],
       [],
       [{ overlay_id: "o-1" }],
       [{ audit_id: "a-1" }],
@@ -247,10 +250,124 @@ describe("skill-mutation — rate limit", () => {
   });
 });
 
+describe("skill-mutation — dual-bucket rate limit", () => {
+  it("human source rejected when human_count >= human limit (auto bucket irrelevant)", async () => {
+    const sql = makeMockSql([[{
+      auto_count: SKILL_MUTATION_RATE_LIMIT_AUTO_PER_DAY,
+      human_count: SKILL_MUTATION_RATE_LIMIT_HUMAN_PER_DAY,
+    }]]);
+    const result = await appendRule(sql, baseCtx, {
+      skillName: "debug",
+      ruleText: "when: foo\nthen: bar",
+      source: "improve",
+    });
+    expect(result.appended).toBe(false);
+    if (!result.appended) {
+      expect(result.code).toBe("rate_limited");
+      expect(result.detail).toMatchObject({
+        bucket: "human",
+        limit: SKILL_MUTATION_RATE_LIMIT_HUMAN_PER_DAY,
+        recent_count: SKILL_MUTATION_RATE_LIMIT_HUMAN_PER_DAY,
+      });
+    }
+  });
+
+  it("human source ACCEPTED when human bucket has headroom even if auto bucket is full", async () => {
+    // Core invariant: auto-fire runaway must not starve human admin calls.
+    const sql = makeMockSql([
+      [{
+        auto_count: SKILL_MUTATION_RATE_LIMIT_AUTO_PER_DAY,
+        human_count: 0,
+      }],
+      [],
+      [{ overlay_id: "o-1" }],
+      [{ audit_id: "a-1" }],
+    ]);
+    const result = await appendRule(sql, baseCtx, {
+      skillName: "debug",
+      ruleText: "when: foo\nthen: bar",
+      source: "improve",
+    });
+    expect(result.appended).toBe(true);
+  });
+
+  it("auto-fire source rejected when auto_count >= auto limit (human bucket irrelevant)", async () => {
+    const sql = makeMockSql([[{
+      auto_count: SKILL_MUTATION_RATE_LIMIT_AUTO_PER_DAY,
+      human_count: 0,
+    }]]);
+    const result = await appendRule(sql, baseCtx, {
+      skillName: "debug",
+      ruleText: "ATTENTION: pattern 'x' caused 5 failures on agent 'y'",
+      source: "auto-fire:evolve",
+    });
+    expect(result.appended).toBe(false);
+    if (!result.appended) {
+      expect(result.code).toBe("rate_limited");
+      expect(result.detail).toMatchObject({
+        bucket: "auto-fire",
+        limit: SKILL_MUTATION_RATE_LIMIT_AUTO_PER_DAY,
+        recent_count: SKILL_MUTATION_RATE_LIMIT_AUTO_PER_DAY,
+      });
+    }
+  });
+
+  it("auto-fire source ACCEPTED when auto bucket has headroom even if human bucket is full", async () => {
+    // Symmetric invariant: human runaway must not starve auto-fire either.
+    const sql = makeMockSql([
+      [{
+        auto_count: 0,
+        human_count: SKILL_MUTATION_RATE_LIMIT_HUMAN_PER_DAY,
+      }],
+      [],
+      [{ overlay_id: "o-1" }],
+      [{ audit_id: "a-1" }],
+    ]);
+    const result = await appendRule(sql, baseCtx, {
+      skillName: "debug",
+      ruleText: "ATTENTION: pattern 'x' caused failures",
+      source: "auto-fire:evolve",
+    });
+    expect(result.appended).toBe(true);
+  });
+
+  it("default source (undefined → 'improve') classifies as human bucket", async () => {
+    const sql = makeMockSql([[{
+      auto_count: 0,
+      human_count: SKILL_MUTATION_RATE_LIMIT_HUMAN_PER_DAY,
+    }]]);
+    const result = await appendRule(sql, baseCtx, {
+      skillName: "debug",
+      ruleText: "when: foo\nthen: bar",
+      // source intentionally omitted → defaults to "improve"
+    });
+    expect(result.appended).toBe(false);
+    if (!result.appended) {
+      expect(result.detail).toMatchObject({ bucket: "human" });
+    }
+  });
+
+  it("source='auto-fire' (plain prefix, no subsource suffix) classifies as auto bucket", async () => {
+    const sql = makeMockSql([[{
+      auto_count: SKILL_MUTATION_RATE_LIMIT_AUTO_PER_DAY,
+      human_count: 0,
+    }]]);
+    const result = await appendRule(sql, baseCtx, {
+      skillName: "debug",
+      ruleText: "when: foo\nthen: bar",
+      source: "auto-fire",
+    });
+    expect(result.appended).toBe(false);
+    if (!result.appended) {
+      expect(result.detail).toMatchObject({ bucket: "auto-fire" });
+    }
+  });
+});
+
 describe("skill-mutation — rate-limit race serializer", () => {
   it("acquires pg_advisory_xact_lock with a (org, skill)-keyed lock id on the happy path", async () => {
     const sql = makeMockSql([
-      [{ n: 0 }], [], [{ overlay_id: "o-1" }], [{ audit_id: "a-1" }],
+      [{ auto_count: 0, human_count: 0 }], [], [{ overlay_id: "o-1" }], [{ audit_id: "a-1" }],
     ]);
     const result = await appendRule(sql, baseCtx, {
       skillName: "debug",
@@ -265,7 +382,7 @@ describe("skill-mutation — rate-limit race serializer", () => {
   });
 
   it("still acquires the lock when the rate-limit check rejects (proves lock fires before COUNT)", async () => {
-    const sql = makeMockSql([[{ n: SKILL_MUTATION_RATE_LIMIT_PER_DAY }]]);
+    const sql = makeMockSql([[{ auto_count: 0, human_count: SKILL_MUTATION_RATE_LIMIT_PER_DAY }]]);
     const result = await appendRule(sql, baseCtx, {
       skillName: "debug",
       ruleText: "when: foo\nthen: bar",
@@ -299,7 +416,7 @@ describe("skill-mutation — rate-limit race serializer", () => {
 describe("skill-mutation — sha integrity and overlay joiner", () => {
   it("first append: before_sha = sha256(''), after_sha = sha256(rule_text)", async () => {
     const sql = makeMockSql([
-      [{ n: 0 }], [], [{ overlay_id: "o-1" }], [{ audit_id: "a-1" }],
+      [{ auto_count: 0, human_count: 0 }], [], [{ overlay_id: "o-1" }], [{ audit_id: "a-1" }],
     ]);
     const ruleText = "when: path contains /tmp/\nthen: require confirmation";
     const result = await appendRule(sql, baseCtx, {
@@ -320,7 +437,7 @@ describe("skill-mutation — sha integrity and overlay joiner", () => {
     const priorRule = "when: path contains /tmp/\nthen: require confirmation";
     const newRule = "when: user asks to delete\nthen: list files first";
     const sql = makeMockSql([
-      [{ n: 1 }],                    // one prior mutation counted
+      [{ auto_count: 0, human_count: 1 }],  // one prior mutation counted
       [{ rule_text: priorRule }],    // one prior overlay
       [{ overlay_id: "o-2" }],
       [{ audit_id: "a-2" }],
@@ -343,7 +460,7 @@ describe("skill-mutation — sha integrity and overlay joiner", () => {
     const r2 = "rule two";
     const r3 = "rule three";
     const sql = makeMockSql([
-      [{ n: 2 }],
+      [{ auto_count: 0, human_count: 2 }],
       [{ rule_text: r1 }, { rule_text: r2 }],
       [{ overlay_id: "o-3" }],
       [{ audit_id: "a-3" }],
