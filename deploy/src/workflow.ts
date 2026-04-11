@@ -912,10 +912,12 @@ ALWAYS:
     const skillMatch = safeInput.trim().match(/^\/([a-z][\w-]*)\s*(.*)?$/);
     if (skillMatch) {
       const [, skillName, skillArgs] = skillMatch;
-      const { getSkillPrompt, loadSkills: loadDbSkills } = await import("./runtime/skills");
+      const { getSkillPrompt, loadSkills: loadDbSkills, loadSkillOverlays } = await import("./runtime/skills");
       let dbSkills: any[] = [];
+      let overlays: Record<string, string[]> = {};
       try { dbSkills = await loadDbSkills(this.env.HYPERDRIVE, p.org_id, p.agent_name); } catch {}
-      const skillPrompt = getSkillPrompt(skillName, skillArgs || "", dbSkills);
+      try { overlays = await loadSkillOverlays(this.env.HYPERDRIVE, p.org_id, p.agent_name); } catch {}
+      const skillPrompt = getSkillPrompt(skillName, skillArgs || "", dbSkills, config.enabled_skills, overlays);
       if (skillPrompt) {
         messages.push({
           role: "system",
@@ -1424,10 +1426,12 @@ ALWAYS:
         const activateMatch = llm.content.match(/<activate-skill\s+name="([a-z][\w-]*)">([\s\S]*?)<\/activate-skill>/);
         if (activateMatch) {
           const [fullTag, autoSkillName, autoSkillArgs] = activateMatch;
-          const { getSkillPrompt, loadSkills: loadDbSkills } = await import("./runtime/skills");
+          const { getSkillPrompt, loadSkills: loadDbSkills, loadSkillOverlays } = await import("./runtime/skills");
           let dbSkills: any[] = [];
+          let overlays: Record<string, string[]> = {};
           try { dbSkills = await loadDbSkills(this.env.HYPERDRIVE, p.org_id, p.agent_name); } catch {}
-          const autoSkillPrompt = getSkillPrompt(autoSkillName, autoSkillArgs.trim(), dbSkills, config.enabled_skills);
+          try { overlays = await loadSkillOverlays(this.env.HYPERDRIVE, p.org_id, p.agent_name); } catch {}
+          const autoSkillPrompt = getSkillPrompt(autoSkillName, autoSkillArgs.trim(), dbSkills, config.enabled_skills, overlays);
           if (autoSkillPrompt) {
             // Strip the activation tag from the assistant's content
             (llm as any).content = llm.content.replace(fullTag, "").trim();

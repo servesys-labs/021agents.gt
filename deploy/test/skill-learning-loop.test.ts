@@ -21,12 +21,24 @@
  * and returns query results based on SQL fragments.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 
 import {
   appendRule,
   OVERLAY_JOINER,
 } from "../../control-plane/src/logic/skill-mutation";
+
+// Mutable reference the db mock closes over. Each test sets this to the
+// stateful sql BEFORE calling loadSkillOverlays so the real function
+// executes its query against the same in-memory state that appendRule
+// just wrote to. This is what makes the "round-trip" real rather than
+// schema-theater: we invoke the actual deploy read path, not a hand-rolled
+// inline query that shadows it.
+let currentMockSql: any = null;
+vi.mock("../src/runtime/db", () => ({
+  getDb: async () => currentMockSql,
+}));
+
 import {
   loadSkillOverlays,
   getSkillPrompt,
@@ -216,24 +228,17 @@ describe("Phase 6 merge gate — round-trip regression", () => {
     expect(audit[0].overlay_id).toBe(overlays[0].overlay_id);
     expect(audit[0].source).toBe("improve");
 
-    // ── Step 3: read overlays via loadSkillOverlays (deploy read path).
+    // ── Step 3: read overlays via the REAL loadSkillOverlays.
     //
-    // loadSkillOverlays takes Hyperdrive via getDb; we bypass that by
-    // building the overlay map directly from the mocked sql — same
-    // shape loadSkillOverlays returns. This is the moment the two
-    // workspaces prove they agree on schema: if appendRule wrote under
-    // column 'rule_text' and loadSkillOverlays read under a different
-    // column, this step would hand an empty map to step 4 and the
-    // test would fail.
-    const overlayRows = await sql`
-      SELECT skill_name, rule_text FROM skill_overlays
-      WHERE org_id = ${orgId} AND (agent_name = ${agentName} OR agent_name = '')
-      ORDER BY created_at ASC
-    `;
-    const overlayMap: Record<string, string[]> = {};
-    for (const r of overlayRows as any[]) {
-      (overlayMap[r.skill_name] ??= []).push(r.rule_text);
-    }
+    // getDb is vi.mocked at the top of this file to return currentMockSql,
+    // so loadSkillOverlays' SELECT hits the same stateful in-memory DB
+    // that appendRule just wrote to. If the read side's SELECT column
+    // names or WHERE clause drift from the write side's INSERT, this
+    // step hands an empty map to step 4 and the test fails. That's the
+    // whole point of running the actual function — not a hand-rolled
+    // copy of the same query.
+    currentMockSql = sql;
+    const overlayMap = await loadSkillOverlays({} as any, orgId, agentName);
     expect(overlayMap[targetSkill]).toBeDefined();
     expect(overlayMap[targetSkill]).toEqual([requiredRule]);
 
@@ -275,16 +280,9 @@ describe("Phase 6 merge gate — round-trip regression", () => {
     const { sha256Hex } = await import("../../control-plane/src/logic/skill-mutation");
     expect(r2.before_sha).toBe(await sha256Hex(rule1));
 
-    // Read overlays and merge — both rules should appear in order.
-    const overlayRows = await sql`
-      SELECT skill_name, rule_text FROM skill_overlays
-      WHERE org_id = ${orgId} AND (agent_name = ${agentName} OR agent_name = '')
-      ORDER BY created_at ASC
-    `;
-    const overlayMap: Record<string, string[]> = {};
-    for (const r of overlayRows as any[]) {
-      (overlayMap[r.skill_name] ??= []).push(r.rule_text);
-    }
+    // Read overlays via the real loadSkillOverlays (same vi.mock hook).
+    currentMockSql = sql;
+    const overlayMap = await loadSkillOverlays({} as any, orgId, agentName);
     expect(overlayMap[targetSkill]).toEqual([rule1, rule2]);
 
     const merged = getSkillPrompt(targetSkill, "", [], undefined, overlayMap);
@@ -303,6 +301,29 @@ describe("Phase 6 merge gate — round-trip regression", () => {
     expect(learnedBlock).toContain(OVERLAY_JOINER);
   });
 
+  it("workflow.ts invokes loadSkillOverlays in both skill-activation paths", async () => {
+    // Static regression for the P0-A gap surfaced in the second-pass audit:
+    // Phase 6 commit 4 added loadSkillOverlays but never wired it into
+    // workflow.ts. The function became an orphan — learned rules were
+    // persisted in Postgres but the runtime read path never called
+    // the reader, so agents saw only the disk body.
+    //
+    // This assertion catches a future regression where someone removes
+    // the wiring from either activation path in workflow.ts. Static grep
+    // because workflow.ts is too large to instantiate under vitest.
+    const fs = await import("fs");
+    const content = fs.readFileSync("src/workflow.ts", "utf8");
+    const loaderCalls = content.match(/loadSkillOverlays\s*\(/g) ?? [];
+    // Both skill-activation paths (manual /command and auto-activate tag)
+    // must call the overlay loader. At least 2 calls expected.
+    expect(loaderCalls.length).toBeGreaterThanOrEqual(2);
+    // And getSkillPrompt must be called with the overlays map as its
+    // final argument. Both call sites end with ", overlays)" — simple
+    // literal match that doesn't need to parse nested parens.
+    const withOverlays = content.match(/getSkillPrompt\([^;]*?,\s*overlays\)/g) ?? [];
+    expect(withOverlays.length).toBeGreaterThanOrEqual(2);
+  });
+
   it("{{ARGS}} substitution still runs on base template; rule text is literal even under round-trip", async () => {
     // The merge order bug we caught in commit 5: rule text containing
     // {{ARGS}} MUST NOT be substituted. Round-trip verifies this survives
@@ -317,15 +338,8 @@ describe("Phase 6 merge gate — round-trip regression", () => {
     );
     expect(r.appended).toBe(true);
 
-    const overlayRows = await sql`
-      SELECT skill_name, rule_text FROM skill_overlays
-      WHERE org_id = ${orgId} AND (agent_name = ${agentName} OR agent_name = '')
-      ORDER BY created_at ASC
-    `;
-    const overlayMap: Record<string, string[]> = {};
-    for (const r of overlayRows as any[]) {
-      (overlayMap[r.skill_name] ??= []).push(r.rule_text);
-    }
+    currentMockSql = sql;
+    const overlayMap = await loadSkillOverlays({} as any, orgId, agentName);
 
     const merged = getSkillPrompt(targetSkill, "SUBSTITUTED_VALUE", [], undefined, overlayMap);
     expect(merged).not.toBeNull();

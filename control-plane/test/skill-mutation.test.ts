@@ -445,6 +445,60 @@ describe("skill-mutation — revertSkillRule", () => {
     expect(sql.calls.length).toBe(5);
   });
 
+  it("uses audit.agent_name for scope filtering — NOT ctx.agentName from the route", async () => {
+    // Regression for the P2 bug surfaced in the second-pass audit:
+    // the route handler hardcodes agentName="" for the revert call, so if
+    // revertSkillRule scoped overlays by ctx.agentName it would miss all
+    // agent-scoped overlays and compute wrong before/after content.
+    //
+    // The audit row stores the ORIGINAL agent_name (e.g. "pdf-specialist"),
+    // and the revert must read overlays under that same scope.
+    const rule = "when: /tmp path\nthen: require confirmation";
+    const ruleSha = await sha256Hex("");
+    const sql = makeMockSql([
+      // 1. SELECT audit row — note agent_name is pdf-specialist, NOT ""
+      [{
+        audit_id: "audit-agent-scoped",
+        skill_name: "debug",
+        agent_name: "pdf-specialist",
+        overlay_id: "ov-agent-1",
+        before_sha: ruleSha,
+        before_content: "",
+        after_content: rule,
+        source: "improve",
+      }],
+      // 2. SELECT current overlays — scope must match audit.agent_name
+      [{ rule_text: rule }],
+      // 3. DELETE overlay
+      [{ overlay_id: "ov-agent-1" }],
+      // 4. SELECT post-delete
+      [],
+      // 5. INSERT revert audit
+      [{ audit_id: "audit-agent-revert" }],
+    ]);
+
+    // Route handler passes agentName="" — but revert MUST ignore that and
+    // use the audit row's agent_name instead.
+    const result = await revertSkillRule(
+      sql,
+      { orgId: "org-test", agentName: "", userRole: "owner" },
+      "audit-agent-scoped",
+    );
+    expect(result.reverted).toBe(true);
+
+    // Verify the SELECT queries for overlays used pdf-specialist, not "".
+    // Calls: [0]=audit select, [1]=before overlays, [2]=delete, [3]=after overlays, [4]=insert audit
+    const beforeOverlaysCall = sql.calls[1];
+    const afterOverlaysCall = sql.calls[3];
+    expect(beforeOverlaysCall.values).toContain("pdf-specialist");
+    expect(afterOverlaysCall.values).toContain("pdf-specialist");
+    // The revert INSERT's agent_name column is the 3rd value (index 2):
+    // (org_id, skill_name, agent_name, overlay_id, ...). Must be the
+    // audit row's agent_name, NOT ctx.agentName.
+    const insertAuditCall = sql.calls[4];
+    expect(insertAuditCall.values[2]).toBe("pdf-specialist");
+  });
+
   it("happy path when removing the ONLY overlay: after state is empty string", async () => {
     const onlyRule = "the only rule";
     const onlySha = await sha256Hex("");
