@@ -12,6 +12,10 @@
  * - Workflow-driven: common tasks have step-by-step flows
  */
 
+// Phase 7.2a scaffold: import locks tsc path; first consumer in 7.2b.
+import { META_SKILL_BODIES } from "../lib/meta-skill-bodies.generated";
+void META_SKILL_BODIES;
+
 /**
  * Build the meta-agent chat prompt.
  *
