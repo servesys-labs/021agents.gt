@@ -11,12 +11,15 @@ jobs:
   # ── Control Plane (Cloudflare Worker) ──────────────────────────────
   control-plane:
     runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN || secrets.CF_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || 'ae92d4bf7c6c448f442d084a2358dcd5' }}
     defaults:
       run:
         working-directory: control-plane
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: "22"
       - run: npm ci
@@ -30,21 +33,25 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
       - name: Deploy control-plane
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && env.CLOUDFLARE_API_TOKEN != ''
         continue-on-error: true
         run: npx wrangler deploy
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Skip control-plane deploy (missing Cloudflare token)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && env.CLOUDFLARE_API_TOKEN == ''
+        run: echo "Skipping control-plane deploy — set CLOUDFLARE_API_TOKEN (or CF_API_TOKEN) in GitHub Secrets"
 
   # ── Runtime Worker (Cloudflare Worker + DO + Containers) ───────────
   deploy:
     runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN || secrets.CF_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || 'ae92d4bf7c6c448f442d084a2358dcd5' }}
     defaults:
       run:
         working-directory: deploy
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: "22"
       - run: npm ci
@@ -58,47 +65,54 @@ jobs:
       - name: Test
         run: npm test
       - name: Deploy runtime
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && env.CLOUDFLARE_API_TOKEN != ''
         continue-on-error: true
         run: npx wrangler deploy
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Skip runtime deploy (missing Cloudflare token)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && env.CLOUDFLARE_API_TOKEN == ''
+        run: echo "Skipping runtime deploy — set CLOUDFLARE_API_TOKEN (or CF_API_TOKEN) in GitHub Secrets"
 
   # ── UI (SvelteKit + Cloudflare Workers Static Assets) ─────────────
   ui:
     runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN || secrets.CF_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || 'ae92d4bf7c6c448f442d084a2358dcd5' }}
     defaults:
       run:
         working-directory: ui
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: "22"
       - run: npm ci
       - name: Build
         run: npm run build
       - name: Deploy UI
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && env.CLOUDFLARE_API_TOKEN != ''
         continue-on-error: true
         run: npx wrangler deploy
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Skip UI deploy (missing Cloudflare token)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && env.CLOUDFLARE_API_TOKEN == ''
+        run: echo "Skipping UI deploy — set CLOUDFLARE_API_TOKEN (or CF_API_TOKEN) in GitHub Secrets"
 
   # ── Live E2E Infra Gate (runs only when secrets are configured) ───
   service-token-parity-and-auth-canary:
     runs-on: ubuntu-latest
     needs: [control-plane, deploy]
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN || secrets.CF_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || 'ae92d4bf7c6c448f442d084a2358dcd5' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: "22"
       - name: Sync SERVICE_TOKEN to runtime + control-plane
         if: github.ref == 'refs/heads/main' && github.event_name == 'push' && env.E2E_SERVICE_TOKEN != '' && env.CLOUDFLARE_API_TOKEN != ''
         run: bash scripts/sync_service_token.sh --service-token "${E2E_SERVICE_TOKEN}" --runtime-url "${E2E_RUNTIME_URL:-https://runtime.oneshots.co}"
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           E2E_SERVICE_TOKEN: ${{ secrets.E2E_SERVICE_TOKEN }}
           E2E_RUNTIME_URL: ${{ secrets.E2E_RUNTIME_URL }}
       - name: Run auth canary
@@ -118,7 +132,7 @@ jobs:
     needs: [control-plane, deploy, ui, service-token-parity-and-auth-canary]
     # Secrets can't be checked in job-level `if`. Use environment check in step instead.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Run E2E infrastructure gate
         if: env.E2E_SERVICE_TOKEN != ''
         run: bash scripts/e2e_infra_gate.sh
@@ -145,7 +159,7 @@ jobs:
     needs: [control-plane, deploy, ui]
     if: github.event_name == 'workflow_dispatch'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Run pre-beta health suite
         if: env.E2E_SERVICE_TOKEN != '' && env.E2E_USER_EMAIL != '' && env.E2E_USER_PASSWORD != ''
         run: bash scripts/pre_beta_health_suite.sh

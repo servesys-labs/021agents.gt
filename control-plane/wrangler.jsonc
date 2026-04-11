@@ -1,6 +1,7 @@
 // wrangler.jsonc — AgentOS Control-Plane Worker
 {
   "name": "agentos-control-plane",
+  "account_id": "ae92d4bf7c6c448f442d084a2358dcd5",
   "main": "src/index.ts",
   "compatibility_date": "2026-03-01",
   "compatibility_flags": ["nodejs_compat"],

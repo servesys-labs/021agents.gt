@@ -1,5 +1,6 @@
 {
   "name": "021agents-ai",
+  "account_id": "ae92d4bf7c6c448f442d084a2358dcd5",
   "compatibility_date": "2026-03-01",
   "assets": {
     "directory": "./build",
