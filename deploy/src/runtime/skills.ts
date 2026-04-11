@@ -79,11 +79,9 @@ export async function loadSkills(
   }
 }
 
-/**
- * Format skills as a system prompt section.
- */
-export function formatSkillsPrompt(skills: Skill[], plan?: string): string {
-  const all = [...BUILTIN_SKILLS, ...skills];
+/** Format skills section. `enabled` = optional agent allowlist (empty = all). */
+export function formatSkillsPrompt(skills: Skill[], plan?: string, enabled?: readonly string[]): string {
+  const all = [...BUILTIN_SKILLS, ...skills].filter(s => !enabled?.length || enabled.includes(s.name));
   if (all.length === 0) return "";
 
   const planTier = (plan || "standard").toLowerCase();
@@ -129,11 +127,9 @@ export function formatSkillsPrompt(skills: Skill[], plan?: string): string {
   return lines.join("\n");
 }
 
-/**
- * Get the full prompt for a specific skill activation.
- * Called when user invokes /skill-name or when the agent matches a trigger.
- */
-export function getSkillPrompt(skillName: string, args: string, skills: Skill[]): string | null {
+/** Get full skill body on activation. `enabled` allowlist is enforced here. */
+export function getSkillPrompt(skillName: string, args: string, skills: Skill[], enabled?: readonly string[]): string | null {
+  if (enabled?.length && !enabled.includes(skillName)) return null;
   const all = [...BUILTIN_SKILLS, ...skills];
   const skill = all.find(s => s.name === skillName);
   if (!skill) return null;
