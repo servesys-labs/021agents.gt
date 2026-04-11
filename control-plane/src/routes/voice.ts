@@ -664,9 +664,10 @@ voiceRoutes.openapi(vapiServerUrlRoute, async (c): Promise<any> => {
       return c.json({
         results: [{ toolCallId: String(fnCall.id ?? ""), result: output }],
       });
-    } catch (err: any) {
+    } catch (err) {
+      console.error(`[voice/vapi-webhook] tool execution failed:`, err);
       return c.json({
-        results: [{ toolCallId: String(fnCall.id ?? ""), result: `Error: ${err.message || "Tool execution failed"}` }],
+        results: [{ toolCallId: String(fnCall.id ?? ""), result: "Error: tool execution failed. Please try again." }],
       });
     }
   }
@@ -1582,7 +1583,11 @@ voiceRoutes.openapi(twilioProvisionRoute, async (c): Promise<any> => {
   const accountSid = String(c.env.TWILIO_ACCOUNT_SID ?? "").trim();
   const authToken = String(c.env.TWILIO_AUTH_TOKEN ?? "").trim();
   if (!accountSid || !authToken) {
-    return c.json({ error: "TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN not configured" }, 500);
+    console.error("[voice/twilio] Twilio credentials are not configured");
+    return c.json({
+      error: "Twilio calling is not set up on this environment. Contact support.",
+      code: "twilio_not_configured",
+    }, 503);
   }
 
   // Verify agent exists (RLS via withOrgDb)
@@ -1609,7 +1614,8 @@ voiceRoutes.openapi(twilioProvisionRoute, async (c): Promise<any> => {
   );
   if (!searchResp.ok) {
     const errText = await searchResp.text().catch(() => "");
-    return c.json({ error: `Twilio search failed (${searchResp.status})`, detail: errText.slice(0, 300) }, 400);
+    console.error(`[voice/twilio-search] Twilio returned ${searchResp.status}: ${errText.slice(0, 400)}`);
+    return c.json({ error: "Phone number search is temporarily unavailable. Please try again in a moment." }, 502);
   }
 
   const searchData = (await searchResp.json()) as { available_phone_numbers?: Array<{ phone_number: string }> };
@@ -1642,7 +1648,8 @@ voiceRoutes.openapi(twilioProvisionRoute, async (c): Promise<any> => {
   );
   if (!buyResp.ok) {
     const errText = await buyResp.text().catch(() => "");
-    return c.json({ error: `Twilio purchase failed (${buyResp.status})`, detail: errText.slice(0, 300) }, 400);
+    console.error(`[voice/twilio-purchase] Twilio returned ${buyResp.status}: ${errText.slice(0, 400)}`);
+    return c.json({ error: "Phone number purchase failed. Please try a different number or try again later." }, 502);
   }
 
   const buyData = (await buyResp.json()) as { sid: string; phone_number: string };
@@ -1860,7 +1867,11 @@ voiceRoutes.openapi(twilioDeleteNumberRoute, async (c): Promise<any> => {
   const accountSid = String(c.env.TWILIO_ACCOUNT_SID ?? "").trim();
   const authToken = String(c.env.TWILIO_AUTH_TOKEN ?? "").trim();
   if (!accountSid || !authToken) {
-    return c.json({ error: "TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN not configured" }, 500);
+    console.error("[voice/twilio] Twilio credentials are not configured");
+    return c.json({
+      error: "Twilio calling is not set up on this environment. Contact support.",
+      code: "twilio_not_configured",
+    }, 503);
   }
 
   return await withOrgDb(c.env, user.org_id, async (sql) => {
@@ -1886,7 +1897,8 @@ voiceRoutes.openapi(twilioDeleteNumberRoute, async (c): Promise<any> => {
 
   if (!releaseResp.ok && releaseResp.status !== 404) {
     const errText = await releaseResp.text().catch(() => "");
-    return c.json({ error: `Twilio release failed (${releaseResp.status})`, detail: errText.slice(0, 300) }, 400);
+    console.error(`[voice/twilio-release] Twilio returned ${releaseResp.status}: ${errText.slice(0, 400)}`);
+    return c.json({ error: "Phone number release failed. Please try again or contact support." }, 502);
   }
 
   // Remove from DB
@@ -2061,7 +2073,11 @@ voiceRoutes.openapi(twilioAvailableNumbersRoute, async (c): Promise<any> => {
   const accountSid = String(c.env.TWILIO_ACCOUNT_SID ?? "").trim();
   const authToken = String(c.env.TWILIO_AUTH_TOKEN ?? "").trim();
   if (!accountSid || !authToken) {
-    return c.json({ error: "TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN not configured" }, 500);
+    console.error("[voice/twilio] Twilio credentials are not configured");
+    return c.json({
+      error: "Twilio calling is not set up on this environment. Contact support.",
+      code: "twilio_not_configured",
+    }, 503);
   }
 
   const searchParams = new URLSearchParams({
@@ -2079,7 +2095,8 @@ voiceRoutes.openapi(twilioAvailableNumbersRoute, async (c): Promise<any> => {
 
   if (!searchResp.ok) {
     const errText = await searchResp.text().catch(() => "");
-    return c.json({ error: `Twilio search failed (${searchResp.status})`, detail: errText.slice(0, 300) }, 400);
+    console.error(`[voice/twilio-search] Twilio returned ${searchResp.status}: ${errText.slice(0, 400)}`);
+    return c.json({ error: "Phone number search is temporarily unavailable. Please try again in a moment." }, 502);
   }
 
   const searchData = (await searchResp.json()) as {
@@ -2149,7 +2166,11 @@ voiceRoutes.openapi(twilioBuyRoute, async (c): Promise<any> => {
   const accountSid = String(c.env.TWILIO_ACCOUNT_SID ?? "").trim();
   const authToken = String(c.env.TWILIO_AUTH_TOKEN ?? "").trim();
   if (!accountSid || !authToken) {
-    return c.json({ error: "TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN not configured" }, 500);
+    console.error("[voice/twilio] Twilio credentials are not configured");
+    return c.json({
+      error: "Twilio calling is not set up on this environment. Contact support.",
+      code: "twilio_not_configured",
+    }, 503);
   }
 
   return await withOrgDb(c.env, user.org_id, async (sql) => {
@@ -2194,7 +2215,8 @@ voiceRoutes.openapi(twilioBuyRoute, async (c): Promise<any> => {
 
   if (!buyResp.ok) {
     const errText = await buyResp.text().catch(() => "");
-    return c.json({ error: `Twilio purchase failed (${buyResp.status})`, detail: errText.slice(0, 300) }, 400);
+    console.error(`[voice/twilio-purchase] Twilio returned ${buyResp.status}: ${errText.slice(0, 400)}`);
+    return c.json({ error: "Phone number purchase failed. Please try a different number or try again later." }, 502);
   }
 
   const buyData = (await buyResp.json()) as { sid: string; phone_number: string };
@@ -2285,7 +2307,11 @@ voiceRoutes.openapi(twilioTestCallRoute, async (c): Promise<any> => {
   const accountSid = String(c.env.TWILIO_ACCOUNT_SID ?? "").trim();
   const authToken = String(c.env.TWILIO_AUTH_TOKEN ?? "").trim();
   if (!accountSid || !authToken) {
-    return c.json({ error: "TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN not configured" }, 500);
+    console.error("[voice/twilio] Twilio credentials are not configured");
+    return c.json({
+      error: "Twilio calling is not set up on this environment. Contact support.",
+      code: "twilio_not_configured",
+    }, 503);
   }
 
   return await withOrgDb(c.env, user.org_id, async (sql) => {
@@ -2325,7 +2351,8 @@ voiceRoutes.openapi(twilioTestCallRoute, async (c): Promise<any> => {
 
   if (!callResp.ok) {
     const errText = await callResp.text().catch(() => "");
-    return c.json({ error: `Twilio call failed (${callResp.status})`, detail: errText.slice(0, 300) }, 400);
+    console.error(`[voice/twilio-test-call] Twilio returned ${callResp.status}: ${errText.slice(0, 400)}`);
+    return c.json({ error: "Test call could not be placed. Please verify both phone numbers and try again." }, 502);
   }
 
   const callData = (await callResp.json()) as { sid: string; status: string };
@@ -2541,8 +2568,9 @@ voiceRoutes.openapi(previewVoiceRoute, async (c): Promise<any> => {
     if (!resp.ok) return c.json({ error: `TTS engine returned ${resp.status}` }, 502);
     const audioData = await resp.arrayBuffer();
     return new Response(audioData, { headers: { "Content-Type": "audio/wav" } });
-  } catch (err: any) {
-    return c.json({ error: `TTS preview failed: ${err.message}` }, 502);
+  } catch (err) {
+    console.error(`[voice/tts-preview] fetch failed:`, err);
+    return c.json({ error: "Voice preview is temporarily unavailable. Please try again in a moment." }, 502);
   }
 });
 
