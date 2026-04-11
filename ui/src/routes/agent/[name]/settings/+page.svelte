@@ -14,6 +14,7 @@
   import Switch from "$lib/components/ui/switch.svelte";
   import Dialog from "$lib/components/ui/dialog.svelte";
   import AgentNav from "$lib/components/agent/AgentNav.svelte";
+  import { getConnectorAuthUrl, listConnectorProviders, listConnectorTools, type ConnectorProvider } from "$lib/services/connectors";
   import { listApiKeys, createApiKey, deleteApiKey, type ApiKey, type ApiKeyCreateResponse } from "$lib/services/settings";
   import { timeAgo } from "$lib/utils/time";
 
@@ -69,6 +70,11 @@
   let deletingKey = $state<ApiKey | null>(null);
   let deleteKeyOpen = $state(false);
   let deletingKeyBusy = $state(false);
+  let connectorApp = $state("google_sheets");
+  let connectorsLoading = $state(false);
+  let connectorProviders = $state<ConnectorProvider[]>([]);
+  let connectorToolsTotal = $state(0);
+  let connectorToolsNote = $state("");
 
   const defaultTriggers = [
     { id: "angry_customer", label: "Customer is angry or frustrated" },
@@ -129,6 +135,9 @@
     { id: "knowledge-search", name: "Knowledge Search", description: "Search uploaded knowledge base" },
     { id: "image-generate", name: "Image Generate", description: "Create images from text descriptions" },
     { id: "http-request", name: "HTTP Request", description: "Make arbitrary HTTP API calls" },
+    { id: "connector", name: "Connector", description: "Call connected SaaS tools via Pipedream" },
+    { id: "mcp-call", name: "MCP Call", description: "Invoke MCP server tools with org scoping" },
+    { id: "db-query", name: "DB Query", description: "Run org-scoped internal analytics queries" },
   ];
 
   const toolIcons: Record<string, string> = {
@@ -144,6 +153,9 @@
     "knowledge-search": "M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253",
     "image-generate": "M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z",
     "http-request": "M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1",
+    "connector": "M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1",
+    "mcp-call": "M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z",
+    "db-query": "M4 7h16M4 12h16M4 17h16",
   };
 
   function toggleTool(id: string) {
@@ -350,8 +362,47 @@
     }
   }
 
+  async function loadConnectorMetadata() {
+    connectorsLoading = true;
+    try {
+      const [providers, tools] = await Promise.all([
+        listConnectorProviders(),
+        listConnectorTools(),
+      ]);
+      connectorProviders = providers.providers || [];
+      connectorToolsTotal = Number(tools.total || 0);
+      connectorToolsNote = tools.note || "";
+    } catch (err) {
+      connectorToolsNote = err instanceof Error ? err.message : "Failed to load connector metadata";
+    } finally {
+      connectorsLoading = false;
+    }
+  }
+
+  async function handleConnectPipedream() {
+    const app = connectorApp.trim();
+    if (!app) {
+      toast.error("Enter an app slug, e.g. google_sheets");
+      return;
+    }
+    try {
+      const auth = await getConnectorAuthUrl(app);
+      if (!auth.auth_url) {
+        toast.error(auth.error || "No OAuth URL available for this app");
+        return;
+      }
+      window.open(auth.auth_url, "_blank", "noopener,noreferrer");
+      toast.success(`Opened ${app} OAuth flow`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to start connector auth");
+    }
+  }
+
   $effect(() => {
-    if (agentName) loadAgent();
+    if (agentName) {
+      loadAgent();
+      loadConnectorMetadata();
+    }
   });
 
   function toggleHandoffTrigger(id: string) {
@@ -593,6 +644,45 @@
                   <label for="max-turns" class="mb-2 block text-sm font-medium text-foreground">Max Turns</label>
                   <Input id="max-turns" type="number" min={1} max={100} bind:value={maxTurns} />
                 </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- Integrations Section -->
+          <section>
+            <h2 class="mb-4">Integrations (Pipedream)</h2>
+            <div class="space-y-4 rounded-lg border border-border p-6">
+              <p class="text-sm text-muted-foreground">
+                Connect third-party apps and expose them to your agent through the
+                <code>connector</code> tool. Use app slugs like <code>google_sheets</code>, <code>notion</code>, or <code>slack</code>.
+              </p>
+              <div class="grid gap-4 sm:grid-cols-3">
+                <div class="rounded-md border border-border p-3">
+                  <p class="text-xs text-muted-foreground">Provider</p>
+                  <p class="mt-1 text-sm font-medium text-foreground">Pipedream</p>
+                </div>
+                <div class="rounded-md border border-border p-3">
+                  <p class="text-xs text-muted-foreground">Catalog Tools</p>
+                  <p class="mt-1 text-sm font-medium text-foreground">{connectorToolsTotal}</p>
+                </div>
+                <div class="rounded-md border border-border p-3">
+                  <p class="text-xs text-muted-foreground">Supported Providers</p>
+                  <p class="mt-1 text-sm font-medium text-foreground">{connectorProviders.length}</p>
+                </div>
+              </div>
+              {#if connectorsLoading}
+                <p class="text-xs text-muted-foreground">Loading connector metadata...</p>
+              {:else if connectorToolsNote}
+                <p class="text-xs text-muted-foreground">{connectorToolsNote}</p>
+              {/if}
+              <div class="flex flex-wrap items-end gap-3">
+                <div class="min-w-[280px] flex-1">
+                  <label for="connector-app" class="mb-2 block text-sm font-medium text-foreground">App Slug</label>
+                  <Input id="connector-app" placeholder="google_sheets" bind:value={connectorApp} />
+                </div>
+                <Button variant="outline" onclick={handleConnectPipedream}>
+                  Connect App
+                </Button>
               </div>
             </div>
           </section>

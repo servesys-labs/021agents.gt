@@ -38,6 +38,20 @@ export interface ConnectorToken {
   scopes: string;
 }
 
+function connectorError(
+  code: string,
+  message: string,
+  opts?: { retryable?: boolean; status?: number; detail?: string },
+): string {
+  return JSON.stringify({
+    error: message,
+    code,
+    retryable: opts?.retryable === true,
+    status: opts?.status || 0,
+    detail: opts?.detail || "",
+  });
+}
+
 // Session-scoped token cache
 const tokenCache = new Map<string, ConnectorToken>();
 
@@ -118,9 +132,11 @@ export async function executeConnector(
 ): Promise<string> {
   const token = await getConnectorToken(hyperdrive, orgId, connectorName);
   if (!token) {
-    return JSON.stringify({
-      error: `Connector '${connectorName}' not connected. Enable it in the portal to authorize access.`,
-    });
+    return connectorError(
+      "CONNECTOR_NOT_CONNECTED",
+      `Connector '${connectorName}' not connected. Enable it in the portal to authorize access.`,
+      { retryable: false, status: 401 },
+    );
   }
 
   // Pipedream MCP endpoint pattern
@@ -134,19 +150,39 @@ export async function executeConnector(
         "Content-Type": "application/json",
       },
       body: JSON.stringify(args),
+      signal: AbortSignal.timeout(30_000),
     });
 
     if (resp.status === 401) {
       // Token may be expired — invalidate cache so next call re-reads from DB
       invalidateToken(orgId, connectorName);
-      return JSON.stringify({
-        error: `Connector '${connectorName}' token expired. Re-authorize in the portal.`,
-      });
+      return connectorError(
+        "CONNECTOR_TOKEN_EXPIRED",
+        `Connector '${connectorName}' token expired. Re-authorize in the portal.`,
+        { retryable: false, status: 401 },
+      );
+    }
+
+    if (!resp.ok) {
+      const body = await resp.text();
+      return connectorError(
+        "CONNECTOR_CALL_FAILED",
+        `Connector '${connectorName}' call failed`,
+        {
+          retryable: resp.status >= 500 || resp.status === 429,
+          status: resp.status,
+          detail: body.slice(0, 400),
+        },
+      );
     }
 
     const body = await resp.text();
     return body.slice(0, 10000);
   } catch (err: any) {
-    return JSON.stringify({ error: `Connector call failed: ${err.message}` });
+    return connectorError(
+      "CONNECTOR_NETWORK_ERROR",
+      `Connector call failed: ${err.message || err}`,
+      { retryable: true, status: 0, detail: String(err?.message || err).slice(0, 400) },
+    );
   }
 }
