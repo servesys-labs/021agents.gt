@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  applyContentBudget,
   applyHistoryBudget,
   buildQueryIntentProfile,
   hasExplicitToolIntent,
@@ -65,5 +66,37 @@ describe("query profile routing behavior", () => {
     expect(result.messages.filter((m) => m.role === "system").length).toBe(1);
     expect(result.messages.length).toBe(4);
     expect(result.messages[result.messages.length - 1]?.content).toBe("u3");
+  });
+
+  it("hard-caps non-system carry-over by content budget", () => {
+    const messages = [
+      { role: "system", content: "sys-a" },
+      { role: "user", content: "u".repeat(5000) },
+      { role: "assistant", content: "a".repeat(5000) },
+      { role: "tool", content: "t".repeat(5000) },
+    ];
+    const result = applyContentBudget(messages, 6000, 2000);
+    expect(result.truncatedMessages).toBeGreaterThan(0);
+    expect(result.nonSystemChars).toBeLessThanOrEqual(6000);
+    expect(result.messages.some((m) => m.role === "system")).toBe(true);
+  });
+
+  it("keeps a contiguous newest-first suffix (no conversation gaps)", () => {
+    // Four non-system messages, each 2000 chars after truncation. Budget 5000
+    // fits exactly two. Must drop the OLDEST two and keep the NEWEST two
+    // in order — never keep newest + oldest with a gap in the middle.
+    const messages = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "u1".repeat(2000) },
+      { role: "assistant", content: "a1".repeat(2000) },
+      { role: "user", content: "u2".repeat(2000) },
+      { role: "assistant", content: "a2".repeat(2000) },
+    ];
+    const result = applyContentBudget(messages, 5000, 2000);
+    const nonSystem = result.messages.filter((m) => m.role !== "system");
+    expect(nonSystem.length).toBe(2);
+    expect(nonSystem[0]?.content).toMatch(/^u2u2/);
+    expect(nonSystem[1]?.content).toMatch(/^a2a2/);
+    expect(result.droppedMessages).toBe(2);
   });
 });

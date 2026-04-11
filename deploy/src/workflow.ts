@@ -41,7 +41,7 @@ import { validateUrl } from "./runtime/ssrf";
 import { shouldCompact, compactMessages } from "./runtime/compact";
 import { repairConversation } from "./runtime/conversation-repair";
 import { migrateConfig } from "./runtime/config-migrations";
-import { logger } from "./runtime/logger";
+import { createJsonlLogger, type JsonlLogger } from "./runtime/logger";
 import { readMailbox } from "./runtime/mailbox";
 import { stepIdempotencyKey, hashArgs, getStepResult, cacheStepResult, isDuplicateWrite, writeUUID, clearSessionDedup } from "./runtime/idempotency";
 import { backupCostState, hydrateFromSnapshot } from "./runtime/do-lifecycle";
@@ -52,7 +52,7 @@ import { registerSession, unregisterSession, isSessionLimitReached, refreshHeart
 import { BudgetError, AgentOSError, SSRFError } from "./runtime/errors";
 import { createChildAbortController } from "./runtime/abort";
 import { queueSessionEpisodicNote } from "./runtime/memory";
-import { applyHistoryBudget, buildQueryIntentProfile } from "./runtime/query-profile";
+import { applyContentBudget, applyHistoryBudget, buildQueryIntentProfile } from "./runtime/query-profile";
 
 // ── Cloud C4.3: Memoized module imports ──────────────────────────
 // Workflow step functions run in isolated contexts. Dynamic imports are
@@ -366,9 +366,33 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     const sessionId = event.instanceId.slice(0, 16);
     const traceId = crypto.randomUUID().slice(0, 16);
 
+    // Per-run structured logger. Instance-scoped so concurrent workflows on
+    // the same isolate can't cross-contaminate each other's org/session tags.
+    // Drained in the finally block at the end of run().
+    const logger: JsonlLogger = createJsonlLogger(this.env as any, {
+      session_id: sessionId,
+      trace_id: traceId,
+      org_id: p.org_id,
+      agent_name: p.agent_name,
+    });
+
     // Setup timing — measured from run() entry until the first turn starts,
     // gives the UI pipeline a real duration for the Setup step.
     const setupStartedAt = Date.now();
+
+    // ── Latency: emit session_start IMMEDIATELY, before any awaited work ──
+    // The UI polls KV every 250ms and shows nothing until the first event
+    // lands. Without this early emit, the "setup" spinner stays blank for
+    // 1-4s (bootstrap step overhead) before anything renders. Emitting
+    // up-front gives the user a visible signal within the first poll tick.
+    // Fields that aren't known yet (model, plan, tool_count) are backfilled
+    // by the later setup_done event.
+    await this.emit(p.progress_key, {
+      type: "session_start",
+      session_id: sessionId,
+      trace_id: traceId,
+      agent_name: p.agent_name,
+    });
 
     // Set RLS org context for all DB calls during this workflow run
     if (p.org_id) {
@@ -410,11 +434,13 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     // ═══════════════════════════════════════════════════════════
     // STEP 1: BOOTSTRAP — load config, skills, reasoning strategy
     // ═══════════════════════════════════════════════════════════
-
-    const bootstrap = await step.do("bootstrap", {
-      retries: { limit: 3, delay: "2 seconds", backoff: "exponential" },
-      timeout: "30 seconds",
-    }, async () => {
+    //
+    // Latency: this used to live inside `step.do("bootstrap", ...)`, but every
+    // step.do adds ~300-1000ms of Workflow checkpoint overhead. All the work
+    // here is idempotent (config load, module-cached imports, flag checks
+    // with their own fallbacks) so we inline it. On workflow resume the body
+    // re-runs — cheap, and each sub-call already handles its own failure.
+    const bootstrap = await (async () => {
       // ── Latency fix 1: Use pre-loaded config from DO when available (saves 200-800ms DB query) ──
       let config: Awaited<ReturnType<typeof import("./runtime/db").loadAgentConfig>>;
       if (p.preloaded_config && p.preloaded_config.system_prompt) {
@@ -515,7 +541,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         tool_count: llmVisibleToolDefs.length,
         featureFlags,
       };
-    });
+    })();
 
     // Phase 10.3: Migrate config to current version
     const { config: migratedConfig, migrated: configMigrated, from: migratedFrom, to: migratedTo } = migrateConfig(bootstrap.config);
@@ -524,14 +550,10 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       logger.info("config_migration", { agent: p.agent_name, from: migratedFrom, to: migratedTo });
     }
 
-    // Phase 7.4: Initialize structured logger
-    logger.init(this.env as any, { session_id: sessionId, trace_id: traceId, org_id: p.org_id, agent_name: p.agent_name });
+    // session_start was already emitted at the top of run() for latency.
+    // This is the structured-log counterpart, which carries extra fields
+    // (channel, config version) that weren't available at that point.
     logger.info("session_start", { channel: p.channel, config_version: config.config_version, config_migrated: configMigrated });
-
-    await this.emit(p.progress_key, {
-      type: "session_start", session_id: sessionId, trace_id: traceId,
-      agent_name: p.agent_name,
-    });
 
     // ── checkpoint_resumed — fired when snapshot hydration recovered prior state
     // This is the durability flex: the Worker was restarted mid-run and the
@@ -572,34 +594,45 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     // Files from previous sessions exist in R2 but need to be loaded back.
     // This must happen BEFORE tools run, or read-file/edit-file will find nothing.
 
-    // ── Latency fix 4: Skip hydration for text-only queries (no file/code tools) ──
+    // ── Latency: sandbox hydration runs as a background barrier, not a blocking step ──
+    //
+    // Old behavior: `await step.do("hydrate-workspace", ...)` sat on the critical
+    // path between bootstrap and the first LLM turn. Cold sandbox container boot
+    // (5-10s) plus per-file R2 get + writeFile RPCs meant turn_start didn't fire
+    // until hydration was fully done, even though the first LLM turn usually
+    // just plans and doesn't touch /workspace.
+    //
+    // New behavior: kick hydration off as a fire-and-forget promise here, and
+    // `await` it lazily inside the tool step — but only when the tool being
+    // executed actually needs the sandbox. Non-sandbox tools (web-search, rag,
+    // memory, etc.) never wait on it. The LLM turn itself never waits on it.
+    //
+    // Hydration is idempotent, so if the workflow resumes from a checkpoint the
+    // barrier is simply re-created and re-runs.
     const SANDBOX_TOOLS = new Set([
       "python-exec", "bash", "write-file", "read-file", "edit-file",
       "save-project", "load-project", "load-folder",
     ]);
     const needsSandbox = config.tools.some((t: string) => SANDBOX_TOOLS.has(t));
-
+    let hydrationBarrier: Promise<void> | null = null;
+    let hydrationDone = false;
+    let hydrationStartedAt = 0;
     if (this.env.STORAGE && this.env.SANDBOX && needsSandbox) {
-      await step.do("hydrate-workspace", {
-        retries: { limit: 2, delay: "3 seconds", backoff: "linear" },
-        timeout: "60 seconds",
-      }, async () => {
+      hydrationStartedAt = Date.now();
+      hydrationBarrier = (async () => {
         const { getSandbox } = await import("@cloudflare/sandbox");
         const { AgentSandbox } = await import("./index");
         const { hydrateWorkspace } = await memo("workspace", () => import("./runtime/workspace"));
         const sandboxId = p.do_session_id || `session-${sessionId}`;
         const orgId = p.org_id || "default";
-        // Register org_id so outbound handlers can scope R2/KV access
         await AgentSandbox.registerOrg(this.env.SANDBOX, sandboxId, orgId);
         const rawSandbox = getSandbox(this.env.SANDBOX, sandboxId, {
           sleepAfter: "10m",
           enableInternet: false,
         } as any);
-        // Wrap with 30s acquire timeout and seconds->ms timeout normalization
-        // using a plain object adapter (Workflow RPC cannot serialize Proxy receivers).
-        const withAcquireTimeout = <T>(p: Promise<T>) =>
+        const withAcquireTimeout = <T>(promise: Promise<T>) =>
           Promise.race([
-            p,
+            promise,
             new Promise<T>((_, reject) =>
               setTimeout(() => reject(new Error(
                 `Sandbox unavailable — no container could be allocated within 30 seconds. ` +
@@ -618,12 +651,34 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
           writeFile: async (path: string, content: string) =>
             withAcquireTimeout(rawSandbox.writeFile(path, content) as Promise<unknown>),
         };
-        const { restored, skipped } = await hydrateWorkspace(
+        await hydrateWorkspace(
           this.env.STORAGE, sandbox, orgId, p.agent_name, p.channel_user_id || "",
         );
-        return { restored, skipped };
-      });
+      })()
+        .then(() => { hydrationDone = true; })
+        .catch((err) => {
+          // Log-and-continue. A file-using tool that lands after a failed
+          // hydrate will simply find the file missing and return its own error.
+          logger.warn("hydrate_workspace_failed", {
+            error: err instanceof Error ? err.message.slice(0, 300) : String(err).slice(0, 300),
+          });
+          hydrationDone = true;
+        });
     }
+    const awaitHydrationIfNeeded = async (toolName: string): Promise<void> => {
+      if (!hydrationBarrier || hydrationDone) return;
+      if (!SANDBOX_TOOLS.has(toolName)) return;
+      const waitStart = Date.now();
+      await hydrationBarrier;
+      const waitedMs = Date.now() - waitStart;
+      if (waitedMs > 50) {
+        logger.info("hydrate_barrier_wait", {
+          tool: toolName,
+          waited_ms: waitedMs,
+          hydrate_total_ms: Date.now() - hydrationStartedAt,
+        });
+      }
+    };
 
     // ═══════════════════════════════════════════════════════════
     // STEP 2: BUILD MESSAGES
@@ -889,7 +944,9 @@ ALWAYS:
     // Cloudflare Workflows have a hard 1000-step limit. We track every step.do()
     // call and force-exit at 900 to leave headroom for finalization steps.
     const WORKFLOW_STEP_LIMIT = 900;
-    let workflowStepCount = 2; // bootstrap + hydrate-workspace already consumed
+    // Neither bootstrap nor hydrate-workspace use step.do anymore — both are
+    // inline. First workflow step is the llm-1 call in the turn loop.
+    let workflowStepCount = 0;
     const startTime = Date.now();
     let terminationReason = "completed";
     const planOnlyRequested = userRequestedPlanOnly(p.input);
@@ -951,15 +1008,31 @@ ALWAYS:
     // Route/model selection and query profile are computed once above.
     const historyBudgeted = applyHistoryBudget(messages as any, queryProfile.max_history_messages);
     messages = historyBudgeted.messages as any;
+    const initialContentBudgeted = applyContentBudget(
+      messages as any,
+      queryProfile.max_non_system_chars,
+      queryProfile.max_message_chars,
+    );
+    messages = initialContentBudgeted.messages as any;
+    if (initialContentBudgeted.droppedMessages > 0) {
+      // Budget may have sliced through a tool_use/tool_result pair — repair before turn 1.
+      const { messages: reRepaired } = repairConversation(messages);
+      messages = reRepaired as any;
+    }
     logger.info("query_profile_applied", {
       profile: queryProfile.key,
       complexity: (selectedRoute as any)?.complexity || "unknown",
       category: (selectedRoute as any)?.category || "unknown",
       role: (selectedRoute as any)?.role || "unknown",
       history_dropped: historyBudgeted.dropped,
+      content_dropped: initialContentBudgeted.droppedMessages,
+      content_truncated: initialContentBudgeted.truncatedMessages,
+      non_system_chars: initialContentBudgeted.nonSystemChars,
       max_history_messages: queryProfile.max_history_messages,
       max_tools_exposed: queryProfile.max_tools_exposed,
       max_tokens_per_turn: queryProfile.max_tokens_per_turn,
+      max_non_system_chars: queryProfile.max_non_system_chars,
+      max_message_chars: queryProfile.max_message_chars,
     });
     if (historyBudgeted.dropped > 0) {
       await this.emit(p.progress_key, {
@@ -1026,6 +1099,35 @@ ALWAYS:
           messages = repaired;
           repairCount += totalRepairs;
           logger.info("conversation_repair", { orphaned_uses: repairs.orphanedUses, orphaned_results: repairs.orphanedResults, duplicate_ids: repairs.duplicateIds, empty_results: repairs.emptyResults });
+        }
+      }
+      // Hard context cap by profile to avoid runaway token carry-over.
+      // The budget can slice off an assistant(tool_use) while keeping its
+      // tool_result, so we ALWAYS re-run repair afterwards to heal the boundary
+      // before the LLM sees it. Without this, Anthropic/OpenAI reject the
+      // request with "tool_result without matching tool_use".
+      {
+        const contentBudgeted = applyContentBudget(
+          messages as any,
+          queryProfile.max_non_system_chars,
+          queryProfile.max_message_chars,
+        );
+        messages = contentBudgeted.messages as any;
+        if (contentBudgeted.droppedMessages > 0) {
+          const { messages: reRepaired, repairs: postBudgetRepairs } = repairConversation(messages);
+          messages = reRepaired;
+          const postTotal = postBudgetRepairs.orphanedUses + postBudgetRepairs.orphanedResults + postBudgetRepairs.duplicateIds + postBudgetRepairs.emptyResults;
+          if (postTotal > 0) repairCount += postTotal;
+        }
+        if (contentBudgeted.droppedMessages > 0 || contentBudgeted.truncatedMessages > 0) {
+          logger.info("content_budget_applied", {
+            turn,
+            dropped_messages: contentBudgeted.droppedMessages,
+            truncated_messages: contentBudgeted.truncatedMessages,
+            non_system_chars: contentBudgeted.nonSystemChars,
+            max_non_system_chars: queryProfile.max_non_system_chars,
+            max_message_chars: queryProfile.max_message_chars,
+          });
         }
       }
 
@@ -1550,6 +1652,11 @@ ALWAYS:
             if (cachedResult) {
               try { return JSON.parse(cachedResult); } catch {}
             }
+
+            // Sandbox hydration ran in parallel with the LLM turn — block here
+            // only if this tool actually needs /workspace. Non-sandbox tools
+            // (web-search, rag, memory, etc.) never wait.
+            await awaitHydrationIfNeeded(tc.name);
 
             const { executeTools } = await memo("tools", () => import("./runtime/tools"));
             const results = await executeTools(
