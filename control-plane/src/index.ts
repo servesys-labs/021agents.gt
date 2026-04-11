@@ -165,13 +165,24 @@ app.use("*", apiKeyRateLimitMiddleware);
 app.use("*", mfaEnforcementMiddleware);
 app.use("*", apiAuditLogMiddleware);
 
-// Hono-level error handler (catches errors that bypass middleware)
+// Hono-level error handler (catches errors that bypass middleware).
+// Every uncaught error in any route lands here. We log the raw detail
+// server-side with a short correlation id and return a generic message
+// to the caller — never the raw `err.message`, which in the April 2026
+// smoke test was leaking Postgres column/table names like
+// `column "quality_overall" does not exist` directly into user-facing
+// JSON responses.
 app.onError((err, c) => {
-  const message = err instanceof Error ? err.message : "Internal server error";
-
-  console.error(`[onError] ${c.req.method} ${c.req.path}: ${message}`);
-  if (err instanceof Error && err.stack) console.error(err.stack);
-  return c.json({ error: message }, 500);
+  const ref = crypto.randomUUID().slice(0, 8);
+  const raw =
+    err instanceof Error
+      ? `${err.name}: ${err.message}${err.stack ? `\n${err.stack}` : ""}`
+      : String(err);
+  console.error(`[onError] (ref=${ref}) ${c.req.method} ${c.req.path}: ${raw}`);
+  return c.json({
+    error: `Something went wrong on our side. Please try again in a moment. (ref: ${ref})`,
+    ref,
+  }, 500);
 });
 
 // ── Health ───────────────────────────────────────────────────────────────
