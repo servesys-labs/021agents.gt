@@ -58,7 +58,42 @@ const META_OUT_PATH = join(
   "meta-skill-bodies.generated.ts",
 );
 
-const FRONTMATTER_RE = /^---\s*\n([\s\S]*?)\n---\s*\n/;
+// Phase 7 commit 7.2b regex fix — symmetric `[ \t]*\n` instead of `\s*\n`.
+//
+// The original `\s*\n` at both ends is greedy and, because `\s` includes
+// `\n`, consumes multiple consecutive newlines on backtrack. Concretely:
+// for `---\nname:...\n---\n\n### Body`, the closing `\s*\n` greedy-grabs
+// `\n\n`, fails to match the final regex `\n` against `#`, backtracks
+// `\s*` to `\n` (one newline), then the regex `\n` matches the second
+// `\n`. Net: BOTH newlines after `---` are consumed by match[0], and any
+// leading `\n` that was supposed to be the first byte of the body is
+// silently stripped.
+//
+// This was a latent bug in the original `parseSkillMetadata` path because
+// metadata-only parsing reads match[1] (the frontmatter capture group),
+// not raw.slice(match[0].length). Phase 7 commit 7.2a's `parseMetaSkillBody`
+// is the first code path that cares about the post-match offset, and
+// Phase 7 commit 7.2b surfaced it when extracting DEMO_MODE_INSTRUCTIONS
+// (whose template literal starts with `\n### Demo Mode Behavior`).
+//
+// Fix: `[ \t]*\n` matches only spaces/tabs before the required `\n`, so
+// `\s*` can no longer cross line boundaries. Opening and closing are
+// fixed symmetrically — the opening fix is zero-impact for every current
+// SKILL.md (none have trailing spaces on their `---` lines) but defends
+// against future files with that pattern, and the symmetry makes the
+// intent obvious to future maintainers who might be tempted to revert it.
+//
+// Scope: this regex is only in the control-plane bundler. The deploy
+// bundler at deploy/scripts/bundle-skills.mjs is locked to Phase 0
+// skill_hashes byte-identity and intentionally left unchanged. Meta
+// skills never flow through the deploy bundler, so the two parsers can
+// diverge safely. If a future phase wants to align them, it must be a
+// deliberate -fixture-bump commit that regenerates Phase 0 hashes.
+//
+// Verified byte-identical for all 23 existing public SKILL.md files:
+// none start with `\n`, so match[1] is unaffected and the catalog
+// regeneration produces zero diff.
+const FRONTMATTER_RE = /^---[ \t]*\n([\s\S]*?)\n---[ \t]*\n/;
 
 // Mirror the YAML subset parsed by deploy/scripts/bundle-skills.mjs and
 // agentos/skills/loader.py. Intentionally minimal — just key/value pairs
