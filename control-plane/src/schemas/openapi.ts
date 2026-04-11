@@ -115,6 +115,14 @@ export const AgentCreateBody = z.object({
   max_tokens: z.number().int().min(1).max(200000).optional(),
   temperature: z.number().min(0).max(2).optional(),
   tools: z.array(z.string()).default([]),
+  /**
+   * Optional agent-level allowlist of skill names (e.g. ["pdf", "research"]).
+   * Empty/omitted = all available skills are exposed to the model. Non-empty
+   * = only the listed names are injected. Phase 5 adds this as the first-class
+   * composition unit — prefer enabling a matching skill to inlining its
+   * workflow in system_prompt.
+   */
+  enabled_skills: z.array(z.string()).optional(),
   max_turns: z.number().int().min(1).max(1000).default(50),
   timeout_seconds: z.number().int().min(1).max(3600).optional(),
   budget_limit_usd: z.number().min(0).max(10000).default(10),

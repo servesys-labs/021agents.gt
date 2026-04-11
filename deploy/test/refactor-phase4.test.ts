@@ -96,6 +96,54 @@ describe("Phase 4 — getSkillPrompt enabled_skills allowlist enforcement", () =
   });
 });
 
+// ── Phase 5 audit — non-BUILTIN bundled skills reachable via enabled ─
+//
+// Phase 4 shipped formatSkillsPrompt + getSkillPrompt with a filter that
+// only searched BUILTIN_SKILLS ++ dbSkills. Bundled-but-not-BUILTIN skills
+// (code-review, deep-research) were silently unreachable: the catalog
+// said they existed, validation accepted them, but the runtime filter
+// returned empty. Phase 5 audit fixes that: the opt-in path now searches
+// BUILTIN_SKILLS ++ NON_BUILTIN_BUNDLED ++ dbSkills, and getSkillPrompt
+// looks up via BUNDLED_SKILLS_BY_NAME instead of the BUILTIN-only array.
+
+describe("Phase 5 audit — non-BUILTIN bundled skills activatable via enabled_skills", () => {
+  it("default path (no enabled) does NOT expose code-review", () => {
+    // Phase 0 snapshot byte-identity depends on this.
+    const out = formatSkillsPrompt([], "standard");
+    expect(out).not.toContain("/code-review");
+    expect(out).not.toContain("/deep-research");
+  });
+
+  it("enabled=['code-review'] exposes code-review in the prompt", () => {
+    const out = formatSkillsPrompt([], "standard", ["code-review"]);
+    expect(out).toContain("/code-review");
+    expect(out).not.toContain("/batch");
+  });
+
+  it("enabled=['deep-research'] exposes deep-research in the prompt", () => {
+    const out = formatSkillsPrompt([], "standard", ["deep-research"]);
+    expect(out).toContain("/deep-research");
+  });
+
+  it("enabled mix of BUILTIN and non-BUILTIN works", () => {
+    const out = formatSkillsPrompt([], "standard", ["batch", "code-review"]);
+    expect(out).toContain("/batch");
+    expect(out).toContain("/code-review");
+  });
+
+  it("getSkillPrompt resolves a non-BUILTIN skill via bundled lookup", () => {
+    // Pre-audit, this returned null because BUILTIN_SKILLS didn't contain
+    // code-review. Post-audit, BUNDLED_SKILLS_BY_NAME resolves it.
+    const prompt = getSkillPrompt("code-review", "review this", [], ["code-review"]);
+    expect(prompt).not.toBeNull();
+    expect(typeof prompt).toBe("string");
+  });
+
+  it("getSkillPrompt still blocks a non-BUILTIN name NOT in enabled", () => {
+    expect(getSkillPrompt("code-review", "args", [], ["batch"])).toBeNull();
+  });
+});
+
 // ── DB-overlap case ───────────────────────────────────────────────
 
 describe("Phase 4 — enabled_skills + DB skill interaction", () => {
