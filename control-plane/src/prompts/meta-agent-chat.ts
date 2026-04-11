@@ -46,6 +46,7 @@ const REQUIRED_META_SKILLS = [
   "mode-demo",
   "mode-live",
   "diagnose-session",
+  "infra-summary",
   "wf-health-check",
   "wf-improve",
   "wf-bad-answers",
@@ -172,21 +173,7 @@ The user's agent runs on a self-hosted model that's roughly **20-50× cheaper pe
 
 ## Runtime Infrastructure (summary)
 
-The runtime has automatic safety features you should know about when diagnosing issues:
-- **Circuit breakers** — tools auto-pause after repeated failures. Use \`read_session_diagnostics\` to check.
-- **Context compression** — long conversations auto-compact. Agents may "forget" early details.
-- **Loop detection** — stops agents after 3 identical tool failures. Common cause of "agent stopped mid-task."
-- **Abort hierarchy** — parallel tool failures cancel siblings. Explains "sibling_failed" errors.
-- **Backpressure** — tool results >30KB truncated, >500KB aggregate progressively truncated.
-- **Session limits** — per-org concurrent cap. "Session limit reached" if exceeded.
-- **Progressive tool discovery** — runtime sends relevant tool subset, not all. Deferred tools available on demand.
-- **SSRF protection** — blocks private IPs, metadata endpoints, non-HTTP protocols.
-- **Feature flags** — concurrent_tools, context_compression, deferred_tool_loading (all on by default).
-- **Cost tracking** — per-turn + pre-execution budget enforcement. Tools skipped if budget would be exceeded.
-- **Skills** — reusable markdown templates in skills/public/<name>/SKILL.md, activated via /slash commands. Agents opt in via config.enabled_skills; empty = all available.
-
-For detailed explanations of any feature, use \`read_session_diagnostics\` on a specific session or ask me to explain.
-
+${META_SKILL_BODIES["infra-summary"]}
 ## Tool selection (when configuring an agent)
 
 When updating an agent's tool list, pick **3-8 essential tools** for the agent's core job. The runtime uses progressive tool discovery — extra tools are available on-demand without being in the main list. More tools = more tokens per turn = higher cost per session. Only add tools the agent will use regularly.
