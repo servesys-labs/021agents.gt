@@ -407,6 +407,15 @@ function resolveTelemetryOrgId(env: RuntimeEnv): string {
   return String((env as any).__orgId || (env as any).ORG_ID || cfg.orgId || cfg.org_id || "");
 }
 
+function resolveToolIdentity(env: RuntimeEnv): { orgId: string; agentName: string; userId: string } {
+  const cfg = (env as any).__agentConfig || {};
+  return {
+    orgId: String((env as any).__orgId || cfg.orgId || cfg.org_id || ""),
+    agentName: String((env as any).__agentName || cfg.agent_name || cfg.agentName || cfg.name || ""),
+    userId: String((env as any).__channelUserId || ""),
+  };
+}
+
 function workspaceScopeFromEnv(env: RuntimeEnv): { org: string; agent: string; userId: string } {
   const cfg = (env as any).__agentConfig || {};
   return {
@@ -1095,6 +1104,45 @@ async function executeSingleTool(
     }
   }
 
+  // ── Governance: org-scoped tool context enforcement ───────────
+  // Connectors/MCP/internal DB tooling must never trust org_id from tool args.
+  const identity = resolveToolIdentity(env);
+  const orgScopedTools = new Set(["connector", "mcp-call", "manage-mcp", "db-query", "db-batch", "db-report"]);
+  if (orgScopedTools.has(tc.name)) {
+    const requestedOrg = String(args.org_id || "").trim();
+    if (!identity.orgId) {
+      return {
+        tool: tc.name,
+        tool_call_id: tc.id,
+        result: JSON.stringify({
+          error: "missing_org_context",
+          code: "ORG_CONTEXT_REQUIRED",
+          retryable: false,
+          tool: tc.name,
+        }),
+        error: "governance:org_context_required",
+        latency_ms: Date.now() - started,
+      };
+    }
+    if (requestedOrg && requestedOrg !== identity.orgId) {
+      return {
+        tool: tc.name,
+        tool_call_id: tc.id,
+        result: JSON.stringify({
+          error: "org_scope_mismatch",
+          code: "ORG_SCOPE_MISMATCH",
+          retryable: false,
+          requested_org_id: requestedOrg,
+          effective_org_id: identity.orgId,
+          tool: tc.name,
+        }),
+        error: "governance:org_scope_mismatch",
+        latency_ms: Date.now() - started,
+      };
+    }
+    args = { ...args, org_id: identity.orgId };
+  }
+
   // ── Governance: Domain allowlist check ────────────────────────
   const config = (env as any).__agentConfig as
     | {
@@ -1679,19 +1727,39 @@ async function dispatch(
       const serverName = String(args.server || args.server_name || "");
       const toolName = String(args.tool || args.tool_name || "");
       if (!serverName || !toolName) return "mcp-call requires server (name) and tool (tool name)";
-
-      const apiBase = (env as any).CONTROL_PLANE_URL || "https://api.oneshots.co/api/v1";
-      const serviceToken = (env as any).SERVICE_TOKEN || "";
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (serviceToken) headers.Authorization = `Bearer ${serviceToken}`;
+      const orgId = String(args.org_id || "");
+      const hyperdrive = (env as any).HYPERDRIVE;
+      if (!orgId) return JSON.stringify({ error: "mcp-call requires org context", code: "ORG_CONTEXT_REQUIRED" });
+      if (!hyperdrive) return JSON.stringify({ error: "mcp-call requires database access", code: "DB_UNAVAILABLE" });
 
       try {
-        // 1. Look up MCP server URL from control-plane
-        const serversResp = await fetchWithTimeout(`${apiBase}/mcp/servers`, { headers });
-        if (!serversResp.ok) return `MCP server lookup failed: ${serversResp.status}`;
-        const { servers } = (await serversResp.json()) as { servers: any[] };
-        const server = servers.find((s: any) => s.name === serverName || s.server_id === serverName);
-        if (!server) return `MCP server "${serverName}" not found. Available: ${servers.map((s: any) => s.name).join(", ")}`;
+        // Look up MCP server directly from org-scoped runtime DB state.
+        const { getDb } = await import("./db");
+        const sql = await getDb(hyperdrive);
+        const rows = await sql`
+          SELECT server_id, name, url, auth_token, status
+          FROM mcp_servers
+          WHERE org_id = ${orgId}
+            AND (name = ${serverName} OR server_id = ${serverName})
+          LIMIT 1
+        `;
+        const server = rows[0];
+        if (!server) {
+          const avail = await sql`SELECT name FROM mcp_servers WHERE org_id = ${orgId} ORDER BY name LIMIT 20`;
+          const names = avail.map((r: any) => r.name).filter(Boolean).join(", ");
+          return JSON.stringify({
+            error: `MCP server "${serverName}" not found`,
+            code: "MCP_SERVER_NOT_FOUND",
+            available_servers: names,
+          });
+        }
+        if (String(server.status || "active") !== "active") {
+          return JSON.stringify({
+            error: `MCP server "${serverName}" is not active`,
+            code: "MCP_SERVER_INACTIVE",
+            status: String(server.status || "unknown"),
+          });
+        }
 
         // 2. Call the tool on the MCP server (JSON-RPC over HTTP)
         const mcpHeaders: Record<string, string> = { "Content-Type": "application/json" };
@@ -1706,11 +1774,26 @@ async function dispatch(
             id: crypto.randomUUID(),
             params: { name: toolName, arguments: args.arguments || args.params || {} },
           }),
-          signal: AbortSignal.timeout(30000),
         });
-        return await mcpResp.text();
+        const body = await mcpResp.text();
+        if (!mcpResp.ok) {
+          return JSON.stringify({
+            error: "mcp_tool_call_failed",
+            code: "MCP_TOOL_CALL_FAILED",
+            retryable: mcpResp.status >= 500,
+            status: mcpResp.status,
+            detail: body.slice(0, 400),
+          });
+        }
+        return body;
       } catch (err: any) {
-        return `MCP call failed: ${err.message}`;
+        const e = classifyFetchError(err);
+        return JSON.stringify({
+          error: "mcp_call_failed",
+          code: "MCP_CALL_FAILED",
+          retryable: e.kind === "network" || e.kind === "timeout" || e.kind === "rate_limit",
+          detail: String(err?.message || err).slice(0, 400),
+        });
       }
     }
 
@@ -2071,7 +2154,7 @@ async function dispatch(
       // Connector tool — reads OAuth tokens from Supabase, calls Pipedream API
       const { executeConnector } = await import("./connectors");
       const connectorName = args.connector_name || args.tool_name || "";
-      const orgId = args.org_id || "";
+      const orgId = String(args.org_id || "");
       if (!connectorName) return "connector requires connector_name";
       return executeConnector(
         (env as any).HYPERDRIVE, orgId, connectorName,
@@ -2496,8 +2579,9 @@ async function dispatch(
       const queryId = String(args.query_id || "");
       if (!queryId) return "db-query requires query_id (e.g., 'sessions.list', 'issues.open', 'eval.runs')";
 
-      const orgId = args.org_id || "";
+      const orgId = String(args.org_id || "");
       const userId = args.user_id || "";
+      if (!orgId) return JSON.stringify({ error: "db-query requires org context", code: "ORG_CONTEXT_REQUIRED" });
 
       // Call our own /cf/db/query endpoint (same worker, internal)
       try {
@@ -2568,7 +2652,8 @@ async function dispatch(
       if (!Array.isArray(queries) || queries.length === 0) return "db-batch requires queries array";
       if (queries.length > 10) return "db-batch max 10 queries per batch";
 
-      const orgId = args.org_id || "";
+      const orgId = String(args.org_id || "");
+      if (!orgId) return JSON.stringify({ error: "db-batch requires org context", code: "ORG_CONTEXT_REQUIRED" });
       const hyperdrive = (env as any).HYPERDRIVE;
       if (!hyperdrive) return "db-batch requires database access";
 
@@ -2593,7 +2678,8 @@ async function dispatch(
     case "db-report": {
       // Pre-built composite reports — agent health, org overview
       const reportId = String(args.report_id || "");
-      const orgId = args.org_id || "";
+      const orgId = String(args.org_id || "");
+      if (!orgId) return JSON.stringify({ error: "db-report requires org context", code: "ORG_CONTEXT_REQUIRED" });
       if (!reportId) return "db-report requires report_id (e.g., 'agent_health', 'org_overview')";
 
       try {
