@@ -76,7 +76,11 @@ dashboardRoutes.openapi(statsRoute, async (c): Promise<any> => {
   let avg_latency_ms = 0;
   let error_rate_pct = 0;
   try {
-    // Query sessions matching org OR agent names (handles empty org_id from telemetry)
+    // Query sessions matching org OR agent names (handles empty org_id from telemetry).
+    // Use = ANY(${array}) — the idiomatic postgres.js pattern for IN-queries
+    // over an array of values. The previous `IN (${sql(array)})` form was
+    // interpreting the array as double-quoted identifiers, which Postgres
+    // parsed as column references (hence "column \"my-assistant\" does not exist").
     const sessionQuery = agentNames.length > 0
       ? sql`
           SELECT
@@ -90,7 +94,7 @@ dashboardRoutes.openapi(statsRoute, async (c): Promise<any> => {
             ) as error_rate
           FROM sessions
           WHERE org_id = ${user.org_id}
-             OR agent_name IN (${sql(agentNames)})
+             OR agent_name = ANY(${agentNames})
         `
       : sql`
           SELECT
@@ -107,7 +111,8 @@ dashboardRoutes.openapi(statsRoute, async (c): Promise<any> => {
     avg_latency_ms = Math.round(Number(sessionStats.avg_latency_s) * 1000);
     error_rate_pct = Math.round(Number(sessionStats.error_rate) * 10000) / 100;
 
-    // If wall_clock_seconds is always 0, try computing from turns table
+    // If wall_clock_seconds is always 0, try computing from turns table.
+    // Same ANY(${array}) fix as the session stats query above.
     if (avg_latency_ms === 0 && total_sessions > 0) {
       try {
         const [turnLatency] = await sql`
@@ -115,7 +120,7 @@ dashboardRoutes.openapi(statsRoute, async (c): Promise<any> => {
           FROM turns t
           JOIN sessions s ON s.session_id = t.session_id
           WHERE s.org_id = ${user.org_id}
-             ${agentNames.length > 0 ? sql`OR s.agent_name IN (${sql(agentNames)})` : sql``}
+             ${agentNames.length > 0 ? sql`OR s.agent_name = ANY(${agentNames})` : sql``}
           LIMIT 1000
         `;
         avg_latency_ms = Math.round(Number(turnLatency.avg_ms));
