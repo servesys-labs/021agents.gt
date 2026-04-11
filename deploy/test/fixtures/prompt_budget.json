@@ -1,0 +1,17 @@
+{
+  "_description": "Size ceiling for the meta-agent-chat system prompt (char count, not tokens — deterministic without a tokenizer). Phase 0 captures current size; Phase 7 tightens.",
+  "_seed_instructions": "To regenerate: WRITE_PROMPT_BUDGET=1 pnpm vitest run test/refactor-phase0.test.ts",
+  "ceilings_chars": {
+    "meta_agent_chat_live": 30795,
+    "meta_agent_chat_demo": 30795
+  },
+  "phase_targets": {
+    "_comment": "Target char count after each phase completes. Phase 7 slims the base prompt by extracting workflows to skills/meta/.",
+    "meta_agent_chat_live": {
+      "phase_0": "seeded",
+      "phase_7": 8000
+    }
+  },
+  "_seeded_at": "2026-04-11T13:43:19.799Z",
+  "_note": "Measures meta-agent-chat.ts file size, not a runtime buildMetaAgentChatPrompt call, because deploy/ tsconfig doesn't include control-plane/. Drift detection is equivalent: any prompt growth changes the file."
+}

@@ -2,7 +2,7 @@
 
 Build, test, govern, deploy, and observe AI agents. The Vercel for agents.
 
-**CLI + API + Portal** — one platform from local development to production SaaS.
+**oneshots CLI + control-plane API + UI portal + Workers runtime** — one platform from local development to production SaaS.
 
 | Metric | Count |
 |--------|-------|
@@ -21,71 +21,50 @@ Build, test, govern, deploy, and observe AI agents. The Vercel for agents.
 
 ### Prerequisites
 
-- **Node.js 18+** and **npm** (for TypeScript CLI and Portal)
-- **Python 3.11+** (for agent scaffolding and local tools)
+- **Node.js 18+** and **pnpm** (runtime, control-plane, UI)
+- **Bun 1.0+** (preferred builder for the `oneshots` CLI — optional, `tsx` works too)
+- **Python 3.11+** (only for `agentos codemap` — the code-graph generator)
+
+### Build and link the CLI
 
 ```bash
-# Install TypeScript CLI (primary interface)
-npm install -g @agentos/cli
-
-# Or use npx (no install)
-npx @agentos/cli --help
-
-# Install Python CLI (for scaffolding only)
-pip install -e ".[dev]"
+cd cli
+npm install
+npm run build       # writes dist/cli.js
+npm link            # makes `oneshots` available on your PATH
 ```
 
 ### Create and Run an Agent
 
 ```bash
-# Step 1: Initialize project (Python CLI)
-agentos init my-project --template research
-cd my-project
+# Authenticate against your control-plane
+oneshots login
 
-# Step 2: Set your LLM provider
-export GMI_API_KEY=gmi-...
+# Create an agent (conversational or one-shot)
+oneshots create --one-shot "a research assistant that finds and summarizes papers"
 
-# Step 3: Create an agent via conversation (Python CLI)
-agentos create
+# Deploy it to the control-plane
+oneshots deploy research-assistant
 
-# Or create one in a single command
-agentos create --one-shot "a research assistant that finds and summarizes papers"
+# Run / chat / eval — all hit the control-plane REST API
+oneshots run research-assistant "What are the latest advances in RLHF?"
+oneshots chat research-assistant
+oneshots eval run research-assistant --trials 5
 
-# Step 4: Deploy to Cloudflare (Python CLI)
-agentos deploy research-assistant
-
-# Step 5: Run the agent (TypeScript CLI) ✨ NEW
-agentos run research-assistant "What are the latest advances in RLHF?"
-
-# Interactive chat (TypeScript CLI) ✨ NEW
-agentos chat research-assistant
-
-# Evaluate performance (TypeScript CLI) ✨ NEW
-agentos eval run research-assistant --trials 5
-
-# View traces (TypeScript CLI) ✨ NEW
-agentos sessions
-
-# Start the portal UI
-cd portal && npm install --legacy-peer-deps && npm run dev
+# Start the UI portal (SvelteKit, not React/Refine)
+cd ui && pnpm install && pnpm dev
 ```
 
-### CLI Migration Notice
+### Python developer tools
 
-The **TypeScript CLI** (`npm install -g @agentos/cli`) is now the primary interface for:
-- `run`, `chat` — Agent execution
-- `eval`, `evolve` — Quality assurance
-- `sessions`, `traces` — Observability
-- `issues`, `security` — Operations
-- `billing` — Cost management
+The Python package is deprecated as a CLI. Only one command remains:
 
-The **Python CLI** (`pip install agentos`) remains for:
-- `init` — Project scaffolding
-- `create` — LLM-assisted agent creation
-- `deploy` — Cloudflare deployment
-- `sandbox` — Local sandbox management
+```bash
+pip install -e ".[dev]"
+agentos codemap     # regenerates data/codemap.json, docs/codemap.dot, docs/codemap.svg
+```
 
-See [CLI Reference](#cli-reference) for full details.
+All prior Python commands (`create`, `deploy`, `run`, `chat`, `eval`, `evolve`, `ingest`, `issues`, `tools`, `plans`, `sandbox`, `serve`, ...) have been removed. `agentos/builder.py` and `agentos/tools/` no longer exist. Use the `oneshots` CLI instead.
 
 ## Architecture
 
@@ -127,77 +106,72 @@ See [CLI Reference](#cli-reference) for full details.
 
 ## CLI Reference
 
-AgentOS provides two CLIs optimized for different workflows:
+### `oneshots` — the TypeScript CLI
 
-### TypeScript CLI (Primary)
+Source: `cli/src/`. Package: `@oneshots/cli`. Binary: `oneshots`. Every command hits
+the control-plane REST API; nothing shells out to Python.
 
-Install: `npm install -g @agentos/cli`
+| Command | What it does |
+|---|---|
+| `oneshots init [dir]` | Scaffold a new agent project |
+| `oneshots login` / `logout` / `whoami` | Authentication |
+| `oneshots create` / `create --one-shot DESC` | Create an agent (conversational or one-shot) |
+| `oneshots list` | List agents |
+| `oneshots run <agent> "task"` | Run an agent |
+| `oneshots chat <agent>` | Interactive chat |
+| `oneshots deploy <agent>` | Deploy to Cloudflare |
+| `oneshots eval <cmd>` | Evaluations (list / run / status) |
+| `oneshots evolve <cmd>` | Analyze + improve agents |
+| `oneshots sessions` / `traces <id>` | Observability |
+| `oneshots skills <cmd>` | Skill management |
+| `oneshots tools <cmd>` | Tool registry |
+| `oneshots graph <cmd>` / `memory <cmd>` | Agent graph / memory inspection |
+| `oneshots releases <agent>` / `workflow <cmd>` / `schedules <cmd>` | Release, workflow, schedule management |
+| `oneshots jobs` | Background jobs |
+| `oneshots research <cmd>` | Autoresearch |
+| `oneshots connectors` | Integration management |
+| `oneshots billing` | Usage and costs |
+| `oneshots issues <cmd>` / `security <cmd>` / `compliance <cmd>` | Ops, security, compliance |
+| `oneshots sandbox <cmd>` | Sandbox management |
+| `oneshots secrets <cmd>` / `tokens <cmd>` / `api-keys <cmd>` / `domains <cmd>` | Secrets, tokens, keys, domains |
+| `oneshots codemap` | Generate code graphs (TS path) |
 
-| Command | Description |
-|---------|-------------|
-| `agentos init [dir]` | Scaffold new project |
-| `agentos create` | Create agent (conversational) |
-| `agentos create -1 DESC` | Create from description |
-| `agentos run <agent> <task>` | **Run an agent** ✨ |
-| `agentos chat <agent>` | **Interactive chat** ✨ |
-| `agentos list` | List agents |
-| `agentos deploy <agent>` | Deploy to Cloudflare |
-| `agentos eval <cmd>` | **Evaluations** (list/run/status) ✨ |
-| `agentos evolve <cmd>` | **Evolution** (analyze/proposals) ✨ |
-| `agentos issues <cmd>` | **Issue management** ✨ |
-| `agentos security <cmd>` | **Security scans** ✨ |
-| `agentos sessions` | **View sessions** ✨ |
-| `agentos traces <id>` | **View traces** ✨ |
-| `agentos skills <cmd>` | **Skill management** ✨ |
-| `agentos tools <cmd>` | **Tool registry** ✨ |
-| `agentos graph <cmd>` | **Graph operations** ✨ |
-| `agentos memory <cmd>` | **Memory inspection** ✨ |
-| `agentos releases <cmd>` | **Release management** ✨ |
-| `agentos workflow <cmd>` | **Workflow management** ✨ |
-| `agentos schedule <cmd>` | **Cron schedules** ✨ |
-| `agentos jobs <cmd>` | **Background jobs** ✨ |
-| `agentos research <cmd>` | **Autoresearch** ✨ |
-| `agentos connectors <cmd>` | **Integrations** ✨ |
-| `agentos billing <cmd>` | **Usage & costs** ✨ |
-| `agentos sandbox <cmd>` | Sandbox management |
-| `agentos login/logout` | Authentication |
-| `agentos codemap` | Generate code graphs |
+Source of truth is `cli/src/cli.ts`.
 
-Commands marked ✨ are new in the TypeScript CLI and offer better performance.
+### `agentos` — the Python developer CLI
 
-### Python CLI (Legacy - Scaffolding Only)
+Only one command remains:
 
-Install: `pip install agentos`
+```bash
+agentos codemap              # regenerate data/codemap.json, docs/codemap.dot, docs/codemap.svg
+```
 
-The Python CLI is maintained for backward compatibility with existing workflows. For runtime operations, use the TypeScript CLI.
-
-| Command | Status | Notes |
-|---------|--------|-------|
-| `agentos init` | ✅ Active | Project scaffolding |
-| `agentos create` | ✅ Active | LLM-assisted agent creation |
-| `agentos deploy` | ✅ Active | Cloudflare deployment |
-| `agentos run` | ⚠️ Deprecated | Use TypeScript CLI |
-| `agentos chat` | ⚠️ Deprecated | Use TypeScript CLI |
-| `agentos sandbox` | ✅ Active | Local sandbox management |
-| `agentos codemap` | ✅ Active | Code graph generation |
+All other Python commands have been removed. `agentos/builder.py` and `agentos/tools/` are gone.
 
 ### Subsystems
 
+> The TypeScript surfaces below (`cli/`, `control-plane/`, `deploy/`, `ui/`, `sdk/`, `ops/`, `voice-agent/`, `widget/`, `mobile/`) are the live path. The Python rows are mostly internal libraries and tests — they are *not* how users interact with AgentOS today.
+
 | Subsystem | Module | Description |
 |-----------|--------|-------------|
-| **Agent** | `agentos.agent` | Agent definition, loading, execution, plan-based routing |
-| **Builder** | `agentos.builder` | Meta-agent that builds agents via LLM conversation |
-| **CLI (TS)** | `cli/` | TypeScript CLI — primary interface for runtime operations |
-| **CLI (Py)** | `agentos.cli` | Python CLI — scaffolding and local tools |
-| **API** | `control-plane/src/routes/` | TypeScript/Hono — 52 routers, 240+ endpoints, RBAC |
-| **Runtime** | `deploy/src/runtime/` | TypeScript/Workers — graph execution engine |
+| **CLI (TS)** | `cli/` | `@oneshots/cli` — commander-based Bun/Node CLI. Binary: `oneshots`. Every subcommand calls the control-plane REST API. |
+| **CLI (Py)** | `agentos.cli` | Minimal Python CLI — `agentos codemap` only |
+| **SDK (TS)** | `sdk/` | TypeScript client SDK for the control-plane API |
+| **Ops Worker** | `ops/` | Separate Cloudflare Worker for operational tasks (own `wrangler.jsonc`) |
+| **Voice Worker** | `voice-agent/` | Voice-agent Cloudflare Worker (Vapi / real-time) |
+| **Widget** | `widget/` | Embeddable chat widget bundle |
+| **Mobile** | `mobile/` | React Native app shell |
+| **UI Portal** | `ui/` | SvelteKit front-end — the canonical admin/operator portal |
+| **Agent** | `agentos.agent` | Python `AgentConfig` dataclass + JSON loader — used by internal Python tests and helpers; live runtime path is TypeScript |
+| **API** | `control-plane/src/routes/` | TypeScript/Hono — routers for every REST endpoint, RBAC, Postgres via Hyperdrive |
+| **Runtime** | `deploy/src/runtime/` | TypeScript/Workers — graph execution engine, tool dispatch, skill injection |
 | **Governance** | `agentos.core.governance` | Budget enforcement, policy checks, cost tracking |
 | **Identity** | `agentos.core.identity` | Cryptographic agent IDs + optional signing keypairs |
 | **Tracing** | `agentos.core.tracing` | Span-based observability (session → turn → tool → sub-agent) |
 | **Database** | `agentos.core.database` | SQLite WAL (52 tables, migrations v1-v12) + Postgres backend |
 | **Events** | `agentos.core.events` | Event bus for lifecycle hooks and observability |
 | **LLM Routing** | `agentos.llm` | Multi-provider routing by complexity + multimodal tiers (image_gen/vision/tts/stt) |
-| **Tools** | `agentos.tools` | 24 builtins (incl. image-generate, text-to-speech, speech-to-text) + MCP client + plugin registry |
+| **Tools** | `deploy/src/runtime/tools.ts` | 40+ builtins live in the TypeScript runtime. The Python `agentos/tools/` tree has been deleted. |
 | **Connectors** | `agentos.connectors` | 3,000+ app integrations via Pipedream MCP |
 | **Memory** | `agentos.memory` | Working, episodic, semantic, procedural, vector store + async updater |
 | **Middleware** | `agentos.middleware` | Loop detection, context summarization, composable chain |
@@ -279,13 +253,7 @@ Each plan maps **8 tiers** to specific models — 4 text complexity tiers + 4 mu
 
 All multimodal models served via GMI Cloud — one API key, one billing account.
 
-```bash
-# List plans (shows multimodal tiers)
-agentos plans list
-
-# Create a custom plan
-agentos plans create
-```
+Plan management happens through the control-plane API, not via CLI.
 
 ## Builtin Tools (24)
 

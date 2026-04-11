@@ -1,0 +1,27 @@
+{
+  "_description": "SHA-256 of name|description|when_to_use|prompt_template for each BUILTIN_SKILL. Phase 0 baseline: captures the exact bytes that reach the model today. Any hash change without a matching -fixture-bump commit label means drift.",
+  "_seed_instructions": "To regenerate: WRITE_SKILL_HASHES=1 pnpm vitest run test/refactor-phase0.test.ts",
+  "hashes": {
+    "batch": "366bdbc932e23abedbd37e11a6ceecfc08049b89b041b4a2be2288c337789013",
+    "review": "d74f391755191246c2094d53c3647740c682d9af1299207dfa745522c4324f40",
+    "debug": "ea913db7c2c74fa5e2eeedb9c416b67b7fadb8d0371d4028fedc28ba5c42f7ad",
+    "verify": "1c63804f849faf491094680f9131b3a578fe3aa4194890539f0cdb243d0a0081",
+    "remember": "4312f0543671ab1fca3f7eafa0a6d64622200da0f93966bfbb73da3aba1d7506",
+    "skillify": "ff48f8a5721074f73ec4ea5658b9654c128a2ce1374eed451b36b40b2f38d111",
+    "schedule": "f392eb545fb8ebf371993cc75847fec4bc947a0f3fb3cdb871e4dcb723518e00",
+    "docs": "31bd52f15a3e18ada7cdee85942e6435dda58d3891cb1cb41305b85f6b0a1d21",
+    "research": "0ec23e56aaea9b47cf4d05348cfa69b00604fec31f495e804ddac6d49d9b6b53",
+    "report": "9ec211e1fe91ba8928c970d6c72629bdd3a8202abcf377937dc2eb4348284384",
+    "design": "5f2d52d9ac6de70e78a985a58216b32a5e2e10b617504b62e2696d4495540b30",
+    "chart": "66b2456f6837373af054464c50606e4a8fcf928fb97f64f3195cccbe2c659171",
+    "pdf": "930142cc8d5ca0565a93d14d3d3c523f1f39b02541e8866fcb1eba241fce329f",
+    "spreadsheet": "29569828f83460df46877e9b8eab40d12adcb5034f292c91f5ebe5945f658650",
+    "analyze": "a34ba476b2e5423fb42c832d55dbd88f7cf6c9b1af36421cf91efefd9c4eed34",
+    "website": "213b3ef07dfd569e4f68f319e411d9db6a80c8b4cfac1a0d0830198cd834df42",
+    "game": "4f7ca85c9aa163e729663c8d16ec4e4e4efbf7f2758989dcb1c7f98130b2eb45",
+    "docx": "38f40db67b2ec9146fbda564acf55c459d4c5112e94ab86f1b9096c408fd40e3",
+    "pptx": "1721612ff92da98fa106eaf33348432649cc31f047bbce60eb8081e1fbbc5ee7"
+  },
+  "_seeded_at": "2026-04-11T13:43:19.793Z",
+  "_skill_count": 19
+}

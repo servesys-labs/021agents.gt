@@ -3,6 +3,10 @@
   "version": "0.2.0",
   "private": true,
   "scripts": {
+    "bundle-skills": "node scripts/bundle-skills.mjs",
+    "predev": "node scripts/bundle-skills.mjs",
+    "predeploy": "node scripts/bundle-skills.mjs",
+    "pretest": "node scripts/bundle-skills.mjs",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "test": "vitest run",
