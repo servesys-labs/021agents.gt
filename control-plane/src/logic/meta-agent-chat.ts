@@ -2197,7 +2197,19 @@ async function executeTool(
           ? (typeof parentRows[0].config === "string" ? JSON.parse(parentRows[0].config as string) : parentRows[0].config || {})
           : {};
 
-        const subConfig: Record<string, unknown> = {
+        interface SubAgentConfig {
+          system_prompt: string;
+          model: string;
+          plan: string;
+          provider: string;
+          tools: string[];
+          max_turns: number;
+          governance: { budget_limit_usd: number };
+          parent_agent: string;
+          version: string;
+          enabled_skills?: string[];
+        }
+        const subConfig: SubAgentConfig = {
           system_prompt: systemPrompt,
           model: String(args.model || parentConfig.model || "anthropic/claude-sonnet-4-6"),
           plan: parentConfig.plan || "standard",
@@ -2238,11 +2250,11 @@ async function executeTool(
           created: true,
           name,
           description,
-          model: (subConfig as any).model,
+          model: subConfig.model,
           tools,
           enabled_skills: enabledSkills.length > 0 ? enabledSkills : undefined,
-          max_turns: (subConfig as any).max_turns,
-          budget_limit_usd: (subConfig as any).governance.budget_limit_usd,
+          max_turns: subConfig.max_turns,
+          budget_limit_usd: subConfig.governance.budget_limit_usd,
           message: `Sub-agent '${name}' created. The parent agent '${ctx.agentName}' can now delegate to it using the run-agent tool with agent_name='${name}'.`,
           ...(droppedSkills.length > 0
             ? {
