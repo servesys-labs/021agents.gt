@@ -139,48 +139,50 @@ trainingRoutes.openapi(createJobRoute, async (c): Promise<any> => {
 
   const jobId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
 
-  // Wrap job creation + initial resource snapshot in a transaction
-  await sql.begin(async (tx: any) => {
-    await tx`
-      INSERT INTO training_jobs (
-        job_id, org_id, agent_name, algorithm, status, config,
-        dataset_name, eval_tasks, max_iterations, auto_activate,
-        created_by, tags
-      ) VALUES (
-        ${jobId}, ${user.org_id}, ${body.agent_name}, ${body.algorithm}, 'created',
-        ${JSON.stringify(body.config)}, ${body.dataset_name ?? null},
-        ${body.eval_tasks ? JSON.stringify(body.eval_tasks) : null},
-        ${body.max_iterations}, ${body.auto_activate},
-        ${user.user_id}, ${body.tags && body.tags.length > 0 ? body.tags : sql`'{}'::text[]`}
-      )
-    `;
+  // We're already inside a withOrgDb callback, so `sql` is the
+  // transaction-scoped client. Nesting another sql.begin() would fail
+  // at runtime (TransactionSql has no .begin method). Everything below
+  // already runs in the enclosing transaction and rolls back together
+  // on throw.
+  await sql`
+    INSERT INTO training_jobs (
+      job_id, org_id, agent_name, algorithm, status, config,
+      dataset_name, eval_tasks, max_iterations, auto_activate,
+      created_by, tags
+    ) VALUES (
+      ${jobId}, ${user.org_id}, ${body.agent_name}, ${body.algorithm}, 'created',
+      ${JSON.stringify(body.config)}, ${body.dataset_name ?? null},
+      ${body.eval_tasks ? JSON.stringify(body.eval_tasks) : null},
+      ${body.max_iterations}, ${body.auto_activate},
+      ${user.user_id}, ${body.tags && body.tags.length > 0 ? body.tags : sql`'{}'::text[]`}
+    )
+  `;
 
-    // Snapshot current system prompt as initial resource (version 0)
-    const agentRows = await tx`
-      SELECT config FROM agents WHERE name = ${body.agent_name} AND org_id = ${user.org_id}
-    `;
-    if (agentRows.length > 0) {
-      let config: Record<string, unknown> = {};
-      config = parseJsonColumn(agentRows[0].config);
-      const systemPrompt = String(config.system_prompt ?? "");
+  // Snapshot current system prompt as initial resource (version 0)
+  const agentRows = await sql`
+    SELECT config FROM agents WHERE name = ${body.agent_name} AND org_id = ${user.org_id}
+  `;
+  if (agentRows.length > 0) {
+    let config: Record<string, unknown> = {};
+    config = parseJsonColumn(agentRows[0].config);
+    const systemPrompt = String(config.system_prompt ?? "");
 
-      if (systemPrompt) {
-        await tx`
-          INSERT INTO training_resources (
-            resource_id, org_id, agent_name, job_id,
-            resource_type, resource_key, version,
-            content_text, source, is_active
-          ) VALUES (
-            ${crypto.randomUUID().replace(/-/g, "").slice(0, 16)},
-            ${user.org_id}, ${body.agent_name}, ${jobId},
-            'system_prompt', 'main', 0,
-            ${systemPrompt}, 'initial', true
-          )
-          ON CONFLICT (org_id, agent_name, resource_type, resource_key, version) DO NOTHING
-        `;
-      }
+    if (systemPrompt) {
+      await sql`
+        INSERT INTO training_resources (
+          resource_id, org_id, agent_name, job_id,
+          resource_type, resource_key, version,
+          content_text, source, is_active
+        ) VALUES (
+          ${crypto.randomUUID().replace(/-/g, "").slice(0, 16)},
+          ${user.org_id}, ${body.agent_name}, ${jobId},
+          'system_prompt', 'main', 0,
+          ${systemPrompt}, 'initial', true
+        )
+        ON CONFLICT (org_id, agent_name, resource_type, resource_key, version) DO NOTHING
+      `;
     }
-  });
+  }
 
   auditTraining(sql, user.org_id, user.user_id, "training.created", jobId, {
     agent_name: body.agent_name, algorithm: body.algorithm, max_iterations: body.max_iterations,

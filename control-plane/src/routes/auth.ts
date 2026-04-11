@@ -297,154 +297,156 @@ authRoutes.openapi(signupRoute, async (c): Promise<any> => {
   const orgSlug = email.split("@")[0].toLowerCase().replace(/\./g, "-");
   const orgName = `${name || orgSlug}'s Org`;
 
-  // Wrap all core signup INSERTs in a transaction so partial state is impossible
+  // NOTE: `sql` inside this withAdminDb callback is already a
+  // transaction-scoped client — withAdminDb opens the transaction for
+  // us. Calling sql.begin() here would nest and fail at runtime
+  // (TransactionSql doesn't expose .begin). All the INSERTs below run
+  // in the same enclosing transaction and roll back together on throw.
   try {
-    await sql.begin(async (tx: any) => {
-      // Create user
-      await tx`
-        INSERT INTO users (user_id, email, name, password_hash, provider, created_at)
-        VALUES (${userId}, ${email}, ${name}, ${passwordHash}, ${"local"}, ${nowEpoch})
+    // Create user
+    await sql`
+      INSERT INTO users (user_id, email, name, password_hash, provider, created_at)
+      VALUES (${userId}, ${email}, ${name}, ${passwordHash}, ${"local"}, ${nowEpoch})
+    `;
+
+    // Create personal org
+    await sql`
+      INSERT INTO orgs (org_id, name, slug, owner_user_id, plan, created_at)
+      VALUES (${orgId}, ${orgName}, ${orgSlug}, ${userId}, ${"free"}, ${nowEpoch})
+    `;
+
+    await sql`
+      INSERT INTO org_members (org_id, user_id, role, created_at)
+      VALUES (${orgId}, ${userId}, ${"owner"}, ${nowEpoch})
+    `;
+
+    // Auto-create personal agent (every user gets one on signup)
+    const personalAgentId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+    const personalName = "my-assistant";
+    const personalDescription = `${name || email.split("@")[0]}'s personal AI assistant`;
+    const personalConfig = {
+      name: personalName,
+      description: personalDescription,
+      system_prompt: buildPersonalAgentPrompt(name || email.split("@")[0]),
+      model: "",  // Let plan routing handle model selection
+      plan: "free",
+      // Lean tool list: 8 core tools the PA uses on most turns.
+      // The runtime's progressive tool discovery makes all 100+ tools
+      // available on demand — they don't need to be in this list.
+      tools: [
+        "web-search", "browse",           // research (daily use)
+        "python-exec", "bash",            // code execution
+        "read-file", "write-file",        // workspace
+        "memory-save", "memory-recall",   // persistence across sessions
+        "create-schedule", "list-schedules", "delete-schedule", // automation
+      ],
+      max_turns: 50,
+      temperature: 0.7,
+      tags: ["personal", "assistant"],
+      version: "1.0.0",
+      governance: { budget_limit_usd: 10 },
+      reasoning_strategy: "",  // auto-select is best for a generalist
+      use_code_mode: true,     // Collapse tool schema for better latency and fewer direct tool calls.
+      parallel_tool_calls: true,
+      is_personal: true,
+    };
+
+    await sql`
+      INSERT INTO agents (agent_id, name, org_id, description, config, version, is_active, created_by, created_at, updated_at)
+      VALUES (${personalAgentId}, ${personalName}, ${orgId}, ${personalDescription}, ${JSON.stringify(personalConfig)}, '1.0.0', ${true}, ${userId}, now(), now())
+    `;
+    console.log(`[auth/signup] Personal agent created for ${email}`);
+
+    // Meta-agent is ambient — no DB row needed. It uses its own system prompt
+    // from prompts/meta-agent-chat.ts and operates on any agent via /agents/:name/meta-chat.
+
+    // Create default org_settings
+    await sql`
+      INSERT INTO org_settings (org_id, plan_type, settings, limits, features, created_at, updated_at)
+      VALUES (
+        ${orgId},
+        ${"free"},
+        ${JSON.stringify({ onboarding_complete: false, default_connectors: [] })},
+        ${JSON.stringify({ max_agents: 50, max_runs_per_month: 1000, max_seats: 1 })},
+        ${JSON.stringify(["basic_agents", "basic_observability"])},
+        now(),
+        now()
+      )
+      ON CONFLICT (org_id) DO NOTHING
+    `;
+
+    // Seed free tier credits ($5.00 — enough for ~50-200 agent runs)
+    const FREE_TIER_USD = 5.00;
+    await sql`
+      INSERT INTO org_credit_balance (org_id, balance_usd, lifetime_purchased_usd, updated_at)
+      VALUES (${orgId}, ${FREE_TIER_USD}, ${FREE_TIER_USD}, now())
+      ON CONFLICT (org_id) DO NOTHING
+    `;
+    await sql`
+      INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
+      VALUES (${orgId}, 'bonus', ${FREE_TIER_USD}, ${FREE_TIER_USD}, 'Welcome bonus — free tier credits', 'signup', 'signup_bonus', now())
+    `;
+    console.log(`[auth/signup] Seeded $${FREE_TIER_USD} free credits for org ${orgId}`);
+
+    // Create referral relationship (code already validated + consumed above)
+    if (validatedReferrerOrgId && validatedReferrerOrgId !== orgId) {
+      await sql`
+        INSERT INTO referrals (referrer_org_id, referred_org_id, referral_code, status, created_at)
+        VALUES (${validatedReferrerOrgId}, ${orgId}, ${referralCode || ''}, 'active', now())
+        ON CONFLICT (referred_org_id) DO NOTHING
       `;
+    }
 
-      // Create personal org
-      await tx`
-        INSERT INTO orgs (org_id, name, slug, owner_user_id, plan, created_at)
-        VALUES (${orgId}, ${orgName}, ${orgSlug}, ${userId}, ${"free"}, ${nowEpoch})
+    // Auto-create default referral code for the new org (5 invites to start)
+    try {
+      const { createReferralCode } = await import("../logic/referrals");
+      await createReferralCode(sql, orgId, { label: "Your invite link", maxUses: 5 });
+    } catch {} // non-blocking within tx
+
+    // Seed default event_types for the org (best-effort, idempotent)
+    const defaultEventTypes = [
+      { event_type: "agent.created", category: "agents", description: "Agent was created" },
+      { event_type: "agent.updated", category: "agents", description: "Agent config was updated" },
+      { event_type: "agent.deleted", category: "agents", description: "Agent was deleted" },
+      { event_type: "session.started", category: "sessions", description: "Agent session started" },
+      { event_type: "session.completed", category: "sessions", description: "Agent session completed" },
+      { event_type: "session.failed", category: "sessions", description: "Agent session failed" },
+      { event_type: "connector.token_stored", category: "connectors", description: "OAuth token stored" },
+      { event_type: "connector.tool_call", category: "connectors", description: "Connector tool invoked" },
+      { event_type: "retention.applied", category: "retention", description: "Retention policy applied" },
+      { event_type: "config.update", category: "config", description: "Configuration changed" },
+      { event_type: "member.invited", category: "orgs", description: "Member invited to org" },
+      { event_type: "member.removed", category: "orgs", description: "Member removed from org" },
+    ];
+    for (const et of defaultEventTypes) {
+      await sql`
+        INSERT INTO event_types (event_type, category, description)
+        VALUES (${et.event_type}, ${et.category}, ${et.description})
+        ON CONFLICT (event_type) DO NOTHING
       `;
+    }
 
-      await tx`
-        INSERT INTO org_members (org_id, user_id, role, created_at)
-        VALUES (${orgId}, ${userId}, ${"owner"}, ${nowEpoch})
+    // Create default project for the new org
+    const projectId = generateId();
+    const projectSlug = email.split("@")[0].toLowerCase().replace(/\./g, "-").slice(0, 30) || "my-agents";
+
+    await sql`
+      INSERT INTO projects (project_id, org_id, name, slug, description, default_env, default_plan, created_at, updated_at)
+      VALUES (${projectId}, ${orgId}, ${`${projectSlug}'s project`}, ${projectSlug}, ${"Default project"}, ${"development"}, ${"standard"}, ${nowEpoch}, ${nowEpoch})
+    `;
+
+    // Create default environments.
+    // NOTE: environments.org_id is NOT NULL (required for the RLS
+    // policy org_id = current_org_id()). Historical signups that
+    // omitted org_id no longer work — include it here and in any
+    // other code path that inserts into environments.
+    for (const envName of ["development", "staging", "production"]) {
+      const envId = generateId();
+      await sql`
+        INSERT INTO environments (env_id, org_id, project_id, name, is_active, created_at)
+        VALUES (${envId}, ${orgId}, ${projectId}, ${envName}, ${true}, ${nowEpoch})
       `;
-
-      // Auto-create personal agent (every user gets one on signup)
-      const personalAgentId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
-      const personalName = "my-assistant";
-      const personalDescription = `${name || email.split("@")[0]}'s personal AI assistant`;
-      const personalConfig = {
-        name: personalName,
-        description: personalDescription,
-        system_prompt: buildPersonalAgentPrompt(name || email.split("@")[0]),
-        model: "",  // Let plan routing handle model selection
-        plan: "free",
-        // Lean tool list: 8 core tools the PA uses on most turns.
-        // The runtime's progressive tool discovery makes all 100+ tools
-        // available on demand — they don't need to be in this list.
-        tools: [
-          "web-search", "browse",           // research (daily use)
-          "python-exec", "bash",            // code execution
-          "read-file", "write-file",        // workspace
-          "memory-save", "memory-recall",   // persistence across sessions
-          "create-schedule", "list-schedules", "delete-schedule", // automation
-        ],
-        max_turns: 50,
-        temperature: 0.7,
-        tags: ["personal", "assistant"],
-        version: "1.0.0",
-        governance: { budget_limit_usd: 10 },
-        reasoning_strategy: "",  // auto-select is best for a generalist
-        use_code_mode: true,     // Collapse tool schema for better latency and fewer direct tool calls.
-        parallel_tool_calls: true,
-        is_personal: true,
-      };
-
-      await tx`
-        INSERT INTO agents (agent_id, name, org_id, description, config, version, is_active, created_by, created_at, updated_at)
-        VALUES (${personalAgentId}, ${personalName}, ${orgId}, ${personalDescription}, ${JSON.stringify(personalConfig)}, '1.0.0', ${true}, ${userId}, now(), now())
-      `;
-      console.log(`[auth/signup] Personal agent created for ${email}`);
-
-      // Meta-agent is ambient — no DB row needed. It uses its own system prompt
-      // from prompts/meta-agent-chat.ts and operates on any agent via /agents/:name/meta-chat.
-
-      // Create default org_settings
-      await tx`
-        INSERT INTO org_settings (org_id, plan_type, settings, limits, features, created_at, updated_at)
-        VALUES (
-          ${orgId},
-          ${"free"},
-          ${JSON.stringify({ onboarding_complete: false, default_connectors: [] })},
-          ${JSON.stringify({ max_agents: 50, max_runs_per_month: 1000, max_seats: 1 })},
-          ${JSON.stringify(["basic_agents", "basic_observability"])},
-          now(),
-          now()
-        )
-        ON CONFLICT (org_id) DO NOTHING
-      `;
-
-      // Seed free tier credits ($5.00 — enough for ~50-200 agent runs)
-      const FREE_TIER_USD = 5.00;
-      await tx`
-        INSERT INTO org_credit_balance (org_id, balance_usd, lifetime_purchased_usd, updated_at)
-        VALUES (${orgId}, ${FREE_TIER_USD}, ${FREE_TIER_USD}, now())
-        ON CONFLICT (org_id) DO NOTHING
-      `;
-      await tx`
-        INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
-        VALUES (${orgId}, 'bonus', ${FREE_TIER_USD}, ${FREE_TIER_USD}, 'Welcome bonus — free tier credits', 'signup', 'signup_bonus', now())
-      `;
-      console.log(`[auth/signup] Seeded $${FREE_TIER_USD} free credits for org ${orgId}`);
-
-      // Create referral relationship (code already validated + consumed above)
-      if (validatedReferrerOrgId && validatedReferrerOrgId !== orgId) {
-        await tx`
-          INSERT INTO referrals (referrer_org_id, referred_org_id, referral_code, status, created_at)
-          VALUES (${validatedReferrerOrgId}, ${orgId}, ${referralCode || ''}, 'active', now())
-          ON CONFLICT (referred_org_id) DO NOTHING
-        `;
-      }
-
-      // Auto-create default referral code for the new org (5 invites to start)
-      try {
-        const { createReferralCode } = await import("../logic/referrals");
-        await createReferralCode(tx, orgId, { label: "Your invite link", maxUses: 5 });
-      } catch {} // non-blocking within tx
-
-      // Seed default event_types for the org (best-effort, idempotent)
-      const defaultEventTypes = [
-        { event_type: "agent.created", category: "agents", description: "Agent was created" },
-        { event_type: "agent.updated", category: "agents", description: "Agent config was updated" },
-        { event_type: "agent.deleted", category: "agents", description: "Agent was deleted" },
-        { event_type: "session.started", category: "sessions", description: "Agent session started" },
-        { event_type: "session.completed", category: "sessions", description: "Agent session completed" },
-        { event_type: "session.failed", category: "sessions", description: "Agent session failed" },
-        { event_type: "connector.token_stored", category: "connectors", description: "OAuth token stored" },
-        { event_type: "connector.tool_call", category: "connectors", description: "Connector tool invoked" },
-        { event_type: "retention.applied", category: "retention", description: "Retention policy applied" },
-        { event_type: "config.update", category: "config", description: "Configuration changed" },
-        { event_type: "member.invited", category: "orgs", description: "Member invited to org" },
-        { event_type: "member.removed", category: "orgs", description: "Member removed from org" },
-      ];
-      for (const et of defaultEventTypes) {
-        await tx`
-          INSERT INTO event_types (event_type, category, description)
-          VALUES (${et.event_type}, ${et.category}, ${et.description})
-          ON CONFLICT (event_type) DO NOTHING
-        `;
-      }
-
-      // Create default project for the new org
-      const projectId = generateId();
-      const projectSlug = email.split("@")[0].toLowerCase().replace(/\./g, "-").slice(0, 30) || "my-agents";
-
-      await tx`
-        INSERT INTO projects (project_id, org_id, name, slug, description, default_env, default_plan, created_at, updated_at)
-        VALUES (${projectId}, ${orgId}, ${`${projectSlug}'s project`}, ${projectSlug}, ${"Default project"}, ${"development"}, ${"standard"}, ${nowEpoch}, ${nowEpoch})
-      `;
-
-      // Create default environments.
-      // NOTE: environments.org_id is NOT NULL (required for the RLS
-      // policy org_id = current_org_id()). Historical signups that
-      // omitted org_id no longer work — include it here and in any
-      // other code path that inserts into environments.
-      for (const envName of ["development", "staging", "production"]) {
-        const envId = generateId();
-        await tx`
-          INSERT INTO environments (env_id, org_id, project_id, name, is_active, created_at)
-          VALUES (${envId}, ${orgId}, ${projectId}, ${envName}, ${true}, ${nowEpoch})
-        `;
-      }
-    });
+    }
   } catch (err) {
     return c.json(failSafe(err, "auth/signup:transaction", { userMessage: "We couldn't create your account right now. Please try again in a moment." }), 500);
   }
