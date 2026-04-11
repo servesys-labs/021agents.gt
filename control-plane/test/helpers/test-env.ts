@@ -79,6 +79,59 @@ export function mockFetcher(
   } as any;
 }
 
+/**
+ * Build a vi.mock() module factory for `../src/db/client` that forwards
+ * every `withOrgDb` / `withAdminDb` call to a shared mock tagged-template
+ * sql function. Use this in any route test that used to `vi.mock`
+ * `getDb` / `getDbForOrg` — those shims were deleted in the April 2026
+ * schema consolidation.
+ *
+ * Usage at the top of a test file:
+ *
+ *     import { buildDbClientMock, type MockSqlFn } from "./helpers/test-env";
+ *
+ *     const mockSql: MockSqlFn = vi.fn(async () => []);
+ *     vi.mock("../src/db/client", () => buildDbClientMock(() => mockSql));
+ *
+ * Inside a test body:
+ *
+ *     (mockSql as any).mockImplementation(async (strings, ...values) => {
+ *       const query = strings.join("?");
+ *       if (query.includes("SELECT ...")) return [...];
+ *       return [];
+ *     });
+ *
+ * The factory dereferences the closure lazily so individual tests can
+ * replace `mockSql`'s implementation per-test without resetting the
+ * module mock.
+ */
+export type MockSqlFn = (
+  strings: TemplateStringsArray,
+  ...values: unknown[]
+) => Promise<any>;
+
+export function buildDbClientMock(getSql: () => MockSqlFn): Record<string, unknown> {
+  const withOrgDb = async (_env: unknown, _orgId: unknown, fn: (sql: any) => Promise<any>) =>
+    fn(getSql());
+  const withAdminDb = async (_env: unknown, fn: (sql: any) => Promise<any>) =>
+    fn(getSql());
+  return {
+    withOrgDb,
+    withAdminDb,
+    // Back-compat shims for tests that still call getDb/getDbForOrg.
+    // Routes never import these anymore, but some tests still do in
+    // unit-test fixtures — forward to the same shared sql.
+    getDb: async () => getSql(),
+    getDbForOrg: async () => getSql(),
+    // Type exports the routes pull in from the same module. Vitest's
+    // module mocking replaces the whole module, so we need these to
+    // exist even if they're not used inside the route at runtime.
+    OrgSql: null,
+    AdminSql: null,
+    Sql: null,
+  };
+}
+
 /** Create a signed JWT for testing. */
 export async function createTestToken(
   userId: string,

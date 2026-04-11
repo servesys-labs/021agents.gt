@@ -350,8 +350,14 @@ describe("Referral Program", () => {
 
     it("distributes L1 only when no L2 exists", async () => {
       let referralQueryCount = 0;
-      const sql: any = (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const sql: any = (strings: TemplateStringsArray, ..._values: unknown[]) => {
         const q = strings.join("?");
+        // checkReferralActivation — `UPDATE referrals SET referred_task_count`
+        // with RETURNING referral_activated. Must come before the generic
+        // INSERT/UPDATE match or it never fires.
+        if (q.includes("UPDATE referrals") && q.includes("referred_task_count")) {
+          return Promise.resolve([{ referral_activated: true }]);
+        }
         // Idempotency check — no existing earnings
         if (q.includes("SELECT") && q.includes("referral_earnings") && q.includes("transfer_id")) {
           return Promise.resolve([]);
@@ -360,7 +366,7 @@ describe("Referral Program", () => {
         if (q.includes("SELECT") && q.includes("COUNT") && q.includes("referrals")) {
           return Promise.resolve([{ cnt: 5 }]); // 5 referrals = below cap
         }
-        // Find referrer
+        // Find referrer (L1 then L2)
         if (q.includes("SELECT") && q.includes("referrals") && q.includes("referred_org_id")) {
           referralQueryCount++;
           if (referralQueryCount === 1) return Promise.resolve([{ referrer_org_id: "org-referrer-l1" }]);
