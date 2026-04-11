@@ -2,15 +2,17 @@ import { describe, it, expect, vi } from "vitest";
 import { Hono } from "hono";
 import type { Env } from "../src/env";
 import type { CurrentUser } from "../src/auth/types";
+import { mockEnv, mockFetcher, buildDbClientMock, type MockSqlFn } from "./helpers/test-env";
+
+// Shared tagged-template sql mock — individual tests replace its
+// implementation by assigning mockSql directly.
+let mockSql: MockSqlFn = (async () => []) as unknown as MockSqlFn;
+
+vi.mock("../src/db/client", () => buildDbClientMock(() => mockSql));
+
+// Route import MUST come after the vi.mock call so the mocked db/client
+// is resolved when the routes file loads.
 import { workflowRoutes } from "../src/routes/workflows";
-import { mockEnv, mockFetcher } from "./helpers/test-env";
-
-vi.mock("../src/db/client", () => ({
-  getDb: vi.fn(),
-  getDbForOrg: vi.fn(),
-}));
-
-import { getDb, getDbForOrg } from "../src/db/client";
 
 type AppType = { Bindings: Env; Variables: { user: CurrentUser } };
 
@@ -69,13 +71,14 @@ function createMockSql() {
       return [];
     }
 
+    // Post-RLS: idempotency lookup uses only `WHERE idempotency_key = ?` —
+    // org scoping is enforced by the RLS session context, not a parameter.
     if (
       query.includes("SELECT * FROM workflow_approvals") &&
       query.includes("idempotency_key")
     ) {
-      const orgId = String(values[0] || "");
-      const key = String(values[1] || "");
-      return approvals.filter((r) => r.org_id === orgId && r.idempotency_key === key).slice(0, 1);
+      const key = String(values[0] || "");
+      return approvals.filter((r) => r.idempotency_key === key).slice(0, 1);
     }
 
     if (
@@ -107,27 +110,25 @@ function createMockSql() {
       return [];
     }
 
+    // Post-RLS: approval lookup uses only `WHERE approval_id = ?`.
     if (
       query.includes("SELECT * FROM workflow_approvals WHERE approval_id =")
-      && query.includes("org_id =")
     ) {
       const approvalId = String(values[0] || "");
-      const orgId = String(values[1] || "");
-      return approvals.filter((r) => r.approval_id === approvalId && r.org_id === orgId).slice(0, 1);
+      return approvals.filter((r) => r.approval_id === approvalId).slice(0, 1);
     }
 
+    // Post-RLS: expire update sets status + updated_at only (no org_id parameter).
     if (
       query.includes("UPDATE workflow_approvals")
-      && query.includes("SET status = ?")
-      && query.includes("WHERE approval_id = ?")
-      && query.includes("org_id = ?")
-      && query.includes("decision = ?") === false
+      && query.includes("SET status")
+      && query.includes("WHERE approval_id")
+      && query.includes("decision =") === false
     ) {
       const status = String(values[0] || "");
       const updatedAt = Number(values[1] || 0);
       const approvalId = String(values[2] || "");
-      const orgId = String(values[3] || "");
-      const row = approvals.find((r) => r.approval_id === approvalId && r.org_id === orgId);
+      const row = approvals.find((r) => r.approval_id === approvalId);
       if (row) {
         row.status = status;
         row.updated_at = updatedAt;
@@ -135,7 +136,8 @@ function createMockSql() {
       return { count: row ? 1 : 0 };
     }
 
-    if (query.includes("UPDATE workflow_approvals") && query.includes("decision = ?")) {
+    // Post-RLS: decision update (status, decision, reviewer, comment, decided_at, updated_at, approval_id).
+    if (query.includes("UPDATE workflow_approvals") && query.includes("decision =")) {
       const status = String(values[0] || "");
       const decision = String(values[1] || "");
       const reviewer = String(values[2] || "");
@@ -143,8 +145,7 @@ function createMockSql() {
       const decidedAt = Number(values[4] || 0);
       const updatedAt = Number(values[5] || 0);
       const approvalId = String(values[6] || "");
-      const orgId = String(values[7] || "");
-      const row = approvals.find((r) => r.approval_id === approvalId && r.org_id === orgId);
+      const row = approvals.find((r) => r.approval_id === approvalId);
       if (row) {
         row.status = status;
         row.decision = decision;
@@ -162,8 +163,7 @@ function createMockSql() {
 
 describe("workflows: approval orchestration routes", () => {
   it("creates pending approval and returns idempotent replay", async () => {
-    vi.mocked(getDb).mockResolvedValue(createMockSql() as any);
-    vi.mocked(getDbForOrg).mockResolvedValue(createMockSql() as any);
+    mockSql = createMockSql() as unknown as MockSqlFn;
     const app = buildApp("org-a");
 
     const startRes = await app.request(
@@ -209,8 +209,7 @@ describe("workflows: approval orchestration routes", () => {
   });
 
   it("uses workflows binding when enabled", async () => {
-    vi.mocked(getDb).mockResolvedValue(createMockSql() as any);
-    vi.mocked(getDbForOrg).mockResolvedValue(createMockSql() as any);
+    mockSql = createMockSql() as unknown as MockSqlFn;
     const app = buildApp("org-a");
     const env = mockEnv({
       APPROVAL_WORKFLOWS_ENABLED: "true",
@@ -242,8 +241,7 @@ describe("workflows: approval orchestration routes", () => {
   });
 
   it("approves pending decision and is idempotent on repeat", async () => {
-    vi.mocked(getDb).mockResolvedValue(createMockSql() as any);
-    vi.mocked(getDbForOrg).mockResolvedValue(createMockSql() as any);
+    mockSql = createMockSql() as unknown as MockSqlFn;
     const app = buildApp("org-a");
 
     const start = await app.request(
@@ -291,8 +289,7 @@ describe("workflows: approval orchestration routes", () => {
   });
 
   it("expires stale approvals on decision attempt", async () => {
-    vi.mocked(getDb).mockResolvedValue(createMockSql() as any);
-    vi.mocked(getDbForOrg).mockResolvedValue(createMockSql() as any);
+    mockSql = createMockSql() as unknown as MockSqlFn;
     const app = buildApp("org-a");
 
     const start = await app.request(

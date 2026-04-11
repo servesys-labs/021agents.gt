@@ -2,14 +2,17 @@ import { describe, it, expect, vi } from "vitest";
 import { Hono } from "hono";
 import type { Env } from "../src/env";
 import type { CurrentUser } from "../src/auth/types";
+import { mockEnv, buildDbClientMock, type MockSqlFn } from "./helpers/test-env";
+
+// Shared tagged-template sql mock — individual tests replace its
+// implementation by assigning mockSql directly.
+let mockSql: MockSqlFn = (async () => []) as unknown as MockSqlFn;
+
+vi.mock("../src/db/client", () => buildDbClientMock(() => mockSql));
+
+// Route import MUST come after the vi.mock call so the mocked db/client
+// is resolved when the routes file loads.
 import { evolveRoutes } from "../src/routes/evolve";
-import { mockEnv } from "./helpers/test-env";
-
-vi.mock("../src/db/client", () => ({
-  getDbForOrg: vi.fn(),
-}));
-
-import { getDbForOrg } from "../src/db/client";
 
 type AppType = { Bindings: Env; Variables: { user: CurrentUser } };
 
@@ -75,7 +78,7 @@ describe("evolve apply autopilot gates", () => {
       return Promise.resolve([]);
     });
 
-    vi.mocked(getDbForOrg).mockResolvedValue(sql as any);
+    mockSql = sql as unknown as MockSqlFn;
 
     const app = new Hono<AppType>();
     app.use("*", async (c, next) => {
@@ -132,7 +135,7 @@ describe("evolve apply autopilot gates", () => {
       return Promise.resolve([]);
     });
 
-    vi.mocked(getDbForOrg).mockResolvedValue(sql as any);
+    mockSql = sql as unknown as MockSqlFn;
 
     const app = new Hono<AppType>();
     app.use("*", async (c, next) => {

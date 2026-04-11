@@ -2,15 +2,17 @@ import { describe, it, expect, vi } from "vitest";
 import { Hono } from "hono";
 import type { Env } from "../src/env";
 import type { CurrentUser } from "../src/auth/types";
+import { mockEnv, buildDbClientMock, type MockSqlFn } from "./helpers/test-env";
+
+// Shared tagged-template sql mock — individual tests replace its
+// implementation by assigning mockSql directly.
+let mockSql: MockSqlFn = (async () => []) as unknown as MockSqlFn;
+
+vi.mock("../src/db/client", () => buildDbClientMock(() => mockSql));
+
+// Route import MUST come after the vi.mock call so the mocked db/client
+// is resolved when the routes file loads.
 import { plansRoutes } from "../src/routes/plans";
-import { mockEnv } from "./helpers/test-env";
-
-vi.mock("../src/db/client", () => ({
-  getDb: vi.fn(),
-  getDbForOrg: vi.fn(),
-}));
-
-import { getDb, getDbForOrg } from "../src/db/client";
 import rawDefault from "../../config/default.json";
 
 type AppType = { Bindings: Env; Variables: { user: CurrentUser } };
@@ -100,7 +102,7 @@ describe("plans routes", () => {
   });
 
   it("POST / merges custom plan into project_configs", async () => {
-    const mockSql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    mockSql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join("?");
       if (query.includes("SELECT config FROM project_configs")) {
         return [{ config: '{"other":1,"plans":{"old":{"_description":"x"}}}' }];
@@ -120,9 +122,7 @@ describe("plans routes", () => {
         return [];
       }
       return [];
-    }) as any;
-    vi.mocked(getDb).mockResolvedValue(mockSql);
-    vi.mocked(getDbForOrg).mockResolvedValue(mockSql);
+    }) as unknown as MockSqlFn;
 
     const app = buildApp("org-a");
     const res = await app.request(
@@ -147,7 +147,7 @@ describe("plans routes", () => {
   });
 
   it("POST / defaults tool_call tier to moderate when tool_call_model empty", async () => {
-    const mockSql2 = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    mockSql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join("?");
       if (query.includes("SELECT config")) return [{ config: "{}" }];
       if (query.includes("INSERT INTO project_configs")) {
@@ -157,9 +157,7 @@ describe("plans routes", () => {
         return [];
       }
       return [];
-    }) as any;
-    vi.mocked(getDb).mockResolvedValue(mockSql2);
-    vi.mocked(getDbForOrg).mockResolvedValue(mockSql2);
+    }) as unknown as MockSqlFn;
 
     const app = buildApp("org-a");
     const res = await app.request(

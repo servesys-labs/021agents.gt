@@ -2,15 +2,17 @@ import { describe, it, expect, vi } from "vitest";
 import { Hono } from "hono";
 import type { Env } from "../src/env";
 import type { CurrentUser } from "../src/auth/types";
+import { mockEnv, buildDbClientMock, type MockSqlFn } from "./helpers/test-env";
+
+// Shared tagged-template sql mock — individual tests replace its
+// implementation by assigning mockSql directly.
+let mockSql: MockSqlFn = (async () => []) as unknown as MockSqlFn;
+
+vi.mock("../src/db/client", () => buildDbClientMock(() => mockSql));
+
+// Route import MUST come after the vi.mock call so the mocked db/client
+// is resolved when the routes file loads.
 import { apiKeyRoutes } from "../src/routes/api-keys";
-import { mockEnv } from "./helpers/test-env";
-
-vi.mock("../src/db/client", () => ({
-  getDb: vi.fn(),
-  getDbForOrg: vi.fn(),
-}));
-
-import { getDb, getDbForOrg } from "../src/db/client";
 
 type AppType = { Bindings: Env; Variables: { user: CurrentUser } };
 
@@ -40,7 +42,7 @@ function buildApp() {
 
 describe("api-keys route contracts", () => {
   it("list returns array with key_prefix field", async () => {
-    const mockSql = (async (strings: TemplateStringsArray) => {
+    mockSql = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("FROM api_keys")) {
         return [
@@ -58,9 +60,7 @@ describe("api-keys route contracts", () => {
         ];
       }
       return [];
-    }) as any;
-    vi.mocked(getDb).mockResolvedValue(mockSql);
-    vi.mocked(getDbForOrg).mockResolvedValue(mockSql);
+    }) as unknown as MockSqlFn;
 
     const app = buildApp();
     const res = await app.request("/", { method: "GET" }, mockEnv());

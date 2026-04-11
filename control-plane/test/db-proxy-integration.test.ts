@@ -9,15 +9,14 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
 import type { Env } from "../src/env";
 import type { CurrentUser } from "../src/auth/types";
-import { mockEnv, mockFetcher } from "./helpers/test-env";
+import { mockEnv, mockFetcher, buildDbClientMock, type MockSqlFn } from "./helpers/test-env";
+
+// Shared tagged-template sql mock — individual tests replace its
+// implementation by assigning mockSql directly.
+let mockSql: MockSqlFn = (async () => []) as unknown as MockSqlFn;
 
 // Mock the DB client so direct-DB paths return predictable data
-vi.mock("../src/db/client", () => ({
-  getDb: vi.fn(),
-  getDbForOrg: vi.fn(),
-}));
-
-import { getDb, getDbForOrg } from "../src/db/client";
+vi.mock("../src/db/client", () => buildDbClientMock(() => mockSql));
 
 type AppType = { Bindings: Env; Variables: { user: CurrentUser } };
 

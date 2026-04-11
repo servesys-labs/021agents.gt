@@ -2,15 +2,17 @@ import { describe, it, expect, vi } from "vitest";
 import { Hono } from "hono";
 import type { Env } from "../src/env";
 import type { CurrentUser } from "../src/auth/types";
+import { mockEnv, buildDbClientMock, type MockSqlFn } from "./helpers/test-env";
+
+// Shared tagged-template sql mock — individual tests replace its
+// implementation by assigning mockSql directly.
+let mockSql: MockSqlFn = (async () => []) as unknown as MockSqlFn;
+
+vi.mock("../src/db/client", () => buildDbClientMock(() => mockSql));
+
+// Route import MUST come after the vi.mock call so the mocked db/client
+// is resolved when the routes file loads.
 import { memoryRoutes } from "../src/routes/memory";
-import { mockEnv } from "./helpers/test-env";
-
-vi.mock("../src/db/client", () => ({
-  getDb: vi.fn(),
-  getDbForOrg: vi.fn(),
-}));
-
-import { getDb, getDbForOrg } from "../src/db/client";
 
 type AppType = { Bindings: Env; Variables: { user: CurrentUser } };
 
@@ -73,8 +75,7 @@ function makeSqlMock(options: { hasSession: boolean }) {
 
 describe("memory routes: working snapshot", () => {
   it("returns derived working snapshot from latest session turns", async () => {
-    vi.mocked(getDb).mockResolvedValue(makeSqlMock({ hasSession: true }) as any);
-    vi.mocked(getDbForOrg).mockResolvedValue(makeSqlMock({ hasSession: true }) as any);
+    mockSql = makeSqlMock({ hasSession: true }) as unknown as MockSqlFn;
     const app = buildApp("org-a");
     const env = mockEnv();
 
@@ -90,8 +91,7 @@ describe("memory routes: working snapshot", () => {
   });
 
   it("returns empty snapshot when no persisted session exists", async () => {
-    vi.mocked(getDb).mockResolvedValue(makeSqlMock({ hasSession: false }) as any);
-    vi.mocked(getDbForOrg).mockResolvedValue(makeSqlMock({ hasSession: false }) as any);
+    mockSql = makeSqlMock({ hasSession: false }) as unknown as MockSqlFn;
     const app = buildApp("org-a");
     const env = mockEnv();
 
@@ -103,8 +103,7 @@ describe("memory routes: working snapshot", () => {
   });
 
   it("facts upsert requires key", async () => {
-    vi.mocked(getDb).mockResolvedValue(makeSqlMock({ hasSession: true }) as any);
-    vi.mocked(getDbForOrg).mockResolvedValue(makeSqlMock({ hasSession: true }) as any);
+    mockSql = makeSqlMock({ hasSession: true }) as unknown as MockSqlFn;
     const app = buildApp("org-a");
     const res = await app.request(
       "/agent-a/facts",
@@ -119,20 +118,18 @@ describe("memory routes: working snapshot", () => {
   });
 
   it("episodes list returns 404 when agent is not owned", async () => {
-    const mockSql = (async (strings: TemplateStringsArray) => {
+    mockSql = (async (strings: TemplateStringsArray) => {
       const query = String(strings[0] || "");
       if (query.includes("FROM agents WHERE name")) return [];
       return [];
-    }) as any;
-    vi.mocked(getDb).mockResolvedValue(mockSql);
-    vi.mocked(getDbForOrg).mockResolvedValue(mockSql);
+    }) as unknown as MockSqlFn;
     const app = buildApp("org-a");
     const res = await app.request("/agent-a/episodes", { method: "GET" }, mockEnv());
     expect(res.status).toBe(404);
   });
 
   it("procedures list returns parsed steps and success_rate", async () => {
-    const mockSql2 = (async (strings: TemplateStringsArray) => {
+    mockSql = (async (strings: TemplateStringsArray) => {
       const query = String(strings[0] || "");
       if (query.includes("FROM agents WHERE name")) return [{ "?column?": 1 }];
       if (query.includes("FROM procedures WHERE agent_name")) {
@@ -147,9 +144,7 @@ describe("memory routes: working snapshot", () => {
         ];
       }
       return [];
-    }) as any;
-    vi.mocked(getDb).mockResolvedValue(mockSql2);
-    vi.mocked(getDbForOrg).mockResolvedValue(mockSql2);
+    }) as unknown as MockSqlFn;
     const app = buildApp("org-a");
     const res = await app.request("/agent-a/procedures", { method: "GET" }, mockEnv());
     expect(res.status).toBe(200);
@@ -160,16 +155,14 @@ describe("memory routes: working snapshot", () => {
   });
 
   it("facts list returns parsed JSON values", async () => {
-    const mockSql3 = (async (strings: TemplateStringsArray) => {
+    mockSql = (async (strings: TemplateStringsArray) => {
       const query = String(strings[0] || "");
       if (query.includes("FROM agents WHERE name")) return [{ "?column?": 1 }];
-      if (query.includes("FROM semantic_facts")) {
+      if (query.includes("FROM facts")) {
         return [{ key: "k1", value: "{\"v\":1}", category: null }];
       }
       return [];
-    }) as any;
-    vi.mocked(getDb).mockResolvedValue(mockSql3);
-    vi.mocked(getDbForOrg).mockResolvedValue(mockSql3);
+    }) as unknown as MockSqlFn;
     const app = buildApp("org-a");
     const res = await app.request("/agent-a/facts", { method: "GET" }, mockEnv());
     expect(res.status).toBe(200);

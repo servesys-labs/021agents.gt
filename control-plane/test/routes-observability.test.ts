@@ -2,15 +2,17 @@ import { describe, it, expect, vi } from "vitest";
 import { Hono } from "hono";
 import type { Env } from "../src/env";
 import type { CurrentUser } from "../src/auth/types";
+import { mockEnv, buildDbClientMock, type MockSqlFn } from "./helpers/test-env";
+
+// Shared tagged-template sql mock — individual tests replace its
+// implementation by assigning mockSql directly.
+let mockSql: MockSqlFn = (async () => []) as unknown as MockSqlFn;
+
+vi.mock("../src/db/client", () => buildDbClientMock(() => mockSql));
+
+// Route import MUST come after the vi.mock call so the mocked db/client
+// is resolved when the routes file loads.
 import { observabilityRoutes } from "../src/routes/observability";
-import { mockEnv } from "./helpers/test-env";
-
-vi.mock("../src/db/client", () => ({
-  getDb: vi.fn(),
-  getDbForOrg: vi.fn(),
-}));
-
-import { getDb, getDbForOrg } from "../src/db/client";
 
 type AppType = { Bindings: Env; Variables: { user: CurrentUser } };
 
@@ -40,14 +42,12 @@ function buildApp(orgId = "org-a") {
 
 describe("observability ownership and maintenance contracts", () => {
   it("meta-proposals listing denies non-owned agents", async () => {
-    const mockSql = (async (strings: TemplateStringsArray) => {
+    mockSql = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("COUNT(*) as cnt FROM sessions")) return [{ cnt: 0 }];
       if (query.includes("COUNT(*) as cnt FROM agents")) return [{ cnt: 0 }];
       return [];
-    }) as any;
-    vi.mocked(getDb).mockResolvedValue(mockSql);
-    vi.mocked(getDbForOrg).mockResolvedValue(mockSql);
+    }) as unknown as MockSqlFn;
 
     const app = buildApp("org-a");
     const res = await app.request("/agents/agent-x/meta-proposals", { method: "GET" }, mockEnv());
@@ -55,14 +55,12 @@ describe("observability ownership and maintenance contracts", () => {
   });
 
   it("maintenance dry_run keeps persisted=false even when persist_proposals=true", async () => {
-    const mockSql2 = (async (strings: TemplateStringsArray) => {
+    mockSql = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("COUNT(*) as cnt FROM sessions")) return [{ cnt: 1 }];
       if (query.includes("COUNT(*) as cnt FROM agents")) return [{ cnt: 1 }];
       return [];
-    }) as any;
-    vi.mocked(getDb).mockResolvedValue(mockSql2);
-    vi.mocked(getDbForOrg).mockResolvedValue(mockSql2);
+    }) as unknown as MockSqlFn;
 
     const app = buildApp("org-a");
     const res = await app.request(
@@ -84,7 +82,7 @@ describe("observability ownership and maintenance contracts", () => {
   });
 
   it("meta-control-plane returns expected contract sections", async () => {
-    const mockSql3 = (async (strings: TemplateStringsArray) => {
+    mockSql = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("FROM sessions WHERE agent_name")) {
         return [{ total: 2, avg_turns: 4, success_rate: 0.5, avg_cost: 0.2 }];
@@ -93,9 +91,7 @@ describe("observability ownership and maintenance contracts", () => {
         return [{ pass_rate: 0.8, total_trials: 10 }];
       }
       return [];
-    }) as any;
-    vi.mocked(getDb).mockResolvedValue(mockSql3);
-    vi.mocked(getDbForOrg).mockResolvedValue(mockSql3);
+    }) as unknown as MockSqlFn;
 
     const app = buildApp("org-a");
     const res = await app.request("/agents/agent-x/meta-control-plane", { method: "GET" }, mockEnv());
@@ -112,8 +108,7 @@ describe("observability ownership and maintenance contracts", () => {
   });
 
   it("annotations validates required fields", async () => {
-    vi.mocked(getDb).mockResolvedValue((async () => []) as any);
-    vi.mocked(getDbForOrg).mockResolvedValue((async () => []) as any);
+    mockSql = (async () => []) as unknown as MockSqlFn;
     const app = buildApp("org-a");
     const missingTrace = await app.request(
       "/annotations",
@@ -139,7 +134,7 @@ describe("observability ownership and maintenance contracts", () => {
   });
 
   it("summary returns numeric observability metrics contract", async () => {
-    const mockSql4 = (async (strings: TemplateStringsArray) => {
+    mockSql = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("FROM sessions WHERE org_id")) {
         return [{ total: 5, cost: 1.2, avg_latency: 2.3, success_rate: 0.8 }];
@@ -148,9 +143,7 @@ describe("observability ownership and maintenance contracts", () => {
         return [{ total_cost: 3.4, input_tokens: 100, output_tokens: 200 }];
       }
       return [];
-    }) as any;
-    vi.mocked(getDb).mockResolvedValue(mockSql4);
-    vi.mocked(getDbForOrg).mockResolvedValue(mockSql4);
+    }) as unknown as MockSqlFn;
 
     const app = buildApp("org-a");
     const res = await app.request("/summary?since_days=14", { method: "GET" }, mockEnv());
@@ -166,7 +159,7 @@ describe("observability ownership and maintenance contracts", () => {
   });
 
   it("trace returns sessions and events for owned trace", async () => {
-    const mockSql5 = (async (strings: TemplateStringsArray) => {
+    mockSql = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("COUNT(*) as cnt FROM sessions WHERE trace_id")) return [{ cnt: 1 }];
       if (query.includes("SELECT * FROM sessions WHERE trace_id")) {
@@ -176,9 +169,7 @@ describe("observability ownership and maintenance contracts", () => {
         return [{ event_id: "evt-1", trace_id: "trace-1", org_id: "org-a" }];
       }
       return [];
-    }) as any;
-    vi.mocked(getDb).mockResolvedValue(mockSql5);
-    vi.mocked(getDbForOrg).mockResolvedValue(mockSql5);
+    }) as unknown as MockSqlFn;
 
     const app = buildApp("org-a");
     const res = await app.request("/trace/trace-1", { method: "GET" }, mockEnv());
@@ -192,7 +183,7 @@ describe("observability ownership and maintenance contracts", () => {
 
   it("trace integrity reports lifecycle mismatch and missing billing in strict mode", async () => {
     const oldTs = new Date(Date.now() - 10 * 60 * 1000).toISOString();
-    const mockSql6 = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    mockSql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join("?");
       if (query.includes("FROM sessions") && query.includes("trace_id")) {
         return [{ session_id: "sess-1", status: "success", created_at: oldTs }];
@@ -206,9 +197,7 @@ describe("observability ownership and maintenance contracts", () => {
       if (query.includes("INSERT INTO audit_log")) return [];
       void values;
       return [];
-    }) as any;
-    vi.mocked(getDb).mockResolvedValue(mockSql6);
-    vi.mocked(getDbForOrg).mockResolvedValue(mockSql6);
+    }) as unknown as MockSqlFn;
 
     const app = buildApp("org-a");
     const res = await app.request("/trace/trace-1/integrity?strict=true", { method: "GET" }, mockEnv());
@@ -227,7 +216,7 @@ describe("observability ownership and maintenance contracts", () => {
   it("trace integrity can emit audit alert on breach", async () => {
     let auditLogged = false;
     const oldTs = new Date(Date.now() - 10 * 60 * 1000).toISOString();
-    const mockSql7 = (async (strings: TemplateStringsArray) => {
+    mockSql = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("FROM sessions") && query.includes("trace_id")) {
         return [{ session_id: "sess-1", status: "success", created_at: oldTs }];
@@ -243,9 +232,7 @@ describe("observability ownership and maintenance contracts", () => {
         return [];
       }
       return [];
-    }) as any;
-    vi.mocked(getDb).mockResolvedValue(mockSql7);
-    vi.mocked(getDbForOrg).mockResolvedValue(mockSql7);
+    }) as unknown as MockSqlFn;
 
     const app = buildApp("org-a");
     const res = await app.request(
@@ -259,7 +246,7 @@ describe("observability ownership and maintenance contracts", () => {
 
   it("trace integrity keeps billing warning relaxed for very recent traces unless strict", async () => {
     const recentTs = new Date().toISOString();
-    const mockSql8 = (async (strings: TemplateStringsArray) => {
+    mockSql = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("FROM sessions") && query.includes("trace_id")) {
         return [{ session_id: "sess-1", status: "success", created_at: recentTs }];
@@ -271,9 +258,7 @@ describe("observability ownership and maintenance contracts", () => {
         return [{ session_id: "sess-1", turn_start: 1, turn_end: 1, session_end: 1 }];
       }
       return [];
-    }) as any;
-    vi.mocked(getDb).mockResolvedValue(mockSql8);
-    vi.mocked(getDbForOrg).mockResolvedValue(mockSql8);
+    }) as unknown as MockSqlFn;
 
     const app = buildApp("org-a");
     const relaxed = await app.request("/trace/trace-1/integrity", { method: "GET" }, mockEnv());
@@ -290,7 +275,7 @@ describe("observability ownership and maintenance contracts", () => {
   });
 
   it("integrity breaches endpoint returns aggregated breach summary", async () => {
-    const mockSql9 = (async (strings: TemplateStringsArray) => {
+    mockSql = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("FROM audit_log") && query.includes("trace.integrity_breach")) {
         return [
@@ -329,9 +314,7 @@ describe("observability ownership and maintenance contracts", () => {
         ];
       }
       return [];
-    }) as any;
-    vi.mocked(getDb).mockResolvedValue(mockSql9);
-    vi.mocked(getDbForOrg).mockResolvedValue(mockSql9);
+    }) as unknown as MockSqlFn;
 
     const app = buildApp("org-a");
     const res = await app.request("/integrity/breaches?limit=10", { method: "GET" }, mockEnv());
@@ -350,7 +333,7 @@ describe("observability ownership and maintenance contracts", () => {
   });
 
   it("integrity breaches endpoint supports trace filter", async () => {
-    const mockSql10 = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    mockSql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join("?");
       if (query.includes("resource_id =")) {
         expect(values.some((v) => String(v) === "trace-filtered")).toBe(true);
@@ -364,9 +347,7 @@ describe("observability ownership and maintenance contracts", () => {
         }];
       }
       return [];
-    }) as any;
-    vi.mocked(getDb).mockResolvedValue(mockSql10);
-    vi.mocked(getDbForOrg).mockResolvedValue(mockSql10);
+    }) as unknown as MockSqlFn;
 
     const app = buildApp("org-a");
     const res = await app.request(
@@ -380,7 +361,7 @@ describe("observability ownership and maintenance contracts", () => {
   });
 
   it("incidents endpoint aggregates integrity, loop, and circuit signals", async () => {
-    const mockSqlIncidents = (async (strings: TemplateStringsArray) => {
+    mockSql = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("FROM audit_log") && query.includes("created_at >=")) {
         return [
@@ -422,9 +403,7 @@ describe("observability ownership and maintenance contracts", () => {
         ];
       }
       return [];
-    }) as any;
-    vi.mocked(getDb).mockResolvedValue(mockSqlIncidents);
-    vi.mocked(getDbForOrg).mockResolvedValue(mockSqlIncidents);
+    }) as unknown as MockSqlFn;
 
     const app = buildApp("org-a");
     const res = await app.request("/incidents?limit=20&dedupe_window_sec=0", { method: "GET" }, mockEnv());
@@ -457,15 +436,14 @@ describe("observability ownership and maintenance contracts", () => {
   });
 
   it("incidents endpoint rejects invalid kinds", async () => {
-    vi.mocked(getDb).mockResolvedValue((async () => []) as any);
-    vi.mocked(getDbForOrg).mockResolvedValue((async () => []) as any);
+    mockSql = (async () => []) as unknown as MockSqlFn;
     const app = buildApp("org-a");
     const res = await app.request("/incidents?kinds=not_a_kind", { method: "GET" }, mockEnv());
     expect(res.status).toBe(400);
   });
 
   it("incidents endpoint filters by min_severity", async () => {
-    const mockSqlSev = (async (strings: TemplateStringsArray) => {
+    mockSql = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("FROM audit_log") && query.includes("created_at >=")) {
         return [
@@ -490,9 +468,7 @@ describe("observability ownership and maintenance contracts", () => {
       }
       if (query.includes("FROM runtime_events")) return [];
       return [];
-    }) as any;
-    vi.mocked(getDb).mockResolvedValue(mockSqlSev);
-    vi.mocked(getDbForOrg).mockResolvedValue(mockSqlSev);
+    }) as unknown as MockSqlFn;
 
     const app = buildApp("org-a");
     const res = await app.request("/incidents?min_severity=high&dedupe_window_sec=0", { method: "GET" }, mockEnv());
