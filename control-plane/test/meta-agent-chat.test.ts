@@ -897,6 +897,40 @@ describe("Phase 7.2b — META_SKILL_BODIES['mode-demo'] byte identity", () => {
   });
 });
 
+describe("Phase 7.6 — META_SKILL_BODIES['infra-summary'] byte identity", () => {
+  // sha computed against the pre-extraction Runtime Infrastructure
+  // (summary) body at commit ebfd3900 (the last commit that had it
+  // inline). Single-section extraction, no placeholders, no
+  // concatenation — mechanically identical to 7.5 (diagnose-session).
+  // Removed alongside the DEMO/LIVE/workflows/diagnose-session tests
+  // in the Phase 7-exit commit.
+  const EXPECTED_SHA = "e4a92bfd748416362af9b294b7e898c82c5d404f43de618d6c5c051e901f9c8f";
+  const EXPECTED_LENGTH = 1386;
+
+  it("matches sha256 of pre-extraction Runtime Infrastructure (summary) body", () => {
+    const body = META_SKILL_BODIES["infra-summary"];
+    const actual = createHash("sha256").update(body, "utf8").digest("hex");
+
+    if (actual !== EXPECTED_SHA) {
+      throw new Error(
+        `META_SKILL_BODIES["infra-summary"] drifted from pre-extraction body.\n` +
+        `  expected sha256: ${EXPECTED_SHA}\n` +
+        `  actual sha256:   ${actual}\n` +
+        `  expected length: ${EXPECTED_LENGTH}\n` +
+        `  actual length:   ${body.length}\n` +
+        `  first 80 chars:  ${JSON.stringify(body.slice(0, 80))}\n` +
+        `  last  80 chars:  ${JSON.stringify(body.slice(-80))}\n` +
+        `\n` +
+        `Investigate:\n` +
+        `  1. skills/meta/infra-summary/SKILL.md — was it edited?\n` +
+        `  2. bundle-skill-catalog.mjs FRONTMATTER_RE — Path B fix reverted?\n` +
+        `  3. Run 'node control-plane/scripts/bundle-skill-catalog.mjs' and\n` +
+        `     inspect the diff on meta-skill-bodies.generated.ts.\n`,
+      );
+    }
+  });
+});
+
 describe("Phase 7.5 — META_SKILL_BODIES['diagnose-session'] byte identity", () => {
   // sha computed against the pre-extraction Diagnostic Mindset body at
   // commit 27c02468 (the last commit that had Diagnostic Mindset inline).

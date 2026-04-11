@@ -32,7 +32,8 @@ never surfaced to user-facing agents.
 | `mode-live` | `buildMetaAgentChatPrompt(mode="live")` | 7.3 ✅ |
 | `wf-health-check`, `wf-improve`, `wf-bad-answers`, `wf-start-training`, `wf-marketplace-publish`, `wf-test-suite`, `wf-add-connector`, `wf-delegate`, `wf-mid-task-stop`, `wf-forgot-context`, `wf-truncated-results`, `wf-tool-blocked`, `wf-audit-log`, `wf-feature-flags`, `wf-cost-analysis` | Concatenated via `WORKFLOW_ORDER` into the `## Common workflows` section | 7.4 ✅ |
 | `diagnose-session` | `## Diagnostic Mindset` section | 7.5 ✅ |
-| _(Runtime Infra trim candidates)_ | `## Runtime Infrastructure` + `## Your tools` | 7.6 planned |
+| `infra-summary` | `## Runtime Infrastructure (summary)` section | 7.6 ✅ |
+| _(deferred)_ | `## Your tools` catalog — deferred to Phase 9 alongside tool consolidation | — |
 
 ## Adding a meta skill
 
