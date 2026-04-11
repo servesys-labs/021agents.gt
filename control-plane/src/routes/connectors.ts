@@ -7,6 +7,7 @@ import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
+import { failSafe } from "../lib/error-response";
 
 export const connectorRoutes = createOpenAPIRouter();
 
@@ -282,8 +283,8 @@ connectorRoutes.openapi(storeTokenRoute, async (c): Promise<any> => {
           scopes = EXCLUDED.scopes,
           updated_at = EXCLUDED.updated_at
       `;
-    } catch (err: any) {
-      return c.json({ error: `Failed to store token: ${err.message}` }, 500);
+    } catch (err) {
+      return c.json(failSafe(err, "connectors/store-token", { userMessage: "We couldn't save the connector token. Please try reconnecting the integration." }), 500);
     }
 
     // Audit

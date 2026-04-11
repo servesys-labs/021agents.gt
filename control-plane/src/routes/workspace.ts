@@ -6,6 +6,7 @@ import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { errorResponses } from "../schemas/openapi";
 import { requireScope } from "../middleware/auth";
+import { failSafe } from "../lib/error-response";
 
 export const workspaceRoutes = createOpenAPIRouter();
 
@@ -45,8 +46,8 @@ workspaceRoutes.openapi(listFilesRoute, async (c): Promise<any> => {
     });
     const data = await resp.json();
     return c.json(data);
-  } catch (err: any) {
-    return c.json({ files: [], error: err.message }, 500);
+  } catch (err) {
+    return c.json({ files: [], ...failSafe(err, "workspace/files/list") }, 500);
   }
 });
 
@@ -89,8 +90,8 @@ workspaceRoutes.openapi(readFileRoute, async (c): Promise<any> => {
     if (!resp.ok) return c.json({ error: "File not found" }, 404);
     const data = await resp.json();
     return c.json(data);
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500);
+  } catch (err) {
+    return c.json(failSafe(err, "workspace/files/read"), 500);
   }
 });
 
@@ -125,8 +126,8 @@ workspaceRoutes.openapi(listProjectsRoute, async (c): Promise<any> => {
     });
     const data = await resp.json();
     return c.json(data);
-  } catch (err: any) {
-    return c.json({ projects: [], error: err.message }, 500);
+  } catch (err) {
+    return c.json({ projects: [], ...failSafe(err, "workspace/projects/list") }, 500);
   }
 });
 
@@ -187,8 +188,8 @@ workspaceRoutes.openapi(createFileRoute, async (c): Promise<any> => {
     });
     const data = await resp.json();
     return c.json(data, resp.ok ? 200 : 500);
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500);
+  } catch (err) {
+    return c.json(failSafe(err, "workspace/files/create"), 500);
   }
 });
 
@@ -229,7 +230,7 @@ workspaceRoutes.openapi(deleteFileRoute, async (c): Promise<any> => {
     });
     const data = await resp.json();
     return c.json(data, resp.ok ? 200 : 500);
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500);
+  } catch (err) {
+    return c.json(failSafe(err, "workspace/files/delete"), 500);
   }
 });

@@ -10,6 +10,7 @@ import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
+import { failSafe } from "../lib/error-response";
 
 export const autoresearchRoutes = createOpenAPIRouter();
 
@@ -231,7 +232,7 @@ autoresearchRoutes.openapi(createRunRoute, async (c): Promise<any> => {
         )
       `;
     } catch (err: any) {
-      return c.json({ error: `Failed to create run: ${err.message}` }, 500);
+      return c.json(failSafe(err, "autoresearch/runs/create", { userMessage: "Couldn't create the experiment run. Please try again in a moment." }), 500);
     }
 
     return c.json({ run_id: runId, agent_name: agentName, status, created: true }, 201);
@@ -359,7 +360,7 @@ autoresearchRoutes.openapi(createExperimentRoute, async (c): Promise<any> => {
         )
       `;
     } catch (err: any) {
-      return c.json({ error: `Failed to create experiment: ${err.message}` }, 500);
+      return c.json(failSafe(err, "autoresearch/experiments/create", { userMessage: "Couldn't create the experiment. Please try again in a moment." }), 500);
     }
 
     return c.json({ experiment_id: experimentId, run_id: runId, created: true }, 201);

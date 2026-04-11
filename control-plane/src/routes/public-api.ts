@@ -27,6 +27,7 @@ import { withOrgDb } from "../db/client";
 import { dispatchRunCompletedWebhooks, type AgentRunEvent } from "../logic/webhook-delivery";
 import { redactPii } from "../logic/pii-redactor";
 import { hasCredits, deductCredits } from "../logic/credits";
+import { failSafe } from "../lib/error-response";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser; custom_domain?: string } };
 export const publicAgentRoutes = new OpenAPIHono<R>();
@@ -350,7 +351,7 @@ publicAgentRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
 
     return c.json(runResponse);
   } catch (err) {
-    return c.json({ error: err instanceof Error ? err.message : "Agent execution failed" }, 500);
+    return c.json(failSafe(err, "public-api/agents/run", { userMessage: "Agent execution failed. Please try again in a moment." }), 500);
   }
 });
 
@@ -529,7 +530,9 @@ publicAgentRoutes.openapi(agentRunStreamRoute, async (c): Promise<any> => {
         }
       } catch {}
     } catch (err) {
-      sendSSE("error", { message: err instanceof Error ? err.message : "Agent execution failed" });
+      const ref = crypto.randomUUID().slice(0, 8);
+      console.error(`[public-api/agents/run-stream] (ref=${ref})`, err);
+      sendSSE("error", { message: `Agent execution failed. Please try again in a moment. (ref: ${ref})`, ref });
     } finally {
       writer.close();
     }
@@ -683,7 +686,7 @@ publicAgentRoutes.openapi(agentRunUploadRoute, async (c): Promise<any> => {
       }
     });
   } catch (err) {
-    return c.json({ error: "Failed to upload files: " + (err instanceof Error ? err.message : "unknown error") }, 500);
+    return c.json(failSafe(err, "public-api/agents/upload", { userMessage: "File upload failed. Please try again in a moment." }), 500);
   }
 
   // Build enhanced input with file references
@@ -787,7 +790,7 @@ publicAgentRoutes.openapi(agentRunUploadRoute, async (c): Promise<any> => {
 
     return c.json(runResponse);
   } catch (err) {
-    return c.json({ error: err instanceof Error ? err.message : "Agent execution failed" }, 500);
+    return c.json(failSafe(err, "public-api/agents/run-upload", { userMessage: "Agent execution failed. Please try again in a moment." }), 500);
   }
 });
 

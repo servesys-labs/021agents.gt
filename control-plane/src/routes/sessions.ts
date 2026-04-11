@@ -9,6 +9,7 @@ import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { parseJsonColumn } from "../lib/parse-json-column";
+import { failSafe } from "../lib/error-response";
 
 export const sessionRoutes = createOpenAPIRouter();
 
@@ -631,7 +632,7 @@ sessionRoutes.get("/search", requireScope("sessions:read"), async (c) => {
       }
       return c.json({ results: rows, query: q, limit, offset });
     } catch (err) {
-      return c.json({ results: [], error: String(err) }, 500);
+      return c.json({ results: [], ...failSafe(err, "sessions/search") }, 500);
     }
   });
 });
@@ -683,7 +684,7 @@ sessionRoutes.get("/:session_id/export", requireScope("sessions:read"), async (c
 
       return c.json({ session: session[0], turns: parsedTurns });
     } catch (err) {
-      return c.json({ error: String(err) }, 500);
+      return c.json(failSafe(err, "sessions/export"), 500);
     }
   });
 });

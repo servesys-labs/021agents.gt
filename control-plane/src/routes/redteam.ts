@@ -18,6 +18,7 @@ import { withOrgDb } from "../db/client";
 import { RedTeamRunner, ScanResult } from "../lib/security";
 import { parseAgentConfigJson } from "../schemas/common";
 import { requireScope } from "../middleware/auth";
+import { failSafe } from "../lib/error-response";
 
 export const redteamRoutes = createOpenAPIRouter();
 
@@ -204,9 +205,7 @@ redteamRoutes.openapi(startScanRoute, async (c): Promise<any> => {
       201,
     );
   } catch (error) {
-    const errorMessage =
-      error instanceof Error ? error.message : String(error);
-    return c.json({ error: "Scan failed", message: errorMessage }, 500);
+    return c.json(failSafe(error, "redteam/scan", { userMessage: "The scan couldn't complete. Please try again in a moment." }), 500);
   }
   });
 });

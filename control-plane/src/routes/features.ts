@@ -44,7 +44,10 @@ featuresRoutes.post("/:flag", async (c) => {
   const value = body.enabled !== false;
 
   const kv = (c.env as any).AGENT_PROGRESS_KV;
-  if (!kv) return c.json({ error: "KV not configured" }, 500);
+  if (!kv) {
+    console.error("[features] AGENT_PROGRESS_KV binding is missing");
+    return c.json({ error: "Feature flags are temporarily unavailable. Contact support." }, 503);
+  }
 
   const cacheKey = user.org_id || "global";
   const raw = await kv.get(`features/${cacheKey}`);
@@ -63,7 +66,10 @@ featuresRoutes.delete("/:flag", async (c) => {
 
   const flag = c.req.param("flag");
   const kv = (c.env as any).AGENT_PROGRESS_KV;
-  if (!kv) return c.json({ error: "KV not configured" }, 500);
+  if (!kv) {
+    console.error("[features] AGENT_PROGRESS_KV binding is missing");
+    return c.json({ error: "Feature flags are temporarily unavailable. Contact support." }, 503);
+  }
 
   const cacheKey = user.org_id || "global";
   const raw = await kv.get(`features/${cacheKey}`);
