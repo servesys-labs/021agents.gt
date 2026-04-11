@@ -2662,12 +2662,14 @@ export class AgentOSMcpServer extends Agent<Env> {
         })),
       ];
 
-      // Load detailed tool schemas from tool_registry if available
+      // Load detailed tool schemas from tool_registry if available.
+      // IN ${sql(array)} (no parens) — see control-plane/routes/dashboard.ts
+      // for why ANY(${array}) breaks under Hyperdrive's prepare:false.
       if (configuredTools.length > 0) {
         try {
           const toolRows = await sql`
             SELECT name, description, schema FROM tool_registry
-            WHERE name = ANY(${configuredTools})
+            WHERE name IN ${sql(configuredTools)}
           `;
           const schemaMap = new Map<string, { description: string; schema: Record<string, unknown> }>();
           for (const row of toolRows) {

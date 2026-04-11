@@ -643,19 +643,24 @@ observabilityRoutes.openapi(traceIntegrityRoute, async (c): Promise<any> => {
   const billingCounts = new Map<string, number>();
   const lifecycleCounts = new Map<string, { turn_start: number; turn_end: number; session_end: number }>();
 
-  // Batch queries instead of N+1 per session
-  const [turnRows, eventRows, billingRows, lifecycleRows] = await Promise.all([
-    sql`SELECT session_id, COUNT(*) as cnt FROM turns WHERE session_id = ANY(${sessionIds}) GROUP BY session_id`.catch(() => []),
-    sql`SELECT session_id, COUNT(*) as cnt FROM runtime_events WHERE session_id = ANY(${sessionIds}) GROUP BY session_id`.catch(() => []),
-    sql`SELECT session_id, COUNT(*) as cnt FROM billing_records WHERE session_id = ANY(${sessionIds}) GROUP BY session_id`.catch(() => []),
-    sql`SELECT session_id,
-        SUM(CASE WHEN event_type = 'turn_start' THEN 1 ELSE 0 END) AS turn_start,
-        SUM(CASE WHEN event_type = 'turn_end' THEN 1 ELSE 0 END) AS turn_end,
-        SUM(CASE WHEN event_type = 'session_end' THEN 1 ELSE 0 END) AS session_end
-      FROM runtime_events
-      WHERE session_id = ANY(${sessionIds})
-      GROUP BY session_id`.catch(() => []),
-  ]);
+  // Batch queries instead of N+1 per session.
+  // IN ${sql(array)} (no parens) — see dashboard.ts for why ANY(${array})
+  // breaks under Hyperdrive's prepare:false. Short-circuit on empty arrays
+  // because sql([]) renders as empty parens which is a syntax error.
+  const [turnRows, eventRows, billingRows, lifecycleRows] = sessionIds.length === 0
+    ? [[], [], [], []] as any[]
+    : await Promise.all([
+        sql`SELECT session_id, COUNT(*) as cnt FROM turns WHERE session_id IN ${sql(sessionIds)} GROUP BY session_id`.catch(() => []),
+        sql`SELECT session_id, COUNT(*) as cnt FROM runtime_events WHERE session_id IN ${sql(sessionIds)} GROUP BY session_id`.catch(() => []),
+        sql`SELECT session_id, COUNT(*) as cnt FROM billing_records WHERE session_id IN ${sql(sessionIds)} GROUP BY session_id`.catch(() => []),
+        sql`SELECT session_id,
+            SUM(CASE WHEN event_type = 'turn_start' THEN 1 ELSE 0 END) AS turn_start,
+            SUM(CASE WHEN event_type = 'turn_end' THEN 1 ELSE 0 END) AS turn_end,
+            SUM(CASE WHEN event_type = 'session_end' THEN 1 ELSE 0 END) AS session_end
+          FROM runtime_events
+          WHERE session_id IN ${sql(sessionIds)}
+          GROUP BY session_id`.catch(() => []),
+      ]);
 
   for (const row of turnRows) turnCounts.set(String(row.session_id), Number(row.cnt || 0));
   for (const row of eventRows) eventCounts.set(String(row.session_id), Number(row.cnt || 0));
@@ -1769,13 +1774,14 @@ observabilityRoutes.get("/export/otlp", requireScope("observability:read"), asyn
     ORDER BY start_time
   `.catch(() => []);
 
-  // Fetch turns for each session to enrich spans
+  // Fetch turns for each session to enrich spans.
+  // IN ${sql(array)} — see dashboard.ts for Hyperdrive prepare:false notes.
   const sessionIds = sessions.map((s: any) => String(s.session_id));
   const turns = sessionIds.length > 0
     ? await sql`
         SELECT session_id, turn_number, tool_calls, tool_results, error, created_at
         FROM turns
-        WHERE session_id = ANY(${sessionIds})
+        WHERE session_id IN ${sql(sessionIds)}
         ORDER BY session_id, turn_number
       `.catch(() => [])
     : [];

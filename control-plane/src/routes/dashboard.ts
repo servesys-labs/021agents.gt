@@ -77,10 +77,18 @@ dashboardRoutes.openapi(statsRoute, async (c): Promise<any> => {
   let error_rate_pct = 0;
   try {
     // Query sessions matching org OR agent names (handles empty org_id from telemetry).
-    // Use = ANY(${array}) — the idiomatic postgres.js pattern for IN-queries
-    // over an array of values. The previous `IN (${sql(array)})` form was
-    // interpreting the array as double-quoted identifiers, which Postgres
-    // parsed as column references (hence "column \"my-assistant\" does not exist").
+    //
+    // Array-binding pitfall with Hyperdrive: Hyperdrive uses transaction-
+    // mode pooling which requires `prepare: false`. Without prepared
+    // statements, postgres.js can't send type OIDs with parameters, so
+    // neither `= ANY(${array})` nor `ANY(${array}::text[])` work — the
+    // server sees the array as a single malformed text literal. The only
+    // pattern that works is `IN ${sql(array)}` (NO wrapping parens) which
+    // postgres.js spreads as `IN ($1, $2, $3)` with each element as its
+    // own scalar parameter. Wrapping parens — `IN (${sql(array)})` —
+    // triggers identifier mode and renders as `IN ("a", "b")` (double
+    // quotes = column references), which is the bug the previous
+    // iteration of this query shipped. Verified via direct DB probe.
     const sessionQuery = agentNames.length > 0
       ? sql`
           SELECT
@@ -94,7 +102,7 @@ dashboardRoutes.openapi(statsRoute, async (c): Promise<any> => {
             ) as error_rate
           FROM sessions
           WHERE org_id = ${user.org_id}
-             OR agent_name = ANY(${agentNames})
+             OR agent_name IN ${sql(agentNames)}
         `
       : sql`
           SELECT
@@ -112,7 +120,8 @@ dashboardRoutes.openapi(statsRoute, async (c): Promise<any> => {
     error_rate_pct = Math.round(Number(sessionStats.error_rate) * 10000) / 100;
 
     // If wall_clock_seconds is always 0, try computing from turns table.
-    // Same ANY(${array}) fix as the session stats query above.
+    // Same IN ${sql(array)} pattern as the session stats query above —
+    // see comment there for the Hyperdrive / prepare:false explanation.
     if (avg_latency_ms === 0 && total_sessions > 0) {
       try {
         const [turnLatency] = await sql`
@@ -120,7 +129,7 @@ dashboardRoutes.openapi(statsRoute, async (c): Promise<any> => {
           FROM turns t
           JOIN sessions s ON s.session_id = t.session_id
           WHERE s.org_id = ${user.org_id}
-             ${agentNames.length > 0 ? sql`OR s.agent_name = ANY(${agentNames})` : sql``}
+             ${agentNames.length > 0 ? sql`OR s.agent_name IN ${sql(agentNames)}` : sql``}
           LIMIT 1000
         `;
         avg_latency_ms = Math.round(Number(turnLatency.avg_ms));
@@ -235,11 +244,14 @@ dashboardRoutes.openapi(activityRoute, async (c): Promise<any> => {
     const agentNames = nameRows.map((a: any) => String(a.name));
 
     if (agentNames.length > 0) {
+      // IN ${sql(array)} — NOT ANY(...) — see comment in /stats handler
+      // for why. tl;dr Hyperdrive mandates prepare:false which breaks
+      // postgres.js's array type inference.
       const rows = await sql`
         SELECT session_id, agent_name, status, created_at
         FROM sessions
         WHERE org_id = ${user.org_id}
-           OR agent_name = ANY(${agentNames})
+           OR agent_name IN ${sql(agentNames)}
         ORDER BY created_at DESC
         LIMIT ${limit}
       `;

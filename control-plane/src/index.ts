@@ -1048,11 +1048,12 @@ export default {
             }>; quality_score?: number; sentiment?: string; task_completed?: boolean;
           }> = [];
 
-          // Batch-fetch turns for ALL sessions in one query (not N+1)
+          // Batch-fetch turns for ALL sessions in one query (not N+1).
+          // IN ${sql(array)} — see dashboard.ts for Hyperdrive prepare:false notes.
           const sessionIds = sessions.map((s: any) => s.session_id);
           const allTurns = sessionIds.length > 0 ? await sql`
             SELECT session_id, turn_number, tool_calls, tool_results, error
-            FROM turns WHERE session_id = ANY(${sessionIds})
+            FROM turns WHERE session_id IN ${sql(sessionIds)}
             ORDER BY session_id, turn_number ASC
           `.catch(() => []) : [];
 
