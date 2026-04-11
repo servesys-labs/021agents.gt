@@ -9,7 +9,7 @@ import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses, ApiKeyCreateBody, ApiKeySummary } from "../schemas/openapi";
 import type { CurrentUser } from "../auth/types";
 import { generateApiKey, hashApiKey } from "../auth/api-keys";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { requireScope, invalidateAuthCache } from "../middleware/auth";
 import { logSecurityEvent } from "../logic/security-events";
 
@@ -73,19 +73,17 @@ apiKeyRoutes.openapi(listApiKeysRoute, async (c): Promise<any> => {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT
+        key_id, name, key_prefix, scopes, project_id, env,
+        expires_at, created_at, last_used_at, is_active,
+        ip_allowlist, allowed_agents, rate_limit_rpm, rate_limit_rpd
+      FROM api_keys
+      ORDER BY created_at DESC
+    `;
 
-  const rows = await sql`
-    SELECT
-      key_id, name, key_prefix, scopes, project_id, env,
-      expires_at, created_at, last_used_at, is_active,
-      ip_allowlist, allowed_agents, rate_limit_rpm, rate_limit_rpd
-    FROM api_keys
-    WHERE org_id = ${user.org_id}
-    ORDER BY created_at DESC
-  `;
-
-  const keys = rows.map((r: any) => {
+    const keys = rows.map((r: any) => {
     let scopes: string[];
     try {
       scopes = typeof r.scopes === "string" ? JSON.parse(r.scopes) : r.scopes;
@@ -93,25 +91,26 @@ apiKeyRoutes.openapi(listApiKeysRoute, async (c): Promise<any> => {
       scopes = ["*"];
     }
 
-    return {
-      key_id: r.key_id,
-      name: r.name,
-      key_prefix: r.key_prefix,
-      scopes,
-      project_id: r.project_id || "",
-      env: r.env || "",
-      expires_at: normalizeTimestamp(r.expires_at),
-      created_at: normalizeTimestamp(r.created_at) ?? new Date().toISOString(),
-      last_used_at: normalizeTimestamp(r.last_used_at),
-      is_active: Boolean(r.is_active),
-      ip_allowlist: Array.isArray(r.ip_allowlist) ? r.ip_allowlist : [],
-      allowed_agents: Array.isArray(r.allowed_agents) ? r.allowed_agents : [],
-      rate_limit_rpm: Number(r.rate_limit_rpm || 60),
-      rate_limit_rpd: Number(r.rate_limit_rpd || 10000),
-    };
-  });
+      return {
+        key_id: r.key_id,
+        name: r.name,
+        key_prefix: r.key_prefix,
+        scopes,
+        project_id: r.project_id || "",
+        env: r.env || "",
+        expires_at: normalizeTimestamp(r.expires_at),
+        created_at: normalizeTimestamp(r.created_at) ?? new Date().toISOString(),
+        last_used_at: normalizeTimestamp(r.last_used_at),
+        is_active: Boolean(r.is_active),
+        ip_allowlist: Array.isArray(r.ip_allowlist) ? r.ip_allowlist : [],
+        allowed_agents: Array.isArray(r.allowed_agents) ? r.allowed_agents : [],
+        rate_limit_rpm: Number(r.rate_limit_rpm || 60),
+        rate_limit_rpd: Number(r.rate_limit_rpd || 10000),
+      };
+    });
 
-  return c.json(keys);
+    return c.json(keys);
+  });
 });
 
 // ── POST / — Create a new API key ────────────────────────────────────────
@@ -149,74 +148,74 @@ apiKeyRoutes.openapi(createApiKeyRoute, async (c): Promise<any> => {
 
   const req = c.req.valid("json");
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const { key, prefix } = generateApiKey();
+    const keyHash = await hashApiKey(key);
+    const keyId = generateId();
+    const nowEpoch = new Date().toISOString();
 
-  const { key, prefix } = generateApiKey();
-  const keyHash = await hashApiKey(key);
-  const keyId = generateId();
-  const nowEpoch = new Date().toISOString();
+    let expiresAt: string | null = null;
+    if (req.expires_in_days) {
+      expiresAt = new Date(Date.now() + req.expires_in_days * 86400 * 1000).toISOString();
+    }
 
-  let expiresAt: string | null = null;
-  if (req.expires_in_days) {
-    expiresAt = new Date(Date.now() + req.expires_in_days * 86400 * 1000).toISOString();
-  }
+    const scopesJson = JSON.stringify(req.scopes);
 
-  const scopesJson = JSON.stringify(req.scopes);
+    // Keep JSONB NOT NULL columns non-null on insert.
+    const ipAllowlistArr = Array.isArray(req.ip_allowlist) ? req.ip_allowlist : [];
+    const allowedAgentsArr = Array.isArray(req.allowed_agents) ? req.allowed_agents : [];
 
-  // Keep JSONB NOT NULL columns non-null on insert.
-  const ipAllowlistArr = Array.isArray(req.ip_allowlist) ? req.ip_allowlist : [];
-  const allowedAgentsArr = Array.isArray(req.allowed_agents) ? req.allowed_agents : [];
+    await sql`
+      INSERT INTO api_keys (
+        key_id, org_id, user_id, name, key_prefix, key_hash, scopes,
+        project_id, env, expires_at, is_active, created_at,
+        ip_allowlist, allowed_agents, rate_limit_rpm, rate_limit_rpd
+      ) VALUES (
+        ${keyId}, ${user.org_id}, ${user.user_id}, ${req.name}, ${prefix},
+        ${keyHash}, ${scopesJson}, ${req.project_id}, ${req.env},
+        ${expiresAt}, ${true}, ${nowEpoch},
+        ${ipAllowlistArr}, ${allowedAgentsArr}, ${req.rate_limit_rpm}, ${req.rate_limit_rpd}
+      )
+    `;
 
-  await sql`
-    INSERT INTO api_keys (
-      key_id, org_id, user_id, name, key_prefix, key_hash, scopes,
-      project_id, env, expires_at, is_active, created_at,
-      ip_allowlist, allowed_agents, rate_limit_rpm, rate_limit_rpd
-    ) VALUES (
-      ${keyId}, ${user.org_id}, ${user.user_id}, ${req.name}, ${prefix},
-      ${keyHash}, ${scopesJson}, ${req.project_id}, ${req.env},
-      ${expiresAt}, ${true}, ${nowEpoch},
-      ${ipAllowlistArr}, ${allowedAgentsArr}, ${req.rate_limit_rpm}, ${req.rate_limit_rpd}
-    )
-  `;
+    // Audit log (fire-and-forget)
+    sql`
+      INSERT INTO audit_log (action, actor_id, org_id, resource_type, resource_name, details, created_at)
+      VALUES (
+        ${"apikey.create"}, ${user.user_id}, ${user.org_id}, ${"api_key"}, ${keyId},
+        ${JSON.stringify({ name: req.name, scopes: req.scopes, project_id: req.project_id, env: req.env })},
+        ${nowEpoch}
+      )
+    `.catch(() => {}); // Best-effort audit
 
-  // Audit log (fire-and-forget)
-  sql`
-    INSERT INTO audit_log (action, actor_id, org_id, resource_type, resource_name, details, created_at)
-    VALUES (
-      ${"apikey.create"}, ${user.user_id}, ${user.org_id}, ${"api_key"}, ${keyId},
-      ${JSON.stringify({ name: req.name, scopes: req.scopes, project_id: req.project_id, env: req.env })},
-      ${nowEpoch}
-    )
-  `.catch(() => {}); // Best-effort audit
+    // Security event: API key created
+    logSecurityEvent(sql, {
+      org_id: user.org_id,
+      event_type: "api_key.created",
+      actor_id: user.user_id,
+      actor_type: "user",
+      target_id: keyId,
+      target_type: "api_key",
+      severity: "info",
+      details: { name: req.name, scopes: req.scopes, project_id: req.project_id },
+    });
 
-  // Security event: API key created
-  logSecurityEvent(sql, {
-    org_id: user.org_id,
-    event_type: "api_key.created",
-    actor_id: user.user_id,
-    actor_type: "user",
-    target_id: keyId,
-    target_type: "api_key",
-    severity: "info",
-    details: { name: req.name, scopes: req.scopes, project_id: req.project_id },
-  });
-
-  return c.json({
-    key_id: keyId,
-    name: req.name,
-    key_prefix: prefix,
-    scopes: req.scopes,
-    project_id: req.project_id,
-    env: req.env,
-    created_at: nowEpoch,
-    last_used_at: null,
-    is_active: true,
-    ip_allowlist: req.ip_allowlist,
-    allowed_agents: req.allowed_agents,
-    rate_limit_rpm: req.rate_limit_rpm,
-    rate_limit_rpd: req.rate_limit_rpd,
-    key, // Full key — only shown once at creation
+    return c.json({
+      key_id: keyId,
+      name: req.name,
+      key_prefix: prefix,
+      scopes: req.scopes,
+      project_id: req.project_id,
+      env: req.env,
+      created_at: nowEpoch,
+      last_used_at: null,
+      is_active: true,
+      ip_allowlist: req.ip_allowlist,
+      allowed_agents: req.allowed_agents,
+      rate_limit_rpm: req.rate_limit_rpm,
+      rate_limit_rpd: req.rate_limit_rpd,
+      key, // Full key — only shown once at creation
+    });
   });
 });
 
@@ -246,34 +245,34 @@ apiKeyRoutes.openapi(revokeApiKeyRoute, async (c): Promise<any> => {
   }
 
   const { key_id: keyId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const result = await sql`
+      UPDATE api_keys SET is_active = ${0}
+      WHERE key_id = ${keyId}
+      RETURNING key_id
+    `;
 
-  const result = await sql`
-    UPDATE api_keys SET is_active = ${0}
-    WHERE key_id = ${keyId} AND org_id = ${user.org_id}
-    RETURNING key_id
-  `;
+    if (result.length === 0) {
+      return c.json({ error: "API key not found" }, 404);
+    }
 
-  if (result.length === 0) {
-    return c.json({ error: "API key not found" }, 404);
-  }
+    // Security event: API key revoked
+    logSecurityEvent(sql, {
+      org_id: user.org_id,
+      event_type: "api_key.revoked",
+      actor_id: user.user_id,
+      actor_type: "user",
+      target_id: keyId,
+      target_type: "api_key",
+      severity: "medium",
+      details: { key_id: keyId },
+    });
 
-  // Security event: API key revoked
-  logSecurityEvent(sql, {
-    org_id: user.org_id,
-    event_type: "api_key.revoked",
-    actor_id: user.user_id,
-    actor_type: "user",
-    target_id: keyId,
-    target_type: "api_key",
-    severity: "medium",
-    details: { key_id: keyId },
+    // Invalidate cached auth so revoked key is rejected immediately
+    await invalidateAuthCache(c.env);
+
+    return c.json({ revoked: keyId });
   });
-
-  // Invalidate cached auth so revoked key is rejected immediately
-  await invalidateAuthCache(c.env);
-
-  return c.json({ revoked: keyId });
 });
 
 // ── POST /:key_id/rotate — Rotate an API key ────────────────────────────
@@ -306,85 +305,85 @@ apiKeyRoutes.openapi(rotateApiKeyRoute, async (c): Promise<any> => {
   }
 
   const { key_id: keyId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Fetch the existing key (RLS enforces org isolation)
+    const rows = await sql`
+      SELECT
+        key_id, org_id, user_id, name, scopes, project_id, env,
+        expires_at, ip_allowlist, allowed_agents, rate_limit_rpm, rate_limit_rpd
+      FROM api_keys
+      WHERE key_id = ${keyId}
+    `;
 
-  // Fetch the existing key
-  const rows = await sql`
-    SELECT
-      key_id, org_id, user_id, name, scopes, project_id, env,
-      expires_at, ip_allowlist, allowed_agents, rate_limit_rpm, rate_limit_rpd
-    FROM api_keys
-    WHERE key_id = ${keyId} AND org_id = ${user.org_id}
-  `;
+    if (rows.length === 0) {
+      return c.json({ error: "API key not found" }, 404);
+    }
 
-  if (rows.length === 0) {
-    return c.json({ error: "API key not found" }, 404);
-  }
+    const old = rows[0];
 
-  const old = rows[0];
+    // Parse scopes from old key
+    let scopes: string[];
+    try {
+      scopes = typeof old.scopes === "string" ? JSON.parse(old.scopes) : old.scopes;
+    } catch {
+      scopes = ["*"];
+    }
 
-  // Parse scopes from old key
-  let scopes: string[];
-  try {
-    scopes = typeof old.scopes === "string" ? JSON.parse(old.scopes) : old.scopes;
-  } catch {
-    scopes = ["*"];
-  }
+    const { key, prefix } = generateApiKey();
+    const keyHash = await hashApiKey(key);
+    const newKeyId = generateId();
+    const nowEpoch = new Date().toISOString();
+    const scopesJson = JSON.stringify(scopes);
 
-  const { key, prefix } = generateApiKey();
-  const keyHash = await hashApiKey(key);
-  const newKeyId = generateId();
-  const nowEpoch = new Date().toISOString();
-  const scopesJson = JSON.stringify(scopes);
+    // Revoke old + create new in sequence
+    await sql`UPDATE api_keys SET is_active = ${0} WHERE key_id = ${keyId}`;
 
-  // Revoke old + create new in sequence
-  await sql`UPDATE api_keys SET is_active = ${0} WHERE key_id = ${keyId}`;
+    await sql`
+      INSERT INTO api_keys (
+        key_id, org_id, user_id, name, key_prefix, key_hash, scopes,
+        project_id, env, expires_at, is_active, created_at,
+        ip_allowlist, allowed_agents, rate_limit_rpm, rate_limit_rpd
+      ) VALUES (
+        ${newKeyId}, ${user.org_id}, ${user.user_id}, ${old.name}, ${prefix},
+        ${keyHash}, ${scopesJson}, ${old.project_id || ""}, ${old.env || ""},
+        ${old.expires_at || null}, ${true}, ${nowEpoch},
+        ${Array.isArray(old.ip_allowlist) ? old.ip_allowlist : []},
+        ${Array.isArray(old.allowed_agents) ? old.allowed_agents : []},
+        ${Number(old.rate_limit_rpm || 60)}, ${Number(old.rate_limit_rpd || 10000)}
+      )
+    `;
 
-  await sql`
-    INSERT INTO api_keys (
-      key_id, org_id, user_id, name, key_prefix, key_hash, scopes,
-      project_id, env, expires_at, is_active, created_at,
-      ip_allowlist, allowed_agents, rate_limit_rpm, rate_limit_rpd
-    ) VALUES (
-      ${newKeyId}, ${user.org_id}, ${user.user_id}, ${old.name}, ${prefix},
-      ${keyHash}, ${scopesJson}, ${old.project_id || ""}, ${old.env || ""},
-      ${old.expires_at || null}, ${true}, ${nowEpoch},
-      ${Array.isArray(old.ip_allowlist) ? old.ip_allowlist : []},
-      ${Array.isArray(old.allowed_agents) ? old.allowed_agents : []},
-      ${Number(old.rate_limit_rpm || 60)}, ${Number(old.rate_limit_rpd || 10000)}
-    )
-  `;
+    // Security event: API key rotated
+    logSecurityEvent(sql, {
+      org_id: user.org_id,
+      event_type: "api_key.rotated",
+      actor_id: user.user_id,
+      actor_type: "user",
+      target_id: keyId,
+      target_type: "api_key",
+      severity: "medium",
+      details: { old_key_id: keyId, new_key_id: newKeyId },
+    });
 
-  // Security event: API key rotated
-  logSecurityEvent(sql, {
-    org_id: user.org_id,
-    event_type: "api_key.rotated",
-    actor_id: user.user_id,
-    actor_type: "user",
-    target_id: keyId,
-    target_type: "api_key",
-    severity: "medium",
-    details: { old_key_id: keyId, new_key_id: newKeyId },
-  });
+    // Invalidate cached auth so old key is rejected immediately after rotation.
+    await invalidateAuthCache(c.env);
 
-  // Invalidate cached auth so old key is rejected immediately after rotation.
-  await invalidateAuthCache(c.env);
-
-  return c.json({
-    key_id: newKeyId,
-    name: old.name,
-    key_prefix: prefix,
-    scopes,
-    project_id: old.project_id || "",
-    env: old.env || "",
-    expires_at: old.expires_at || null,
-    created_at: nowEpoch,
-    last_used_at: null,
-    is_active: true,
-    ip_allowlist: Array.isArray(old.ip_allowlist) ? old.ip_allowlist : [],
-    allowed_agents: Array.isArray(old.allowed_agents) ? old.allowed_agents : [],
-    rate_limit_rpm: Number(old.rate_limit_rpm || 60),
-    rate_limit_rpd: Number(old.rate_limit_rpd || 10000),
-    key, // Full key — only shown once
+    return c.json({
+      key_id: newKeyId,
+      name: old.name,
+      key_prefix: prefix,
+      scopes,
+      project_id: old.project_id || "",
+      env: old.env || "",
+      expires_at: old.expires_at || null,
+      created_at: nowEpoch,
+      last_used_at: null,
+      is_active: true,
+      ip_allowlist: Array.isArray(old.ip_allowlist) ? old.ip_allowlist : [],
+      allowed_agents: Array.isArray(old.allowed_agents) ? old.allowed_agents : [],
+      rate_limit_rpm: Number(old.rate_limit_rpm || 60),
+      rate_limit_rpd: Number(old.rate_limit_rpd || 10000),
+      key, // Full key — only shown once
+    });
   });
 });

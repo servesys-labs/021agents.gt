@@ -6,7 +6,7 @@ import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import type { CurrentUser } from "../auth/types";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 export const opsObservabilityRoutes = createOpenAPIRouter();
@@ -36,7 +36,7 @@ opsObservabilityRoutes.openapi(agentHealthRoute, async (c): Promise<any> => {
   const { name: agentName } = c.req.valid("param");
   const query = c.req.valid("query");
   const windowMinutes = Math.max(1, Math.min(1440, Number(query.window_minutes) || 30));
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   const since = new Date(Date.now() - windowMinutes * 60 * 1000).toISOString();
   const oneHourAgo = new Date(Date.now() - 3600 * 1000).toISOString();
@@ -47,8 +47,7 @@ opsObservabilityRoutes.openapi(agentHealthRoute, async (c): Promise<any> => {
       MAX(created_at) AS last_run_at,
       MAX(CASE WHEN status = 'success' THEN created_at END) AS last_success_at
     FROM sessions
-    WHERE org_id = ${user.org_id}
-      AND agent_name = ${agentName}
+    WHERE agent_name = ${agentName}
       AND created_at >= ${since}
   `;
 
@@ -59,8 +58,7 @@ opsObservabilityRoutes.openapi(agentHealthRoute, async (c): Promise<any> => {
       COALESCE(SUM(CASE WHEN status != 'success' THEN 1 ELSE 0 END)::float / NULLIF(COUNT(*), 0), 0) AS error_rate_1h,
       COALESCE(AVG(wall_clock_seconds) * 1000, 0) AS avg_latency_1h_ms
     FROM sessions
-    WHERE org_id = ${user.org_id}
-      AND agent_name = ${agentName}
+    WHERE agent_name = ${agentName}
       AND created_at >= ${oneHourAgo}
   `;
 
@@ -85,6 +83,7 @@ opsObservabilityRoutes.openapi(agentHealthRoute, async (c): Promise<any> => {
     error_rate_1h: errorRate,
     avg_latency_1h_ms: Number(hourly.avg_latency_1h_ms),
     sessions_1h: Number(hourly.sessions_1h),
+  });
   });
 });
 
@@ -114,7 +113,7 @@ opsObservabilityRoutes.openapi(latencyPercentilesRoute, async (c): Promise<any> 
   const agentName = query.agent_name || "";
   const sinceHours = Math.max(1, Math.min(720, Number(query.since_hours) || 24));
   const since = new Date(Date.now() - sinceHours * 3600 * 1000).toISOString();
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   const agentFilter = agentName
     ? sql`AND agent_name = ${agentName}`
@@ -128,8 +127,7 @@ opsObservabilityRoutes.openapi(latencyPercentilesRoute, async (c): Promise<any> 
       COALESCE(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY wall_clock_seconds), 0) * 1000 AS p95_ms,
       COALESCE(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY wall_clock_seconds), 0) * 1000 AS p99_ms
     FROM sessions
-    WHERE org_id = ${user.org_id}
-      AND wall_clock_seconds IS NOT NULL
+    WHERE wall_clock_seconds IS NOT NULL
       ${agentFilter}
       AND created_at >= ${since}
   `;
@@ -141,6 +139,7 @@ opsObservabilityRoutes.openapi(latencyPercentilesRoute, async (c): Promise<any> 
     p99_ms: Number(row.p99_ms),
     count: Number(row.count),
     since_hours: sinceHours,
+  });
   });
 });
 
@@ -170,7 +169,7 @@ opsObservabilityRoutes.openapi(errorBreakdownRoute, async (c): Promise<any> => {
   const agentName = query.agent_name || "";
   const sinceHours = Math.max(1, Math.min(720, Number(query.since_hours) || 24));
   const since = new Date(Date.now() - sinceHours * 3600 * 1000).toISOString();
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   const agentFilter = agentName
     ? sql`AND agent_name = ${agentName}`
@@ -180,7 +179,7 @@ opsObservabilityRoutes.openapi(errorBreakdownRoute, async (c): Promise<any> => {
   const statusRows = await sql`
     SELECT status, COUNT(*)::int AS count
     FROM sessions
-    WHERE org_id = ${user.org_id}
+    WHERE 1=1
       ${agentFilter}
       AND created_at >= ${since}
     GROUP BY status
@@ -203,7 +202,7 @@ opsObservabilityRoutes.openapi(errorBreakdownRoute, async (c): Promise<any> => {
            COUNT(*)::int AS total,
            SUM(CASE WHEN status != 'success' THEN 1 ELSE 0 END)::int AS errors
     FROM sessions
-    WHERE org_id = ${user.org_id}
+    WHERE 1=1
       ${agentFilter}
       AND created_at >= ${since}
     GROUP BY agent_name
@@ -222,6 +221,7 @@ opsObservabilityRoutes.openapi(errorBreakdownRoute, async (c): Promise<any> => {
     by_status: byStatus,
     error_rate: total > 0 ? errors / total : 0,
     by_agent: byAgent,
+  });
   });
 });
 
@@ -249,8 +249,9 @@ opsObservabilityRoutes.openapi(webhookHealthRoute, async (c): Promise<any> => {
   const query = c.req.valid("query");
   const windowMinutes = Math.max(1, Math.min(1440, Number(query.window_minutes) || 60));
   const since = new Date(Date.now() - windowMinutes * 60 * 1000).toISOString();
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
+  // webhook_deliveries is NOT RLS-enforced; keep the explicit org filter.
   const [totals] = await sql`
     SELECT
       COUNT(*)::int AS total_deliveries,
@@ -293,6 +294,7 @@ opsObservabilityRoutes.openapi(webhookHealthRoute, async (c): Promise<any> => {
       failed: Number(r.failed),
     })),
   });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -311,12 +313,11 @@ const batchStatusRoute = createRoute({
 });
 opsObservabilityRoutes.openapi(batchStatusRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   const statusRows = await sql`
     SELECT status, COUNT(*)::int AS count
     FROM batch_jobs
-    WHERE org_id = ${user.org_id}
     GROUP BY status
   `;
 
@@ -337,7 +338,6 @@ opsObservabilityRoutes.openapi(batchStatusRoute, async (c): Promise<any> => {
       COALESCE(SUM(completed_tasks), 0)::int AS completed_tasks,
       COALESCE(SUM(failed_tasks), 0)::int AS failed_tasks
     FROM batch_jobs
-    WHERE org_id = ${user.org_id}
   `;
 
   return c.json({
@@ -345,6 +345,7 @@ opsObservabilityRoutes.openapi(batchStatusRoute, async (c): Promise<any> => {
     total_tasks: Number(tasks.total_tasks),
     completed_tasks: Number(tasks.completed_tasks),
     failed_tasks: Number(tasks.failed_tasks),
+  });
   });
 });
 
@@ -364,7 +365,7 @@ const concurrentRoute = createRoute({
 });
 opsObservabilityRoutes.openapi(concurrentRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
   const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
 
   const [row] = await sql`
@@ -373,14 +374,14 @@ opsObservabilityRoutes.openapi(concurrentRoute, async (c): Promise<any> => {
       COUNT(DISTINCT user_id) FILTER (WHERE created_at >= ${fiveMinAgo})::int AS unique_users_5m,
       COUNT(DISTINCT agent_name) FILTER (WHERE status = 'running' OR created_at >= ${fiveMinAgo})::int AS agents_active
     FROM sessions
-    WHERE org_id = ${user.org_id}
-      AND (status = 'running' OR created_at >= ${fiveMinAgo})
+    WHERE (status = 'running' OR created_at >= ${fiveMinAgo})
   `;
 
   return c.json({
     running_sessions: Number(row.running_sessions),
     unique_users_5m: Number(row.unique_users_5m),
     agents_active: Number(row.agents_active),
+  });
   });
 });
 
@@ -400,12 +401,11 @@ const costBudgetRoute = createRoute({
 });
 opsObservabilityRoutes.openapi(costBudgetRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   const [settings] = await sql`
     SELECT budget_monthly_usd
     FROM org_settings
-    WHERE org_id = ${user.org_id}
   `;
 
   const budgetMonthly = Number(settings?.budget_monthly_usd ?? 0);
@@ -417,8 +417,7 @@ opsObservabilityRoutes.openapi(costBudgetRoute, async (c): Promise<any> => {
   const [spend] = await sql`
     SELECT COALESCE(SUM(total_cost_usd), 0) AS spent
     FROM billing_records
-    WHERE org_id = ${user.org_id}
-      AND created_at >= ${monthStart}
+    WHERE created_at >= ${monthStart}
   `;
 
   const spentThisMonth = Number(spend.spent);
@@ -439,6 +438,7 @@ opsObservabilityRoutes.openapi(costBudgetRoute, async (c): Promise<any> => {
     projected_monthly_usd: projectedMonthly,
     alert,
   });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -457,14 +457,13 @@ const rateLimitsLogRoute = createRoute({
 });
 opsObservabilityRoutes.openapi(rateLimitsLogRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
   const twentyFourHoursAgo = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
 
   const [total] = await sql`
     SELECT COUNT(*)::int AS total_breaches_24h
     FROM api_access_log
-    WHERE org_id = ${user.org_id}
-      AND status_code = 429
+    WHERE status_code = 429
       AND created_at >= ${twentyFourHoursAgo}
   `;
 
@@ -474,8 +473,7 @@ opsObservabilityRoutes.openapi(rateLimitsLogRoute, async (c): Promise<any> => {
       COUNT(*)::int AS breaches,
       MAX(created_at) AS last_breach_at
     FROM api_access_log
-    WHERE org_id = ${user.org_id}
-      AND status_code = 429
+    WHERE status_code = 429
       AND created_at >= ${twentyFourHoursAgo}
     GROUP BY api_key_id
     ORDER BY breaches DESC
@@ -488,6 +486,7 @@ opsObservabilityRoutes.openapi(rateLimitsLogRoute, async (c): Promise<any> => {
       breaches: Number(r.breaches),
       last_breach_at: r.last_breach_at,
     })),
+  });
   });
 });
 

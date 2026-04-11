@@ -5,7 +5,7 @@
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 export const connectorRoutes = createOpenAPIRouter();
@@ -70,25 +70,25 @@ const listToolsRoute = createRoute({
 connectorRoutes.openapi(listToolsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { app } = c.req.valid("query");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  try {
-    let rows;
-    if (app) {
-      rows = await sql`
-        SELECT name, description, app, provider FROM connector_tools WHERE app = ${app} ORDER BY name
-      `;
-    } else {
-      rows = await sql`SELECT name, description, app, provider FROM connector_tools ORDER BY name LIMIT 200`;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    try {
+      let rows;
+      if (app) {
+        rows = await sql`
+          SELECT name, description, app, provider FROM connector_tools WHERE app = ${app} ORDER BY name
+        `;
+      } else {
+        rows = await sql`SELECT name, description, app, provider FROM connector_tools ORDER BY name LIMIT 200`;
+      }
+      return c.json({ tools: rows, total: rows.length });
+    } catch {
+      return c.json({
+        tools: [],
+        total: 0,
+        note: "Connector tools registry not yet populated. Configure Pipedream integration.",
+      });
     }
-    return c.json({ tools: rows, total: rows.length });
-  } catch {
-    return c.json({
-      tools: [],
-      total: 0,
-      note: "Connector tools registry not yet populated. Configure Pipedream integration.",
-    });
-  }
+  });
 });
 
 // ── POST /connectors/tools/call ────────────────────────────────────────
@@ -157,14 +157,15 @@ connectorRoutes.openapi(callToolRoute, async (c): Promise<any> => {
     }
 
     // Audit
-    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
     const now = new Date().toISOString();
     try {
-      await sql`
-        INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
-        VALUES (${user.org_id}, ${user.user_id}, 'connector.tool_call', 'connector', ${toolName},
-                ${JSON.stringify({ provider: "pipedream", app, duration_ms: durationMs })}, ${now})
-      `;
+      await withOrgDb(c.env, user.org_id, async (sql) => {
+        await sql`
+          INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
+          VALUES (${user.org_id}, ${user.user_id}, 'connector.tool_call', 'connector', ${toolName},
+                  ${JSON.stringify({ provider: "pipedream", app, duration_ms: durationMs })}, ${now})
+        `;
+      });
     } catch {}
 
     return c.json({ success: true, data: result.data, duration_ms: Math.round(durationMs * 10) / 10 });
@@ -197,23 +198,23 @@ connectorRoutes.openapi(getUsageRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { since_days: sinceDays } = c.req.valid("query");
   const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT model as tool_name, COUNT(*) as calls, COALESCE(SUM(total_cost_usd), 0) as cost
+      FROM billing_records
+      WHERE cost_type = 'connector' AND created_at >= ${since}
+      GROUP BY model ORDER BY calls DESC
+    `;
 
-  const rows = await sql`
-    SELECT model as tool_name, COUNT(*) as calls, COALESCE(SUM(total_cost_usd), 0) as cost
-    FROM billing_records
-    WHERE cost_type = 'connector' AND org_id = ${user.org_id} AND created_at >= ${since}
-    GROUP BY model ORDER BY calls DESC
-  `;
+    const totalCalls = rows.reduce((sum: number, r: any) => sum + Number(r.calls), 0);
+    const totalCost = rows.reduce((sum: number, r: any) => sum + Number(r.cost), 0);
 
-  const totalCalls = rows.reduce((sum: number, r: any) => sum + Number(r.calls), 0);
-  const totalCost = rows.reduce((sum: number, r: any) => sum + Number(r.cost), 0);
-
-  return c.json({
-    total_calls: totalCalls,
-    total_cost_usd: totalCost,
-    by_tool: rows,
-    since_days: sinceDays,
+    return c.json({
+      total_calls: totalCalls,
+      total_cost_usd: totalCost,
+      by_tool: rows,
+      since_days: sinceDays,
+    });
   });
 });
 
@@ -262,40 +263,41 @@ connectorRoutes.openapi(storeTokenRoute, async (c): Promise<any> => {
   if (!provider) return c.json({ error: "provider is required" }, 400);
   if (!accessTokenEnc) return c.json({ error: "access_token_enc is required" }, 400);
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const now = new Date().toISOString();
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const now = new Date().toISOString();
 
-  try {
-    await sql`
-      INSERT INTO connector_tokens (
-        org_id, provider, app, access_token_enc, refresh_token_enc,
-        expires_at, scopes, created_at, updated_at
-      ) VALUES (
-        ${user.org_id}, ${provider}, ${app}, ${accessTokenEnc}, ${refreshTokenEnc},
-        ${expiresAt}, ${scopes}, ${now}, ${now}
-      )
-      ON CONFLICT (org_id, provider, app) DO UPDATE SET
-        access_token_enc = EXCLUDED.access_token_enc,
-        refresh_token_enc = EXCLUDED.refresh_token_enc,
-        expires_at = EXCLUDED.expires_at,
-        scopes = EXCLUDED.scopes,
-        updated_at = EXCLUDED.updated_at
-    `;
-  } catch (err: any) {
-    return c.json({ error: `Failed to store token: ${err.message}` }, 500);
-  }
+    try {
+      await sql`
+        INSERT INTO connector_tokens (
+          org_id, provider, app, access_token_enc, refresh_token_enc,
+          expires_at, scopes, created_at, updated_at
+        ) VALUES (
+          ${user.org_id}, ${provider}, ${app}, ${accessTokenEnc}, ${refreshTokenEnc},
+          ${expiresAt}, ${scopes}, ${now}, ${now}
+        )
+        ON CONFLICT (org_id, provider, app) DO UPDATE SET
+          access_token_enc = EXCLUDED.access_token_enc,
+          refresh_token_enc = EXCLUDED.refresh_token_enc,
+          expires_at = EXCLUDED.expires_at,
+          scopes = EXCLUDED.scopes,
+          updated_at = EXCLUDED.updated_at
+      `;
+    } catch (err: any) {
+      return c.json({ error: `Failed to store token: ${err.message}` }, 500);
+    }
 
-  // Audit
-  try {
-    const nowEpoch = new Date().toISOString();
-    await sql`
-      INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
-      VALUES (${user.org_id}, ${user.user_id}, 'connector.token_stored', 'connector', ${provider},
-              ${JSON.stringify({ scopes })}, ${nowEpoch})
-    `;
-  } catch {}
+    // Audit
+    try {
+      const nowEpoch = new Date().toISOString();
+      await sql`
+        INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
+        VALUES (${user.org_id}, ${user.user_id}, 'connector.token_stored', 'connector', ${provider},
+                ${JSON.stringify({ scopes })}, ${nowEpoch})
+      `;
+    } catch {}
 
-  return c.json({ provider, stored: true });
+    return c.json({ provider, stored: true });
+  });
 });
 
 // ── DELETE /connectors/tokens/{connector} ──────────────────────────────
@@ -319,14 +321,14 @@ const revokeTokenRoute = createRoute({
 connectorRoutes.openapi(revokeTokenRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { connector: connectorProvider } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    await sql`
+      DELETE FROM connector_tokens
+      WHERE provider = ${connectorProvider}
+    `;
 
-  await sql`
-    DELETE FROM connector_tokens
-    WHERE org_id = ${user.org_id} AND provider = ${connectorProvider}
-  `;
-
-  return c.json({ provider: connectorProvider, revoked: true });
+    return c.json({ provider: connectorProvider, revoked: true });
+  });
 });
 
 // ── POST /connectors/tools (register) ──────────────────────────────────
@@ -368,31 +370,32 @@ connectorRoutes.openapi(registerToolsRoute, async (c): Promise<any> => {
 
   if (tools.length === 0) return c.json({ error: "tools array is required" }, 400);
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  let inserted = 0;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    let inserted = 0;
 
-  for (const tool of tools) {
-    const name = tool.name.trim();
-    const description = tool.description;
-    const app = tool.app;
-    const provider = tool.provider;
+    for (const tool of tools) {
+      const name = tool.name.trim();
+      const description = tool.description;
+      const app = tool.app;
+      const provider = tool.provider;
 
-    if (!name) continue;
+      if (!name) continue;
 
-    try {
-      await sql`
-        INSERT INTO connector_tools (name, description, app, provider)
-        VALUES (${name}, ${description}, ${app}, ${provider})
-        ON CONFLICT (name) DO UPDATE SET
-          description = EXCLUDED.description,
-          app = EXCLUDED.app,
-          provider = EXCLUDED.provider
-      `;
-      inserted++;
-    } catch {}
-  }
+      try {
+        await sql`
+          INSERT INTO connector_tools (name, description, app, provider)
+          VALUES (${name}, ${description}, ${app}, ${provider})
+          ON CONFLICT (name) DO UPDATE SET
+            description = EXCLUDED.description,
+            app = EXCLUDED.app,
+            provider = EXCLUDED.provider
+        `;
+        inserted++;
+      } catch {}
+    }
 
-  return c.json({ registered: inserted, total: tools.length });
+    return c.json({ registered: inserted, total: tools.length });
+  });
 });
 
 // ── GET /connectors/auth/{app} ─────────────────────────────────────────
@@ -416,19 +419,20 @@ const getAuthRoute = createRoute({
 connectorRoutes.openapi(getAuthRoute, async (c): Promise<any> => {
   const { app } = c.req.valid("param");
   const user = c.get("user");
-
-  // Proxy to runtime for OAuth URL generation
-  try {
-    const resp = await c.env.RUNTIME.fetch(
-      `https://runtime/api/v1/connectors/auth/${app}?user_id=${user.user_id}`,
-      { method: "GET" },
-    );
-    if (resp.status >= 400) {
-      return c.json({ app, auth_url: "", error: "OAuth not configured for this app" });
-    }
-    const data = await resp.json() as any;
-    return c.json({ app, auth_url: data.auth_url || "" });
-  } catch {
-    return c.json({ app, auth_url: "", error: "Runtime service unavailable" });
+  const projectId = String(c.env.PIPEDREAM_PROJECT_ID || "").trim();
+  if (!projectId) {
+    return c.json({ app, auth_url: "", error: "OAuth not configured for this app" });
   }
+
+  // Keep parity with the prior connector-hub behavior:
+  // https://pipedream.com/_static/connect.html?app=...&connectLink=true&...
+  const params = new URLSearchParams({
+    app,
+    connectLink: "true",
+    external_user_id: user.user_id || "default-user",
+    project_id: projectId,
+    environment: String((c.env as any).PIPEDREAM_ENV || "production"),
+  });
+  const authUrl = `https://pipedream.com/_static/connect.html?${params.toString()}`;
+  return c.json({ app, auth_url: authUrl });
 });

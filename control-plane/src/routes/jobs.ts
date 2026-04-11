@@ -3,11 +3,15 @@
  * Ported from agentos/api/routers/jobs.py
  *
  * Queue submission via c.env.JOB_QUEUE, status tracking in DB.
+ *
+ * RLS: job_queue is org-scoped under withOrgDb. The redundant
+ * `WHERE org_id = ${user.org_id}` clauses have been dropped — RLS
+ * enforces tenant isolation via the GUC set inside the transaction.
  */
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 export const jobRoutes = createOpenAPIRouter();
@@ -63,30 +67,31 @@ jobRoutes.openapi(createJobRoute, async (c): Promise<any> => {
   if (!agentName) return c.json({ error: "agent_name is required" }, 400);
   if (!task) return c.json({ error: "task is required" }, 400);
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const jobId = genId();
   const now = new Date().toISOString();
 
-  await sql`
-    INSERT INTO job_queue (job_id, org_id, agent_name, task, idempotency_key, max_retries, priority, scheduled_at, status, created_at)
-    VALUES (${jobId}, ${user.org_id}, ${agentName}, ${task}, ${idempotencyKey}, ${maxRetries}, ${priority}, ${scheduledAt}, 'pending', ${now})
-  `;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    await sql`
+      INSERT INTO job_queue (job_id, org_id, agent_name, task, idempotency_key, max_retries, priority, scheduled_at, status, created_at)
+      VALUES (${jobId}, ${user.org_id}, ${agentName}, ${task}, ${idempotencyKey}, ${maxRetries}, ${priority}, ${scheduledAt}, 'pending', ${now})
+    `;
 
-  // Submit to Cloudflare Queue
-  try {
-    await c.env.JOB_QUEUE.send({
-      job_id: jobId,
-      agent_name: agentName,
-      task,
-      org_id: user.org_id,
-      max_retries: maxRetries,
-      priority,
-    });
-  } catch {
-    // Queue submission is best-effort; job is tracked in DB
-  }
+    // Submit to Cloudflare Queue
+    try {
+      await c.env.JOB_QUEUE.send({
+        job_id: jobId,
+        agent_name: agentName,
+        task,
+        org_id: user.org_id,
+        max_retries: maxRetries,
+        priority,
+      });
+    } catch {
+      // Queue submission is best-effort; job is tracked in DB
+    }
 
-  return c.json({ job_id: jobId, status: "pending" });
+    return c.json({ job_id: jobId, status: "pending" });
+  });
 });
 
 // ── GET /jobs ───────────────────────────────────────────────────────────
@@ -115,21 +120,22 @@ jobRoutes.openapi(listJobsRoute, async (c): Promise<any> => {
   const query = c.req.valid("query");
   const status = query.status || "";
   const limit = Math.min(200, Math.max(1, Number(query.limit) || 50));
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  let rows;
-  if (status) {
-    rows = await sql`
-      SELECT * FROM job_queue WHERE org_id = ${user.org_id} AND status = ${status}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  } else {
-    rows = await sql`
-      SELECT * FROM job_queue WHERE org_id = ${user.org_id}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  }
-  return c.json({ jobs: rows });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    let rows;
+    if (status) {
+      rows = await sql`
+        SELECT * FROM job_queue WHERE status = ${status}
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    } else {
+      rows = await sql`
+        SELECT * FROM job_queue
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    }
+    return c.json({ jobs: rows });
+  });
 });
 
 // ── GET /jobs/dlq ───────────────────────────────────────────────────────
@@ -156,13 +162,14 @@ jobRoutes.openapi(listDlqRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const query = c.req.valid("query");
   const limit = Math.min(200, Math.max(1, Number(query.limit) || 50));
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  const rows = await sql`
-    SELECT * FROM job_queue WHERE org_id = ${user.org_id} AND status = 'dead'
-    ORDER BY created_at DESC LIMIT ${limit}
-  `;
-  return c.json({ jobs: rows });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT * FROM job_queue WHERE status = 'dead'
+      ORDER BY created_at DESC LIMIT ${limit}
+    `;
+    return c.json({ jobs: rows });
+  });
 });
 
 // ── GET /jobs/:job_id ───────────────────────────────────────────────────
@@ -187,13 +194,14 @@ const getJobRoute = createRoute({
 jobRoutes.openapi(getJobRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { job_id: jobId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  const rows = await sql`
-    SELECT * FROM job_queue WHERE job_id = ${jobId} AND org_id = ${user.org_id}
-  `;
-  if (rows.length === 0) return c.json({ error: "Job not found" }, 404);
-  return c.json(rows[0]);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT * FROM job_queue WHERE job_id = ${jobId}
+    `;
+    if (rows.length === 0) return c.json({ error: "Job not found" }, 404);
+    return c.json(rows[0]);
+  });
 });
 
 // ── POST /jobs/:job_id/retry ────────────────────────────────────────────
@@ -218,17 +226,18 @@ const retryJobRoute = createRoute({
 jobRoutes.openapi(retryJobRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { job_id: jobId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  const rows = await sql`
-    SELECT job_id FROM job_queue WHERE job_id = ${jobId} AND org_id = ${user.org_id}
-  `;
-  if (rows.length === 0) return c.json({ error: "Job not found" }, 404);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT job_id FROM job_queue WHERE job_id = ${jobId}
+    `;
+    if (rows.length === 0) return c.json({ error: "Job not found" }, 404);
 
-  await sql`
-    UPDATE job_queue SET status = 'pending', attempts = 0 WHERE job_id = ${jobId} AND org_id = ${user.org_id}
-  `;
-  return c.json({ retried: jobId });
+    await sql`
+      UPDATE job_queue SET status = 'pending', attempts = 0 WHERE job_id = ${jobId}
+    `;
+    return c.json({ retried: jobId });
+  });
 });
 
 // ── POST /jobs/:job_id/cancel ───────────────────────────────────────────
@@ -253,20 +262,21 @@ const cancelJobRoute = createRoute({
 jobRoutes.openapi(cancelJobRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { job_id: jobId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  const rows = await sql`
-    SELECT status FROM job_queue WHERE job_id = ${jobId} AND org_id = ${user.org_id}
-  `;
-  if (rows.length === 0) return c.json({ error: "Job not found" }, 404);
-  if (!["pending", "running"].includes(rows[0].status)) {
-    return c.json({ error: `Cannot cancel job with status '${rows[0].status}'` }, 409);
-  }
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT status FROM job_queue WHERE job_id = ${jobId}
+    `;
+    if (rows.length === 0) return c.json({ error: "Job not found" }, 404);
+    if (!["pending", "running"].includes(rows[0].status)) {
+      return c.json({ error: `Cannot cancel job with status '${rows[0].status}'` }, 409);
+    }
 
-  await sql`
-    UPDATE job_queue SET status = 'cancelled' WHERE job_id = ${jobId} AND org_id = ${user.org_id}
-  `;
-  return c.json({ cancelled: jobId });
+    await sql`
+      UPDATE job_queue SET status = 'cancelled' WHERE job_id = ${jobId}
+    `;
+    return c.json({ cancelled: jobId });
+  });
 });
 
 // ── POST /jobs/:job_id/pause ────────────────────────────────────────────
@@ -291,20 +301,21 @@ const pauseJobRoute = createRoute({
 jobRoutes.openapi(pauseJobRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { job_id: jobId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  const rows = await sql`
-    SELECT status FROM job_queue WHERE job_id = ${jobId} AND org_id = ${user.org_id}
-  `;
-  if (rows.length === 0) return c.json({ error: "Job not found" }, 404);
-  if (rows[0].status !== "pending") {
-    return c.json({ error: `Cannot pause job with status '${rows[0].status}' — only pending jobs can be paused` }, 409);
-  }
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT status FROM job_queue WHERE job_id = ${jobId}
+    `;
+    if (rows.length === 0) return c.json({ error: "Job not found" }, 404);
+    if (rows[0].status !== "pending") {
+      return c.json({ error: `Cannot pause job with status '${rows[0].status}' — only pending jobs can be paused` }, 409);
+    }
 
-  await sql`
-    UPDATE job_queue SET status = 'paused' WHERE job_id = ${jobId} AND org_id = ${user.org_id}
-  `;
-  return c.json({ paused: jobId });
+    await sql`
+      UPDATE job_queue SET status = 'paused' WHERE job_id = ${jobId}
+    `;
+    return c.json({ paused: jobId });
+  });
 });
 
 // ── POST /jobs/:job_id/resume ───────────────────────────────────────────
@@ -329,18 +340,19 @@ const resumeJobRoute = createRoute({
 jobRoutes.openapi(resumeJobRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { job_id: jobId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  const rows = await sql`
-    SELECT status FROM job_queue WHERE job_id = ${jobId} AND org_id = ${user.org_id}
-  `;
-  if (rows.length === 0) return c.json({ error: "Job not found" }, 404);
-  if (rows[0].status !== "paused") {
-    return c.json({ error: `Cannot resume job with status '${rows[0].status}' — only paused jobs can be resumed` }, 409);
-  }
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT status FROM job_queue WHERE job_id = ${jobId}
+    `;
+    if (rows.length === 0) return c.json({ error: "Job not found" }, 404);
+    if (rows[0].status !== "paused") {
+      return c.json({ error: `Cannot resume job with status '${rows[0].status}' — only paused jobs can be resumed` }, 409);
+    }
 
-  await sql`
-    UPDATE job_queue SET status = 'pending' WHERE job_id = ${jobId} AND org_id = ${user.org_id}
-  `;
-  return c.json({ resumed: jobId });
+    await sql`
+      UPDATE job_queue SET status = 'pending' WHERE job_id = ${jobId}
+    `;
+    return c.json({ resumed: jobId });
+  });
 });

@@ -7,12 +7,20 @@
  * Setup: POST /github/webhooks with repo URL and secret → register webhook.
  * Receive: POST /github/webhooks/receive → validate signature → dispatch to agent.
  *
- * Inspired by Claude Code's KAIROS GitHub webhook subscriptions.
+ * RLS pattern:
+ *   - Register/list handlers run under withOrgDb(user.org_id) like normal.
+ *   - The /receive handler is PUBLIC (no user). It takes org_id from the
+ *     query string, does admin-level subscription lookup via withAdminDb
+ *     (because signature verification hasn't run yet — we can't trust the
+ *     caller), verifies the signature, then dispatches through the queue.
+ *     After signature verification succeeds we could switch to withOrgDb,
+ *     but all the DB work is already done — the subsequent queue.send()
+ *     is the only side effect.
  */
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDb } from "../db/client";
+import { withOrgDb, withAdminDb } from "../db/client";
 
 export const githubWebhookRoutes = createOpenAPIRouter();
 
@@ -57,24 +65,25 @@ const registerRoute = createRoute({
 githubWebhookRoutes.openapi(registerRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const body = c.req.valid("json");
-  const sql = await getDb(c.env.HYPERDRIVE);
-  const secret = body.secret || crypto.randomUUID();
-  const now = new Date().toISOString();
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const secret = body.secret || crypto.randomUUID();
+    const now = new Date().toISOString();
 
-  await sql`
-    INSERT INTO github_webhook_subscriptions (org_id, agent_name, repo_url, events, secret, created_at)
-    VALUES (${user.org_id}, ${body.agent_name}, ${body.repo_url}, ${JSON.stringify(body.events)}, ${secret}, ${now})
-    ON CONFLICT (org_id, repo_url) DO UPDATE SET
-      agent_name = EXCLUDED.agent_name, events = EXCLUDED.events, secret = EXCLUDED.secret, updated_at = NOW()
-  `;
+    await sql`
+      INSERT INTO github_webhook_subscriptions (org_id, agent_name, repo_url, events, secret, created_at)
+      VALUES (${user.org_id}, ${body.agent_name}, ${body.repo_url}, ${JSON.stringify(body.events)}, ${secret}, ${now})
+      ON CONFLICT (org_id, repo_url) DO UPDATE SET
+        agent_name = EXCLUDED.agent_name, events = EXCLUDED.events, secret = EXCLUDED.secret, updated_at = NOW()
+    `;
 
-  const webhookUrl = `https://api.oneshots.co/api/v1/github/webhooks/receive?org=${encodeURIComponent(user.org_id)}`;
+    const webhookUrl = `https://api.oneshots.co/api/v1/github/webhooks/receive?org=${encodeURIComponent(user.org_id)}`;
 
-  return c.json({
-    webhook_url: webhookUrl,
-    secret,
-    events: body.events,
-    setup_instructions: `Add this webhook URL to your GitHub repo settings: ${webhookUrl}. Use the secret for signature verification.`,
+    return c.json({
+      webhook_url: webhookUrl,
+      secret,
+      events: body.events,
+      setup_instructions: `Add this webhook URL to your GitHub repo settings: ${webhookUrl}. Use the secret for signature verification.`,
+    });
   });
 });
 
@@ -87,21 +96,24 @@ githubWebhookRoutes.post("/receive", async (c) => {
   const eventType = c.req.header("X-GitHub-Event") || "";
   const rawBody = await c.req.text();
 
-  const sql = await getDb(c.env.HYPERDRIVE);
-
-  // Find matching subscription
   let payload: any;
   try { payload = JSON.parse(rawBody); } catch { return c.json({ error: "Invalid JSON" }, 400); }
-
   const repoUrl = payload.repository?.html_url || payload.repository?.url || "";
-  const subs = await sql`
-    SELECT agent_name, events, secret FROM github_webhook_subscriptions
-    WHERE org_id = ${orgId} AND (repo_url = ${repoUrl} OR repo_url LIKE ${"%" + (payload.repository?.full_name || "NONE")})
-    LIMIT 1
-  `;
 
-  if (subs.length === 0) return c.json({ error: "No subscription found" }, 404);
-  const sub = subs[0];
+  // Subscription lookup runs before signature verification, so we can't
+  // trust the caller yet — use withAdminDb rather than withOrgDb here
+  // (the query-string org_id is attacker-controllable until the HMAC
+  // check below succeeds).
+  const sub = await withAdminDb(c.env, async (sql) => {
+    const rows = await sql`
+      SELECT agent_name, events, secret FROM github_webhook_subscriptions
+      WHERE org_id = ${orgId} AND (repo_url = ${repoUrl} OR repo_url LIKE ${"%" + (payload.repository?.full_name || "NONE")})
+      LIMIT 1
+    `;
+    return rows.length > 0 ? rows[0] : null;
+  });
+
+  if (!sub) return c.json({ error: "No subscription found" }, 404);
 
   // Verify signature
   const valid = await verifyGitHubSignature(sub.secret, rawBody, signature);
@@ -136,12 +148,13 @@ githubWebhookRoutes.post("/receive", async (c) => {
 // GET /github/webhooks — list subscriptions
 githubWebhookRoutes.get("/", async (c) => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
-  const rows = await sql`
-    SELECT agent_name, repo_url, events, created_at FROM github_webhook_subscriptions
-    WHERE org_id = ${user.org_id} ORDER BY created_at DESC LIMIT 50
-  `;
-  return c.json({ subscriptions: rows });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT agent_name, repo_url, events, created_at FROM github_webhook_subscriptions
+      ORDER BY created_at DESC LIMIT 50
+    `;
+    return c.json({ subscriptions: rows });
+  });
 });
 
 function formatGitHubEvent(eventType: string, payload: any): string {

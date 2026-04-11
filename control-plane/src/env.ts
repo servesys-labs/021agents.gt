@@ -2,8 +2,16 @@
  * Worker environment bindings — typed for all control-plane routes.
  */
 export interface Env {
-  // Hyperdrive — Supabase Postgres connection pool
+  // Hyperdrive — Supabase Postgres connection pool (RLS-enforced).
+  // Org-scoped queries go through withOrgDb(env, orgId, fn) which opens a
+  // transaction and sets app.current_org_id for RLS policies.
   HYPERDRIVE: Hyperdrive;
+
+  // Hyperdrive (admin) — bypasses RLS for legitimate cross-org queries.
+  // Used by withAdminDb(env, fn). In prototype mode this may be the same
+  // connection string as HYPERDRIVE; in production it should point to a
+  // role granted BYPASSRLS so the audit boundary is at the DB level.
+  HYPERDRIVE_ADMIN: Hyperdrive;
 
   // Workers AI — LLM inference for meta-agent, issue classifier, etc.
   AI: Ai;
@@ -35,6 +43,13 @@ export interface Env {
   CLOUDFLARE_API_TOKEN?: string;
   STRIPE_SECRET_KEY: string;
   STRIPE_WEBHOOK_SECRET: string;
+  // Stripe Connect — payout infrastructure. When unset, the referral
+  // payout route returns 503 instead of silently deducting balance.
+  // Set this to the Connect application client ID (ca_...) once
+  // Connect is registered in the Stripe Dashboard AND onboarding +
+  // webhook handling have been implemented. Presence of this value
+  // is the feature gate.
+  STRIPE_CONNECT_CLIENT_ID?: string;
   SERVICE_TOKEN: string;
 
   /** Growth controls */

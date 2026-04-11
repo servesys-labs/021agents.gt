@@ -16,7 +16,7 @@
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { parseJsonColumn } from "../lib/parse-json-column";
 import {
@@ -120,16 +120,15 @@ toolRoutes.openapi(listToolsRoute, async (c): Promise<any> => {
 
   try {
     // Try to get tools from DB registry first (for org-scoped custom tools)
-    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
     let dbTools: ToolPlugin[] = [];
 
     try {
-      const rows = await sql`
+      const rows = await withOrgDb(c.env, user.org_id, (sql) => sql`
         SELECT name, description, source, has_handler, schema, is_builtin
         FROM tool_registry
         WHERE org_id = ${user.org_id} OR is_builtin = true
         ORDER BY name
-      `;
+      `);
 
       dbTools = rows.map((r: any) => ({
         name: r.name,
@@ -276,37 +275,36 @@ toolRoutes.openapi(statsRoute, async (c): Promise<any> => {
   const user = c.get("user");
 
   try {
-    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+    return await withOrgDb(c.env, user.org_id, async (sql) => {
+      const [totalResult, toolCounts, recentErrors] = await Promise.all([
+        sql`SELECT COUNT(*) as total FROM tool_executions`,
+        sql`
+          SELECT
+            tool_name,
+            COUNT(*) as execution_count,
+            AVG(duration_ms) as avg_duration_ms,
+            MAX(created_at) as last_executed
+          FROM tool_executions
+          GROUP BY tool_name
+          ORDER BY execution_count DESC
+          LIMIT 20
+        `,
+        sql`
+          SELECT tool_name, error, created_at
+          FROM tool_executions
+          WHERE error IS NOT NULL
+          ORDER BY created_at DESC
+          LIMIT 10
+        `,
+      ]);
 
-    const [totalResult, toolCounts, recentErrors] = await Promise.all([
-      sql`SELECT COUNT(*) as total FROM tool_executions WHERE org_id = ${user.org_id}`,
-      sql`
-        SELECT
-          tool_name,
-          COUNT(*) as execution_count,
-          AVG(duration_ms) as avg_duration_ms,
-          MAX(created_at) as last_executed
-        FROM tool_executions
-        WHERE org_id = ${user.org_id}
-        GROUP BY tool_name
-        ORDER BY execution_count DESC
-        LIMIT 20
-      `,
-      sql`
-        SELECT tool_name, error, created_at
-        FROM tool_executions
-        WHERE org_id = ${user.org_id} AND error IS NOT NULL
-        ORDER BY created_at DESC
-        LIMIT 10
-      `,
-    ]);
+      const total = Number((totalResult[0] as any)?.total || 0);
 
-    const total = Number((totalResult[0] as any)?.total || 0);
-
-    return c.json({
-      total_executions: total,
-      tool_breakdown: toolCounts,
-      recent_errors: recentErrors,
+      return c.json({
+        total_executions: total,
+        tool_breakdown: toolCounts,
+        recent_errors: recentErrors,
+      });
     });
   } catch {
     return c.json({
@@ -461,8 +459,7 @@ toolRoutes.openapi(registerRoute, async (c): Promise<any> => {
 
   // Register in DB for persistence
   try {
-    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-    await sql`
+    await withOrgDb(c.env, user.org_id, (sql) => sql`
       INSERT INTO tool_registry (
         name, description, org_id, schema, has_handler,
         handler_code, source, is_builtin, created_at
@@ -473,7 +470,7 @@ toolRoutes.openapi(registerRoute, async (c): Promise<any> => {
         ${body.handler_code || null},
         'user-defined', false, ${new Date().toISOString()}
       )
-    `;
+    `);
   } catch (err) {
     console.warn("[tools] Failed to persist tool to DB:", err);
     // Continue - tool will be registered in memory only
@@ -532,13 +529,12 @@ toolRoutes.openapi(getToolRoute, async (c): Promise<any> => {
   // Try DB if not in registry
   if (!tool) {
     try {
-      const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-      const rows = await sql`
+      const rows = await withOrgDb(c.env, user.org_id, (sql) => sql`
         SELECT name, description, source, has_handler, schema, handler_code, is_builtin
         FROM tool_registry
         WHERE name = ${name} AND (org_id = ${user.org_id} OR is_builtin = true)
         LIMIT 1
-      `;
+      `);
 
       if (rows.length > 0) {
         const r = rows[0] as any;
@@ -712,8 +708,7 @@ toolRoutes.openapi(executeToolRoute, async (c): Promise<any> => {
 
     // Log tool execution (fire-and-forget)
     try {
-      const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-      sql`
+      withOrgDb(c.env, user.org_id, (sql) => sql`
         INSERT INTO tool_executions (
           tool_name, org_id, user_id, arguments_json, result,
           duration_ms, trace_id, session_id, created_at
@@ -723,7 +718,7 @@ toolRoutes.openapi(executeToolRoute, async (c): Promise<any> => {
           ${duration}, ${body.trace_id || null}, ${body.session_id || null},
           ${new Date().toISOString()}
         )
-      `.catch(() => {});
+      `).catch(() => {});
     } catch {
       // Non-critical
     }
@@ -794,11 +789,10 @@ toolRoutes.openapi(deleteToolRoute, async (c): Promise<any> => {
 
   // Remove from DB
   try {
-    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-    await sql`
+    await withOrgDb(c.env, user.org_id, (sql) => sql`
       DELETE FROM tool_registry
-      WHERE name = ${name} AND org_id = ${user.org_id}
-    `;
+      WHERE name = ${name}
+    `);
   } catch (err) {
     console.warn("[tools] Failed to remove tool from DB:", err);
   }
@@ -839,42 +833,43 @@ toolRoutes.openapi(executionHistoryRoute, async (c): Promise<any> => {
   const { limit, offset } = c.req.valid("query");
 
   try {
-    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-    const rows = await sql`
-      SELECT
-        execution_id, arguments_json, result, duration_ms,
-        trace_id, session_id, created_at, error
-      FROM tool_executions
-      WHERE tool_name = ${name} AND org_id = ${user.org_id}
-      ORDER BY created_at DESC
-      LIMIT ${limit} OFFSET ${offset}
-    `;
+    return await withOrgDb(c.env, user.org_id, async (sql) => {
+      const rows = await sql`
+        SELECT
+          execution_id, arguments_json, result, duration_ms,
+          trace_id, session_id, created_at, error
+        FROM tool_executions
+        WHERE tool_name = ${name}
+        ORDER BY created_at DESC
+        LIMIT ${limit} OFFSET ${offset}
+      `;
 
-    const countResult = await sql`
-      SELECT COUNT(*) as total
-      FROM tool_executions
-      WHERE tool_name = ${name} AND org_id = ${user.org_id}
-    `;
-    const total = Number((countResult[0] as any)?.total || 0);
+      const countResult = await sql`
+        SELECT COUNT(*) as total
+        FROM tool_executions
+        WHERE tool_name = ${name}
+      `;
+      const total = Number((countResult[0] as any)?.total || 0);
 
-    return c.json({
-      tool: name,
-      executions: rows.map((r: any) => ({
-        id: r.execution_id,
-        arguments: parseJsonColumn(r.arguments_json),
-        result: parseJsonColumn(r.result, null),
-        duration_ms: r.duration_ms,
-        trace_id: r.trace_id,
-        session_id: r.session_id,
-        created_at: r.created_at,
-        error: r.error,
-      })),
-      pagination: {
-        total,
-        limit,
-        offset,
-        has_more: offset + rows.length < total,
-      },
+      return c.json({
+        tool: name,
+        executions: rows.map((r: any) => ({
+          id: r.execution_id,
+          arguments: parseJsonColumn(r.arguments_json),
+          result: parseJsonColumn(r.result, null),
+          duration_ms: r.duration_ms,
+          trace_id: r.trace_id,
+          session_id: r.session_id,
+          created_at: r.created_at,
+          error: r.error,
+        })),
+        pagination: {
+          total,
+          limit,
+          offset,
+          has_more: offset + rows.length < total,
+        },
+      });
     });
   } catch {
     return c.json({

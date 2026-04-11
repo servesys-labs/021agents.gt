@@ -5,7 +5,7 @@
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 
 export const middlewareStatusRoutes = createOpenAPIRouter();
 
@@ -70,40 +70,39 @@ const eventsRoute = createRoute({
 
 middlewareStatusRoutes.openapi(eventsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const orgId = user.org_id;
   const { session_id: sessionId, middleware_name: middlewareName, limit: rawLimit } = c.req.valid("query");
   const limit = Math.min(500, Math.max(1, Number(rawLimit) || 100));
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  try {
-    let rows;
-    if (sessionId && middlewareName) {
-      rows = await sql`
-        SELECT * FROM middleware_events
-        WHERE org_id = ${orgId} AND session_id = ${sessionId} AND middleware_name = ${middlewareName}
-        ORDER BY created_at DESC LIMIT ${limit}
-      `;
-    } else if (sessionId) {
-      rows = await sql`
-        SELECT * FROM middleware_events
-        WHERE org_id = ${orgId} AND session_id = ${sessionId}
-        ORDER BY created_at DESC LIMIT ${limit}
-      `;
-    } else if (middlewareName) {
-      rows = await sql`
-        SELECT * FROM middleware_events
-        WHERE org_id = ${orgId} AND middleware_name = ${middlewareName}
-        ORDER BY created_at DESC LIMIT ${limit}
-      `;
-    } else {
-      rows = await sql`
-        SELECT * FROM middleware_events
-        WHERE org_id = ${orgId}
-        ORDER BY created_at DESC LIMIT ${limit}
-      `;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    try {
+      let rows;
+      if (sessionId && middlewareName) {
+        rows = await sql`
+          SELECT * FROM middleware_events
+          WHERE session_id = ${sessionId} AND middleware_name = ${middlewareName}
+          ORDER BY created_at DESC LIMIT ${limit}
+        `;
+      } else if (sessionId) {
+        rows = await sql`
+          SELECT * FROM middleware_events
+          WHERE session_id = ${sessionId}
+          ORDER BY created_at DESC LIMIT ${limit}
+        `;
+      } else if (middlewareName) {
+        rows = await sql`
+          SELECT * FROM middleware_events
+          WHERE middleware_name = ${middlewareName}
+          ORDER BY created_at DESC LIMIT ${limit}
+        `;
+      } else {
+        rows = await sql`
+          SELECT * FROM middleware_events
+          ORDER BY created_at DESC LIMIT ${limit}
+        `;
+      }
+      return c.json(rows);
+    } catch {
+      return c.json([]);
     }
-    return c.json(rows);
-  } catch {
-    return c.json([]);
-  }
+  });
 });

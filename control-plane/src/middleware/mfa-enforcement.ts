@@ -7,7 +7,7 @@
 import { createMiddleware } from "hono/factory";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { logSecurityEvent } from "../auth/security-events";
 
 // ── In-memory cache for org MFA settings (5 min TTL) ──────────────────
@@ -83,16 +83,14 @@ export const mfaEnforcementMiddleware = createMiddleware<{
   let policy = getCachedMfaPolicy(user.org_id);
   if (policy === null) {
     try {
-      const sql = await getDb(c.env.HYPERDRIVE);
-      const rows = await sql`
-        SELECT mfa_enforcement FROM org_settings
-        WHERE org_id = ${user.org_id}
-        LIMIT 1
-      `;
-      policy = (rows.length > 0 ? rows[0].mfa_enforcement : "optional") as MfaPolicy;
-      if (!["optional", "required_all", "required_admins"].includes(policy)) {
-        policy = "optional";
-      }
+      policy = await withOrgDb(c.env, user.org_id, async (sql) => {
+        // RLS on org_settings filters to current org — no WHERE needed.
+        const rows = await sql`
+          SELECT mfa_enforcement FROM org_settings LIMIT 1
+        `;
+        const p = (rows.length > 0 ? rows[0].mfa_enforcement : "optional") as MfaPolicy;
+        return ["optional", "required_all", "required_admins"].includes(p) ? p : "optional";
+      });
     } catch {
       // DB unavailable — default to optional
       policy = "optional";
@@ -125,20 +123,23 @@ export const mfaEnforcementMiddleware = createMiddleware<{
     );
   }
 
-  // MFA verified — fire-and-forget: update org_members + log event
+  // MFA verified — fire-and-forget: update org_members + log event.
+  // org_members is NOT org-scoped via RLS (see audit Option A) so keep
+  // the explicit WHERE; security_events IS org-scoped so RLS handles it.
   try {
-    const sql = await getDb(c.env.HYPERDRIVE);
-    sql`
-      UPDATE org_members
-      SET mfa_verified = true, mfa_verified_at = NOW()
-      WHERE org_id = ${user.org_id} AND user_id = ${user.user_id}
-    `.catch(() => {});
+    await withOrgDb(c.env, user.org_id, async (sql) => {
+      sql`
+        UPDATE org_members
+        SET mfa_verified = true, mfa_verified_at = NOW()
+        WHERE org_id = ${user.org_id} AND user_id = ${user.user_id}
+      `.catch(() => {});
 
-    logSecurityEvent(sql, {
-      event_type: "login.mfa_verified",
-      user_id: user.user_id,
-      org_id: user.org_id,
-      ip_address: c.req.header("CF-Connecting-IP") ?? "",
+      logSecurityEvent(sql, {
+        event_type: "login.mfa_verified",
+        user_id: user.user_id,
+        org_id: user.org_id,
+        ip_address: c.req.header("CF-Connecting-IP") ?? "",
+      });
     });
   } catch {
     // Best-effort

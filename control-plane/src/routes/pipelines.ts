@@ -9,7 +9,7 @@ import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import type { Env } from "../env";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { parseJsonColumn } from "../lib/parse-json-column";
 
@@ -75,14 +75,15 @@ const listStreamsRoute = createRoute({
 });
 pipelineRoutes.openapi(listStreamsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const rows = await sql`
-    SELECT id, name, description, type, config, status, cf_resource_id, created_at, updated_at
-    FROM pipelines
-    WHERE org_id = ${user.org_id} AND type = 'stream' AND status != 'deleted'
-    ORDER BY created_at DESC
-  `;
-  return c.json({ streams: rows, total: rows.length });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT id, name, description, type, config, status, cf_resource_id, created_at, updated_at
+      FROM pipelines
+      WHERE type = 'stream' AND status != 'deleted'
+      ORDER BY created_at DESC
+    `;
+    return c.json({ streams: rows, total: rows.length });
+  });
 });
 
 const createStreamRoute = createRoute({
@@ -128,14 +129,15 @@ pipelineRoutes.openapi(createStreamRoute, async (c): Promise<any> => {
     http_auth: body.http_auth !== false,
   };
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  await sql`
-    INSERT INTO pipelines (id, org_id, name, description, type, config, status, created_at, updated_at)
-    VALUES (${id}, ${user.org_id}, ${name}, ${body.description || ""}, 'stream',
-            ${JSON.stringify(config)}, 'draft', ${now}, ${now})
-  `;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    await sql`
+      INSERT INTO pipelines (id, org_id, name, description, type, config, status, created_at, updated_at)
+      VALUES (${id}, ${user.org_id}, ${name}, ${body.description || ""}, 'stream',
+              ${JSON.stringify(config)}, 'draft', ${now}, ${now})
+    `;
 
-  return c.json({ id, name, type: "stream", status: "draft", config }, 201);
+    return c.json({ id, name, type: "stream", status: "draft", config }, 201);
+  });
 });
 
 const getStreamRoute = createRoute({
@@ -158,15 +160,16 @@ const getStreamRoute = createRoute({
 pipelineRoutes.openapi(getStreamRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { stream_id: streamId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const rows = await sql`
-    SELECT id, name, description, type, config, status, cf_resource_id, created_at, updated_at
-    FROM pipelines
-    WHERE id = ${streamId} AND org_id = ${user.org_id} AND type = 'stream' AND status != 'deleted'
-    LIMIT 1
-  `;
-  if (rows.length === 0) return c.json({ error: "Stream not found" }, 404);
-  return c.json(rows[0] as any);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT id, name, description, type, config, status, cf_resource_id, created_at, updated_at
+      FROM pipelines
+      WHERE id = ${streamId} AND type = 'stream' AND status != 'deleted'
+      LIMIT 1
+    `;
+    if (rows.length === 0) return c.json({ error: "Stream not found" }, 404);
+    return c.json(rows[0] as any);
+  });
 });
 
 const deleteStreamRoute = createRoute({
@@ -188,12 +191,13 @@ const deleteStreamRoute = createRoute({
 pipelineRoutes.openapi(deleteStreamRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { stream_id: streamId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  await sql`
-    UPDATE pipelines SET status = 'deleted', updated_at = ${nowEpoch()}
-    WHERE id = ${streamId} AND org_id = ${user.org_id} AND type = 'stream'
-  `;
-  return c.json({ deleted: true, id: streamId });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    await sql`
+      UPDATE pipelines SET status = 'deleted', updated_at = ${nowEpoch()}
+      WHERE id = ${streamId} AND type = 'stream'
+    `;
+    return c.json({ deleted: true, id: streamId });
+  });
 });
 
 const sendToStreamRoute = createRoute({
@@ -231,42 +235,43 @@ pipelineRoutes.openapi(sendToStreamRoute, async (c): Promise<any> => {
     return c.json({ error: "events array is required" }, 400);
   }
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const rows = await sql`
-    SELECT cf_resource_id, config, status FROM pipelines
-    WHERE id = ${streamId} AND org_id = ${user.org_id} AND type = 'stream' AND status != 'deleted'
-    LIMIT 1
-  `;
-  if (rows.length === 0) return c.json({ error: "Stream not found" }, 404);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT cf_resource_id, config, status FROM pipelines
+      WHERE id = ${streamId} AND type = 'stream' AND status != 'deleted'
+      LIMIT 1
+    `;
+    if (rows.length === 0) return c.json({ error: "Stream not found" }, 404);
 
-  const cfResourceId = String(rows[0].cf_resource_id || "");
+    const cfResourceId = String(rows[0].cf_resource_id || "");
 
-  // If stream has a CF resource, post to the ingest endpoint
-  if (cfResourceId) {
-    try {
-      const resp = await fetch(`https://${cfResourceId}.ingest.cloudflare.com`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(events),
-      });
-      if (!resp.ok) {
-        return c.json({ error: `Ingest failed: ${resp.status}` }, 502);
+    // If stream has a CF resource, post to the ingest endpoint
+    if (cfResourceId) {
+      try {
+        const resp = await fetch(`https://${cfResourceId}.ingest.cloudflare.com`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(events),
+        });
+        if (!resp.ok) {
+          return c.json({ error: `Ingest failed: ${resp.status}` }, 502);
+        }
+        return c.json({ sent: true, count: events.length });
+      } catch (err: unknown) {
+        return c.json({ error: `Ingest error: ${err instanceof Error ? err.message : String(err)}` }, 502);
       }
-      return c.json({ sent: true, count: events.length });
-    } catch (err: unknown) {
-      return c.json({ error: `Ingest error: ${err instanceof Error ? err.message : String(err)}` }, 502);
     }
-  }
 
-  // Fallback: store events in R2 for pending pipelines
-  try {
-    const key = `pipelines/${streamId}/${Date.now()}.jsonl`;
-    const data = events.map((e: unknown) => JSON.stringify(e)).join("\n");
-    await c.env.STORAGE.put(key, data);
-    return c.json({ sent: true, count: events.length, storage: "r2", key });
-  } catch (err: unknown) {
-    return c.json({ error: `Storage error: ${err instanceof Error ? err.message : String(err)}` }, 500);
-  }
+    // Fallback: store events in R2 for pending pipelines
+    try {
+      const key = `pipelines/${streamId}/${Date.now()}.jsonl`;
+      const data = events.map((e: unknown) => JSON.stringify(e)).join("\n");
+      await c.env.STORAGE.put(key, data);
+      return c.json({ sent: true, count: events.length, storage: "r2", key });
+    } catch (err: unknown) {
+      return c.json({ error: `Storage error: ${err instanceof Error ? err.message : String(err)}` }, 500);
+    }
+  });
 });
 
 // ── Sinks ────────────────────────────────────────────────────────────
@@ -286,14 +291,15 @@ const listSinksRoute = createRoute({
 });
 pipelineRoutes.openapi(listSinksRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const rows = await sql`
-    SELECT id, name, description, type, config, status, cf_resource_id, created_at, updated_at
-    FROM pipelines
-    WHERE org_id = ${user.org_id} AND type = 'sink' AND status != 'deleted'
-    ORDER BY created_at DESC
-  `;
-  return c.json({ sinks: rows, total: rows.length });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT id, name, description, type, config, status, cf_resource_id, created_at, updated_at
+      FROM pipelines
+      WHERE type = 'sink' AND status != 'deleted'
+      ORDER BY created_at DESC
+    `;
+    return c.json({ sinks: rows, total: rows.length });
+  });
 });
 
 const createSinkRoute = createRoute({
@@ -372,14 +378,15 @@ pipelineRoutes.openapi(createSinkRoute, async (c): Promise<any> => {
     config.r2_path = body.path || "";
   }
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  await sql`
-    INSERT INTO pipelines (id, org_id, name, description, type, config, status, created_at, updated_at)
-    VALUES (${id}, ${user.org_id}, ${name}, ${body.description || ""}, 'sink',
-            ${JSON.stringify(config)}, 'draft', ${now}, ${now})
-  `;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    await sql`
+      INSERT INTO pipelines (id, org_id, name, description, type, config, status, created_at, updated_at)
+      VALUES (${id}, ${user.org_id}, ${name}, ${body.description || ""}, 'sink',
+              ${JSON.stringify(config)}, 'draft', ${now}, ${now})
+    `;
 
-  return c.json({ id, name, type: "sink", status: "draft", config }, 201);
+    return c.json({ id, name, type: "sink", status: "draft", config }, 201);
+  });
 });
 
 const getSinkRoute = createRoute({
@@ -402,15 +409,16 @@ const getSinkRoute = createRoute({
 pipelineRoutes.openapi(getSinkRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { sink_id: sinkId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const rows = await sql`
-    SELECT id, name, description, type, config, status, cf_resource_id, created_at, updated_at
-    FROM pipelines
-    WHERE id = ${sinkId} AND org_id = ${user.org_id} AND type = 'sink' AND status != 'deleted'
-    LIMIT 1
-  `;
-  if (rows.length === 0) return c.json({ error: "Sink not found" }, 404);
-  return c.json(rows[0] as any);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT id, name, description, type, config, status, cf_resource_id, created_at, updated_at
+      FROM pipelines
+      WHERE id = ${sinkId} AND type = 'sink' AND status != 'deleted'
+      LIMIT 1
+    `;
+    if (rows.length === 0) return c.json({ error: "Sink not found" }, 404);
+    return c.json(rows[0] as any);
+  });
 });
 
 const deleteSinkRoute = createRoute({
@@ -432,12 +440,13 @@ const deleteSinkRoute = createRoute({
 pipelineRoutes.openapi(deleteSinkRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { sink_id: sinkId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  await sql`
-    UPDATE pipelines SET status = 'deleted', updated_at = ${nowEpoch()}
-    WHERE id = ${sinkId} AND org_id = ${user.org_id} AND type = 'sink'
-  `;
-  return c.json({ deleted: true, id: sinkId });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    await sql`
+      UPDATE pipelines SET status = 'deleted', updated_at = ${nowEpoch()}
+      WHERE id = ${sinkId} AND type = 'sink'
+    `;
+    return c.json({ deleted: true, id: sinkId });
+  });
 });
 
 // ── Pipelines ────────────────────────────────────────────────────────
@@ -457,14 +466,15 @@ const listPipelinesRoute = createRoute({
 });
 pipelineRoutes.openapi(listPipelinesRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const rows = await sql`
-    SELECT id, name, description, type, config, status, cf_resource_id, created_at, updated_at
-    FROM pipelines
-    WHERE org_id = ${user.org_id} AND type = 'pipeline' AND status != 'deleted'
-    ORDER BY created_at DESC
-  `;
-  return c.json({ pipelines: rows, total: rows.length });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT id, name, description, type, config, status, cf_resource_id, created_at, updated_at
+      FROM pipelines
+      WHERE type = 'pipeline' AND status != 'deleted'
+      ORDER BY created_at DESC
+    `;
+    return c.json({ pipelines: rows, total: rows.length });
+  });
 });
 
 const createPipelineRoute = createRoute({
@@ -513,38 +523,39 @@ pipelineRoutes.openapi(createPipelineRoute, async (c): Promise<any> => {
     sql: body.sql,
   };
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
-  // Validate stream and sink exist
-  const streamRows = await sql`
-    SELECT id, name FROM pipelines
-    WHERE id = ${body.stream_id} AND org_id = ${user.org_id} AND type = 'stream' AND status != 'deleted'
-    LIMIT 1
-  `;
-  if (streamRows.length === 0) return c.json({ error: "Stream not found" }, 404);
+    // Validate stream and sink exist
+    const streamRows = await sql`
+      SELECT id, name FROM pipelines
+      WHERE id = ${body.stream_id} AND type = 'stream' AND status != 'deleted'
+      LIMIT 1
+    `;
+    if (streamRows.length === 0) return c.json({ error: "Stream not found" }, 404);
 
-  const sinkRows = await sql`
-    SELECT id, name FROM pipelines
-    WHERE id = ${body.sink_id} AND org_id = ${user.org_id} AND type = 'sink' AND status != 'deleted'
-    LIMIT 1
-  `;
-  if (sinkRows.length === 0) return c.json({ error: "Sink not found" }, 404);
+    const sinkRows = await sql`
+      SELECT id, name FROM pipelines
+      WHERE id = ${body.sink_id} AND type = 'sink' AND status != 'deleted'
+      LIMIT 1
+    `;
+    if (sinkRows.length === 0) return c.json({ error: "Sink not found" }, 404);
 
-  await sql`
-    INSERT INTO pipelines (id, org_id, name, description, type, config, status, created_at, updated_at)
-    VALUES (${id}, ${user.org_id}, ${name}, ${body.description || ""}, 'pipeline',
-            ${JSON.stringify(config)}, 'draft', ${now}, ${now})
-  `;
+    await sql`
+      INSERT INTO pipelines (id, org_id, name, description, type, config, status, created_at, updated_at)
+      VALUES (${id}, ${user.org_id}, ${name}, ${body.description || ""}, 'pipeline',
+              ${JSON.stringify(config)}, 'draft', ${now}, ${now})
+    `;
 
-  return c.json({
-    id,
-    name,
-    type: "pipeline",
-    status: "draft",
-    config,
-    stream: { id: streamRows[0].id, name: streamRows[0].name },
-    sink: { id: sinkRows[0].id, name: sinkRows[0].name },
-  }, 201);
+    return c.json({
+      id,
+      name,
+      type: "pipeline",
+      status: "draft",
+      config,
+      stream: { id: streamRows[0].id, name: streamRows[0].name },
+      sink: { id: sinkRows[0].id, name: sinkRows[0].name },
+    }, 201);
+  });
 });
 
 const getPipelineRoute = createRoute({
@@ -573,36 +584,37 @@ pipelineRoutes.openapi(getPipelineRoute, async (c): Promise<any> => {
     return c.notFound();
   }
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const rows = await sql`
-    SELECT id, name, description, type, config, status, cf_resource_id, created_at, updated_at
-    FROM pipelines
-    WHERE id = ${pipelineId} AND org_id = ${user.org_id} AND type = 'pipeline' AND status != 'deleted'
-    LIMIT 1
-  `;
-  if (rows.length === 0) return c.json({ error: "Pipeline not found" }, 404);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT id, name, description, type, config, status, cf_resource_id, created_at, updated_at
+      FROM pipelines
+      WHERE id = ${pipelineId} AND type = 'pipeline' AND status != 'deleted'
+      LIMIT 1
+    `;
+    if (rows.length === 0) return c.json({ error: "Pipeline not found" }, 404);
 
-  const pipeline = rows[0];
-  let config: Record<string, unknown> = {};
-  config = parseJsonColumn(pipeline.config);
+    const pipeline = rows[0];
+    let config: Record<string, unknown> = {};
+    config = parseJsonColumn(pipeline.config);
 
-  // Resolve stream and sink names
-  let streamName = "";
-  let sinkName = "";
-  if (config.stream_id) {
-    const sr = await sql`SELECT name FROM pipelines WHERE id = ${String(config.stream_id)} LIMIT 1`;
-    if (sr.length > 0) streamName = String(sr[0].name);
-  }
-  if (config.sink_id) {
-    const sr = await sql`SELECT name FROM pipelines WHERE id = ${String(config.sink_id)} LIMIT 1`;
-    if (sr.length > 0) sinkName = String(sr[0].name);
-  }
+    // Resolve stream and sink names
+    let streamName = "";
+    let sinkName = "";
+    if (config.stream_id) {
+      const sr = await sql`SELECT name FROM pipelines WHERE id = ${String(config.stream_id)} LIMIT 1`;
+      if (sr.length > 0) streamName = String(sr[0].name);
+    }
+    if (config.sink_id) {
+      const sr = await sql`SELECT name FROM pipelines WHERE id = ${String(config.sink_id)} LIMIT 1`;
+      if (sr.length > 0) sinkName = String(sr[0].name);
+    }
 
-  return c.json({
-    ...pipeline,
-    stream_name: streamName,
-    sink_name: sinkName,
-  } as any);
+    return c.json({
+      ...pipeline,
+      stream_name: streamName,
+      sink_name: sinkName,
+    } as any);
+  });
 });
 
 const updatePipelineRoute = createRoute({
@@ -636,34 +648,35 @@ pipelineRoutes.openapi(updatePipelineRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { pipeline_id: pipelineId } = c.req.valid("param");
   const body = c.req.valid("json");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
-  const rows = await sql`
-    SELECT config FROM pipelines
-    WHERE id = ${pipelineId} AND org_id = ${user.org_id} AND type = 'pipeline' AND status != 'deleted'
-    LIMIT 1
-  `;
-  if (rows.length === 0) return c.json({ error: "Pipeline not found" }, 404);
-
-  let config: Record<string, unknown> = {};
-  config = parseJsonColumn(rows[0].config);
-
-  if (body.sql) config.sql = body.sql;
-  const description = body.description !== undefined ? body.description : null;
-
-  if (description !== null) {
-    await sql`
-      UPDATE pipelines SET config = ${JSON.stringify(config)}, description = ${description}, updated_at = ${nowEpoch()}
-      WHERE id = ${pipelineId} AND org_id = ${user.org_id}
+    const rows = await sql`
+      SELECT config FROM pipelines
+      WHERE id = ${pipelineId} AND type = 'pipeline' AND status != 'deleted'
+      LIMIT 1
     `;
-  } else {
-    await sql`
-      UPDATE pipelines SET config = ${JSON.stringify(config)}, updated_at = ${nowEpoch()}
-      WHERE id = ${pipelineId} AND org_id = ${user.org_id}
-    `;
-  }
+    if (rows.length === 0) return c.json({ error: "Pipeline not found" }, 404);
 
-  return c.json({ updated: true, id: pipelineId, config });
+    let config: Record<string, unknown> = {};
+    config = parseJsonColumn(rows[0].config);
+
+    if (body.sql) config.sql = body.sql;
+    const description = body.description !== undefined ? body.description : null;
+
+    if (description !== null) {
+      await sql`
+        UPDATE pipelines SET config = ${JSON.stringify(config)}, description = ${description}, updated_at = ${nowEpoch()}
+        WHERE id = ${pipelineId}
+      `;
+    } else {
+      await sql`
+        UPDATE pipelines SET config = ${JSON.stringify(config)}, updated_at = ${nowEpoch()}
+        WHERE id = ${pipelineId}
+      `;
+    }
+
+    return c.json({ updated: true, id: pipelineId, config });
+  });
 });
 
 const deletePipelineRoute = createRoute({
@@ -685,12 +698,13 @@ const deletePipelineRoute = createRoute({
 pipelineRoutes.openapi(deletePipelineRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { pipeline_id: pipelineId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  await sql`
-    UPDATE pipelines SET status = 'deleted', updated_at = ${nowEpoch()}
-    WHERE id = ${pipelineId} AND org_id = ${user.org_id} AND type = 'pipeline'
-  `;
-  return c.json({ deleted: true, id: pipelineId });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    await sql`
+      UPDATE pipelines SET status = 'deleted', updated_at = ${nowEpoch()}
+      WHERE id = ${pipelineId} AND type = 'pipeline'
+    `;
+    return c.json({ deleted: true, id: pipelineId });
+  });
 });
 
 // ── Pipeline Templates ───────────────────────────────────────────────
@@ -803,10 +817,10 @@ pipelineRoutes.openapi(queryPipelineRoute, async (c): Promise<any> => {
 
   if (!querySql) return c.json({ error: "sql query is required" }, 400);
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
   const rows = await sql`
     SELECT name, config, status FROM pipelines
-    WHERE id = ${pipelineId} AND org_id = ${user.org_id} AND type = 'pipeline' AND status != 'deleted'
+    WHERE id = ${pipelineId} AND type = 'pipeline' AND status != 'deleted'
     LIMIT 1
   `;
   if (rows.length === 0) return c.json({ error: "Pipeline not found" }, 404);
@@ -853,6 +867,7 @@ pipelineRoutes.openapi(queryPipelineRoute, async (c): Promise<any> => {
       error: `Query failed: ${err instanceof Error ? err.message : String(err)}`,
     }, 500);
   }
+  });
 });
 
 // ── Deploy (trigger CF API resource creation) ────────────────────────
@@ -881,49 +896,50 @@ const deployPipelineRoute = createRoute({
 pipelineRoutes.openapi(deployPipelineRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { pipeline_id: pipelineId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
-  const rows = await sql`
-    SELECT id, name, type, config, status FROM pipelines
-    WHERE id = ${pipelineId} AND org_id = ${user.org_id} AND status != 'deleted'
-    LIMIT 1
-  `;
-  if (rows.length === 0) return c.json({ error: "Resource not found" }, 404);
-
-  const resource = rows[0];
-  const now = nowEpoch();
-
-  // Mark as deploying
-  await sql`
-    UPDATE pipelines SET status = 'deploying', updated_at = ${now}
-    WHERE id = ${pipelineId} AND org_id = ${user.org_id}
-  `;
-
-  // Attempt CF API call
-  const result = await cfApi(c.env, "/pipelines", "POST", {
-    name: resource.name,
-    type: resource.type,
-    config: parseJsonColumn(resource.config),
-  });
-
-  if (result.ok) {
-    const cfId = (result.data as Record<string, unknown>)?.id || "";
-    await sql`
-      UPDATE pipelines SET status = 'active', cf_resource_id = ${String(cfId)}, updated_at = ${nowEpoch()}
-      WHERE id = ${pipelineId} AND org_id = ${user.org_id}
+    const rows = await sql`
+      SELECT id, name, type, config, status FROM pipelines
+      WHERE id = ${pipelineId} AND status != 'deleted'
+      LIMIT 1
     `;
-    return c.json({ deployed: true, id: pipelineId, cf_resource_id: cfId });
-  }
+    if (rows.length === 0) return c.json({ error: "Resource not found" }, 404);
 
-  // CF API not available — mark as pending for manual deployment
-  await sql`
-    UPDATE pipelines SET status = 'draft', updated_at = ${nowEpoch()}
-    WHERE id = ${pipelineId} AND org_id = ${user.org_id}
-  `;
-  return c.json({
-    deployed: false,
-    id: pipelineId,
-    note: "CF Pipelines API unavailable. Deploy manually via wrangler CLI.",
-    error: result.error,
-  }, 202);
+    const resource = rows[0];
+    const now = nowEpoch();
+
+    // Mark as deploying
+    await sql`
+      UPDATE pipelines SET status = 'deploying', updated_at = ${now}
+      WHERE id = ${pipelineId}
+    `;
+
+    // Attempt CF API call
+    const result = await cfApi(c.env, "/pipelines", "POST", {
+      name: resource.name,
+      type: resource.type,
+      config: parseJsonColumn(resource.config),
+    });
+
+    if (result.ok) {
+      const cfId = (result.data as Record<string, unknown>)?.id || "";
+      await sql`
+        UPDATE pipelines SET status = 'active', cf_resource_id = ${String(cfId)}, updated_at = ${nowEpoch()}
+        WHERE id = ${pipelineId}
+      `;
+      return c.json({ deployed: true, id: pipelineId, cf_resource_id: cfId });
+    }
+
+    // CF API not available — mark as pending for manual deployment
+    await sql`
+      UPDATE pipelines SET status = 'draft', updated_at = ${nowEpoch()}
+      WHERE id = ${pipelineId}
+    `;
+    return c.json({
+      deployed: false,
+      id: pipelineId,
+      note: "CF Pipelines API unavailable. Deploy manually via wrangler CLI.",
+      error: result.error,
+    }, 202);
+  });
 });

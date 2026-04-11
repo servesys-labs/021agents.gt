@@ -9,7 +9,7 @@ import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { errorResponses } from "../schemas/openapi";
 import { requireScope } from "../middleware/auth";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { getAlgorithm } from "../logic/training-algorithms";
 import { computeRewardForEvalRun } from "../logic/reward-aggregator";
 import {
@@ -123,11 +123,10 @@ const createJobRoute = createRoute({
 trainingRoutes.openapi(createJobRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const body = c.req.valid("json");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  // Verify agent exists
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+  // Verify agent exists (RLS handles org isolation)
   const agents = await sql`
-    SELECT name FROM agents WHERE name = ${body.agent_name} AND org_id = ${user.org_id} LIMIT 1
+    SELECT name FROM agents WHERE name = ${body.agent_name} LIMIT 1
   `;
   if (agents.length === 0) {
     return c.json({ error: `Agent '${body.agent_name}' not found` }, 404);
@@ -199,6 +198,7 @@ trainingRoutes.openapi(createJobRoute, async (c): Promise<any> => {
     auto_activate: body.auto_activate,
     created_at: new Date().toISOString(),
   }, 201);
+  });
 });
 
 // ── GET /jobs — list training jobs ──────────────────────────────────
@@ -224,47 +224,46 @@ const listJobsRoute = createRoute({
 trainingRoutes.openapi(listJobsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name, status, limit } = c.req.valid("query");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    let rows;
+    if (agent_name && status) {
+      rows = await sql`
+        SELECT * FROM training_jobs
+        WHERE agent_name = ${agent_name} AND status = ${status}
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    } else if (agent_name) {
+      rows = await sql`
+        SELECT * FROM training_jobs
+        WHERE agent_name = ${agent_name}
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    } else if (status) {
+      rows = await sql`
+        SELECT * FROM training_jobs
+        WHERE status = ${status}
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    } else {
+      rows = await sql`
+        SELECT * FROM training_jobs
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    }
 
-  let rows;
-  if (agent_name && status) {
-    rows = await sql`
-      SELECT * FROM training_jobs
-      WHERE org_id = ${user.org_id} AND agent_name = ${agent_name} AND status = ${status}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  } else if (agent_name) {
-    rows = await sql`
-      SELECT * FROM training_jobs
-      WHERE org_id = ${user.org_id} AND agent_name = ${agent_name}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  } else if (status) {
-    rows = await sql`
-      SELECT * FROM training_jobs
-      WHERE org_id = ${user.org_id} AND status = ${status}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  } else {
-    rows = await sql`
-      SELECT * FROM training_jobs
-      WHERE org_id = ${user.org_id}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  }
-
-  return c.json(rows.map((r: any) => ({
-    job_id: r.job_id,
-    agent_name: r.agent_name,
-    algorithm: r.algorithm,
-    status: r.status,
-    current_iteration: r.current_iteration,
-    max_iterations: r.max_iterations,
-    best_score: r.best_score,
-    best_iteration: r.best_iteration,
-    auto_activate: r.auto_activate,
-    created_at: r.created_at,
-  })));
+    return c.json(rows.map((r: any) => ({
+      job_id: r.job_id,
+      agent_name: r.agent_name,
+      algorithm: r.algorithm,
+      status: r.status,
+      current_iteration: r.current_iteration,
+      max_iterations: r.max_iterations,
+      best_score: r.best_score,
+      best_iteration: r.best_iteration,
+      auto_activate: r.auto_activate,
+      created_at: r.created_at,
+    })));
+  });
 });
 
 // ── GET /jobs/{job_id} — get job detail ─────────────────────────────
@@ -285,13 +284,13 @@ const getJobRoute = createRoute({
 trainingRoutes.openapi(getJobRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { job_id } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
   const jobs = await sql`
-    SELECT * FROM training_jobs WHERE id = ${job_id} AND org_id = ${user.org_id}
+    SELECT * FROM training_jobs WHERE id = ${job_id}
   `;
   if (jobs.length === 0) return c.json({ error: "Training job not found" }, 404);
 
+  // training_iterations is NOT RLS — keep org_id filter
   const iterations = await sql`
     SELECT * FROM training_iterations
     WHERE id = ${job_id} AND org_id = ${user.org_id} ORDER BY iteration_number
@@ -299,7 +298,7 @@ trainingRoutes.openapi(getJobRoute, async (c): Promise<any> => {
 
   const resources = await sql`
     SELECT * FROM training_resources
-    WHERE id = ${job_id} AND org_id = ${user.org_id} ORDER BY version
+    WHERE id = ${job_id} ORDER BY version
   `;
 
   const job = jobs[0] as any;
@@ -330,6 +329,7 @@ trainingRoutes.openapi(getJobRoute, async (c): Promise<any> => {
       created_at: r.created_at,
     })),
   });
+  });
 });
 
 // ── POST /jobs/{job_id}/step — advance one iteration ────────────────
@@ -351,11 +351,10 @@ const stepJobRoute = createRoute({
 trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { job_id } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  // Load job
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+  // Load job (RLS handles org isolation)
   const jobs = await sql`
-    SELECT * FROM training_jobs WHERE id = ${job_id} AND org_id = ${user.org_id}
+    SELECT * FROM training_jobs WHERE id = ${job_id}
   `;
   if (jobs.length === 0) return c.json({ error: "Training job not found" }, 404);
 
@@ -1142,6 +1141,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
     should_continue: shouldContinue,
     progress_events: progressEvents.length > 0 ? progressEvents : undefined,
   });
+  });
 });
 
 // ── GET /jobs/{job_id}/progress — poll real-time progress from KV ────
@@ -1163,12 +1163,9 @@ const progressRoute = createRoute({
 trainingRoutes.openapi(progressRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { job_id } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  // Verify job exists and belongs to this org
-  const jobs = await sql`
-    SELECT agent_name FROM training_jobs WHERE id = ${job_id} AND org_id = ${user.org_id}
-  `;
+  const jobs = await withOrgDb(c.env, user.org_id, (sql) => sql`
+    SELECT agent_name FROM training_jobs WHERE id = ${job_id}
+  `);
   if (jobs.length === 0) return c.json({ error: "Training job not found" }, 404);
 
   const agentName = String(jobs[0].agent_name);
@@ -1227,12 +1224,11 @@ trainingRoutes.openapi(streamRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { job_id } = c.req.valid("param");
   const { since } = c.req.valid("query");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  // Verify job exists
-  const jobs = await sql`
-    SELECT agent_name, status FROM training_jobs WHERE id = ${job_id} AND org_id = ${user.org_id}
-  `;
+  // Verify job exists (RLS handles org isolation)
+  const jobs = await withOrgDb(c.env, user.org_id, (sql) => sql`
+    SELECT agent_name, status FROM training_jobs WHERE id = ${job_id}
+  `);
   if (jobs.length === 0) return c.json({ error: "Training job not found" }, 404);
 
   const agentName = String(jobs[0].agent_name);
@@ -1294,7 +1290,7 @@ trainingRoutes.openapi(streamRoute, async (c): Promise<any> => {
           consecutiveErrors = 0;
 
           // Check if job finished
-          const statusRows = await sql`SELECT status FROM training_jobs WHERE id = ${job_id}`;
+          const statusRows = await withOrgDb(c.env, user.org_id, (sqlPoll) => sqlPoll`SELECT status FROM training_jobs WHERE id = ${job_id}`);
           const status = statusRows.length > 0 ? String(statusRows[0].status) : "unknown";
 
           if (status === "completed" || status === "cancelled" || status === "failed") {
@@ -1364,17 +1360,17 @@ const cancelJobRoute = createRoute({
 trainingRoutes.openapi(cancelJobRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { job_id } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const result = await sql`
+      UPDATE training_jobs SET status = 'cancelled', completed_at = now()
+      WHERE id = ${job_id} AND status IN ('created', 'running', 'paused')
+    `;
+    if (result.count === 0) return c.json({ error: "Job not found or already finished" }, 404);
 
-  const result = await sql`
-    UPDATE training_jobs SET status = 'cancelled', completed_at = now()
-    WHERE id = ${job_id} AND org_id = ${user.org_id} AND status IN ('created', 'running', 'paused')
-  `;
-  if (result.count === 0) return c.json({ error: "Job not found or already finished" }, 404);
+    auditTraining(sql, user.org_id, user.user_id, "training.cancelled", job_id, {});
 
-  auditTraining(sql, user.org_id, user.user_id, "training.cancelled", job_id, {});
-
-  return c.json({ cancelled: true });
+    return c.json({ cancelled: true });
+  });
 });
 
 // ── DELETE /jobs/{job_id} — delete job ──────────────────────────────
@@ -1395,19 +1391,19 @@ const deleteJobRoute = createRoute({
 trainingRoutes.openapi(deleteJobRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { job_id } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Fix #6: Prevent deleting running jobs
+    const jobCheck = await sql`
+      SELECT status FROM training_jobs WHERE id = ${job_id}
+    `;
+    if (jobCheck.length === 0) return c.json({ error: "Training job not found" }, 404);
+    if (jobCheck[0].status === "running") {
+      return c.json({ error: "Cannot delete a running job. Cancel it first." }, 409);
+    }
 
-  // Fix #6: Prevent deleting running jobs
-  const jobCheck = await sql`
-    SELECT status FROM training_jobs WHERE id = ${job_id} AND org_id = ${user.org_id}
-  `;
-  if (jobCheck.length === 0) return c.json({ error: "Training job not found" }, 404);
-  if (jobCheck[0].status === "running") {
-    return c.json({ error: "Cannot delete a running job. Cancel it first." }, 409);
-  }
-
-  await sql`DELETE FROM training_jobs WHERE id = ${job_id} AND org_id = ${user.org_id}`;
-  return c.json({ deleted: job_id });
+    await sql`DELETE FROM training_jobs WHERE id = ${job_id}`;
+    return c.json({ deleted: job_id });
+  });
 });
 
 // ── POST /jobs/{job_id}/auto-step — start unattended training ───────
@@ -1429,28 +1425,28 @@ const autoStepRoute = createRoute({
 trainingRoutes.openapi(autoStepRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { job_id } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const jobs = await sql`
+      SELECT status FROM training_jobs WHERE id = ${job_id}
+    `;
+    if (jobs.length === 0) return c.json({ error: "Training job not found" }, 404);
+    if (jobs[0].status === "completed" || jobs[0].status === "cancelled") {
+      return c.json({ error: `Job is already ${jobs[0].status}` }, 409);
+    }
 
-  const jobs = await sql`
-    SELECT status FROM training_jobs WHERE id = ${job_id} AND org_id = ${user.org_id}
-  `;
-  if (jobs.length === 0) return c.json({ error: "Training job not found" }, 404);
-  if (jobs[0].status === "completed" || jobs[0].status === "cancelled") {
-    return c.json({ error: `Job is already ${jobs[0].status}` }, 409);
-  }
+    // Mark as running if still created
+    if (jobs[0].status === "created") {
+      await sql`UPDATE 0 = ${job_id}`;
+    }
 
-  // Mark as running if still created
-  if (jobs[0].status === "created") {
-    await sql`UPDATE 0 = ${job_id}`;
-  }
+    // Enqueue first step — queue consumer will chain subsequent steps
+    await c.env.JOB_QUEUE.send({
+      type: "training_step",
+      payload: { job_id, org_id: user.org_id },
+    });
 
-  // Enqueue first step — queue consumer will chain subsequent steps
-  await c.env.JOB_QUEUE.send({
-    type: "training_step",
-    payload: { job_id, org_id: user.org_id },
+    return c.json({ queued: true, job_id });
   });
-
-  return c.json({ queued: true, job_id });
 });
 
 // ── GET /jobs/{job_id}/iterations — list iterations ─────────────────
@@ -1470,24 +1466,25 @@ const listIterationsRoute = createRoute({
 trainingRoutes.openapi(listIterationsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { job_id } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // training_iterations is NOT RLS — keep org_id filter
+    const rows = await sql`
+      SELECT * FROM training_iterations
+      WHERE id = ${job_id} AND org_id = ${user.org_id}
+      ORDER BY iteration_number
+    `;
 
-  const rows = await sql`
-    SELECT * FROM training_iterations
-    WHERE id = ${job_id} AND org_id = ${user.org_id}
-    ORDER BY iteration_number
-  `;
-
-  return c.json(rows.map((r: any) => ({
-    iteration_id: r.iteration_id,
-    iteration_number: r.iteration_number,
-    status: r.status,
-    pass_rate: r.pass_rate,
-    reward_score: r.reward_score,
-    resource_version: r.resource_version,
-    started_at: r.started_at,
-    completed_at: r.completed_at,
-  })));
+    return c.json(rows.map((r: any) => ({
+      iteration_id: r.iteration_id,
+      iteration_number: r.iteration_number,
+      status: r.status,
+      pass_rate: r.pass_rate,
+      reward_score: r.reward_score,
+      resource_version: r.resource_version,
+      started_at: r.started_at,
+      completed_at: r.completed_at,
+    })));
+  });
 });
 
 // ── GET /resources/{agent_name} — list resource versions ────────────
@@ -1514,32 +1511,32 @@ trainingRoutes.openapi(listResourcesRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name } = c.req.valid("param");
   const { resource_type, limit } = c.req.valid("query");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = resource_type
+      ? await sql`
+          SELECT * FROM training_resources
+          WHERE agent_name = ${agent_name} AND resource_type = ${resource_type}
+          ORDER BY version DESC LIMIT ${limit}
+        `
+      : await sql`
+          SELECT * FROM training_resources
+          WHERE agent_name = ${agent_name}
+          ORDER BY version DESC LIMIT ${limit}
+        `;
 
-  const rows = resource_type
-    ? await sql`
-        SELECT * FROM training_resources
-        WHERE org_id = ${user.org_id} AND agent_name = ${agent_name} AND resource_type = ${resource_type}
-        ORDER BY version DESC LIMIT ${limit}
-      `
-    : await sql`
-        SELECT * FROM training_resources
-        WHERE org_id = ${user.org_id} AND agent_name = ${agent_name}
-        ORDER BY version DESC LIMIT ${limit}
-      `;
-
-  return c.json(rows.map((r: any) => ({
-    resource_id: r.resource_id,
-    resource_type: r.resource_type,
-    resource_key: r.resource_key,
-    version: r.version,
-    source: r.source,
-    eval_score: r.eval_score,
-    is_active: r.is_active,
-    parent_version: r.parent_version,
-    content_length: r.content_text?.length ?? 0,
-    created_at: r.created_at,
-  })));
+    return c.json(rows.map((r: any) => ({
+      resource_id: r.resource_id,
+      resource_type: r.resource_type,
+      resource_key: r.resource_key,
+      version: r.version,
+      source: r.source,
+      eval_score: r.eval_score,
+      is_active: r.is_active,
+      parent_version: r.parent_version,
+      content_length: r.content_text?.length ?? 0,
+      created_at: r.created_at,
+    })));
+  });
 });
 
 // ── POST /resources/{agent_name}/{resource_type}/{resource_key}/activate
@@ -1568,69 +1565,69 @@ trainingRoutes.openapi(activateResourceRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name, resource_type, resource_key } = c.req.valid("param");
   const { version } = c.req.valid("json");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Deactivate all versions of this resource
+    await sql`
+      UPDATE training_resources SET is_active = false
+      WHERE agent_name = ${agent_name}
+        AND resource_type = ${resource_type} AND resource_key = ${resource_key}
+    `;
 
-  // Deactivate all versions of this resource
-  await sql`
-    UPDATE training_resources SET is_active = false
-    WHERE org_id = ${user.org_id} AND agent_name = ${agent_name}
-      AND resource_type = ${resource_type} AND resource_key = ${resource_key}
-  `;
-
-  // Activate the requested version
-  const result = await sql`
-    UPDATE training_resources SET is_active = true
-    WHERE org_id = ${user.org_id} AND agent_name = ${agent_name}
-      AND resource_type = ${resource_type} AND resource_key = ${resource_key}
-      AND version = ${version}
-  `;
-
-  if (result.count === 0) {
-    return c.json({ error: "Resource version not found" }, 404);
-  }
-
-  // Apply to agent config if it's a system_prompt
-  if (resource_type === "system_prompt") {
-    const resourceRows = await sql`
-      SELECT content_text FROM training_resources
-      WHERE org_id = ${user.org_id} AND agent_name = ${agent_name}
+    // Activate the requested version
+    const result = await sql`
+      UPDATE training_resources SET is_active = true
+      WHERE agent_name = ${agent_name}
         AND resource_type = ${resource_type} AND resource_key = ${resource_key}
         AND version = ${version}
     `;
-    if (resourceRows.length > 0 && resourceRows[0].content_text) {
-      const agentRows = await sql`
-        SELECT config FROM agents WHERE name = ${agent_name} AND org_id = ${user.org_id}
+
+    if (result.count === 0) {
+      return c.json({ error: "Resource version not found" }, 404);
+    }
+
+    // Apply to agent config if it's a system_prompt
+    if (resource_type === "system_prompt") {
+      const resourceRows = await sql`
+        SELECT content_text FROM training_resources
+        WHERE agent_name = ${agent_name}
+          AND resource_type = ${resource_type} AND resource_key = ${resource_key}
+          AND version = ${version}
       `;
-      if (agentRows.length > 0) {
-        const config = parseJsonColumn(agentRows[0].config);
-        config.system_prompt = resourceRows[0].content_text;
-        await sql`
-          UPDATE agents SET config = ${JSON.stringify(config)}, updated_at = now()
-          WHERE name = ${agent_name} AND org_id = ${user.org_id}
+      if (resourceRows.length > 0 && resourceRows[0].content_text) {
+        const agentRows = await sql`
+          SELECT config FROM agents WHERE name = ${agent_name}
         `;
+        if (agentRows.length > 0) {
+          const config = parseJsonColumn(agentRows[0].config);
+          config.system_prompt = resourceRows[0].content_text;
+          await sql`
+            UPDATE agents SET config = ${JSON.stringify(config)}, updated_at = now()
+            WHERE name = ${agent_name}
+          `;
+        }
       }
     }
-  }
 
-  // Notify runtime DO to invalidate config cache (so the new prompt takes effect immediately)
-  try {
-    await c.env.RUNTIME.fetch("https://runtime/api/v1/internal/config-invalidate", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(c.env.SERVICE_TOKEN ? { Authorization: `Bearer ${c.env.SERVICE_TOKEN}` } : {}),
-      },
-      body: JSON.stringify({ agent_name, version: String(version), timestamp: Date.now() }),
+    // Notify runtime DO to invalidate config cache (so the new prompt takes effect immediately)
+    try {
+      await c.env.RUNTIME.fetch("https://runtime/api/v1/internal/config-invalidate", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(c.env.SERVICE_TOKEN ? { Authorization: `Bearer ${c.env.SERVICE_TOKEN}` } : {}),
+        },
+        body: JSON.stringify({ agent_name, version: String(version), timestamp: Date.now() }),
+      });
+    } catch {
+      // Non-critical — DO will reload on next request anyway
+    }
+
+    auditTraining(sql, user.org_id, user.user_id, "resource.activated", agent_name, {
+      resource_type, resource_key, version,
     });
-  } catch {
-    // Non-critical — DO will reload on next request anyway
-  }
 
-  auditTraining(sql, user.org_id, user.user_id, "resource.activated", agent_name, {
-    resource_type, resource_key, version,
+    return c.json({ activated: true, version });
   });
-
-  return c.json({ activated: true, version });
 });
 
 // ── GET /rewards/{agent_name} — reward history ──────────────────────
@@ -1656,15 +1653,16 @@ trainingRoutes.openapi(listRewardsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name } = c.req.valid("param");
   const { limit } = c.req.valid("query");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // training_rewards is NOT RLS — keep org_id filter
+    const rows = await sql`
+      SELECT * FROM training_rewards
+      WHERE org_id = ${user.org_id} AND agent_name = ${agent_name}
+      ORDER BY created_at DESC LIMIT ${limit}
+    `;
 
-  const rows = await sql`
-    SELECT * FROM training_rewards
-    WHERE org_id = ${user.org_id} AND agent_name = ${agent_name}
-    ORDER BY created_at DESC LIMIT ${limit}
-  `;
-
-  return c.json(rows);
+    return c.json(rows);
+  });
 });
 
 // ── POST /resources/{agent_name}/rollback — revert to previous resource ─
@@ -1699,19 +1697,19 @@ trainingRoutes.openapi(rollbackRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name } = c.req.valid("param");
   const { resource_type, resource_key } = c.req.valid("json");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const result = await revertToPreviousResource(sql, user.org_id, agent_name, resource_type, resource_key);
 
-  const result = await revertToPreviousResource(sql, user.org_id, agent_name, resource_type, resource_key);
+    if (!result.reverted) {
+      return c.json({ error: "No previous version to rollback to", ...result }, 404);
+    }
 
-  if (!result.reverted) {
-    return c.json({ error: "No previous version to rollback to", ...result }, 404);
-  }
+    auditTraining(sql, user.org_id, user.user_id, "resource.rolled_back", agent_name, {
+      resource_type, resource_key, from_version: result.from_version, to_version: result.to_version,
+    });
 
-  auditTraining(sql, user.org_id, user.user_id, "resource.rolled_back", agent_name, {
-    resource_type, resource_key, from_version: result.from_version, to_version: result.to_version,
+    return c.json(result);
   });
-
-  return c.json(result);
 });
 
 // ── GET /resources/{agent_name}/circuit-breaker — check circuit breaker ──
@@ -1748,9 +1746,8 @@ trainingRoutes.openapi(circuitBreakerRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name } = c.req.valid("param");
   const { window_minutes, error_threshold } = c.req.valid("query");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  const state = await checkCircuitBreaker(sql, user.org_id, agent_name, window_minutes, error_threshold);
-
-  return c.json(state);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const state = await checkCircuitBreaker(sql, user.org_id, agent_name, window_minutes, error_threshold);
+    return c.json(state);
+  });
 });

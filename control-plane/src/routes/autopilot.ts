@@ -8,7 +8,7 @@
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDb } from "../db/client";
+import { withOrgDb, withAdminDb } from "../db/client";
 
 export const autopilotRoutes = createOpenAPIRouter();
 
@@ -69,34 +69,34 @@ const startRoute = createRoute({
 autopilotRoutes.openapi(startRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const body = c.req.valid("json");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Check if already active
+    const existing = await sql`
+      SELECT id, status FROM autopilot_sessions
+      WHERE agent_name = ${body.agent_name}
+        AND channel = ${body.channel} AND channel_user_id = ${body.channel_user_id || ""}
+        AND status = 'active'
+      LIMIT 1
+    `;
+    if (existing.length > 0) {
+      return c.json({ error: "Autopilot already active for this agent/channel", id: existing[0].id }, 409);
+    }
 
-  // Check if already active
-  const existing = await sql`
-    SELECT id, status FROM autopilot_sessions
-    WHERE org_id = ${user.org_id} AND agent_name = ${body.agent_name}
-      AND channel = ${body.channel} AND channel_user_id = ${body.channel_user_id || ""}
-      AND status = 'active'
-    LIMIT 1
-  `;
-  if (existing.length > 0) {
-    return c.json({ error: "Autopilot already active for this agent/channel", id: existing[0].id }, 409);
-  }
+    const addendum = body.system_addendum || DEFAULT_SYSTEM_ADDENDUM;
+    const now = new Date().toISOString();
 
-  const addendum = body.system_addendum || DEFAULT_SYSTEM_ADDENDUM;
-  const now = new Date().toISOString();
+    const rows = await sql`
+      INSERT INTO autopilot_sessions (org_id, agent_name, channel, channel_user_id, tick_interval_seconds, system_addendum, config, created_at, updated_at)
+      VALUES (${user.org_id}, ${body.agent_name}, ${body.channel}, ${body.channel_user_id || ""}, ${body.tick_interval_seconds}, ${addendum}, ${JSON.stringify(body.config || {})}, ${now}, ${now})
+      ON CONFLICT (org_id, agent_name, channel, channel_user_id) DO UPDATE SET
+        status = 'active', tick_interval_seconds = EXCLUDED.tick_interval_seconds,
+        system_addendum = EXCLUDED.system_addendum, config = EXCLUDED.config,
+        updated_at = EXCLUDED.updated_at
+      RETURNING *
+    `;
 
-  const rows = await sql`
-    INSERT INTO autopilot_sessions (org_id, agent_name, channel, channel_user_id, tick_interval_seconds, system_addendum, config, created_at, updated_at)
-    VALUES (${user.org_id}, ${body.agent_name}, ${body.channel}, ${body.channel_user_id || ""}, ${body.tick_interval_seconds}, ${addendum}, ${JSON.stringify(body.config || {})}, ${now}, ${now})
-    ON CONFLICT (org_id, agent_name, channel, channel_user_id) DO UPDATE SET
-      status = 'active', tick_interval_seconds = EXCLUDED.tick_interval_seconds,
-      system_addendum = EXCLUDED.system_addendum, config = EXCLUDED.config,
-      updated_at = EXCLUDED.updated_at
-    RETURNING *
-  `;
-
-  return c.json(rows[0]);
+    return c.json(rows[0]);
+  });
 });
 
 // POST /autopilot/stop — stop an autopilot session
@@ -127,17 +127,17 @@ const stopRoute = createRoute({
 autopilotRoutes.openapi(stopRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const body = c.req.valid("json");
-  const sql = await getDb(c.env.HYPERDRIVE);
-
-  const rows = await sql`
-    UPDATE autopilot_sessions SET status = 'stopped', updated_at = NOW()
-    WHERE org_id = ${user.org_id} AND agent_name = ${body.agent_name}
-      AND channel = ${body.channel} AND channel_user_id = ${body.channel_user_id || ""}
-      AND status = 'active'
-    RETURNING id
-  `;
-  if (rows.length === 0) return c.json({ error: "No active autopilot session found" }, 404);
-  return c.json({ stopped: true, id: rows[0].id });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      UPDATE autopilot_sessions SET status = 'stopped', updated_at = NOW()
+      WHERE agent_name = ${body.agent_name}
+        AND channel = ${body.channel} AND channel_user_id = ${body.channel_user_id || ""}
+        AND status = 'active'
+      RETURNING id
+    `;
+    if (rows.length === 0) return c.json({ error: "No active autopilot session found" }, 404);
+    return c.json({ stopped: true, id: rows[0].id });
+  });
 });
 
 // GET /autopilot/status — get autopilot sessions for the org
@@ -154,15 +154,15 @@ const statusRoute = createRoute({
 
 autopilotRoutes.openapi(statusRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
-
-  const rows = await sql`
-    SELECT * FROM autopilot_sessions
-    WHERE org_id = ${user.org_id} AND status IN ('active', 'paused')
-    ORDER BY updated_at DESC
-    LIMIT 50
-  `;
-  return c.json({ sessions: rows });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT * FROM autopilot_sessions
+      WHERE status IN ('active', 'paused')
+      ORDER BY updated_at DESC
+      LIMIT 50
+    `;
+    return c.json({ sessions: rows });
+  });
 });
 
 // ── Events Endpoint — returns recent tick outputs for a session ──
@@ -200,37 +200,39 @@ const eventsRoute = createRoute({
 autopilotRoutes.openapi(eventsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name, channel } = c.req.valid("query");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Get the session to verify ownership (RLS enforces org isolation)
+    const sessions = await sql`
+      SELECT id, tick_count, total_cost_usd FROM autopilot_sessions
+      WHERE agent_name = ${agent_name}
+        AND channel = ${channel} AND status = 'active'
+      LIMIT 1
+    `;
+    if (sessions.length === 0) {
+      return c.json({ events: [] });
+    }
 
-  // Get the session to verify ownership
-  const sessions = await sql`
-    SELECT id, tick_count, total_cost_usd FROM autopilot_sessions
-    WHERE org_id = ${user.org_id} AND agent_name = ${agent_name}
-      AND channel = ${channel} AND status = 'active'
-    LIMIT 1
-  `;
-  if (sessions.length === 0) {
-    return c.json({ events: [] });
-  }
+    // Fetch recent turns for this agent's autopilot sessions.
+    // turns is not RLS'd directly but joins to sessions which IS RLS'd,
+    // so the JOIN provides isolation. Keep s.agent_name/s.channel filters.
+    const rows = await sql`
+      SELECT t.llm_content as content, t.turn_number as tick, t.created_at
+      FROM turns t
+      JOIN sessions s ON t.session_id = s.session_id
+      WHERE s.agent_name = ${agent_name}
+        AND s.channel = ${channel}
+        AND t.created_at > now() - interval '1 hour'
+      ORDER BY t.created_at DESC
+      LIMIT 20
+    `;
 
-  // Fetch recent turns for this agent's autopilot sessions
-  const rows = await sql`
-    SELECT t.llm_content as content, t.turn_number as tick, t.created_at
-    FROM turns t
-    JOIN sessions s ON t.session_id = s.session_id
-    WHERE s.org_id = ${user.org_id} AND s.agent_name = ${agent_name}
-      AND s.channel = ${channel}
-      AND t.created_at > now() - interval '1 hour'
-    ORDER BY t.created_at DESC
-    LIMIT 20
-  `;
-
-  return c.json({
-    events: rows.map((r: any) => ({
-      content: r.content || "",
-      tick: Number(r.tick) || 0,
-      timestamp: new Date(r.created_at).getTime(),
-    })),
+    return c.json({
+      events: rows.map((r: any) => ({
+        content: r.content || "",
+        tick: Number(r.tick) || 0,
+        timestamp: new Date(r.created_at).getTime(),
+      })),
+    });
   });
 });
 
@@ -262,86 +264,96 @@ export async function tickAutopilotSessions(env: any): Promise<{ dispatched: num
   let pages = 0;
 
   try {
-    const { getDb: getDbFn } = await import("../db/client");
-    const sql = await getDbFn(env.HYPERDRIVE);
     const queue = env.JOB_QUEUE;
     if (!queue) return { dispatched: 0, pages: 0 };
 
-    // Paginated dispatch: fetch due sessions in batches and fan out to queue
-    let hasMore = true;
-    let lastId = "";
+    // Cron: cross-tenant scan for due sessions. Use admin connection
+    // (BYPASSRLS) to see all orgs in a single sweep.
+    const result = await withAdminDb(env, async (sql) => {
+      let localDispatched = 0;
+      let localPages = 0;
 
-    while (hasMore) {
-      const sessions = lastId
-        ? await sql`
-            SELECT id, org_id, agent_name, channel, channel_user_id, tick_interval_seconds, tick_count, system_addendum, config
-            FROM autopilot_sessions
-            WHERE status = 'active'
-              AND (last_tick_at IS NULL OR last_tick_at + make_interval(secs => tick_interval_seconds) < NOW())
-              AND id > ${lastId}
-            ORDER BY id ASC
-            LIMIT ${DISPATCH_PAGE_SIZE}
-          `
-        : await sql`
-            SELECT id, org_id, agent_name, channel, channel_user_id, tick_interval_seconds, tick_count, system_addendum, config
-            FROM autopilot_sessions
-            WHERE status = 'active'
-              AND (last_tick_at IS NULL OR last_tick_at + make_interval(secs => tick_interval_seconds) < NOW())
-            ORDER BY id ASC
-            LIMIT ${DISPATCH_PAGE_SIZE}
-          `;
+      // Paginated dispatch: fetch due sessions in batches and fan out to queue
+      let hasMore = true;
+      let lastId = "";
 
-      pages++;
-      hasMore = sessions.length === DISPATCH_PAGE_SIZE;
-      if (sessions.length === 0) break;
-      lastId = sessions[sessions.length - 1].id;
+      while (hasMore) {
+        const sessions = lastId
+          ? await sql`
+              SELECT id, org_id, agent_name, channel, channel_user_id, tick_interval_seconds, tick_count, system_addendum, config
+              FROM autopilot_sessions
+              WHERE status = 'active'
+                AND (last_tick_at IS NULL OR last_tick_at + make_interval(secs => tick_interval_seconds) < NOW())
+                AND id > ${lastId}
+              ORDER BY id ASC
+              LIMIT ${DISPATCH_PAGE_SIZE}
+            `
+          : await sql`
+              SELECT id, org_id, agent_name, channel, channel_user_id, tick_interval_seconds, tick_count, system_addendum, config
+              FROM autopilot_sessions
+              WHERE status = 'active'
+                AND (last_tick_at IS NULL OR last_tick_at + make_interval(secs => tick_interval_seconds) < NOW())
+              ORDER BY id ASC
+              LIMIT ${DISPATCH_PAGE_SIZE}
+            `;
 
-      // Optimistically mark as ticked (prevents re-dispatch on next cron)
-      const ids = sessions.map((s: any) => s.id);
-      await sql`
-        UPDATE autopilot_sessions
-        SET last_tick_at = NOW(), tick_count = tick_count + 1, updated_at = NOW()
-        WHERE id = ANY(${ids})
-      `;
+        localPages++;
+        hasMore = sessions.length === DISPATCH_PAGE_SIZE;
+        if (sessions.length === 0) break;
+        lastId = sessions[sessions.length - 1].id;
 
-      // Fan out to queue — batch send for efficiency
-      // CF Queue.send() is fast (~1ms) so even 500 sends complete in <1s
-      await Promise.all(sessions.map((session: any) =>
-        queue.send({
-          type: "autopilot_tick",
-          payload: {
-            session_id: session.id,
-            org_id: session.org_id,
-            agent_name: session.agent_name,
-            channel: session.channel,
-            channel_user_id: session.channel_user_id || "",
-            tick_count: (session.tick_count || 0) + 1,
-            system_addendum: session.system_addendum || "",
-            config: session.config,
-          },
-        })
-      ));
+        // Optimistically mark as ticked (prevents re-dispatch on next cron)
+        const ids = sessions.map((s: any) => s.id);
+        await sql`
+          UPDATE autopilot_sessions
+          SET last_tick_at = NOW(), tick_count = tick_count + 1, updated_at = NOW()
+          WHERE id = ANY(${ids})
+        `;
 
-      dispatched += sessions.length;
+        // Fan out to queue — batch send for efficiency
+        // CF Queue.send() is fast (~1ms) so even 500 sends complete in <1s
+        await Promise.all(sessions.map((session: any) =>
+          queue.send({
+            type: "autopilot_tick",
+            payload: {
+              session_id: session.id,
+              org_id: session.org_id,
+              agent_name: session.agent_name,
+              channel: session.channel,
+              channel_user_id: session.channel_user_id || "",
+              tick_count: (session.tick_count || 0) + 1,
+              system_addendum: session.system_addendum || "",
+              config: session.config,
+            },
+          })
+        ));
 
-      // Safety: don't exceed 30s cron budget
-      if (pages > 20) break; // 20 pages × 500 = 10K sessions max per cron cycle
-    }
+        localDispatched += sessions.length;
 
-    // Dream memory consolidation: run for sessions that have been idle 10+ minutes
-    try {
-      const idleSessions = await sql`
-        SELECT DISTINCT org_id, agent_name FROM autopilot_sessions
-        WHERE status = 'active' AND last_tick_at < NOW() - INTERVAL '10 minutes'
-        LIMIT 5
-      `;
-      for (const session of idleSessions) {
-        await queue.send({
-          type: "memory_consolidation",
-          payload: { org_id: session.org_id, agent_name: session.agent_name },
-        });
+        // Safety: don't exceed 30s cron budget
+        if (localPages > 20) break; // 20 pages × 500 = 10K sessions max per cron cycle
       }
-    } catch {}
+
+      // Dream memory consolidation: run for sessions that have been idle 10+ minutes
+      try {
+        const idleSessions = await sql`
+          SELECT DISTINCT org_id, agent_name FROM autopilot_sessions
+          WHERE status = 'active' AND last_tick_at < NOW() - INTERVAL '10 minutes'
+          LIMIT 5
+        `;
+        for (const session of idleSessions) {
+          await queue.send({
+            type: "memory_consolidation",
+            payload: { org_id: session.org_id, agent_name: session.agent_name },
+          });
+        }
+      } catch {}
+
+      return { dispatched: localDispatched, pages: localPages };
+    });
+
+    dispatched = result.dispatched;
+    pages = result.pages;
   } catch {
     // DB unavailable — skip this tick cycle
   }
@@ -390,21 +402,21 @@ export async function processAutopilotTick(
   // Update cost (tick_count already updated optimistically)
   if (costUsd > 0) {
     try {
-      const { getDb: getDbFn } = await import("../db/client");
-      const sql = await getDbFn(env.HYPERDRIVE);
-      await sql`
-        UPDATE autopilot_sessions SET total_cost_usd = total_cost_usd + ${costUsd}, updated_at = NOW()
-        WHERE id = ${payload.session_id}
-      `;
+      await withOrgDb(env, payload.org_id, async (sql) => {
+        await sql`
+          UPDATE autopilot_sessions SET total_cost_usd = total_cost_usd + ${costUsd}, updated_at = NOW()
+          WHERE id = ${payload.session_id}
+        `;
+      });
     } catch {}
   }
 
   // Push non-empty output to channel
   if (output.trim() && output.trim() !== "(No output)") {
     try {
-      const { getDb: getDbFn } = await import("../db/client");
-      const sql = await getDbFn(env.HYPERDRIVE);
-      await pushToChannel(env, sql, { ...payload, config: payload.config }, output);
+      await withOrgDb(env, payload.org_id, async (sql) => {
+        await pushToChannel(env, sql, { ...payload, config: payload.config }, output);
+      });
     } catch {}
   }
 }
@@ -476,10 +488,11 @@ async function pushToChannel(env: any, sql: any, session: any, output: string): 
   }
 }
 
-async function getSecretValue(sql: any, name: string, orgId: string): Promise<string> {
+async function getSecretValue(sql: any, name: string, _orgId: string): Promise<string> {
+  // sql is an org-scoped connection (RLS enforces org isolation on secrets).
   try {
     const rows = await sql`
-      SELECT encrypted_value FROM secrets WHERE name = ${name} AND org_id = ${orgId}
+      SELECT encrypted_value FROM secrets WHERE name = ${name}
       ORDER BY created_at DESC LIMIT 1
     `;
     return rows.length > 0 ? String(rows[0].encrypted_value) : "";

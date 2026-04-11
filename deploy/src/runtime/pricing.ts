@@ -16,6 +16,8 @@
  * Source: OpenRouter API pricing as of March 2026.
  */
 
+import { log } from "./log";
+
 // ── Margin ──────────────────────────────────────────────────────
 // Applied to ALL costs (LLM + tools). This is how OneShots makes money.
 // 1.4x = 40% gross margin on compute costs.
@@ -167,7 +169,7 @@ export function estimateTokenCost(model: string, inputTokens: number, outputToke
       if (model.startsWith("@cf/") || model.startsWith("gemma-4")) {
         pricing = { input: 0.00, output: 0.00 };
       } else {
-        console.warn(`[pricing] Unknown model '${model}' — charging penalty rate. Add to MODEL_PRICING.`);
+        log.warn(`[pricing] Unknown model '${model}' — charging penalty rate. Add to MODEL_PRICING.`);
         pricing = { input: 5.00, output: 15.00 };
       }
     }

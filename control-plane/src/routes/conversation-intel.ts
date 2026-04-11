@@ -6,7 +6,7 @@ import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { scoreSession } from "../logic/conversation-analytics";
 import { requireScope } from "../middleware/auth";
 
@@ -36,50 +36,50 @@ conversationIntelRoutes.openapi(summaryRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name: agentName, since_days: sinceDays } = c.req.valid("query");
   const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    let rows;
+    if (agentName) {
+      rows = await sql`
+        SELECT
+          COUNT(*) as total_scores,
+          AVG(quality_overall) as avg_quality,
+          AVG(sentiment_score) as avg_sentiment,
+          MIN(quality_overall) as min_quality,
+          MAX(quality_overall) as max_quality,
+          SUM(CASE WHEN has_tool_failure = 1 THEN 1 ELSE 0 END) as tool_failures,
+          SUM(CASE WHEN has_hallucination_risk = 1 THEN 1 ELSE 0 END) as hallucination_risks,
+          COUNT(DISTINCT session_id) as sessions_scored
+        FROM conversation_scores
+        WHERE agent_name = ${agentName} AND created_at >= ${since}
+      `;
+    } else {
+      rows = await sql`
+        SELECT
+          COUNT(*) as total_scores,
+          AVG(quality_overall) as avg_quality,
+          AVG(sentiment_score) as avg_sentiment,
+          MIN(quality_overall) as min_quality,
+          MAX(quality_overall) as max_quality,
+          SUM(CASE WHEN has_tool_failure = 1 THEN 1 ELSE 0 END) as tool_failures,
+          SUM(CASE WHEN has_hallucination_risk = 1 THEN 1 ELSE 0 END) as hallucination_risks,
+          COUNT(DISTINCT session_id) as sessions_scored
+        FROM conversation_scores
+        WHERE created_at >= ${since}
+      `;
+    }
 
-  let rows;
-  if (agentName) {
-    rows = await sql`
-      SELECT
-        COUNT(*) as total_scores,
-        AVG(quality_overall) as avg_quality,
-        AVG(sentiment_score) as avg_sentiment,
-        MIN(quality_overall) as min_quality,
-        MAX(quality_overall) as max_quality,
-        SUM(CASE WHEN has_tool_failure = 1 THEN 1 ELSE 0 END) as tool_failures,
-        SUM(CASE WHEN has_hallucination_risk = 1 THEN 1 ELSE 0 END) as hallucination_risks,
-        COUNT(DISTINCT session_id) as sessions_scored
-      FROM conversation_scores
-      WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND created_at >= ${since}
-    `;
-  } else {
-    rows = await sql`
-      SELECT
-        COUNT(*) as total_scores,
-        AVG(quality_overall) as avg_quality,
-        AVG(sentiment_score) as avg_sentiment,
-        MIN(quality_overall) as min_quality,
-        MAX(quality_overall) as max_quality,
-        SUM(CASE WHEN has_tool_failure = 1 THEN 1 ELSE 0 END) as tool_failures,
-        SUM(CASE WHEN has_hallucination_risk = 1 THEN 1 ELSE 0 END) as hallucination_risks,
-        COUNT(DISTINCT session_id) as sessions_scored
-      FROM conversation_scores
-      WHERE org_id = ${user.org_id} AND created_at >= ${since}
-    `;
-  }
-
-  const r = rows[0] ?? {};
-  return c.json({
-    total_scores: Number(r.total_scores ?? 0),
-    avg_quality: Math.round(Number(r.avg_quality ?? 0) * 1000) / 1000,
-    avg_sentiment: Math.round(Number(r.avg_sentiment ?? 0) * 1000) / 1000,
-    min_quality: Math.round(Number(r.min_quality ?? 0) * 1000) / 1000,
-    max_quality: Math.round(Number(r.max_quality ?? 0) * 1000) / 1000,
-    tool_failures: Number(r.tool_failures ?? 0),
-    hallucination_risks: Number(r.hallucination_risks ?? 0),
-    sessions_scored: Number(r.sessions_scored ?? 0),
-    since_days: sinceDays,
+    const r = rows[0] ?? {};
+    return c.json({
+      total_scores: Number(r.total_scores ?? 0),
+      avg_quality: Math.round(Number(r.avg_quality ?? 0) * 1000) / 1000,
+      avg_sentiment: Math.round(Number(r.avg_sentiment ?? 0) * 1000) / 1000,
+      min_quality: Math.round(Number(r.min_quality ?? 0) * 1000) / 1000,
+      max_quality: Math.round(Number(r.max_quality ?? 0) * 1000) / 1000,
+      tool_failures: Number(r.tool_failures ?? 0),
+      hallucination_risks: Number(r.hallucination_risks ?? 0),
+      sessions_scored: Number(r.sessions_scored ?? 0),
+      since_days: sinceDays,
+    });
   });
 });
 
@@ -108,48 +108,47 @@ const scoresRoute = createRoute({
 conversationIntelRoutes.openapi(scoresRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { session_id: sessionId, agent_name: agentName, sentiment, limit } = c.req.valid("query");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    let rows;
+    if (sessionId && sentiment) {
+      rows = await sql`
+        SELECT * FROM conversation_scores
+        WHERE session_id = ${sessionId} AND sentiment = ${sentiment}
+        ORDER BY turn_number ASC LIMIT ${limit}
+      `;
+    } else if (sessionId) {
+      rows = await sql`
+        SELECT * FROM conversation_scores
+        WHERE session_id = ${sessionId}
+        ORDER BY turn_number ASC LIMIT ${limit}
+      `;
+    } else if (agentName && sentiment) {
+      rows = await sql`
+        SELECT * FROM conversation_scores
+        WHERE agent_name = ${agentName} AND sentiment = ${sentiment}
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    } else if (agentName) {
+      rows = await sql`
+        SELECT * FROM conversation_scores
+        WHERE agent_name = ${agentName}
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    } else if (sentiment) {
+      rows = await sql`
+        SELECT * FROM conversation_scores
+        WHERE sentiment = ${sentiment}
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    } else {
+      rows = await sql`
+        SELECT * FROM conversation_scores
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    }
 
-  let rows;
-  if (sessionId && sentiment) {
-    rows = await sql`
-      SELECT * FROM conversation_scores
-      WHERE org_id = ${user.org_id} AND session_id = ${sessionId} AND sentiment = ${sentiment}
-      ORDER BY turn_number ASC LIMIT ${limit}
-    `;
-  } else if (sessionId) {
-    rows = await sql`
-      SELECT * FROM conversation_scores
-      WHERE org_id = ${user.org_id} AND session_id = ${sessionId}
-      ORDER BY turn_number ASC LIMIT ${limit}
-    `;
-  } else if (agentName && sentiment) {
-    rows = await sql`
-      SELECT * FROM conversation_scores
-      WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND sentiment = ${sentiment}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  } else if (agentName) {
-    rows = await sql`
-      SELECT * FROM conversation_scores
-      WHERE org_id = ${user.org_id} AND agent_name = ${agentName}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  } else if (sentiment) {
-    rows = await sql`
-      SELECT * FROM conversation_scores
-      WHERE org_id = ${user.org_id} AND sentiment = ${sentiment}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  } else {
-    rows = await sql`
-      SELECT * FROM conversation_scores
-      WHERE org_id = ${user.org_id}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  }
-
-  return c.json(rows);
+    return c.json(rows);
+  });
 });
 
 // ── GET /analytics ───────────────────────────────────────────────
@@ -177,24 +176,24 @@ conversationIntelRoutes.openapi(analyticsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name: agentName, since_days: sinceDays, limit } = c.req.valid("query");
   const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    let rows;
+    if (agentName) {
+      rows = await sql`
+        SELECT * FROM conversation_analytics
+        WHERE agent_name = ${agentName} AND created_at >= ${since}
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    } else {
+      rows = await sql`
+        SELECT * FROM conversation_analytics
+        WHERE created_at >= ${since}
+        ORDER BY created_at DESC LIMIT ${limit}
+      `;
+    }
 
-  let rows;
-  if (agentName) {
-    rows = await sql`
-      SELECT * FROM conversation_analytics
-      WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND created_at >= ${since}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  } else {
-    rows = await sql`
-      SELECT * FROM conversation_analytics
-      WHERE org_id = ${user.org_id} AND created_at >= ${since}
-      ORDER BY created_at DESC LIMIT ${limit}
-    `;
-  }
-
-  return c.json(rows);
+    return c.json(rows);
+  });
 });
 
 // ── POST /score/:session_id ──────────────────────────────────────
@@ -218,41 +217,41 @@ const scoreSessionRoute = createRoute({
 conversationIntelRoutes.openapi(scoreSessionRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { session_id: sessionId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Verify session exists (RLS enforces org isolation on sessions)
+    const sessionRows = await sql`
+      SELECT session_id, agent_name, input_text FROM sessions
+      WHERE session_id = ${sessionId} LIMIT 1
+    `;
+    if (!sessionRows.length) {
+      return c.json({ error: "Session not found" }, 404);
+    }
 
-  // Verify session exists
-  const sessionRows = await sql`
-    SELECT session_id, agent_name, input_text FROM sessions
-    WHERE session_id = ${sessionId} LIMIT 1
-  `;
-  if (!sessionRows.length) {
-    return c.json({ error: "Session not found" }, 404);
-  }
+    const session = sessionRows[0] as Record<string, unknown>;
+    const agentName = String(session.agent_name ?? "");
+    const inputText = String(session.input_text ?? "");
 
-  const session = sessionRows[0] as Record<string, unknown>;
-  const agentName = String(session.agent_name ?? "");
-  const inputText = String(session.input_text ?? "");
+    // Load turns (turns is gated by sessions FK; the verified session above
+    // proves this session belongs to the current org).
+    const turns = await sql`
+      SELECT * FROM turns WHERE session_id = ${sessionId}
+      ORDER BY turn_number ASC
+    `;
 
-  // Load turns
-  const turns = await sql`
-    SELECT * FROM turns WHERE session_id = ${sessionId}
-    ORDER BY turn_number ASC
-  `;
+    if (!turns.length) {
+      return c.json({ session_id: sessionId, scored: false, message: "No turns to score" });
+    }
 
-  if (!turns.length) {
-    return c.json({ session_id: sessionId, scored: false, message: "No turns to score" });
-  }
-
-  // Run scoring (use Workers AI if available)
-  const result = await scoreSession(
-    sessionId,
-    turns as unknown as Record<string, unknown>[],
-    inputText,
-    user.org_id,
-    agentName,
-    c.env.AI,
-    c.env.AI_SCORING_MODEL || "@cf/meta/llama-3.1-8b-instruct",
-  );
+    // Run scoring (use Workers AI if available)
+    const result = await scoreSession(
+      sessionId,
+      turns as unknown as Record<string, unknown>[],
+      inputText,
+      user.org_id,
+      agentName,
+      c.env.AI,
+      c.env.AI_SCORING_MODEL || "@cf/meta/llama-3.1-8b-instruct",
+    );
 
   // Persist per-turn scores
   const now = new Date().toISOString();
@@ -334,14 +333,15 @@ conversationIntelRoutes.openapi(scoreSessionRoute, async (c): Promise<any> => {
     // Best-effort persistence
   }
 
-  return c.json({
-    session_id: sessionId,
-    scored: true,
-    total_turns: result.total_turns,
-    avg_quality: result.avg_quality,
-    avg_sentiment_score: result.avg_sentiment_score,
-    dominant_sentiment: result.dominant_sentiment,
-    topics: result.topics,
+    return c.json({
+      session_id: sessionId,
+      scored: true,
+      total_turns: result.total_turns,
+      avg_quality: result.avg_quality,
+      avg_sentiment_score: result.avg_sentiment_score,
+      dominant_sentiment: result.dominant_sentiment,
+      topics: result.topics,
+    });
   });
 });
 
@@ -369,104 +369,104 @@ conversationIntelRoutes.openapi(trendsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name: agentName, since_days: sinceDays } = c.req.valid("query");
   const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Daily quality + sentiment averages
+    let dailyRows;
+    let sentimentDistRows;
+    let intentDistRows;
+    let topicDistRows;
 
-  // Daily quality + sentiment averages
-  let dailyRows;
-  let sentimentDistRows;
-  let intentDistRows;
-  let topicDistRows;
+    if (agentName) {
+      dailyRows = await sql`
+        SELECT
+          DATE(created_at) as day,
+          AVG(quality_overall) as avg_quality,
+          AVG(sentiment_score) as avg_sentiment,
+          COUNT(*) as turn_count,
+          SUM(CASE WHEN has_tool_failure = 1 THEN 1 ELSE 0 END) as tool_failures
+        FROM conversation_scores
+        WHERE agent_name = ${agentName} AND created_at >= ${since}
+        GROUP BY day ORDER BY day
+      `;
+      sentimentDistRows = await sql`
+        SELECT sentiment, COUNT(*) as cnt
+        FROM conversation_scores
+        WHERE agent_name = ${agentName} AND created_at >= ${since}
+        GROUP BY sentiment
+      `;
+      intentDistRows = await sql`
+        SELECT intent, COUNT(*) as cnt
+        FROM conversation_scores
+        WHERE agent_name = ${agentName} AND created_at >= ${since}
+        GROUP BY intent ORDER BY cnt DESC LIMIT 10
+      `;
+      topicDistRows = await sql`
+        SELECT topic, COUNT(*) as cnt
+        FROM conversation_scores
+        WHERE agent_name = ${agentName} AND created_at >= ${since}
+          AND topic != ''
+        GROUP BY topic ORDER BY cnt DESC LIMIT 10
+      `;
+    } else {
+      dailyRows = await sql`
+        SELECT
+          DATE(created_at) as day,
+          AVG(quality_overall) as avg_quality,
+          AVG(sentiment_score) as avg_sentiment,
+          COUNT(*) as turn_count,
+          SUM(CASE WHEN has_tool_failure = 1 THEN 1 ELSE 0 END) as tool_failures
+        FROM conversation_scores
+        WHERE created_at >= ${since}
+        GROUP BY day ORDER BY day
+      `;
+      sentimentDistRows = await sql`
+        SELECT sentiment, COUNT(*) as cnt
+        FROM conversation_scores
+        WHERE created_at >= ${since}
+        GROUP BY sentiment
+      `;
+      intentDistRows = await sql`
+        SELECT intent, COUNT(*) as cnt
+        FROM conversation_scores
+        WHERE created_at >= ${since}
+        GROUP BY intent ORDER BY cnt DESC LIMIT 10
+      `;
+      topicDistRows = await sql`
+        SELECT topic, COUNT(*) as cnt
+        FROM conversation_scores
+        WHERE created_at >= ${since}
+          AND topic != ''
+        GROUP BY topic ORDER BY cnt DESC LIMIT 10
+      `;
+    }
 
-  if (agentName) {
-    dailyRows = await sql`
-      SELECT
-        DATE(created_at) as day,
-        AVG(quality_overall) as avg_quality,
-        AVG(sentiment_score) as avg_sentiment,
-        COUNT(*) as turn_count,
-        SUM(CASE WHEN has_tool_failure = 1 THEN 1 ELSE 0 END) as tool_failures
-      FROM conversation_scores
-      WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND created_at >= ${since}
-      GROUP BY day ORDER BY day
-    `;
-    sentimentDistRows = await sql`
-      SELECT sentiment, COUNT(*) as cnt
-      FROM conversation_scores
-      WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND created_at >= ${since}
-      GROUP BY sentiment
-    `;
-    intentDistRows = await sql`
-      SELECT intent, COUNT(*) as cnt
-      FROM conversation_scores
-      WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND created_at >= ${since}
-      GROUP BY intent ORDER BY cnt DESC LIMIT 10
-    `;
-    topicDistRows = await sql`
-      SELECT topic, COUNT(*) as cnt
-      FROM conversation_scores
-      WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND created_at >= ${since}
-        AND topic != ''
-      GROUP BY topic ORDER BY cnt DESC LIMIT 10
-    `;
-  } else {
-    dailyRows = await sql`
-      SELECT
-        DATE(created_at) as day,
-        AVG(quality_overall) as avg_quality,
-        AVG(sentiment_score) as avg_sentiment,
-        COUNT(*) as turn_count,
-        SUM(CASE WHEN has_tool_failure = 1 THEN 1 ELSE 0 END) as tool_failures
-      FROM conversation_scores
-      WHERE org_id = ${user.org_id} AND created_at >= ${since}
-      GROUP BY day ORDER BY day
-    `;
-    sentimentDistRows = await sql`
-      SELECT sentiment, COUNT(*) as cnt
-      FROM conversation_scores
-      WHERE org_id = ${user.org_id} AND created_at >= ${since}
-      GROUP BY sentiment
-    `;
-    intentDistRows = await sql`
-      SELECT intent, COUNT(*) as cnt
-      FROM conversation_scores
-      WHERE org_id = ${user.org_id} AND created_at >= ${since}
-      GROUP BY intent ORDER BY cnt DESC LIMIT 10
-    `;
-    topicDistRows = await sql`
-      SELECT topic, COUNT(*) as cnt
-      FROM conversation_scores
-      WHERE org_id = ${user.org_id} AND created_at >= ${since}
-        AND topic != ''
-      GROUP BY topic ORDER BY cnt DESC LIMIT 10
-    `;
-  }
+    // Build distributions
+    const sentimentDist: Record<string, number> = {};
+    for (const r of sentimentDistRows) {
+      sentimentDist[String(r.sentiment)] = Number(r.cnt);
+    }
 
-  // Build distributions
-  const sentimentDist: Record<string, number> = {};
-  for (const r of sentimentDistRows) {
-    sentimentDist[String(r.sentiment)] = Number(r.cnt);
-  }
+    const intentDist: Record<string, number> = {};
+    for (const r of intentDistRows) {
+      intentDist[String(r.intent)] = Number(r.cnt);
+    }
 
-  const intentDist: Record<string, number> = {};
-  for (const r of intentDistRows) {
-    intentDist[String(r.intent)] = Number(r.cnt);
-  }
+    const topicDist: Record<string, number> = {};
+    for (const r of topicDistRows) {
+      topicDist[String(r.topic)] = Number(r.cnt);
+    }
 
-  const topicDist: Record<string, number> = {};
-  for (const r of topicDistRows) {
-    topicDist[String(r.topic)] = Number(r.cnt);
-  }
-
-  return c.json({
-    daily: dailyRows.map((r) => ({
-      day: r.day,
-      avg_quality: Math.round(Number(r.avg_quality ?? 0) * 1000) / 1000,
-      avg_sentiment: Math.round(Number(r.avg_sentiment ?? 0) * 1000) / 1000,
-      turn_count: Number(r.turn_count ?? 0),
-      tool_failures: Number(r.tool_failures ?? 0),
-    })),
-    sentiment_distribution: sentimentDist,
-    intent_distribution: intentDist,
-    topic_distribution: topicDist,
+    return c.json({
+      daily: dailyRows.map((r) => ({
+        day: r.day,
+        avg_quality: Math.round(Number(r.avg_quality ?? 0) * 1000) / 1000,
+        avg_sentiment: Math.round(Number(r.avg_sentiment ?? 0) * 1000) / 1000,
+        turn_count: Number(r.turn_count ?? 0),
+        tool_failures: Number(r.tool_failures ?? 0),
+      })),
+      sentiment_distribution: sentimentDist,
+      intent_distribution: intentDist,
+      topic_distribution: topicDist,
+    });
   });
 });

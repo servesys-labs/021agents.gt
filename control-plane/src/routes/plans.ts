@@ -8,7 +8,7 @@
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import rawDefault from "../../../config/default.json";
 import { parseJsonColumn } from "../lib/parse-json-column";
 
@@ -199,33 +199,34 @@ plansRoutes.openapi(createPlanRoute, async (c): Promise<any> => {
     tool_call: { provider, model: toolModel, max_tokens: 4096 },
   };
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const now = new Date().toISOString();
 
-  let existing: Record<string, unknown> = {};
-  try {
-    const rows = await sql`
-      SELECT config FROM project_configs WHERE org_id = ${user.org_id} LIMIT 1
-    `;
-    if (rows.length > 0) existing = parseJsonColumn(rows[0].config);
-  } catch {
-    return c.json({ error: "Failed to load project config" }, 500);
-  }
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    let existing: Record<string, unknown> = {};
+    try {
+      const rows = await sql`
+        SELECT config FROM project_configs LIMIT 1
+      `;
+      if (rows.length > 0) existing = parseJsonColumn(rows[0].config);
+    } catch {
+      return c.json({ error: "Failed to load project config" }, 500);
+    }
 
-  const plans = isRecord(existing.plans) ? { ...existing.plans } : {};
-  plans[name] = planEntry;
-  const merged = { ...existing, plans };
-  const configJson = JSON.stringify(merged);
+    const plans = isRecord(existing.plans) ? { ...existing.plans } : {};
+    plans[name] = planEntry;
+    const merged = { ...existing, plans };
+    const configJson = JSON.stringify(merged);
 
-  try {
-    await sql`
-      INSERT INTO project_configs (org_id, config, updated_at)
-      VALUES (${user.org_id}, ${configJson}, ${now})
-      ON CONFLICT (org_id) DO UPDATE SET config = EXCLUDED.config, updated_at = EXCLUDED.updated_at
-    `;
-  } catch {
-    return c.json({ error: "Failed to save project config" }, 500);
-  }
+    try {
+      await sql`
+        INSERT INTO project_configs (org_id, config, updated_at)
+        VALUES (${user.org_id}, ${configJson}, ${now})
+        ON CONFLICT (org_id) DO UPDATE SET config = EXCLUDED.config, updated_at = EXCLUDED.updated_at
+      `;
+    } catch {
+      return c.json({ error: "Failed to save project config" }, 500);
+    }
 
-  return c.json({ created: name });
+    return c.json({ created: name });
+  });
 });

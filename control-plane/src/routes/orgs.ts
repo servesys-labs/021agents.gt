@@ -6,7 +6,7 @@ import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses, OrgSummary, OrgMember } from "../schemas/openapi";
 import type { CurrentUser } from "../auth/types";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import type { Sql } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { logSecurityEvent } from "../logic/security-events";
@@ -66,24 +66,28 @@ const listOrgsRoute = createRoute({
 });
 orgRoutes.openapi(listOrgsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const rows = await sql`
-    SELECT o.*, COUNT(m2.user_id) as member_count
-    FROM orgs o
-    JOIN org_members m ON o.org_id = m.org_id
-    LEFT JOIN org_members m2 ON o.org_id = m2.org_id
-    WHERE m.user_id = ${user.user_id}
-    GROUP BY o.org_id
-  `;
-  return c.json(
-    rows.map((r: any) => ({
-      org_id: r.org_id,
-      name: r.name,
-      slug: r.slug,
-      plan: r.plan || "free",
-      member_count: Number(r.member_count),
-    })),
-  );
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // orgs is RLS-enforced (only the current org row is visible) — but the
+    // join through org_members + the user filter still produces the correct
+    // single-org result for the caller.
+    const rows = await sql`
+      SELECT o.*, COUNT(m2.user_id) as member_count
+      FROM orgs o
+      JOIN org_members m ON o.org_id = m.org_id
+      LEFT JOIN org_members m2 ON o.org_id = m2.org_id
+      WHERE m.user_id = ${user.user_id}
+      GROUP BY o.org_id
+    `;
+    return c.json(
+      rows.map((r: any) => ({
+        org_id: r.org_id,
+        name: r.name,
+        slug: r.slug,
+        plan: r.plan || "free",
+        member_count: Number(r.member_count),
+      })),
+    );
+  });
 });
 
 // ── POST / — create a new organization ──────────────────────────────────
@@ -121,34 +125,35 @@ orgRoutes.openapi(createOrgRoute, async (c): Promise<any> => {
   if (!name) return c.json({ error: "name is required" }, 400);
   const slug = String(body.slug || "").trim() || name.toLowerCase().replace(/\s+/g, "-");
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const orgId = genId();
 
-  await sql`
-    INSERT INTO orgs (org_id, name, slug, owner_user_id) VALUES (${orgId}, ${name}, ${slug}, ${user.user_id})
-  `;
-  await sql`
-    INSERT INTO org_members (org_id, user_id, role) VALUES (${orgId}, ${user.user_id}, 'owner')
-  `;
-
-  // Create default org_settings for the new org
-  const now = new Date().toISOString();
-  try {
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
     await sql`
-      INSERT INTO org_settings (org_id, plan_type, settings, limits, features, created_at, updated_at)
-      VALUES (
-        ${orgId},
-        ${"free"},
-        ${JSON.stringify({ onboarding_complete: false, default_connectors: [] })},
-        ${JSON.stringify({ max_agents: 50, max_runs_per_month: 1000, max_seats: 1 })},
-        ${JSON.stringify(["basic_agents", "basic_observability"])},
-        ${now},
-        ${now}
-      )
+      INSERT INTO orgs (org_id, name, slug, owner_user_id) VALUES (${orgId}, ${name}, ${slug}, ${user.user_id})
     `;
-  } catch {}
+    await sql`
+      INSERT INTO org_members (org_id, user_id, role) VALUES (${orgId}, ${user.user_id}, 'owner')
+    `;
 
-  return c.json({ org_id: orgId, name, slug, plan: "free", member_count: 1 });
+    // Create default org_settings for the new org
+    const now = new Date().toISOString();
+    try {
+      await sql`
+        INSERT INTO org_settings (org_id, plan_type, settings, limits, features, created_at, updated_at)
+        VALUES (
+          ${orgId},
+          ${"free"},
+          ${JSON.stringify({ onboarding_complete: false, default_connectors: [] })},
+          ${JSON.stringify({ max_agents: 50, max_runs_per_month: 1000, max_seats: 1 })},
+          ${JSON.stringify(["basic_agents", "basic_observability"])},
+          ${now},
+          ${now}
+        )
+      `;
+    } catch {}
+
+    return c.json({ org_id: orgId, name, slug, plan: "free", member_count: 1 });
+  });
 });
 
 // ── GET /:org_id/members — list members ─────────────────────────────────
@@ -173,20 +178,20 @@ const listMembersRoute = createRoute({
 orgRoutes.openapi(listMembersRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { org_id: orgId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    try {
+      await requireOrgMember(sql, user, orgId, "viewer");
+    } catch (e: any) {
+      return c.json({ error: e.message }, e.status || 400);
+    }
 
-  try {
-    await requireOrgMember(sql, user, orgId, "viewer");
-  } catch (e: any) {
-    return c.json({ error: e.message }, e.status || 400);
-  }
-
-  const rows = await sql`
-    SELECT u.user_id, u.email, u.name, m.role, m.created_at
-    FROM org_members m JOIN users u ON m.user_id = u.user_id
-    WHERE m.org_id = ${orgId}
-  `;
-  return c.json({ members: rows });
+    const rows = await sql`
+      SELECT u.user_id, u.email, u.name, m.role, m.created_at
+      FROM org_members m JOIN users u ON m.user_id = u.user_id
+      WHERE m.org_id = ${orgId}
+    `;
+    return c.json({ members: rows });
+  });
 });
 
 // ── POST /:org_id/members — invite a member ────────────────────────────
@@ -234,42 +239,43 @@ orgRoutes.openapi(addMemberRoute, async (c): Promise<any> => {
     return c.json({ error: "Invalid role" }, 400);
   }
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  try {
-    await requireOrgMember(sql, user, orgId, "admin");
-  } catch (e: any) {
-    return c.json({ error: e.message }, e.status || 400);
-  }
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    try {
+      await requireOrgMember(sql, user, orgId, "admin");
+    } catch (e: any) {
+      return c.json({ error: e.message }, e.status || 400);
+    }
 
-  // Find or create user
-  const userRows = await sql`SELECT user_id FROM users WHERE email = ${email}`;
-  let targetUserId: string;
-  if (userRows.length > 0) {
-    targetUserId = userRows[0].user_id;
-  } else {
-    targetUserId = genId();
-    await sql`INSERT INTO users (user_id, email, name) VALUES (${targetUserId}, ${email}, '')`;
-  }
+    // Find or create user
+    const userRows = await sql`SELECT user_id FROM users WHERE email = ${email}`;
+    let targetUserId: string;
+    if (userRows.length > 0) {
+      targetUserId = userRows[0].user_id;
+    } else {
+      targetUserId = genId();
+      await sql`INSERT INTO users (user_id, email, name) VALUES (${targetUserId}, ${email}, '')`;
+    }
 
-  await sql`
-    INSERT INTO org_members (org_id, user_id, role, invited_by)
-    VALUES (${orgId}, ${targetUserId}, ${role}, ${user.user_id})
-    ON CONFLICT (org_id, user_id) DO NOTHING
-  `;
+    await sql`
+      INSERT INTO org_members (org_id, user_id, role, invited_by)
+      VALUES (${orgId}, ${targetUserId}, ${role}, ${user.user_id})
+      ON CONFLICT (org_id, user_id) DO NOTHING
+    `;
 
-  // Security event: user invited
-  logSecurityEvent(sql, {
-    org_id: orgId,
-    event_type: "user.invited",
-    actor_id: user.user_id,
-    actor_type: "user",
-    target_id: targetUserId,
-    target_type: "user",
-    severity: "info",
-    details: { email, role },
+    // Security event: user invited
+    logSecurityEvent(sql, {
+      org_id: orgId,
+      event_type: "user.invited",
+      actor_id: user.user_id,
+      actor_type: "user",
+      target_id: targetUserId,
+      target_type: "user",
+      severity: "info",
+      details: { email, role },
+    });
+
+    return c.json({ invited: email, role });
   });
-
-  return c.json({ invited: email, role });
 });
 
 // ── PUT /:org_id — update an organization ───────────────────────────────
@@ -308,38 +314,39 @@ orgRoutes.openapi(updateOrgRoute, async (c): Promise<any> => {
   const name = String(body.name || "").trim();
   const plan = String(body.plan || "").trim();
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  try {
-    await requireOrgMember(sql, user, orgId, "admin");
-  } catch (e: any) {
-    return c.json({ error: e.message }, e.status || 400);
-  }
-
-  if (!name && !plan) return c.json({ error: "Nothing to update" }, 400);
-
-  const now = new Date().toISOString();
-  if (name && plan) {
-    await sql`UPDATE orgs SET name = ${name}, plan = ${plan}, updated_at = ${now} WHERE org_id = ${orgId}`;
-  } else if (name) {
-    await sql`UPDATE orgs SET name = ${name}, updated_at = ${now} WHERE org_id = ${orgId}`;
-  } else {
-    await sql`UPDATE orgs SET plan = ${plan}, updated_at = ${now} WHERE org_id = ${orgId}`;
-  }
-
-  // Sync plan change to org_settings
-  if (plan) {
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
     try {
-      await sql`
-        INSERT INTO org_settings (org_id, plan_type, created_at, updated_at)
-        VALUES (${orgId}, ${plan}, ${now}, ${now})
-        ON CONFLICT (org_id) DO UPDATE SET
-          plan_type = EXCLUDED.plan_type,
-          updated_at = EXCLUDED.updated_at
-      `;
-    } catch {}
-  }
+      await requireOrgMember(sql, user, orgId, "admin");
+    } catch (e: any) {
+      return c.json({ error: e.message }, e.status || 400);
+    }
 
-  return c.json({ updated: orgId });
+    if (!name && !plan) return c.json({ error: "Nothing to update" }, 400);
+
+    const now = new Date().toISOString();
+    if (name && plan) {
+      await sql`UPDATE orgs SET name = ${name}, plan = ${plan}, updated_at = ${now} WHERE org_id = ${orgId}`;
+    } else if (name) {
+      await sql`UPDATE orgs SET name = ${name}, updated_at = ${now} WHERE org_id = ${orgId}`;
+    } else {
+      await sql`UPDATE orgs SET plan = ${plan}, updated_at = ${now} WHERE org_id = ${orgId}`;
+    }
+
+    // Sync plan change to org_settings
+    if (plan) {
+      try {
+        await sql`
+          INSERT INTO org_settings (org_id, plan_type, created_at, updated_at)
+          VALUES (${orgId}, ${plan}, ${now}, ${now})
+          ON CONFLICT (org_id) DO UPDATE SET
+            plan_type = EXCLUDED.plan_type,
+            updated_at = EXCLUDED.updated_at
+        `;
+      } catch {}
+    }
+
+    return c.json({ updated: orgId });
+  });
 });
 
 // ── DELETE /:org_id — delete an organization ────────────────────────────
@@ -364,17 +371,17 @@ const deleteOrgRoute = createRoute({
 orgRoutes.openapi(deleteOrgRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { org_id: orgId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    try {
+      await requireOrgMember(sql, user, orgId, "owner");
+    } catch (e: any) {
+      return c.json({ error: e.message }, e.status || 400);
+    }
 
-  try {
-    await requireOrgMember(sql, user, orgId, "owner");
-  } catch (e: any) {
-    return c.json({ error: e.message }, e.status || 400);
-  }
-
-  await sql`DELETE FROM org_members WHERE org_id = ${orgId}`;
-  await sql`DELETE FROM orgs WHERE org_id = ${orgId}`;
-  return c.json({ deleted: orgId });
+    await sql`DELETE FROM org_members WHERE org_id = ${orgId}`;
+    await sql`DELETE FROM orgs WHERE org_id = ${orgId}`;
+    return c.json({ deleted: orgId });
+  });
 });
 
 // ── PUT /:org_id/members/:member_user_id — update member role ───────────
@@ -419,30 +426,31 @@ orgRoutes.openapi(updateMemberRoleRoute, async (c): Promise<any> => {
     return c.json({ error: "Invalid role" }, 400);
   }
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  try {
-    await requireOrgMember(sql, user, orgId, "admin");
-  } catch (e: any) {
-    return c.json({ error: e.message }, e.status || 400);
-  }
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    try {
+      await requireOrgMember(sql, user, orgId, "admin");
+    } catch (e: any) {
+      return c.json({ error: e.message }, e.status || 400);
+    }
 
-  await sql`
-    UPDATE org_members SET role = ${role} WHERE org_id = ${orgId} AND user_id = ${memberUserId}
-  `;
+    await sql`
+      UPDATE org_members SET role = ${role} WHERE org_id = ${orgId} AND user_id = ${memberUserId}
+    `;
 
-  // Security event: role changed
-  logSecurityEvent(sql, {
-    org_id: orgId,
-    event_type: "user.role_changed",
-    actor_id: user.user_id,
-    actor_type: "user",
-    target_id: memberUserId,
-    target_type: "user",
-    severity: "medium",
-    details: { new_role: role },
+    // Security event: role changed
+    logSecurityEvent(sql, {
+      org_id: orgId,
+      event_type: "user.role_changed",
+      actor_id: user.user_id,
+      actor_type: "user",
+      target_id: memberUserId,
+      target_type: "user",
+      severity: "medium",
+      details: { new_role: role },
+    });
+
+    return c.json({ updated: memberUserId, role });
   });
-
-  return c.json({ updated: memberUserId, role });
 });
 
 // ── DELETE /:org_id/members/:member_user_id — remove a member ───────────
@@ -467,29 +475,29 @@ const removeMemberRoute = createRoute({
 orgRoutes.openapi(removeMemberRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { org_id: orgId, member_user_id: memberUserId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    try {
+      await requireOrgMember(sql, user, orgId, "admin");
+    } catch (e: any) {
+      return c.json({ error: e.message }, e.status || 400);
+    }
 
-  try {
-    await requireOrgMember(sql, user, orgId, "admin");
-  } catch (e: any) {
-    return c.json({ error: e.message }, e.status || 400);
-  }
+    await sql`DELETE FROM org_members WHERE org_id = ${orgId} AND user_id = ${memberUserId}`;
 
-  await sql`DELETE FROM org_members WHERE org_id = ${orgId} AND user_id = ${memberUserId}`;
+    // Security event: user removed
+    logSecurityEvent(sql, {
+      org_id: orgId,
+      event_type: "user.removed",
+      actor_id: user.user_id,
+      actor_type: "user",
+      target_id: memberUserId,
+      target_type: "user",
+      severity: "medium",
+      details: { removed_user_id: memberUserId },
+    });
 
-  // Security event: user removed
-  logSecurityEvent(sql, {
-    org_id: orgId,
-    event_type: "user.removed",
-    actor_id: user.user_id,
-    actor_type: "user",
-    target_id: memberUserId,
-    target_type: "user",
-    severity: "medium",
-    details: { removed_user_id: memberUserId },
+    return c.json({ removed: memberUserId });
   });
-
-  return c.json({ removed: memberUserId });
 });
 
 // ── GET /settings — read org settings + onboarding state ────────────────
@@ -509,23 +517,23 @@ const getSettingsRoute = createRoute({
 });
 orgRoutes.openapi(getSettingsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT settings, plan_type FROM org_settings LIMIT 1
+    `;
 
-  const rows = await sql`
-    SELECT settings, plan_type FROM org_settings WHERE org_id = ${user.org_id} LIMIT 1
-  `;
+    if (rows.length === 0) {
+      // No org_settings row — user hasn't completed onboarding
+      return c.json({ onboarding_complete: false });
+    }
 
-  if (rows.length === 0) {
-    // No org_settings row — user hasn't completed onboarding
-    return c.json({ onboarding_complete: false });
-  }
-
-  const settings = parseJsonColumn(rows[0].settings);
-  return c.json({
-    onboarding_complete: settings.onboarding_complete ?? false,
-    default_connectors: settings.default_connectors ?? [],
-    org_name: settings.org_name ?? "",
-    plan_type: rows[0].plan_type ?? "free",
+    const settings = parseJsonColumn(rows[0].settings);
+    return c.json({
+      onboarding_complete: settings.onboarding_complete ?? false,
+      default_connectors: settings.default_connectors ?? [],
+      org_name: settings.org_name ?? "",
+      plan_type: rows[0].plan_type ?? "free",
+    });
   });
 });
 
@@ -557,38 +565,38 @@ orgRoutes.openapi(updateSettingsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const parsed = c.req.valid("json");
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Merge with existing settings
+    const existing = await sql`
+      SELECT settings FROM org_settings LIMIT 1
+    `;
+    const current = existing.length > 0
+      ? parseJsonColumn(existing[0].settings)
+      : {};
 
-  // Merge with existing settings
-  const existing = await sql`
-    SELECT settings FROM org_settings WHERE org_id = ${user.org_id} LIMIT 1
-  `;
-  const current = existing.length > 0
-    ? parseJsonColumn(existing[0].settings)
-    : {};
+    const merged = {
+      ...current,
+      ...parsed,
+    };
 
-  const merged = {
-    ...current,
-    ...parsed,
-  };
+    const settingsJson = JSON.stringify(merged);
+    const now = new Date().toISOString();
 
-  const settingsJson = JSON.stringify(merged);
-  const now = new Date().toISOString();
-
-  await sql`
-    INSERT INTO org_settings (org_id, settings, plan_type, created_at, updated_at)
-    VALUES (${user.org_id}, ${settingsJson}, ${"free"}, ${now}, ${now})
-    ON CONFLICT (org_id) DO UPDATE SET
-      settings = ${settingsJson},
-      updated_at = ${now}
-  `;
-
-  // Also update org name if provided
-  if (parsed.org_name) {
     await sql`
-      UPDATE orgs SET name = ${parsed.org_name}, updated_at = now() WHERE org_id = ${user.org_id}
-    `.catch(() => {});
-  }
+      INSERT INTO org_settings (org_id, settings, plan_type, created_at, updated_at)
+      VALUES (${user.org_id}, ${settingsJson}, ${"free"}, ${now}, ${now})
+      ON CONFLICT (org_id) DO UPDATE SET
+        settings = ${settingsJson},
+        updated_at = ${now}
+    `;
 
-  return c.json({ saved: true, settings: merged });
+    // Also update org name if provided
+    if (parsed.org_name) {
+      await sql`
+        UPDATE orgs SET name = ${parsed.org_name}, updated_at = now() WHERE org_id = ${user.org_id}
+      `.catch(() => {});
+    }
+
+    return c.json({ saved: true, settings: merged });
+  });
 });

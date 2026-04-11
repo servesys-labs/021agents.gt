@@ -4,7 +4,7 @@
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 export const dashboardRoutes = createOpenAPIRouter();
@@ -43,7 +43,7 @@ const statsRoute = createRoute({
 
 dashboardRoutes.openapi(statsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   // ── Agent stats ──────────────────────────────────────────
   let total_agents = 0;
@@ -55,12 +55,12 @@ dashboardRoutes.openapi(statsRoute, async (c): Promise<any> => {
         COUNT(*) as total,
         COALESCE(SUM(CASE WHEN is_active = true THEN 1 ELSE 0 END), 0) as live
       FROM agents
-      WHERE org_id = ${user.org_id} AND is_active = true
+      WHERE is_active = true
     `;
     total_agents = Number(agentStats.total);
     live_agents = Number(agentStats.live);
 
-    const nameRows = await sql`SELECT name FROM agents WHERE org_id = ${user.org_id} AND is_active = true`;
+    const nameRows = await sql`SELECT name FROM agents WHERE is_active = true`;
     agentNames = nameRows.map((a: any) => String(a.name));
   } catch (err) {
     console.error("[dashboard] Agent stats failed:", err);
@@ -126,7 +126,7 @@ dashboardRoutes.openapi(statsRoute, async (c): Promise<any> => {
       try {
         const [txCount] = await sql`
           SELECT COUNT(*) as c FROM credit_transactions
-          WHERE org_id = ${user.org_id} AND type = 'burn'
+          WHERE type = 'burn'
         `;
         total_sessions = Number(txCount.c);
       } catch {}
@@ -142,7 +142,6 @@ dashboardRoutes.openapi(statsRoute, async (c): Promise<any> => {
     const [costStats] = await sql`
       SELECT COALESCE(SUM(total_cost_usd), 0) as cost
       FROM billing_records
-      WHERE org_id = ${user.org_id}
     `;
     total_cost_usd = Number(costStats.cost);
 
@@ -152,7 +151,7 @@ dashboardRoutes.openapi(statsRoute, async (c): Promise<any> => {
         const [burnSum] = await sql`
           SELECT COALESCE(SUM(ABS(amount_usd)), 0) as cost
           FROM credit_transactions
-          WHERE org_id = ${user.org_id} AND type = 'burn'
+          WHERE type = 'burn'
         `;
         total_cost_usd = Number(burnSum.cost);
       } catch {}
@@ -170,6 +169,7 @@ dashboardRoutes.openapi(statsRoute, async (c): Promise<any> => {
     avg_latency_ms,
     total_cost_usd,
     error_rate_pct,
+  });
   });
 });
 
@@ -213,7 +213,7 @@ dashboardRoutes.openapi(activityRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { limit: rawLimit } = c.req.valid("query");
   const limit = Math.max(1, Math.min(100, Number(rawLimit) || 10));
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   let activity: Array<{
     id: string;
@@ -225,7 +225,7 @@ dashboardRoutes.openapi(activityRoute, async (c): Promise<any> => {
 
   try {
     // Get agent names for this org to include sessions with empty org_id
-    const nameRows = await sql`SELECT name FROM agents WHERE org_id = ${user.org_id}`;
+    const nameRows = await sql`SELECT name FROM agents`;
     const agentNames = nameRows.map((a: any) => String(a.name));
 
     if (agentNames.length > 0) {
@@ -265,6 +265,7 @@ dashboardRoutes.openapi(activityRoute, async (c): Promise<any> => {
   }
 
   return c.json({ activity });
+  });
 });
 
 // ══════════════════════════════════════════════════════════════════════
@@ -276,27 +277,27 @@ dashboardRoutes.openapi(activityRoute, async (c): Promise<any> => {
  */
 dashboardRoutes.get("/stats/by-agent", requireScope("observability:read"), async (c) => {
   const orgId = c.get("user").org_id;
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
-  try {
-    const rows = await sql`
-      SELECT
-        s.agent_name,
-        COUNT(*) as session_count,
-        SUM(COALESCE(s.cost_total_usd, 0)) as total_cost_usd,
-        AVG(COALESCE(s.wall_clock_seconds, 0)) as avg_latency_s,
-        COUNT(*) FILTER (WHERE s.status IN ('error', 'failed')) as error_count,
-        ROUND(COUNT(*) FILTER (WHERE s.status IN ('error', 'failed'))::numeric / NULLIF(COUNT(*), 0) * 100, 1) as error_rate_pct
-      FROM sessions s
-      WHERE (s.org_id = ${orgId} OR s.agent_name IN (SELECT name FROM agents WHERE org_id = ${orgId}))
-        AND s.created_at > NOW() - INTERVAL '30 days'
-      GROUP BY s.agent_name
-      ORDER BY total_cost_usd DESC
-      LIMIT 20
-    `;
-    return c.json({ agents: rows });
-  } catch (err) {
-    return c.json({ agents: [], error: String(err) });
-  }
+  return await withOrgDb(c.env, orgId, async (sql) => {
+    try {
+      const rows = await sql`
+        SELECT
+          s.agent_name,
+          COUNT(*) as session_count,
+          SUM(COALESCE(s.cost_total_usd, 0)) as total_cost_usd,
+          AVG(COALESCE(s.wall_clock_seconds, 0)) as avg_latency_s,
+          COUNT(*) FILTER (WHERE s.status IN ('error', 'failed')) as error_count,
+          ROUND(COUNT(*) FILTER (WHERE s.status IN ('error', 'failed'))::numeric / NULLIF(COUNT(*), 0) * 100, 1) as error_rate_pct
+        FROM sessions s
+        WHERE s.created_at > NOW() - INTERVAL '30 days'
+        GROUP BY s.agent_name
+        ORDER BY total_cost_usd DESC
+        LIMIT 20
+      `;
+      return c.json({ agents: rows });
+    } catch (err) {
+      return c.json({ agents: [], error: String(err) });
+    }
+  });
 });
 
 /**
@@ -304,26 +305,27 @@ dashboardRoutes.get("/stats/by-agent", requireScope("observability:read"), async
  */
 dashboardRoutes.get("/stats/by-model", requireScope("observability:read"), async (c) => {
   const orgId = c.get("user").org_id;
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
-  try {
-    const rows = await sql`
-      SELECT
-        t.model_used as model,
-        COUNT(*) as turn_count,
-        SUM(COALESCE(t.input_tokens, 0)) as total_input_tokens,
-        SUM(COALESCE(t.output_tokens, 0)) as total_output_tokens,
-        SUM(COALESCE(t.cost_total_usd, 0)) as total_cost_usd
-      FROM turns t
-      JOIN sessions s ON t.session_id = s.session_id
-      WHERE (s.org_id = ${orgId} OR s.agent_name IN (SELECT name FROM agents WHERE org_id = ${orgId}))
-        AND t.created_at > NOW() - INTERVAL '30 days'
-      GROUP BY t.model_used
-      ORDER BY total_cost_usd DESC
-    `;
-    return c.json({ models: rows });
-  } catch (err) {
-    return c.json({ models: [], error: String(err) });
-  }
+  return await withOrgDb(c.env, orgId, async (sql) => {
+    try {
+      // turns is NOT RLS-enforced, but joined sessions IS — RLS on sessions filters the join.
+      const rows = await sql`
+        SELECT
+          t.model_used as model,
+          COUNT(*) as turn_count,
+          SUM(COALESCE(t.input_tokens, 0)) as total_input_tokens,
+          SUM(COALESCE(t.output_tokens, 0)) as total_output_tokens,
+          SUM(COALESCE(t.cost_total_usd, 0)) as total_cost_usd
+        FROM turns t
+        JOIN sessions s ON t.session_id = s.session_id
+        WHERE t.created_at > NOW() - INTERVAL '30 days'
+        GROUP BY t.model_used
+        ORDER BY total_cost_usd DESC
+      `;
+      return c.json({ models: rows });
+    } catch (err) {
+      return c.json({ models: [], error: String(err) });
+    }
+  });
 });
 
 /**
@@ -332,36 +334,37 @@ dashboardRoutes.get("/stats/by-model", requireScope("observability:read"), async
  */
 dashboardRoutes.get("/stats/tool-health", requireScope("observability:read"), async (c) => {
   const orgId = c.get("user").org_id;
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
-  try {
-    // Parse tool_calls JSON from turns to get per-tool stats
-    const rows = await sql`
-      SELECT
-        tool_name,
-        COUNT(*) as call_count,
-        COUNT(*) FILTER (WHERE error IS NOT NULL AND error != '') as error_count,
-        ROUND(AVG(latency_ms)::numeric, 0) as avg_latency_ms,
-        ROUND(COUNT(*) FILTER (WHERE error IS NOT NULL AND error != '')::numeric / NULLIF(COUNT(*), 0) * 100, 1) as error_rate_pct
-      FROM (
+  return await withOrgDb(c.env, orgId, async (sql) => {
+    try {
+      // Parse tool_calls JSON from turns to get per-tool stats.
+      // turns is NOT RLS-enforced; the JOIN to sessions (RLS) provides isolation.
+      const rows = await sql`
         SELECT
-          jsonb_array_elements(COALESCE(tool_results::jsonb, '[]'::jsonb))->>'name' as tool_name,
-          (jsonb_array_elements(COALESCE(tool_results::jsonb, '[]'::jsonb))->>'latency_ms')::numeric as latency_ms,
-          jsonb_array_elements(COALESCE(tool_results::jsonb, '[]'::jsonb))->>'error' as error
-        FROM turns t
-        JOIN sessions s ON t.session_id = s.session_id
-        WHERE s.org_id = ${orgId}
-          AND t.created_at > NOW() - INTERVAL '7 days'
-          AND t.tool_results IS NOT NULL AND t.tool_results != '[]'
-      ) tool_stats
-      WHERE tool_name IS NOT NULL
-      GROUP BY tool_name
-      ORDER BY error_rate_pct DESC, call_count DESC
-      LIMIT 50
-    `;
-    return c.json({ tools: rows });
-  } catch (err) {
-    return c.json({ tools: [], error: String(err) });
-  }
+          tool_name,
+          COUNT(*) as call_count,
+          COUNT(*) FILTER (WHERE error IS NOT NULL AND error != '') as error_count,
+          ROUND(AVG(latency_ms)::numeric, 0) as avg_latency_ms,
+          ROUND(COUNT(*) FILTER (WHERE error IS NOT NULL AND error != '')::numeric / NULLIF(COUNT(*), 0) * 100, 1) as error_rate_pct
+        FROM (
+          SELECT
+            jsonb_array_elements(COALESCE(tool_results::jsonb, '[]'::jsonb))->>'name' as tool_name,
+            (jsonb_array_elements(COALESCE(tool_results::jsonb, '[]'::jsonb))->>'latency_ms')::numeric as latency_ms,
+            jsonb_array_elements(COALESCE(tool_results::jsonb, '[]'::jsonb))->>'error' as error
+          FROM turns t
+          JOIN sessions s ON t.session_id = s.session_id
+          WHERE t.created_at > NOW() - INTERVAL '7 days'
+            AND t.tool_results IS NOT NULL AND t.tool_results != '[]'
+        ) tool_stats
+        WHERE tool_name IS NOT NULL
+        GROUP BY tool_name
+        ORDER BY error_rate_pct DESC, call_count DESC
+        LIMIT 50
+      `;
+      return c.json({ tools: rows });
+    } catch (err) {
+      return c.json({ tools: [], error: String(err) });
+    }
+  });
 });
 
 /**
@@ -369,29 +372,29 @@ dashboardRoutes.get("/stats/tool-health", requireScope("observability:read"), as
  */
 dashboardRoutes.get("/stats/routing", requireScope("observability:read"), async (c) => {
   const orgId = c.get("user").org_id;
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
-  try {
-    // Find sessions where user started with one agent but the conversation
-    // was short (1-2 turns) and low-rated — suggests misroute
-    const rows = await sql`
-      SELECT
-        s.agent_name,
-        COUNT(*) as total_sessions,
-        COUNT(*) FILTER (WHERE s.step_count <= 2 AND COALESCE(f.rating, 5) <= 2) as likely_misroutes,
-        ROUND(AVG(COALESCE(f.rating, 0)) FILTER (WHERE f.rating IS NOT NULL)::numeric, 1) as avg_rating,
-        ROUND(COUNT(*) FILTER (WHERE s.step_count <= 2 AND COALESCE(f.rating, 5) <= 2)::numeric / NULLIF(COUNT(*), 0) * 100, 1) as misroute_rate_pct
-      FROM sessions s
-      LEFT JOIN session_feedback f ON s.session_id = f.session_id
-      WHERE s.org_id = ${orgId}
-        AND s.created_at > NOW() - INTERVAL '30 days'
-      GROUP BY s.agent_name
-      HAVING COUNT(*) >= 5
-      ORDER BY misroute_rate_pct DESC
-    `;
-    return c.json({ routing: rows });
-  } catch (err) {
-    return c.json({ routing: [], error: String(err) });
-  }
+  return await withOrgDb(c.env, orgId, async (sql) => {
+    try {
+      // Find sessions where user started with one agent but the conversation
+      // was short (1-2 turns) and low-rated — suggests misroute
+      const rows = await sql`
+        SELECT
+          s.agent_name,
+          COUNT(*) as total_sessions,
+          COUNT(*) FILTER (WHERE s.step_count <= 2 AND COALESCE(f.rating, 5) <= 2) as likely_misroutes,
+          ROUND(AVG(COALESCE(f.rating, 0)) FILTER (WHERE f.rating IS NOT NULL)::numeric, 1) as avg_rating,
+          ROUND(COUNT(*) FILTER (WHERE s.step_count <= 2 AND COALESCE(f.rating, 5) <= 2)::numeric / NULLIF(COUNT(*), 0) * 100, 1) as misroute_rate_pct
+        FROM sessions s
+        LEFT JOIN session_feedback f ON s.session_id = f.session_id
+        WHERE s.created_at > NOW() - INTERVAL '30 days'
+        GROUP BY s.agent_name
+        HAVING COUNT(*) >= 5
+        ORDER BY misroute_rate_pct DESC
+      `;
+      return c.json({ routing: rows });
+    } catch (err) {
+      return c.json({ routing: [], error: String(err) });
+    }
+  });
 });
 
 /**
@@ -400,23 +403,23 @@ dashboardRoutes.get("/stats/routing", requireScope("observability:read"), async 
 dashboardRoutes.get("/stats/trends", requireScope("observability:read"), async (c) => {
   const orgId = c.get("user").org_id;
   const period = Number(c.req.query("period_days") || 7);
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
-  try {
-    const rows = await sql`
-      SELECT
-        DATE(s.created_at) as day,
-        COUNT(*) as sessions,
-        SUM(COALESCE(s.cost_total_usd, 0)) as cost_usd,
-        COUNT(*) FILTER (WHERE s.status IN ('error', 'failed')) as errors,
-        AVG(COALESCE(s.wall_clock_seconds, 0)) as avg_latency_s
-      FROM sessions s
-      WHERE (s.org_id = ${orgId} OR s.agent_name IN (SELECT name FROM agents WHERE org_id = ${orgId}))
-        AND s.created_at > NOW() - INTERVAL '1 day' * ${period}
-      GROUP BY DATE(s.created_at)
-      ORDER BY day ASC
-    `;
-    return c.json({ trends: rows, period_days: period });
-  } catch (err) {
-    return c.json({ trends: [], error: String(err) });
-  }
+  return await withOrgDb(c.env, orgId, async (sql) => {
+    try {
+      const rows = await sql`
+        SELECT
+          DATE(s.created_at) as day,
+          COUNT(*) as sessions,
+          SUM(COALESCE(s.cost_total_usd, 0)) as cost_usd,
+          COUNT(*) FILTER (WHERE s.status IN ('error', 'failed')) as errors,
+          AVG(COALESCE(s.wall_clock_seconds, 0)) as avg_latency_s
+        FROM sessions s
+        WHERE s.created_at > NOW() - INTERVAL '1 day' * ${period}
+        GROUP BY DATE(s.created_at)
+        ORDER BY day ASC
+      `;
+      return c.json({ trends: rows, period_days: period });
+    } catch (err) {
+      return c.json({ trends: [], error: String(err) });
+    }
+  });
 });

@@ -17,6 +17,7 @@
  */
 
 import type { RuntimeEnv } from "./types";
+import { log } from "./log";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -143,7 +144,7 @@ export function createVoiceRelay(
         await sendMarkToTwilio("speech-done");
       }
     } catch (err) {
-      console.error("[voice-relay] TTS failed:", err);
+      log.error("[voice-relay] TTS failed:", err);
     } finally {
       isSpeaking = false;
       // Process next queued speech
@@ -191,7 +192,7 @@ export function createVoiceRelay(
         }
       }
     } catch (err) {
-      console.error("[voice-relay] STT processing failed:", err);
+      log.error("[voice-relay] STT processing failed:", err);
     } finally {
       isProcessing = false;
     }
@@ -209,13 +210,13 @@ export function createVoiceRelay(
 
       switch (msg.event) {
         case "connected":
-          console.log("[voice-relay] Twilio connected");
+          log.info("[voice-relay] Twilio connected");
           break;
 
         case "start":
           streamSid = msg.start?.streamSid || "";
           callSid = msg.start?.callSid || "";
-          console.log(`[voice-relay] Stream started: ${streamSid}, call: ${callSid}`);
+          log.info(`[voice-relay] Stream started: ${streamSid}, call: ${callSid}`);
 
           // Send greeting
           if (config.greeting && !greetingSent) {
@@ -246,7 +247,7 @@ export function createVoiceRelay(
           break;
 
         case "stop":
-          console.log(`[voice-relay] Stream stopped: ${callSid}`);
+          log.info(`[voice-relay] Stream stopped: ${callSid}`);
           if (greetingTimer) { clearTimeout(greetingTimer); greetingTimer = null; }
           // Process any remaining audio
           if (audioBuffer.length > MULAW_BYTES_PER_MS * 500) { // at least 500ms

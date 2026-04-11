@@ -4,6 +4,7 @@
  */
 
 import { getDb } from "./db";
+import { log } from "./log";
 
 export interface Skill {
   name: string;
@@ -72,7 +73,7 @@ export async function loadSkills(
 
     return skills;
   } catch (err) {
-    console.warn("[skills] Failed to load skills:", err);
+    log.warn("[skills] Failed to load skills:", err);
     return cached?.skills ?? [];
   }
 }

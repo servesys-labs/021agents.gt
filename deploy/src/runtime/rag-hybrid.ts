@@ -9,6 +9,8 @@
  * Fusion: Reciprocal Rank Fusion (RRF) merges BM25 + vector results.
  */
 
+import { log } from "./log";
+
 // ── Types ─────────────────────────────────────────────────────────
 
 export interface HybridSearchResult {
@@ -100,7 +102,7 @@ export async function bm25Search(
       rank: Number(r.rank || 0),
     }));
   } catch (err) {
-    console.error(`[rag-hybrid] BM25 search failed: ${err instanceof Error ? err.message : err}`);
+    log.error(`[rag-hybrid] BM25 search failed: ${err instanceof Error ? err.message : err}`);
     return [];
   }
 }
@@ -134,7 +136,7 @@ export async function storeChunksForBM25(
         stored++;
       }
     } catch (err) {
-      console.error(`[rag-hybrid] BM25 store batch failed: ${err instanceof Error ? err.message : err}`);
+      log.error(`[rag-hybrid] BM25 store batch failed: ${err instanceof Error ? err.message : err}`);
     }
   }
   return stored;

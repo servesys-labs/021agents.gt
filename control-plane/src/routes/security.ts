@@ -6,7 +6,7 @@ import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import {
   allProbesDicts,
   scanConfig,
@@ -64,23 +64,22 @@ const listScansRoute = createRoute({
 securityRoutes.openapi(listScansRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name: agentName, limit } = c.req.valid("query");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  let rows;
-  if (agentName) {
-    rows = await sql`
-      SELECT * FROM security_scans
-      WHERE org_id = ${user.org_id} AND agent_name = ${agentName}
-      ORDER BY started_at DESC LIMIT ${limit}
-    `;
-  } else {
-    rows = await sql`
-      SELECT * FROM security_scans
-      WHERE org_id = ${user.org_id}
-      ORDER BY started_at DESC LIMIT ${limit}
-    `;
-  }
-  return c.json({ scans: rows });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    let rows;
+    if (agentName) {
+      rows = await sql`
+        SELECT * FROM security_scans
+        WHERE agent_name = ${agentName}
+        ORDER BY started_at DESC LIMIT ${limit}
+      `;
+    } else {
+      rows = await sql`
+        SELECT * FROM security_scans
+        ORDER BY started_at DESC LIMIT ${limit}
+      `;
+    }
+    return c.json({ scans: rows });
+  });
 });
 
 // ── GET /findings ────────────────────────────────────────────────
@@ -108,61 +107,60 @@ const listFindingsRoute = createRoute({
 securityRoutes.openapi(listFindingsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { scan_id: scanId, agent_name: agentName, severity, limit } = c.req.valid("query");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Use separate queries to avoid SQL injection with dynamic WHERE
+    let rows;
+    if (scanId && agentName && severity) {
+      rows = await sql`
+        SELECT * FROM security_scan_findings
+        WHERE scan_id = ${scanId} AND agent_name = ${agentName} AND severity = ${severity}
+        ORDER BY aivss_score DESC LIMIT ${limit}
+      `;
+    } else if (scanId && agentName) {
+      rows = await sql`
+        SELECT * FROM security_scan_findings
+        WHERE scan_id = ${scanId} AND agent_name = ${agentName}
+        ORDER BY aivss_score DESC LIMIT ${limit}
+      `;
+    } else if (scanId && severity) {
+      rows = await sql`
+        SELECT * FROM security_scan_findings
+        WHERE scan_id = ${scanId} AND severity = ${severity}
+        ORDER BY aivss_score DESC LIMIT ${limit}
+      `;
+    } else if (agentName && severity) {
+      rows = await sql`
+        SELECT * FROM security_scan_findings
+        WHERE agent_name = ${agentName} AND severity = ${severity}
+        ORDER BY aivss_score DESC LIMIT ${limit}
+      `;
+    } else if (scanId) {
+      rows = await sql`
+        SELECT * FROM security_scan_findings
+        WHERE scan_id = ${scanId}
+        ORDER BY aivss_score DESC LIMIT ${limit}
+      `;
+    } else if (agentName) {
+      rows = await sql`
+        SELECT * FROM security_scan_findings
+        WHERE agent_name = ${agentName}
+        ORDER BY aivss_score DESC LIMIT ${limit}
+      `;
+    } else if (severity) {
+      rows = await sql`
+        SELECT * FROM security_scan_findings
+        WHERE severity = ${severity}
+        ORDER BY aivss_score DESC LIMIT ${limit}
+      `;
+    } else {
+      rows = await sql`
+        SELECT * FROM security_scan_findings
+        ORDER BY aivss_score DESC LIMIT ${limit}
+      `;
+    }
 
-  // Use separate queries to avoid SQL injection with dynamic WHERE
-  let rows;
-  if (scanId && agentName && severity) {
-    rows = await sql`
-      SELECT * FROM security_scan_findings
-      WHERE org_id = ${user.org_id} AND scan_id = ${scanId} AND agent_name = ${agentName} AND severity = ${severity}
-      ORDER BY aivss_score DESC LIMIT ${limit}
-    `;
-  } else if (scanId && agentName) {
-    rows = await sql`
-      SELECT * FROM security_scan_findings
-      WHERE org_id = ${user.org_id} AND scan_id = ${scanId} AND agent_name = ${agentName}
-      ORDER BY aivss_score DESC LIMIT ${limit}
-    `;
-  } else if (scanId && severity) {
-    rows = await sql`
-      SELECT * FROM security_scan_findings
-      WHERE org_id = ${user.org_id} AND scan_id = ${scanId} AND severity = ${severity}
-      ORDER BY aivss_score DESC LIMIT ${limit}
-    `;
-  } else if (agentName && severity) {
-    rows = await sql`
-      SELECT * FROM security_scan_findings
-      WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND severity = ${severity}
-      ORDER BY aivss_score DESC LIMIT ${limit}
-    `;
-  } else if (scanId) {
-    rows = await sql`
-      SELECT * FROM security_scan_findings
-      WHERE org_id = ${user.org_id} AND scan_id = ${scanId}
-      ORDER BY aivss_score DESC LIMIT ${limit}
-    `;
-  } else if (agentName) {
-    rows = await sql`
-      SELECT * FROM security_scan_findings
-      WHERE org_id = ${user.org_id} AND agent_name = ${agentName}
-      ORDER BY aivss_score DESC LIMIT ${limit}
-    `;
-  } else if (severity) {
-    rows = await sql`
-      SELECT * FROM security_scan_findings
-      WHERE org_id = ${user.org_id} AND severity = ${severity}
-      ORDER BY aivss_score DESC LIMIT ${limit}
-    `;
-  } else {
-    rows = await sql`
-      SELECT * FROM security_scan_findings
-      WHERE org_id = ${user.org_id}
-      ORDER BY aivss_score DESC LIMIT ${limit}
-    `;
-  }
-
-  return c.json({ findings: rows });
+    return c.json({ findings: rows });
+  });
 });
 
 // ── GET /risk-profiles ───────────────────────────────────────────
@@ -181,12 +179,13 @@ const listRiskProfilesRoute = createRoute({
 
 securityRoutes.openapi(listRiskProfilesRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const rows = await sql`
-    SELECT * FROM risk_profiles WHERE org_id = ${user.org_id}
-    ORDER BY risk_score DESC
-  `;
-  return c.json({ profiles: rows });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT * FROM risk_profiles
+      ORDER BY risk_score DESC
+    `;
+    return c.json({ profiles: rows });
+  });
 });
 
 // ── GET /risk-profiles/:agent_name ───────────────────────────────
@@ -209,14 +208,15 @@ const getAgentRiskProfileRoute = createRoute({
 securityRoutes.openapi(getAgentRiskProfileRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name: agentName } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const rows = await sql`
-    SELECT * FROM risk_profiles WHERE agent_name = ${agentName} AND org_id = ${user.org_id} LIMIT 1
-  `;
-  if (!rows.length) {
-    return c.json({ agent_name: agentName, risk_score: 0.0, risk_level: "not_scanned" });
-  }
-  return c.json(rows[0]);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT * FROM risk_profiles WHERE agent_name = ${agentName} LIMIT 1
+    `;
+    if (!rows.length) {
+      return c.json({ agent_name: agentName, risk_score: 0.0, risk_level: "not_scanned" });
+    }
+    return c.json(rows[0]);
+  });
 });
 
 // ── POST /scan/:agent_name ───────────────────────────────────────
@@ -244,94 +244,94 @@ securityRoutes.openapi(scanAgentRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name: agentName } = c.req.valid("param");
   const { scan_type: scanType } = c.req.valid("query");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  // Load agent config from DB (config is canonical; same column as agents router)
-  const agentRows = await sql`
-    SELECT config FROM agents
-    WHERE name = ${agentName} AND org_id = ${user.org_id}
-    LIMIT 1
-  `;
-  if (!agentRows.length) {
-    return c.json({ error: `Agent '${agentName}' not found` }, 404);
-  }
-
-  const agentConfig = parseAgentConfigJson(
-    (agentRows[0] as Record<string, unknown>).config,
-  );
-
-  // Generate scan ID
-  const scanIdBytes = new Uint8Array(8);
-  crypto.getRandomValues(scanIdBytes);
-  const scanId = Array.from(scanIdBytes)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-
-  // Run config scan
-  const result = scanConfig(agentName, agentConfig, scanId);
-
-  // Persist scan
-  try {
-    await sql`
-      INSERT INTO security_scans (
-        scan_id, org_id, agent_name, scan_type, status,
-        total_probes, passed, failed, risk_score, risk_level,
-        started_at, completed_at
-      ) VALUES (
-        ${result.scan_id}, ${user.org_id}, ${agentName}, ${scanType}, ${"completed"},
-        ${result.total_probes}, ${result.passed}, ${result.failed},
-        ${result.risk_score}, ${result.risk_level},
-        ${result.started_at}, ${result.completed_at}
-      )
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Load agent config from DB (config is canonical; same column as agents router)
+    const agentRows = await sql`
+      SELECT config FROM agents
+      WHERE name = ${agentName}
+      LIMIT 1
     `;
-
-    // Persist findings
-    for (const finding of result.findings) {
-      await sql`
-        INSERT INTO security_scan_findings (
-          scan_id, org_id, agent_name, probe_id, probe_name,
-          category, layer, severity, title, description, evidence,
-          aivss_vector, aivss_score
-        ) VALUES (
-          ${result.scan_id}, ${user.org_id}, ${agentName},
-          ${String(finding.probe_id ?? "")}, ${String(finding.probe_name ?? "")},
-          ${String(finding.category ?? "")}, ${String(finding.layer ?? "")},
-          ${String(finding.severity ?? "info")},
-          ${`${String(finding.probe_name ?? "")} - ${String(finding.category ?? "unknown")}`},
-          ${finding.evidence ? String(finding.evidence).slice(0, 500) : "No description available"},
-          ${String(finding.evidence ?? "")},
-          ${String(finding.aivss_vector ?? "")}, ${Number(finding.aivss_score ?? 0)}
-        )
-      `;
+    if (!agentRows.length) {
+      return c.json({ error: `Agent '${agentName}' not found` }, 404);
     }
 
-    // Upsert risk profile
-    await sql`
-      INSERT INTO risk_profiles (agent_name, org_id, risk_score, risk_level, last_scan_id, findings_summary, updated_at)
-      VALUES (
-        ${agentName}, ${user.org_id}, ${result.risk_score}, ${result.risk_level},
-        ${result.scan_id}, ${JSON.stringify(result.findings_summary)}, ${new Date().toISOString()}
-      )
-      ON CONFLICT (agent_name) DO UPDATE SET
-        risk_score = EXCLUDED.risk_score,
-        risk_level = EXCLUDED.risk_level,
-        last_scan_id = EXCLUDED.last_scan_id,
-        findings_summary = EXCLUDED.findings_summary,
-        updated_at = EXCLUDED.updated_at
-    `;
-  } catch {
-    // Best-effort persistence
-  }
+    const agentConfig = parseAgentConfigJson(
+      (agentRows[0] as Record<string, unknown>).config,
+    );
 
-  return c.json({
-    scan_id: result.scan_id,
-    agent_name: agentName,
-    risk_score: result.risk_score,
-    risk_level: result.risk_level,
-    total_probes: result.total_probes,
-    passed: result.passed,
-    failed: result.failed,
-    findings_count: result.findings.length,
+    // Generate scan ID
+    const scanIdBytes = new Uint8Array(8);
+    crypto.getRandomValues(scanIdBytes);
+    const scanId = Array.from(scanIdBytes)
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+
+    // Run config scan
+    const result = scanConfig(agentName, agentConfig, scanId);
+
+    // Persist scan
+    try {
+      await sql`
+        INSERT INTO security_scans (
+          scan_id, org_id, agent_name, scan_type, status,
+          total_probes, passed, failed, risk_score, risk_level,
+          started_at, completed_at
+        ) VALUES (
+          ${result.scan_id}, ${user.org_id}, ${agentName}, ${scanType}, ${"completed"},
+          ${result.total_probes}, ${result.passed}, ${result.failed},
+          ${result.risk_score}, ${result.risk_level},
+          ${result.started_at}, ${result.completed_at}
+        )
+      `;
+
+      // Persist findings
+      for (const finding of result.findings) {
+        await sql`
+          INSERT INTO security_scan_findings (
+            scan_id, org_id, agent_name, probe_id, probe_name,
+            category, layer, severity, title, description, evidence,
+            aivss_vector, aivss_score
+          ) VALUES (
+            ${result.scan_id}, ${user.org_id}, ${agentName},
+            ${String(finding.probe_id ?? "")}, ${String(finding.probe_name ?? "")},
+            ${String(finding.category ?? "")}, ${String(finding.layer ?? "")},
+            ${String(finding.severity ?? "info")},
+            ${`${String(finding.probe_name ?? "")} - ${String(finding.category ?? "unknown")}`},
+            ${finding.evidence ? String(finding.evidence).slice(0, 500) : "No description available"},
+            ${String(finding.evidence ?? "")},
+            ${String(finding.aivss_vector ?? "")}, ${Number(finding.aivss_score ?? 0)}
+          )
+        `;
+      }
+
+      // Upsert risk profile
+      await sql`
+        INSERT INTO risk_profiles (agent_name, org_id, risk_score, risk_level, last_scan_id, findings_summary, updated_at)
+        VALUES (
+          ${agentName}, ${user.org_id}, ${result.risk_score}, ${result.risk_level},
+          ${result.scan_id}, ${JSON.stringify(result.findings_summary)}, ${new Date().toISOString()}
+        )
+        ON CONFLICT (agent_name) DO UPDATE SET
+          risk_score = EXCLUDED.risk_score,
+          risk_level = EXCLUDED.risk_level,
+          last_scan_id = EXCLUDED.last_scan_id,
+          findings_summary = EXCLUDED.findings_summary,
+          updated_at = EXCLUDED.updated_at
+      `;
+    } catch {
+      // Best-effort persistence
+    }
+
+    return c.json({
+      scan_id: result.scan_id,
+      agent_name: agentName,
+      risk_score: result.risk_score,
+      risk_level: result.risk_level,
+      total_probes: result.total_probes,
+      passed: result.passed,
+      failed: result.failed,
+      findings_count: result.findings.length,
+    });
   });
 });
 
@@ -382,23 +382,22 @@ const getScanReportRoute = createRoute({
 securityRoutes.openapi(getScanReportRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { scan_id: scanId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const scanRows = await sql`
+      SELECT * FROM security_scans WHERE scan_id = ${scanId} LIMIT 1
+    `;
+    if (!scanRows.length) {
+      return c.json({ error: "Scan not found" }, 404);
+    }
 
-  const scanRows = await sql`
-    SELECT * FROM security_scans WHERE scan_id = ${scanId} AND org_id = ${user.org_id} LIMIT 1
-  `;
-  if (!scanRows.length) {
-    return c.json({ error: "Scan not found" }, 404);
-  }
+    const scan = scanRows[0] as Record<string, unknown>;
+    const findingRows = await sql`
+      SELECT * FROM security_scan_findings WHERE scan_id = ${scanId}
+      ORDER BY aivss_score DESC
+    `;
 
-  const scan = scanRows[0] as Record<string, unknown>;
-  const findingRows = await sql`
-    SELECT * FROM security_scan_findings WHERE scan_id = ${scanId} AND org_id = ${user.org_id}
-    ORDER BY aivss_score DESC
-  `;
-
-  // Reconstruct a ScanResult-like object for the report generator
-  const mockResult = {
+    // Reconstruct a ScanResult-like object for the report generator
+    const mockResult = {
     scan_id: String(scan.scan_id),
     agent_name: String(scan.agent_name ?? ""),
     scan_type: String(scan.scan_type ?? ""),
@@ -417,8 +416,9 @@ securityRoutes.openapi(getScanReportRoute, async (c): Promise<any> => {
     findings_summary: {},
   };
 
-  const report = generateReport(mockResult);
-  return c.json(report);
+    const report = generateReport(mockResult);
+    return c.json(report);
+  });
 });
 
 // ── POST /aivss/calculate ────────────────────────────────────────
@@ -484,24 +484,24 @@ securityRoutes.openapi(getRiskTrendsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name: agentName } = c.req.valid("param");
   const { limit } = c.req.valid("query");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const rows = await sql`
+      SELECT scan_id, risk_score, risk_level, passed, failed, started_at as created_at
+      FROM security_scans
+      WHERE agent_name = ${agentName}
+      ORDER BY started_at DESC LIMIT ${limit}
+    `;
 
-  const rows = await sql`
-    SELECT scan_id, risk_score, risk_level, passed, failed, started_at as created_at
-    FROM security_scans
-    WHERE org_id = ${user.org_id} AND agent_name = ${agentName}
-    ORDER BY started_at DESC LIMIT ${limit}
-  `;
+    // Reverse to chronological order (oldest first) for trend charts
+    const trends = [...rows].reverse().map((s) => ({
+      scan_id: s.scan_id,
+      risk_score: Number(s.risk_score ?? 0),
+      risk_level: String(s.risk_level ?? "unknown"),
+      passed: Number(s.passed ?? 0),
+      failed: Number(s.failed ?? 0),
+      created_at: Number(s.created_at ?? 0),
+    }));
 
-  // Reverse to chronological order (oldest first) for trend charts
-  const trends = [...rows].reverse().map((s) => ({
-    scan_id: s.scan_id,
-    risk_score: Number(s.risk_score ?? 0),
-    risk_level: String(s.risk_level ?? "unknown"),
-    passed: Number(s.passed ?? 0),
-    failed: Number(s.failed ?? 0),
-    created_at: Number(s.created_at ?? 0),
-  }));
-
-  return c.json({ agent_name: agentName, trends });
+    return c.json({ agent_name: agentName, trends });
+  });
 });

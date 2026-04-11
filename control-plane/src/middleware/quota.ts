@@ -11,7 +11,7 @@
 import type { Context, Next } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 
 export type PlanType = "free" | "pro" | "team" | "enterprise";
 
@@ -81,39 +81,41 @@ export async function getQuotaUsage(
   seatCount: number;
   plan: PlanType;
 }> {
-  const sql = await getDbForOrg(env.HYPERDRIVE, orgId);
+  return await withOrgDb(env, orgId, async (sql) => {
+    // Get plan from org settings (default to free).
+    // org_settings has org_id as PK — RLS policy filters to current org.
+    const orgRow = await sql`
+      SELECT plan_type FROM org_settings LIMIT 1
+    `.catch(() => []);
+    const plan = (orgRow[0]?.plan_type as PlanType) || "free";
 
-  // Get plan from org settings (default to free)
-  const orgRow = await sql`
-    SELECT plan_type FROM org_settings WHERE org_id = ${orgId} LIMIT 1
-  `.catch(() => []);
-  const plan = (orgRow[0]?.plan_type as PlanType) || "free";
+    // Count agents (RLS filters to current_org_id)
+    const agentResult = await sql`
+      SELECT COUNT(*) as count FROM agents
+    `;
+    const agentCount = Number(agentResult[0]?.count || 0);
 
-  // Count agents
-  const agentResult = await sql`
-    SELECT COUNT(*) as count FROM agents WHERE org_id = ${orgId}
-  `;
-  const agentCount = Number(agentResult[0]?.count || 0);
+    // Count runs this month
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+    const monthStartTs = monthStart.getTime() / 1000;
 
-  // Count runs this month
-  const monthStart = new Date();
-  monthStart.setDate(1);
-  monthStart.setHours(0, 0, 0, 0);
-  const monthStartTs = monthStart.getTime() / 1000;
+    const runsResult = await sql`
+      SELECT COUNT(*) as count FROM billing_records
+      WHERE created_at >= ${monthStartTs}
+    `;
+    const runsThisMonth = Number(runsResult[0]?.count || 0);
 
-  const runsResult = await sql`
-    SELECT COUNT(*) as count FROM billing_records 
-    WHERE org_id = ${orgId} AND created_at >= ${monthStartTs}
-  `;
-  const runsThisMonth = Number(runsResult[0]?.count || 0);
+    // Count seats (users in org). org_members is NOT org-scoped via RLS
+    // (see audit Option A), so we keep the explicit WHERE org_id filter.
+    const seatsResult = await sql`
+      SELECT COUNT(*) as count FROM org_members WHERE org_id = ${orgId}
+    `.catch(() => [{ count: 1 }]);
+    const seatCount = Number(seatsResult[0]?.count || 1);
 
-  // Count seats (users in org)
-  const seatsResult = await sql`
-    SELECT COUNT(*) as count FROM org_members WHERE org_id = ${orgId}
-  `.catch(() => [{ count: 1 }]);
-  const seatCount = Number(seatsResult[0]?.count || 1);
-
-  return { agentCount, runsThisMonth, seatCount, plan };
+    return { agentCount, runsThisMonth, seatCount, plan };
+  });
 }
 
 /**

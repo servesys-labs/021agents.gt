@@ -8,7 +8,7 @@ import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { hasCredits, deductCredits } from "../logic/credits";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import type { CurrentUser } from "../auth/types";
 
@@ -293,8 +293,7 @@ runtimeProxyRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
   const requestedPlan = String(body.plan || "").toLowerCase();
   if (requestedPlan !== "free") {
     try {
-      const creditSql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
-      const hasEnough = await hasCredits(creditSql, orgId, 1);
+      const hasEnough = await withOrgDb(c.env, orgId, (creditSql) => hasCredits(creditSql, orgId, 1));
       if (!hasEnough) {
         return c.json({
           error: "Insufficient credits. Purchase credits at https://app.021agents.ai/settings?tab=billing",
@@ -336,8 +335,7 @@ runtimeProxyRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
     if (resp.status < 400) {
       try {
         const costUsd = Number(result.cost_usd || 0);
-        const deductSql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
-        const deductResult = await deductCredits(deductSql, orgId, costUsd, `Agent run: ${agentName}`, agentName, String(result.session_id || ""));
+        const deductResult = await withOrgDb(c.env, orgId, (deductSql) => deductCredits(deductSql, orgId, costUsd, `Agent run: ${agentName}`, agentName, String(result.session_id || "")));
         if (!deductResult.success) {
           console.error(`[billing] FAILED to deduct $${costUsd} from org ${orgId} — insufficient credits (balance: $${deductResult.balance_after_usd})`);
         }
@@ -399,8 +397,7 @@ runtimeProxyRoutes.openapi(batchRoute, async (c): Promise<any> => {
   const batchOrgId = user.org_id;
   const estimatedBatchCost = inputs.length * 0.01; // conservative $0.01/item estimate
   try {
-    const creditSql = await getDbForOrg(c.env.HYPERDRIVE, batchOrgId);
-    const hasEnough = await hasCredits(creditSql, batchOrgId, Math.max(1, estimatedBatchCost));
+    const hasEnough = await withOrgDb(c.env, batchOrgId, (creditSql) => hasCredits(creditSql, batchOrgId, Math.max(1, estimatedBatchCost)));
     if (!hasEnough) {
       return c.json({
         error: `Insufficient credits for batch of ${inputs.length} items (estimated ~$${estimatedBatchCost.toFixed(2)}). Purchase credits at https://app.021agents.ai/settings?tab=billing`,
@@ -487,8 +484,7 @@ runtimeProxyRoutes.openapi(batchRoute, async (c): Promise<any> => {
         // Fire-and-forget per-item credit deduction
         try {
           const costUsd = Number(itemCostUsd || 0);
-          const deductSql = await getDbForOrg(c.env.HYPERDRIVE, batchOrgId);
-          deductCredits(deductSql, batchOrgId, costUsd, `Batch run: ${agentName}`, agentName, String(result.session_id || ""))
+          withOrgDb(c.env, batchOrgId, (deductSql) => deductCredits(deductSql, batchOrgId, costUsd, `Batch run: ${agentName}`, agentName, String(result.session_id || "")))
             .then(r => { if (!r.success) console.error(`[billing] Batch deduction failed for org ${batchOrgId}: insufficient credits`); })
             .catch(err => console.error(`[billing] Batch deduction error: ${err.message}`));
         } catch (err: any) {
@@ -629,8 +625,7 @@ runtimeProxyRoutes.openapi(streamRoute, async (c): Promise<any> => {
   const streamPlan = String(body.plan || "").toLowerCase();
   if (streamPlan !== "free") {
     try {
-      const creditSql = await getDbForOrg(c.env.HYPERDRIVE, streamOrgId);
-      const hasEnough = await hasCredits(creditSql, streamOrgId, 1);
+      const hasEnough = await withOrgDb(c.env, streamOrgId, (creditSql) => hasCredits(creditSql, streamOrgId, 1));
       if (!hasEnough) {
         return c.json({
           error: "Insufficient credits. Purchase credits at https://app.021agents.ai/settings?tab=billing",
@@ -773,15 +768,14 @@ runtimeProxyRoutes.openapi(streamRoute, async (c): Promise<any> => {
                 billedDone = true;
                 const costUsd = Number(parsed.cost_usd || 0);
                 if (costUsd > 0) {
-                  const deductSql = await getDbForOrg(c.env.HYPERDRIVE, orgIdForBilling);
-                  const deductResult = await deductCredits(
+                  const deductResult = await withOrgDb(c.env, orgIdForBilling, (deductSql) => deductCredits(
                     deductSql,
                     orgIdForBilling,
                     costUsd,
                     `Agent run: ${agentNameForBilling}`,
                     agentNameForBilling,
                     String(parsed.session_id || ""),
-                  );
+                  ));
                   if (!deductResult.success) {
                     console.error(`[sse-billing] FAILED deduction $${costUsd} from org ${orgIdForBilling} — insufficient credits`);
                   }

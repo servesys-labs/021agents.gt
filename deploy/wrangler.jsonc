@@ -73,10 +73,20 @@
     ]
   },
 
-  // Hyperdrive — accelerated Supabase Postgres connection from edge
+  // Hyperdrive — accelerated Supabase Postgres connection from edge.
+  //
+  // HYPERDRIVE_ADMIN bypasses RLS for the runtime worker (a trusted
+  // backend processing events across tenants). In prototype mode it
+  // shares the HYPERDRIVE connection string; in production it should
+  // point at a Hyperdrive config whose role is granted BYPASSRLS so
+  // admin access is auditable at the database level.
   "hyperdrive": [
     {
       "binding": "HYPERDRIVE",
+      "id": "775f7e11ce8c479993855531f728770a"
+    },
+    {
+      "binding": "HYPERDRIVE_ADMIN",
       "id": "775f7e11ce8c479993855531f728770a"
     }
   ],

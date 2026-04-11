@@ -8,7 +8,7 @@
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDb, getDbForOrg } from "../db/client";
+import { withOrgDb, withAdminDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 export const chatPlatformRoutes = createOpenAPIRouter();
@@ -914,7 +914,10 @@ const telegramWebhookRoute = createRoute({
   },
 });
 chatPlatformRoutes.openapi(telegramWebhookRoute, async (c): Promise<any> => {
-  const sql = await getDb(c.env.HYPERDRIVE);
+  // Webhook is unauthenticated; the org is resolved from channel_configs
+  // below. Use admin connection (BYPASSRLS) so the lookup can see all orgs;
+  // helper queries below still filter by org_id explicitly.
+  return await withAdminDb(c.env, async (sql) => {
   const payload = c.req.valid("json") as any;
   const message = payload?.message || payload?.edited_message;
   if (!message) return c.json({ ok: true });
@@ -1099,6 +1102,7 @@ chatPlatformRoutes.openapi(telegramWebhookRoute, async (c): Promise<any> => {
   }
 
   return c.json({ ok: true });
+  });
 });
 
 // ── POST /chat/telegram/connect ────────────────────────────────────────
@@ -1145,17 +1149,17 @@ chatPlatformRoutes.openapi(telegramConnectRoute, async (c): Promise<any> => {
   const botToken = body.bot_token.trim();
   if (!botToken) return c.json({ error: "bot_token is required" }, 400);
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const now = new Date().toISOString();
-
-  // Store in secrets
-  try {
-    await sql`
-      INSERT INTO secrets (name, encrypted_value, org_id, created_at, updated_at)
-      VALUES ('TELEGRAM_BOT_TOKEN', ${botToken}, ${user.org_id}, ${now}, ${now})
-      ON CONFLICT (org_id, name, project_id, env) DO UPDATE SET encrypted_value = EXCLUDED.encrypted_value, updated_at = EXCLUDED.updated_at
-    `;
-  } catch {}
+  await withOrgDb(c.env, user.org_id, async (sql) => {
+    const now = new Date().toISOString();
+    // Store in secrets (RLS enforces org isolation)
+    try {
+      await sql`
+        INSERT INTO secrets (name, encrypted_value, org_id, created_at, updated_at)
+        VALUES ('TELEGRAM_BOT_TOKEN', ${botToken}, ${user.org_id}, ${now}, ${now})
+        ON CONFLICT (org_id, name, project_id, env) DO UPDATE SET encrypted_value = EXCLUDED.encrypted_value, updated_at = EXCLUDED.updated_at
+      `;
+    } catch {}
+  });
 
   // Register webhook to control-plane handler, which reads org-scoped secrets.
   const webhookUrl = `${new URL(c.req.url).origin}/api/v1/chat/telegram/webhook`;
@@ -1225,8 +1229,9 @@ chatPlatformRoutes.openapi(telegramSetupRoute, async (c): Promise<any> => {
   const webhookUrl = body.webhook_url.trim();
   if (!webhookUrl) return c.json({ error: "webhook_url is required" }, 400);
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const botToken = await getTelegramToken(sql);
+  const botToken = await withOrgDb(c.env, user.org_id, async (sql) => {
+    return await getTelegramToken(sql);
+  });
   if (!botToken) return c.json({ error: "TELEGRAM_BOT_TOKEN not configured" }, 503);
 
   try {
@@ -1274,8 +1279,9 @@ const telegramQrRoute = createRoute({
 });
 chatPlatformRoutes.openapi(telegramQrRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const botToken = await getTelegramToken(sql);
+  const botToken = await withOrgDb(c.env, user.org_id, async (sql) => {
+    return await getTelegramToken(sql);
+  });
   if (!botToken) return c.json({ error: "TELEGRAM_BOT_TOKEN not configured" }, 503);
 
   let botUsername = "";
@@ -1317,8 +1323,9 @@ const deleteTelegramWebhookRoute = createRoute({
 });
 chatPlatformRoutes.openapi(deleteTelegramWebhookRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const botToken = await getTelegramToken(sql);
+  const botToken = await withOrgDb(c.env, user.org_id, async (sql) => {
+    return await getTelegramToken(sql);
+  });
   if (!botToken) return c.json({ error: "TELEGRAM_BOT_TOKEN not configured" }, 503);
 
   try {
@@ -1394,8 +1401,8 @@ chatPlatformRoutes.openapi(whatsappWebhookRoute, async (c): Promise<any> => {
   // WhatsApp Cloud API sends: { object: "whatsapp_business_account", entry: [...] }
   if (payload.object !== "whatsapp_business_account") return c.json({ ok: true });
 
-  const sql = await getDb(c.env.HYPERDRIVE);
-
+  // Webhook is unauthenticated; org is resolved from channel_configs below.
+  return await withAdminDb(c.env, async (sql) => {
   for (const entry of payload.entry || []) {
     for (const change of entry.changes || []) {
       if (change.field !== "messages") continue;
@@ -1529,6 +1536,7 @@ chatPlatformRoutes.openapi(whatsappWebhookRoute, async (c): Promise<any> => {
   }
 
   return c.json({ ok: true });
+  });
 });
 
 // POST /chat/whatsapp/connect — Store WhatsApp credentials
@@ -1560,24 +1568,24 @@ const whatsappConnectRoute = createRoute({
 chatPlatformRoutes.openapi(whatsappConnectRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const body = c.req.valid("json");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Store access token
+    await storeSecret(sql, "WHATSAPP_ACCESS_TOKEN", body.access_token, user.org_id);
 
-  // Store access token
-  await storeSecret(sql, "WHATSAPP_ACCESS_TOKEN", body.access_token, user.org_id);
-
-  // Upsert channel config
-  const now = new Date().toISOString();
-  const config = JSON.stringify({
-    phone_number_id: body.phone_number_id,
-    business_account_id: body.business_account_id,
+    // Upsert channel config
+    const now = new Date().toISOString();
+    const config = JSON.stringify({
+      phone_number_id: body.phone_number_id,
+      business_account_id: body.business_account_id,
+    });
+    await sql`
+      INSERT INTO channel_configs (org_id, channel, agent_name, config, is_active, created_at, updated_at)
+      VALUES (${user.org_id}, 'whatsapp', ${body.agent_name || ""}, ${config}::jsonb, true, ${now}, ${now})
+      ON CONFLICT (org_id, channel) DO UPDATE
+      SET config = ${config}::jsonb, agent_name = COALESCE(NULLIF(${body.agent_name}, ''), channel_configs.agent_name),
+          is_active = true, updated_at = ${now}
+    `;
   });
-  await sql`
-    INSERT INTO channel_configs (org_id, channel, agent_name, config, is_active, created_at, updated_at)
-    VALUES (${user.org_id}, 'whatsapp', ${body.agent_name || ""}, ${config}::jsonb, true, ${now}, ${now})
-    ON CONFLICT (org_id, channel) DO UPDATE
-    SET config = ${config}::jsonb, agent_name = COALESCE(NULLIF(${body.agent_name}, ''), channel_configs.agent_name),
-        is_active = true, updated_at = ${now}
-  `;
 
   // Webhook URL points to deploy worker (handles all chat webhooks with ctx.waitUntil)
   const webhookUrl = `${c.env.RUNTIME_WORKER_URL}/chat/whatsapp/webhook`;
@@ -1642,8 +1650,8 @@ chatPlatformRoutes.openapi(slackWebhookRoute, async (c): Promise<any> => {
   // Thread support: reply in thread if message is in a thread, or create thread from the message
   const threadTs = event.thread_ts || event.ts || "";
 
-  // Resolve org from team_id
-  const sql = await getDb(c.env.HYPERDRIVE);
+  // Resolve org from team_id (webhook is unauthenticated; admin DB)
+  return await withAdminDb(c.env, async (sql) => {
   let orgId = "";
   try {
     const rows = await sql`
@@ -1739,6 +1747,7 @@ chatPlatformRoutes.openapi(slackWebhookRoute, async (c): Promise<any> => {
   }
 
   return c.json({ ok: true });
+  });
 });
 
 // POST /chat/slack/connect — Store Slack credentials
@@ -1770,19 +1779,19 @@ const slackConnectRoute = createRoute({
 chatPlatformRoutes.openapi(slackConnectRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const body = c.req.valid("json");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  await withOrgDb(c.env, user.org_id, async (sql) => {
+    await storeSecret(sql, "SLACK_BOT_TOKEN", body.bot_token, user.org_id);
 
-  await storeSecret(sql, "SLACK_BOT_TOKEN", body.bot_token, user.org_id);
-
-  const now = new Date().toISOString();
-  const config = JSON.stringify({ team_id: body.team_id, team_name: body.team_name });
-  await sql`
-    INSERT INTO channel_configs (org_id, channel, agent_name, config, is_active, created_at, updated_at)
-    VALUES (${user.org_id}, 'slack', ${body.agent_name || ""}, ${config}::jsonb, true, ${now}, ${now})
-    ON CONFLICT (org_id, channel) DO UPDATE
-    SET config = ${config}::jsonb, agent_name = COALESCE(NULLIF(${body.agent_name}, ''), channel_configs.agent_name),
-        is_active = true, updated_at = ${now}
-  `;
+    const now = new Date().toISOString();
+    const config = JSON.stringify({ team_id: body.team_id, team_name: body.team_name });
+    await sql`
+      INSERT INTO channel_configs (org_id, channel, agent_name, config, is_active, created_at, updated_at)
+      VALUES (${user.org_id}, 'slack', ${body.agent_name || ""}, ${config}::jsonb, true, ${now}, ${now})
+      ON CONFLICT (org_id, channel) DO UPDATE
+      SET config = ${config}::jsonb, agent_name = COALESCE(NULLIF(${body.agent_name}, ''), channel_configs.agent_name),
+          is_active = true, updated_at = ${now}
+    `;
+  });
 
   const webhookUrl = `${c.env.RUNTIME_WORKER_URL}/chat/slack/webhook`;
   return c.json({ ok: true, team_id: body.team_id, webhook_url: webhookUrl });
@@ -1824,19 +1833,21 @@ chatPlatformRoutes.openapi(slackOAuthRoute, async (c): Promise<any> => {
   const teamId = data.team?.id || "";
   const teamName = data.team?.name || "";
 
-  // If state contains orgId, save automatically
+  // If state contains orgId, save automatically (state IS the org_id from
+  // the OAuth init handshake; use withOrgDb so RLS enforces isolation)
   if (state && botToken && teamId) {
-    const sql = await getDb(c.env.HYPERDRIVE);
     try {
-      await storeSecret(sql, "SLACK_BOT_TOKEN", botToken, state);
-      const now = new Date().toISOString();
-      const config = JSON.stringify({ team_id: teamId, team_name: teamName });
-      await sql`
-        INSERT INTO channel_configs (org_id, channel, agent_name, config, is_active, created_at, updated_at)
-        VALUES (${state}, 'slack', '', ${config}::jsonb, true, ${now}, ${now})
-        ON CONFLICT (org_id, channel) DO UPDATE
-        SET config = ${config}::jsonb, is_active = true, updated_at = ${now}
-      `;
+      await withOrgDb(c.env, state, async (sql) => {
+        await storeSecret(sql, "SLACK_BOT_TOKEN", botToken, state);
+        const now = new Date().toISOString();
+        const config = JSON.stringify({ team_id: teamId, team_name: teamName });
+        await sql`
+          INSERT INTO channel_configs (org_id, channel, agent_name, config, is_active, created_at, updated_at)
+          VALUES (${state}, 'slack', '', ${config}::jsonb, true, ${now}, ${now})
+          ON CONFLICT (org_id, channel) DO UPDATE
+          SET config = ${config}::jsonb, is_active = true, updated_at = ${now}
+        `;
+      });
     } catch {}
   }
 
@@ -1909,8 +1920,7 @@ chatPlatformRoutes.openapi(instagramWebhookRoute, async (c): Promise<any> => {
 
   if (payload.object !== "instagram") return c.json({ ok: true });
 
-  const sql = await getDb(c.env.HYPERDRIVE);
-
+  return await withAdminDb(c.env, async (sql) => {
   for (const entry of payload.entry || []) {
     const igUserId = entry.id || "";
     for (const messaging of entry.messaging || []) {
@@ -1954,6 +1964,7 @@ chatPlatformRoutes.openapi(instagramWebhookRoute, async (c): Promise<any> => {
   }
 
   return c.json({ ok: true });
+  });
 });
 
 // POST /chat/instagram/connect — Store Instagram credentials
@@ -1986,23 +1997,23 @@ const instagramConnectRoute = createRoute({
 chatPlatformRoutes.openapi(instagramConnectRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const body = c.req.valid("json");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  await withOrgDb(c.env, user.org_id, async (sql) => {
+    await storeSecret(sql, "INSTAGRAM_PAGE_TOKEN", body.page_token, user.org_id);
 
-  await storeSecret(sql, "INSTAGRAM_PAGE_TOKEN", body.page_token, user.org_id);
-
-  const now = new Date().toISOString();
-  const config = JSON.stringify({
-    page_id: body.page_id,
-    ig_user_id: body.ig_user_id,
-    ig_username: body.ig_username,
+    const now = new Date().toISOString();
+    const config = JSON.stringify({
+      page_id: body.page_id,
+      ig_user_id: body.ig_user_id,
+      ig_username: body.ig_username,
+    });
+    await sql`
+      INSERT INTO channel_configs (org_id, channel, agent_name, config, is_active, created_at, updated_at)
+      VALUES (${user.org_id}, 'instagram', ${body.agent_name || ""}, ${config}::jsonb, true, ${now}, ${now})
+      ON CONFLICT (org_id, channel) DO UPDATE
+      SET config = ${config}::jsonb, agent_name = COALESCE(NULLIF(${body.agent_name}, ''), channel_configs.agent_name),
+          is_active = true, updated_at = ${now}
+    `;
   });
-  await sql`
-    INSERT INTO channel_configs (org_id, channel, agent_name, config, is_active, created_at, updated_at)
-    VALUES (${user.org_id}, 'instagram', ${body.agent_name || ""}, ${config}::jsonb, true, ${now}, ${now})
-    ON CONFLICT (org_id, channel) DO UPDATE
-    SET config = ${config}::jsonb, agent_name = COALESCE(NULLIF(${body.agent_name}, ''), channel_configs.agent_name),
-        is_active = true, updated_at = ${now}
-  `;
 
   // Webhook URL points to deploy worker (handles all chat webhooks with ctx.waitUntil)
   const webhookUrl = `${c.env.RUNTIME_WORKER_URL}/chat/instagram/webhook`;
@@ -2069,8 +2080,7 @@ chatPlatformRoutes.openapi(messengerWebhookRoute, async (c): Promise<any> => {
 
   if (payload.object !== "page") return c.json({ ok: true });
 
-  const sql = await getDb(c.env.HYPERDRIVE);
-
+  return await withAdminDb(c.env, async (sql) => {
   for (const entry of payload.entry || []) {
     const pageId = entry.id || "";
     for (const messaging of entry.messaging || []) {
@@ -2114,6 +2124,7 @@ chatPlatformRoutes.openapi(messengerWebhookRoute, async (c): Promise<any> => {
   }
 
   return c.json({ ok: true });
+  });
 });
 
 // POST /chat/messenger/connect — Store Messenger page credentials
@@ -2145,19 +2156,19 @@ const messengerConnectRoute = createRoute({
 chatPlatformRoutes.openapi(messengerConnectRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const body = c.req.valid("json");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  await withOrgDb(c.env, user.org_id, async (sql) => {
+    await storeSecret(sql, "FACEBOOK_PAGE_TOKEN", body.page_token, user.org_id);
 
-  await storeSecret(sql, "FACEBOOK_PAGE_TOKEN", body.page_token, user.org_id);
-
-  const now = new Date().toISOString();
-  const config = JSON.stringify({ page_id: body.page_id, page_name: body.page_name });
-  await sql`
-    INSERT INTO channel_configs (org_id, channel, agent_name, config, is_active, created_at, updated_at)
-    VALUES (${user.org_id}, 'messenger', ${body.agent_name || ""}, ${config}::jsonb, true, ${now}, ${now})
-    ON CONFLICT (org_id, channel) DO UPDATE
-    SET config = ${config}::jsonb, agent_name = COALESCE(NULLIF(${body.agent_name}, ''), channel_configs.agent_name),
-        is_active = true, updated_at = ${now}
-  `;
+    const now = new Date().toISOString();
+    const config = JSON.stringify({ page_id: body.page_id, page_name: body.page_name });
+    await sql`
+      INSERT INTO channel_configs (org_id, channel, agent_name, config, is_active, created_at, updated_at)
+      VALUES (${user.org_id}, 'messenger', ${body.agent_name || ""}, ${config}::jsonb, true, ${now}, ${now})
+      ON CONFLICT (org_id, channel) DO UPDATE
+      SET config = ${config}::jsonb, agent_name = COALESCE(NULLIF(${body.agent_name}, ''), channel_configs.agent_name),
+          is_active = true, updated_at = ${now}
+    `;
+  });
 
   // Webhook URL points to deploy worker (handles all chat webhooks with ctx.waitUntil)
   const webhookUrl = `${c.env.RUNTIME_WORKER_URL}/chat/messenger/webhook`;
@@ -2201,32 +2212,32 @@ const listChannelsRoute = createRoute({
 chatPlatformRoutes.openapi(listChannelsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name: agentName } = c.req.valid("query");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    let rows;
+    if (agentName) {
+      rows = await sql`
+        SELECT channel, agent_name, is_active, config, created_at, updated_at
+        FROM channel_configs WHERE agent_name = ${agentName} OR agent_name = ''
+        ORDER BY channel
+      `;
+    } else {
+      rows = await sql`
+        SELECT channel, agent_name, is_active, config, created_at, updated_at
+        FROM channel_configs
+        ORDER BY channel
+      `;
+    }
 
-  let rows;
-  if (agentName) {
-    rows = await sql`
-      SELECT channel, agent_name, is_active, config, created_at, updated_at
-      FROM channel_configs WHERE org_id = ${user.org_id} AND (agent_name = ${agentName} OR agent_name = '')
-      ORDER BY channel
-    `;
-  } else {
-    rows = await sql`
-      SELECT channel, agent_name, is_active, config, created_at, updated_at
-      FROM channel_configs WHERE org_id = ${user.org_id}
-      ORDER BY channel
-    `;
-  }
-
-  return c.json({
-    channels: rows.map((r: any) => ({
-      channel: r.channel,
-      agent_name: r.agent_name || "",
-      is_active: Boolean(r.is_active),
-      config: typeof r.config === "string" ? JSON.parse(r.config) : (r.config || {}),
-      created_at: r.created_at?.toISOString?.() || String(r.created_at || ""),
-      updated_at: r.updated_at?.toISOString?.() || String(r.updated_at || ""),
-    })),
+    return c.json({
+      channels: rows.map((r: any) => ({
+        channel: r.channel,
+        agent_name: r.agent_name || "",
+        is_active: Boolean(r.is_active),
+        config: typeof r.config === "string" ? JSON.parse(r.config) : (r.config || {}),
+        created_at: r.created_at?.toISOString?.() || String(r.created_at || ""),
+        updated_at: r.updated_at?.toISOString?.() || String(r.updated_at || ""),
+      })),
+    });
   });
 });
 
@@ -2260,7 +2271,7 @@ chatPlatformRoutes.openapi(upsertChannelRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { channel } = c.req.valid("param");
   const body = c.req.valid("json");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
   const now = new Date().toISOString();
   const configStr = JSON.stringify(body.config || {});
 
@@ -2273,6 +2284,7 @@ chatPlatformRoutes.openapi(upsertChannelRoute, async (c): Promise<any> => {
   `;
 
   return c.json({ ok: true, channel });
+  });
 });
 
 // DELETE /chat/channels/:channel — Deactivate a channel
@@ -2292,12 +2304,12 @@ const deleteChannelRoute = createRoute({
 chatPlatformRoutes.openapi(deleteChannelRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { channel } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  await sql`
-    UPDATE channel_configs SET is_active = false, updated_at = ${new Date().toISOString()}
-    WHERE org_id = ${user.org_id} AND channel = ${channel}
-  `;
+  await withOrgDb(c.env, user.org_id, async (sql) => {
+    await sql`
+      UPDATE channel_configs SET is_active = false, updated_at = ${new Date().toISOString()}
+      WHERE channel = ${channel}
+    `;
+  });
 
   return c.json({ ok: true });
 });
@@ -2333,25 +2345,30 @@ const emailSetupRoute = createRoute({
 chatPlatformRoutes.openapi(emailSetupRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name, custom_email } = c.req.valid("json");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  const agentRows = await sql`SELECT name FROM agents WHERE name = ${agent_name} AND org_id = ${user.org_id} LIMIT 1`;
-  if (agentRows.length === 0) return c.json({ error: "Agent not found" }, 404);
 
   const orgShort = user.org_id.slice(-8);
   const defaultEmail = `${agent_name}.${orgShort}@oneshots.co`;
-  const now = new Date().toISOString();
 
-  // Save config
-  await sql`
-    INSERT INTO channel_configs (org_id, channel, agent_name, is_active, config, created_at, updated_at)
-    VALUES (${user.org_id}, 'email', ${agent_name}, true,
-      ${JSON.stringify({ default_email: defaultEmail, custom_email: custom_email || null })}::jsonb, ${now}, ${now})
-    ON CONFLICT (org_id, channel) DO UPDATE SET
-      agent_name = ${agent_name}, is_active = true,
-      config = ${JSON.stringify({ default_email: defaultEmail, custom_email: custom_email || null })}::jsonb,
-      updated_at = ${now}
-  `.catch(() => {});
+  const setupResult = await withOrgDb(c.env, user.org_id, async (sql): Promise<{ notFound?: true } | { ok: true }> => {
+    const agentRows = await sql`SELECT name FROM agents WHERE name = ${agent_name} LIMIT 1`;
+    if (agentRows.length === 0) return { notFound: true };
+
+    const now = new Date().toISOString();
+    // Save config
+    await sql`
+      INSERT INTO channel_configs (org_id, channel, agent_name, is_active, config, created_at, updated_at)
+      VALUES (${user.org_id}, 'email', ${agent_name}, true,
+        ${JSON.stringify({ default_email: defaultEmail, custom_email: custom_email || null })}::jsonb, ${now}, ${now})
+      ON CONFLICT (org_id, channel) DO UPDATE SET
+        agent_name = ${agent_name}, is_active = true,
+        config = ${JSON.stringify({ default_email: defaultEmail, custom_email: custom_email || null })}::jsonb,
+        updated_at = ${now}
+    `.catch(() => {});
+
+    return { ok: true };
+  });
+
+  if ("notFound" in setupResult) return c.json({ error: "Agent not found" }, 404);
 
   let customDomainStatus = null;
   if (custom_email) {
@@ -2388,16 +2405,18 @@ const emailRemoveRoute = createRoute({
 chatPlatformRoutes.openapi(emailRemoveRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name, custom_email } = c.req.valid("json");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Remove the custom email from config
   const orgShort = user.org_id.slice(-8);
   const defaultEmail = `${agent_name}.${orgShort}@oneshots.co`;
-  const now = new Date().toISOString();
-  await sql`
-    UPDATE channel_configs SET config = ${JSON.stringify({ default_email: defaultEmail, custom_email: null })}::jsonb, updated_at = ${now}
-    WHERE org_id = ${user.org_id} AND channel = 'email'
-  `.catch(() => {});
+
+  await withOrgDb(c.env, user.org_id, async (sql) => {
+    const now = new Date().toISOString();
+    await sql`
+      UPDATE channel_configs SET config = ${JSON.stringify({ default_email: defaultEmail, custom_email: null })}::jsonb, updated_at = ${now}
+      WHERE channel = 'email'
+    `.catch(() => {});
+  });
 
   // Try to remove the CF Email Routing rule
   const removeResult = await removeEmailRouting(c.env, custom_email);
@@ -2554,26 +2573,27 @@ const smsConnectRoute = createRoute({
 chatPlatformRoutes.openapi(smsConnectRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const body = c.req.valid("json");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const now = new Date().toISOString();
+  await withOrgDb(c.env, user.org_id, async (sql) => {
+    const now = new Date().toISOString();
 
-  // Store Twilio credentials as secrets
-  await storeSecret(sql, "TWILIO_ACCOUNT_SID", body.account_sid, user.org_id);
-  await storeSecret(sql, "TWILIO_AUTH_TOKEN", body.auth_token, user.org_id);
-  await storeSecret(sql, "TWILIO_PHONE_NUMBER", body.phone_number, user.org_id);
+    // Store Twilio credentials as secrets
+    await storeSecret(sql, "TWILIO_ACCOUNT_SID", body.account_sid, user.org_id);
+    await storeSecret(sql, "TWILIO_AUTH_TOKEN", body.auth_token, user.org_id);
+    await storeSecret(sql, "TWILIO_PHONE_NUMBER", body.phone_number, user.org_id);
 
-  // Save channel config
-  const config = JSON.stringify({
-    phone_number: body.phone_number,
-    account_sid: body.account_sid,
+    // Save channel config
+    const config = JSON.stringify({
+      phone_number: body.phone_number,
+      account_sid: body.account_sid,
+    });
+    await sql`
+      INSERT INTO channel_configs (org_id, channel, agent_name, config, is_active, created_at, updated_at)
+      VALUES (${user.org_id}, 'sms', ${body.agent_name || ""}, ${config}::jsonb, true, ${now}, ${now})
+      ON CONFLICT (org_id, channel) DO UPDATE
+      SET config = ${config}::jsonb, agent_name = COALESCE(NULLIF(${body.agent_name}, ''), channel_configs.agent_name),
+          is_active = true, updated_at = ${now}
+    `;
   });
-  await sql`
-    INSERT INTO channel_configs (org_id, channel, agent_name, config, is_active, created_at, updated_at)
-    VALUES (${user.org_id}, 'sms', ${body.agent_name || ""}, ${config}::jsonb, true, ${now}, ${now})
-    ON CONFLICT (org_id, channel) DO UPDATE
-    SET config = ${config}::jsonb, agent_name = COALESCE(NULLIF(${body.agent_name}, ''), channel_configs.agent_name),
-        is_active = true, updated_at = ${now}
-  `;
 
   // Configure Twilio phone number webhook
   const webhookUrl = `${c.env.RUNTIME_WORKER_URL}/chat/sms/webhook`;
@@ -2647,8 +2667,8 @@ chatPlatformRoutes.openapi(smsWebhookRoute, async (c): Promise<any> => {
     return new Response("<Response></Response>", { status: 200, headers: { "Content-Type": "text/xml" } });
   }
 
-  const sql = await getDb(c.env.HYPERDRIVE);
-
+  // Webhook is unauthenticated; resolve org from channel_configs.
+  return await withAdminDb(c.env, async (sql) => {
   // Look up org from channel_configs by phone number
   let orgId = "";
   try {
@@ -2686,6 +2706,7 @@ chatPlatformRoutes.openapi(smsWebhookRoute, async (c): Promise<any> => {
   const safeOutput = (output || "Sorry, I could not process your message.").slice(0, 1600);
   const twiml = `<Response><Message>${safeOutput.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</Message></Response>`;
   return new Response(twiml, { status: 200, headers: { "Content-Type": "text/xml" } });
+  });
 });
 
 // DELETE /chat/sms/disconnect — Remove Twilio webhook and deactivate channel
@@ -2713,7 +2734,7 @@ const smsDisconnectRoute = createRoute({
 });
 chatPlatformRoutes.openapi(smsDisconnectRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   // Get stored credentials to remove webhook
   const accountSid = await getSecret(sql, "TWILIO_ACCOUNT_SID", user.org_id);
@@ -2751,10 +2772,11 @@ chatPlatformRoutes.openapi(smsDisconnectRoute, async (c): Promise<any> => {
   const now = new Date().toISOString();
   await sql`
     UPDATE channel_configs SET is_active = false, updated_at = ${now}
-    WHERE org_id = ${user.org_id} AND channel = 'sms'
+    WHERE channel = 'sms'
   `;
 
   return c.json({ ok: true });
+  });
 });
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -2813,8 +2835,8 @@ chatPlatformRoutes.openapi(tiktokWebhookRoute, async (c): Promise<any> => {
   const conversationId = content.conversation_id || "";
   if (!msgText || !senderId) return c.json({ ok: true });
 
-  const sql = await getDb(c.env.HYPERDRIVE);
-
+  // Webhook is unauthenticated; resolve org from channel_configs.
+  return await withAdminDb(c.env, async (sql) => {
   // Resolve org from channel_configs
   let orgId = "";
   try {
@@ -2853,6 +2875,7 @@ chatPlatformRoutes.openapi(tiktokWebhookRoute, async (c): Promise<any> => {
   }
 
   return c.json({ ok: true });
+  });
 });
 
 // POST /chat/tiktok/connect — Store TikTok credentials
@@ -2895,25 +2918,26 @@ const tiktokConnectRoute = createRoute({
 chatPlatformRoutes.openapi(tiktokConnectRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const body = c.req.valid("json");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const now = new Date().toISOString();
+  await withOrgDb(c.env, user.org_id, async (sql) => {
+    const now = new Date().toISOString();
 
-  // Store TikTok credentials as secrets
-  await storeSecret(sql, "TIKTOK_CLIENT_KEY", body.client_key, user.org_id);
-  await storeSecret(sql, "TIKTOK_CLIENT_SECRET", body.client_secret, user.org_id);
-  await storeSecret(sql, "TIKTOK_ACCESS_TOKEN", body.access_token, user.org_id);
+    // Store TikTok credentials as secrets
+    await storeSecret(sql, "TIKTOK_CLIENT_KEY", body.client_key, user.org_id);
+    await storeSecret(sql, "TIKTOK_CLIENT_SECRET", body.client_secret, user.org_id);
+    await storeSecret(sql, "TIKTOK_ACCESS_TOKEN", body.access_token, user.org_id);
 
-  // Save channel config
-  const config = JSON.stringify({
-    client_key: body.client_key,
+    // Save channel config
+    const config = JSON.stringify({
+      client_key: body.client_key,
+    });
+    await sql`
+      INSERT INTO channel_configs (org_id, channel, agent_name, config, is_active, created_at, updated_at)
+      VALUES (${user.org_id}, 'tiktok', ${body.agent_name || ""}, ${config}::jsonb, true, ${now}, ${now})
+      ON CONFLICT (org_id, channel) DO UPDATE
+      SET config = ${config}::jsonb, agent_name = COALESCE(NULLIF(${body.agent_name}, ''), channel_configs.agent_name),
+          is_active = true, updated_at = ${now}
+    `;
   });
-  await sql`
-    INSERT INTO channel_configs (org_id, channel, agent_name, config, is_active, created_at, updated_at)
-    VALUES (${user.org_id}, 'tiktok', ${body.agent_name || ""}, ${config}::jsonb, true, ${now}, ${now})
-    ON CONFLICT (org_id, channel) DO UPDATE
-    SET config = ${config}::jsonb, agent_name = COALESCE(NULLIF(${body.agent_name}, ''), channel_configs.agent_name),
-        is_active = true, updated_at = ${now}
-  `;
 
   // Register webhook with TikTok
   const webhookUrl = `${c.env.RUNTIME_WORKER_URL}/chat/tiktok/webhook`;
@@ -2961,7 +2985,7 @@ const tiktokDisconnectRoute = createRoute({
 });
 chatPlatformRoutes.openapi(tiktokDisconnectRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
 
   // Attempt to unsubscribe webhook
   const accessToken = await getSecret(sql, "TIKTOK_ACCESS_TOKEN", user.org_id);
@@ -2982,8 +3006,9 @@ chatPlatformRoutes.openapi(tiktokDisconnectRoute, async (c): Promise<any> => {
   const now = new Date().toISOString();
   await sql`
     UPDATE channel_configs SET is_active = false, updated_at = ${now}
-    WHERE org_id = ${user.org_id} AND channel = 'tiktok'
+    WHERE channel = 'tiktok'
   `;
 
   return c.json({ ok: true });
+  });
 });

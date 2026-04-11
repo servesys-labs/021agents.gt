@@ -195,12 +195,20 @@
             </div>
             <div>
               <p class="text-2xl font-bold">${referrals.earnings.total_earned_usd.toFixed(2)}</p>
-              <p class="text-xs text-muted-foreground">Total Earned</p>
+              <p class="text-xs text-muted-foreground">Total Earned (credits)</p>
             </div>
             <div>
               <p class="text-2xl font-bold">{referrals.earnings.total_transactions}</p>
               <p class="text-xs text-muted-foreground">Earning Transactions</p>
             </div>
+          </div>
+          <div class="mt-4 rounded-md border border-border bg-muted/40 px-4 py-3">
+            <p class="text-xs text-muted-foreground">
+              <span class="font-medium text-foreground">Cash payouts coming soon.</span>
+              Referral earnings currently accrue as platform credits and are
+              applied automatically to your usage. Bank transfers will be
+              available once our payout infrastructure goes live.
+            </p>
           </div>
         </div>
       {/if}

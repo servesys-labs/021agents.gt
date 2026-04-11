@@ -14,7 +14,7 @@ import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { RedTeamRunner, ScanResult } from "../lib/security";
 import { parseAgentConfigJson } from "../schemas/common";
 import { requireScope } from "../middleware/auth";
@@ -55,8 +55,6 @@ const startScanRoute = createRoute({
 
 redteamRoutes.openapi(startScanRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
   const parsed = c.req.valid("json");
   const { scan_type, agent_config } = parsed;
 
@@ -68,12 +66,14 @@ redteamRoutes.openapi(startScanRoute, async (c): Promise<any> => {
     return c.json({ error: "agent_name is required" }, 400);
   }
 
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+
   // Load agent config if not provided
   let agentConfig = agent_config;
   if (!agentConfig) {
     const agentRows = await sql`
       SELECT config FROM agents
-      WHERE name = ${agentName} AND org_id = ${user.org_id}
+      WHERE name = ${agentName}
       LIMIT 1
     `;
     if (!agentRows.length) {
@@ -208,6 +208,7 @@ redteamRoutes.openapi(startScanRoute, async (c): Promise<any> => {
       error instanceof Error ? error.message : String(error);
     return c.json({ error: "Scan failed", message: errorMessage }, 500);
   }
+  });
 });
 
 // ── GET /redteam/scans ─────────────────────────────────────────────
@@ -233,34 +234,34 @@ const listScansRoute = createRoute({
 redteamRoutes.openapi(listScansRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name: agentName, limit } = c.req.valid("query");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  let rows;
-  if (agentName) {
-    rows = await sql`
-      SELECT
-        scan_id, agent_name, scan_type, status,
-        total_probes, passed, failed, risk_score, risk_level,
-        started_at, completed_at
-      FROM security_scans
-      WHERE org_id = ${user.org_id} AND agent_name = ${agentName}
-      ORDER BY started_at DESC LIMIT ${limit}
-    `;
-  } else {
-    rows = await sql`
-      SELECT
-        scan_id, agent_name, scan_type, status,
-        total_probes, passed, failed, risk_score, risk_level,
-        started_at, completed_at
-      FROM security_scans
-      WHERE org_id = ${user.org_id}
-      ORDER BY started_at DESC LIMIT ${limit}
-    `;
-  }
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    let rows;
+    if (agentName) {
+      rows = await sql`
+        SELECT
+          scan_id, agent_name, scan_type, status,
+          total_probes, passed, failed, risk_score, risk_level,
+          started_at, completed_at
+        FROM security_scans
+        WHERE agent_name = ${agentName}
+        ORDER BY started_at DESC LIMIT ${limit}
+      `;
+    } else {
+      rows = await sql`
+        SELECT
+          scan_id, agent_name, scan_type, status,
+          total_probes, passed, failed, risk_score, risk_level,
+          started_at, completed_at
+        FROM security_scans
+        ORDER BY started_at DESC LIMIT ${limit}
+      `;
+    }
 
-  return c.json({
-    scans: rows,
-    total: rows.length,
+    return c.json({
+      scans: rows,
+      total: rows.length,
+    });
   });
 });
 
@@ -285,7 +286,6 @@ const getScanRoute = createRoute({
 redteamRoutes.openapi(getScanRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { id: scanId } = c.req.valid("param");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // First check cache for active/running scans with full details
   const cachedResult = scanResultsCache.get(scanId);
@@ -293,25 +293,26 @@ redteamRoutes.openapi(getScanRoute, async (c): Promise<any> => {
     return c.json(cachedResult);
   }
 
-  // Get scan from database
-  const scanRows = await sql`
-    SELECT * FROM security_scans
-    WHERE scan_id = ${scanId} AND org_id = ${user.org_id}
-    LIMIT 1
-  `;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Get scan from database
+    const scanRows = await sql`
+      SELECT * FROM security_scans
+      WHERE scan_id = ${scanId}
+      LIMIT 1
+    `;
 
-  if (!scanRows.length) {
-    return c.json({ error: "Scan not found" }, 404);
-  }
+    if (!scanRows.length) {
+      return c.json({ error: "Scan not found" }, 404);
+    }
 
-  const scan = scanRows[0] as Record<string, unknown>;
+    const scan = scanRows[0] as Record<string, unknown>;
 
-  // Get findings for this scan
-  const findingRows = await sql`
-    SELECT * FROM security_scan_findings
-    WHERE scan_id = ${scanId} AND org_id = ${user.org_id}
-    ORDER BY aivss_score DESC
-  `;
+    // Get findings for this scan
+    const findingRows = await sql`
+      SELECT * FROM security_scan_findings
+      WHERE scan_id = ${scanId}
+      ORDER BY aivss_score DESC
+    `;
 
   // Get MAESTRO layers (stored in scan metadata if available)
   let maestroLayers: Record<string, unknown>[] = [];
@@ -345,7 +346,8 @@ redteamRoutes.openapi(getScanRoute, async (c): Promise<any> => {
     completed_at: String(scan.completed_at ?? new Date().toISOString()),
   };
 
-  return c.json(result);
+    return c.json(result);
+  });
 });
 
 // ── POST /redteam/scans/:id/cancel ─────────────────────────────────

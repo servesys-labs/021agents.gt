@@ -3,7 +3,8 @@
  * Falls back to platform defaults when no policy exists.
  */
 
-import { getDb } from "../db/client";
+import type { Env } from "../env";
+import { withOrgDb } from "../db/client";
 import { parseJsonColumn } from "../lib/parse-json-column";
 
 export interface Thresholds {
@@ -27,41 +28,44 @@ const PLATFORM_DEFAULTS: Thresholds = {
 /**
  * Load thresholds for an agent, with fallback chain:
  *   agent-specific → org-wide → platform defaults
+ *
+ * Takes the Env (not a raw Hyperdrive) so the call flows through
+ * withOrgDb with the caller's org_id set for RLS.
  */
 export async function getThresholds(
-  hyperdrive: Hyperdrive,
+  env: Pick<Env, "HYPERDRIVE">,
   orgId: string,
   agentName?: string,
 ): Promise<Thresholds> {
   try {
-    const sql = await getDb(hyperdrive);
+    return await withOrgDb(env, orgId, async (sql) => {
+      // RLS filters agent_policies to the current org automatically.
+      if (agentName) {
+        const agentRows = await sql`
+          SELECT config FROM agent_policies
+          WHERE agent_name = ${agentName} AND policy_type = 'thresholds'
+          LIMIT 1
+        `;
+        if (agentRows.length > 0) {
+          return { ...PLATFORM_DEFAULTS, ...parseJsonColumn(agentRows[0].config) };
+        }
+      }
 
-    // Try agent-specific policy first
-    if (agentName) {
-      const agentRows = await sql`
+      // Try org-wide policy (agent_name IS NULL)
+      const orgRows = await sql`
         SELECT config FROM agent_policies
-        WHERE org_id = ${orgId} AND agent_name = ${agentName} AND policy_type = 'thresholds'
+        WHERE agent_name IS NULL AND policy_type = 'thresholds'
         LIMIT 1
       `;
-      if (agentRows.length > 0) {
-        return { ...PLATFORM_DEFAULTS, ...parseJsonColumn(agentRows[0].config) };
+      if (orgRows.length > 0) {
+        return { ...PLATFORM_DEFAULTS, ...parseJsonColumn(orgRows[0].config) };
       }
-    }
-
-    // Try org-wide policy
-    const orgRows = await sql`
-      SELECT config FROM agent_policies
-      WHERE org_id = ${orgId} AND agent_name IS NULL AND policy_type = 'thresholds'
-      LIMIT 1
-    `;
-    if (orgRows.length > 0) {
-      return { ...PLATFORM_DEFAULTS, ...parseJsonColumn(orgRows[0].config) };
-    }
+      return PLATFORM_DEFAULTS;
+    });
   } catch {
     // DB error — use platform defaults
+    return PLATFORM_DEFAULTS;
   }
-
-  return PLATFORM_DEFAULTS;
 }
 
 export { PLATFORM_DEFAULTS };

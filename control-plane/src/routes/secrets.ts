@@ -9,7 +9,7 @@ import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import type { CurrentUser } from "../auth/types";
 import type { Env } from "../env";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb } from "../db/client";
 import { fernetEncrypt } from "../logic/fernet";
 import { requireScope } from "../middleware/auth";
 
@@ -44,35 +44,34 @@ secretRoutes.openapi(listSecretsRoute, async (c): Promise<any> => {
   const query = c.req.valid("query");
   const projectId = query.project_id || "";
   const envFilter = query.env || "";
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  let rows;
-  if (projectId && envFilter) {
-    rows = await sql`
-      SELECT name, project_id, env, created_at, updated_at FROM secrets
-      WHERE org_id = ${user.org_id} AND project_id = ${projectId} AND env = ${envFilter}
-      ORDER BY name
-    `;
-  } else if (projectId) {
-    rows = await sql`
-      SELECT name, project_id, env, created_at, updated_at FROM secrets
-      WHERE org_id = ${user.org_id} AND project_id = ${projectId}
-      ORDER BY name
-    `;
-  } else if (envFilter) {
-    rows = await sql`
-      SELECT name, project_id, env, created_at, updated_at FROM secrets
-      WHERE org_id = ${user.org_id} AND env = ${envFilter}
-      ORDER BY name
-    `;
-  } else {
-    rows = await sql`
-      SELECT name, project_id, env, created_at, updated_at FROM secrets
-      WHERE org_id = ${user.org_id}
-      ORDER BY name
-    `;
-  }
-  return c.json({ secrets: rows });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    let rows;
+    if (projectId && envFilter) {
+      rows = await sql`
+        SELECT name, project_id, env, created_at, updated_at FROM secrets
+        WHERE project_id = ${projectId} AND env = ${envFilter}
+        ORDER BY name
+      `;
+    } else if (projectId) {
+      rows = await sql`
+        SELECT name, project_id, env, created_at, updated_at FROM secrets
+        WHERE project_id = ${projectId}
+        ORDER BY name
+      `;
+    } else if (envFilter) {
+      rows = await sql`
+        SELECT name, project_id, env, created_at, updated_at FROM secrets
+        WHERE env = ${envFilter}
+        ORDER BY name
+      `;
+    } else {
+      rows = await sql`
+        SELECT name, project_id, env, created_at, updated_at FROM secrets
+        ORDER BY name
+      `;
+    }
+    return c.json({ secrets: rows });
+  });
 });
 
 // ── POST / — Create a secret ────────────────────────────────────────────────
@@ -112,26 +111,26 @@ secretRoutes.openapi(createSecretRoute, async (c): Promise<any> => {
   if (!name) return c.json({ error: "name is required" }, 400);
   if (!value) return c.json({ error: "value is required" }, 400);
 
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  // Check for duplicate
-  const existing = await sql`
-    SELECT name FROM secrets
-    WHERE org_id = ${user.org_id} AND name = ${name} AND project_id = ${projectId} AND env = ${envFilter}
-  `;
-  if (existing.length > 0) {
-    return c.json({ error: `Secret '${name}' already exists in this scope` }, 409);
-  }
-
   const encrypted = await fernetEncrypt(value, getKeySeed(c.env));
   const now = new Date().toISOString();
 
-  await sql`
-    INSERT INTO secrets (org_id, project_id, env, name, encrypted_value, created_by, created_at, updated_at)
-    VALUES (${user.org_id}, ${projectId}, ${envFilter}, ${name}, ${encrypted}, ${user.user_id}, ${now}, ${now})
-  `;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Check for duplicate
+    const existing = await sql`
+      SELECT name FROM secrets
+      WHERE name = ${name} AND project_id = ${projectId} AND env = ${envFilter}
+    `;
+    if (existing.length > 0) {
+      return c.json({ error: `Secret '${name}' already exists in this scope` }, 409);
+    }
 
-  return c.json({ created: name, project_id: projectId, env: envFilter });
+    await sql`
+      INSERT INTO secrets (org_id, project_id, env, name, encrypted_value, created_by, created_at, updated_at)
+      VALUES (${user.org_id}, ${projectId}, ${envFilter}, ${name}, ${encrypted}, ${user.user_id}, ${now}, ${now})
+    `;
+
+    return c.json({ created: name, project_id: projectId, env: envFilter });
+  });
 });
 
 // ── DELETE /{name} — Delete a secret ────────────────────────────────────────
@@ -159,14 +158,14 @@ secretRoutes.openapi(deleteSecretRoute, async (c): Promise<any> => {
   const query = c.req.valid("query");
   const projectId = query.project_id || "";
   const envFilter = query.env || "";
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  const result = await sql`
-    DELETE FROM secrets
-    WHERE org_id = ${user.org_id} AND name = ${name} AND project_id = ${projectId} AND env = ${envFilter}
-  `;
-  if (result.count === 0) return c.json({ error: `Secret '${name}' not found` }, 404);
-  return c.json({ deleted: name });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const result = await sql`
+      DELETE FROM secrets
+      WHERE name = ${name} AND project_id = ${projectId} AND env = ${envFilter}
+    `;
+    if (result.count === 0) return c.json({ error: `Secret '${name}' not found` }, 404);
+    return c.json({ deleted: name });
+  });
 });
 
 // ── POST /{name}/rotate — Rotate a secret value ────────────────────────────
@@ -207,12 +206,13 @@ secretRoutes.openapi(rotateSecretRoute, async (c): Promise<any> => {
 
   const encrypted = await fernetEncrypt(newValue, getKeySeed(c.env));
   const now = new Date().toISOString();
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  const result = await sql`
-    UPDATE secrets SET encrypted_value = ${encrypted}, updated_at = ${now}
-    WHERE org_id = ${user.org_id} AND name = ${name} AND project_id = ${projectId} AND env = ${envFilter}
-  `;
-  if (result.count === 0) return c.json({ error: `Secret '${name}' not found` }, 404);
-  return c.json({ rotated: name, updated_at: now });
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const result = await sql`
+      UPDATE secrets SET encrypted_value = ${encrypted}, updated_at = ${now}
+      WHERE name = ${name} AND project_id = ${projectId} AND env = ${envFilter}
+    `;
+    if (result.count === 0) return c.json({ error: `Secret '${name}' not found` }, 404);
+    return c.json({ rotated: name, updated_at: now });
+  });
 });

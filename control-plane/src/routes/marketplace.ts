@@ -8,7 +8,7 @@
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
-import { getDbForOrg } from "../db/client";
+import { withOrgDb, withAdminDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import {
   searchMarketplace,
@@ -45,18 +45,23 @@ const searchRoute = createRoute({
 marketplaceRoutes.openapi(searchRoute, async (c): Promise<any> => {
   const { q, category, max_price, min_quality, limit } = c.req.valid("query");
   const user = c.get("user") as any;
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user?.org_id || "public");
 
-  const results = await searchMarketplace(sql, q, {
-    category,
-    max_price_usd: max_price,
-    min_quality: min_quality,
-    limit,
-    querier_org_id: user?.org_id,
-    querier_agent_name: user?.agent_name,
+  // Public discovery endpoint — no auth required. The marketplace_listings
+  // RLS policy permits cross-org reads where is_published = true, but the
+  // search query intentionally aggregates broadly across all published
+  // listings, so withAdminDb is the right tool.
+  return await withAdminDb(c.env, async (sql) => {
+    const results = await searchMarketplace(sql, q, {
+      category,
+      max_price_usd: max_price,
+      min_quality: min_quality,
+      limit,
+      querier_org_id: user?.org_id,
+      querier_agent_name: user?.agent_name,
+    });
+
+    return c.json(results);
   });
-
-  return c.json(results);
 });
 
 // ── GET /categories — List marketplace categories ────────────
@@ -119,18 +124,18 @@ const publishRoute = createRoute({
 marketplaceRoutes.openapi(publishRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const body = c.req.valid("json");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  // Verify agent exists
-  const agentRows = await sql`
-    SELECT name FROM agents WHERE name = ${body.agent_name} AND org_id = ${user.org_id} AND is_active = true LIMIT 1
-  `;
-  if (agentRows.length === 0) return c.json({ error: "Agent not found or inactive" }, 404);
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Verify agent exists
+    const agentRows = await sql`
+      SELECT name FROM agents WHERE name = ${body.agent_name} AND is_active = true LIMIT 1
+    `;
+    if (agentRows.length === 0) return c.json({ error: "Agent not found or inactive" }, 404);
 
-  const baseUrl = `https://api.oneshots.co/api/v1`;
+    const baseUrl = `https://api.oneshots.co/api/v1`;
 
-  try {
-    const [listing] = await sql`
+    try {
+      const [listing] = await sql`
       INSERT INTO marketplace_listings (
         agent_name, org_id, display_name, short_description, long_description,
         category, subcategory, tags, price_per_task_usd, price_per_1k_tokens_usd,
@@ -162,35 +167,36 @@ marketplaceRoutes.openapi(publishRoute, async (c): Promise<any> => {
       RETURNING id
     `;
 
-    // Sync pricing to agent's config (the x-402 gate reads from here)
-    if (body.price_per_task_usd > 0 || body.price_per_1k_tokens_usd > 0) {
-      try {
-        const [agentRow] = await sql`SELECT config FROM agents WHERE name = ${body.agent_name} AND org_id = ${user.org_id}`;
-        const cfg = typeof agentRow.config === "string" ? JSON.parse(agentRow.config) : agentRow.config || {};
-        cfg.pricing = {
-          price_per_task_usd: body.price_per_task_usd,
-          price_per_1k_tokens_usd: body.price_per_1k_tokens_usd,
-        };
-        await sql`UPDATE agents SET config = ${JSON.stringify(cfg)}, updated_at = now() WHERE name = ${body.agent_name} AND org_id = ${user.org_id}`;
-      } catch {} // non-blocking — listing is still created
-    }
+      // Sync pricing to agent's config (the x-402 gate reads from here)
+      if (body.price_per_task_usd > 0 || body.price_per_1k_tokens_usd > 0) {
+        try {
+          const [agentRow] = await sql`SELECT config FROM agents WHERE name = ${body.agent_name}`;
+          const cfg = typeof agentRow.config === "string" ? JSON.parse(agentRow.config) : agentRow.config || {};
+          cfg.pricing = {
+            price_per_task_usd: body.price_per_task_usd,
+            price_per_1k_tokens_usd: body.price_per_1k_tokens_usd,
+          };
+          await sql`UPDATE agents SET config = ${JSON.stringify(cfg)}, updated_at = now() WHERE name = ${body.agent_name}`;
+        } catch {} // non-blocking — listing is still created
+      }
 
-    return c.json({
-      published: true,
-      listing_id: listing.id,
-      agent_name: body.agent_name,
-      org_id: user.org_id,
-      category: body.category,
-      agent_type: body.agent_type,
-      pricing_model: body.pricing_model,
-      price_per_task_usd: body.price_per_task_usd,
-      cost_plus_margin_pct: body.cost_plus_margin_pct,
-      agent_card_url: baseUrl + '/.well-known/agent.json?agent=' + body.agent_name,
-      a2a_endpoint_url: baseUrl + '/a2a?org=' + user.org_id + '&agent=' + body.agent_name,
-    });
-  } catch (err: any) {
-    return c.json({ error: err.message }, 500);
-  }
+      return c.json({
+        published: true,
+        listing_id: listing.id,
+        agent_name: body.agent_name,
+        org_id: user.org_id,
+        category: body.category,
+        agent_type: body.agent_type,
+        pricing_model: body.pricing_model,
+        price_per_task_usd: body.price_per_task_usd,
+        cost_plus_margin_pct: body.cost_plus_margin_pct,
+        agent_card_url: baseUrl + '/.well-known/agent.json?agent=' + body.agent_name,
+        a2a_endpoint_url: baseUrl + '/a2a?org=' + user.org_id + '&agent=' + body.agent_name,
+      });
+    } catch (err: any) {
+      return c.json({ error: err.message }, 500);
+    }
+  });
 });
 
 // ── POST /rate — Rate an agent after A2A transaction ─────────
@@ -225,65 +231,68 @@ const rateRoute = createRoute({
 marketplaceRoutes.openapi(rateRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const body = c.req.valid("json");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  // Prevent self-rating
-  const [listing] = await sql`SELECT org_id FROM marketplace_listings WHERE id = ${body.listing_id} LIMIT 1`;
-  if (listing && String(listing.org_id) === user.org_id) {
-    return c.json({ error: "Cannot rate your own agent" }, 403);
-  }
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Prevent self-rating. marketplace_listings RLS allows cross-org reads
+    // for is_published rows, so this lookup still works under withOrgDb.
+    const [listing] = await sql`SELECT org_id FROM marketplace_listings WHERE id = ${body.listing_id} LIMIT 1`;
+    if (listing && String(listing.org_id) === user.org_id) {
+      return c.json({ error: "Cannot rate your own agent" }, 403);
+    }
 
-  // Phase 10.2: Anti-fraud — velocity checks
-  const recentRatings = await sql`
-    SELECT COUNT(*) as cnt FROM marketplace_ratings
-    WHERE listing_id = ${body.listing_id} AND rater_org_id = ${user.org_id}
-      AND created_at > NOW() - INTERVAL '24 hours'
-  `;
-  if (Number(recentRatings[0]?.cnt || 0) >= 3) {
-    return c.json({ error: "Rating limit: max 3 ratings per listing per 24h" }, 429);
-  }
-  const hourlyRatings = await sql`
-    SELECT COUNT(*) as cnt FROM marketplace_ratings
-    WHERE listing_id = ${body.listing_id}
-      AND created_at > NOW() - INTERVAL '1 hour'
-  `;
-  if (Number(hourlyRatings[0]?.cnt || 0) >= 10) {
-    return c.json({ error: "This listing has reached its hourly rating limit" }, 429);
-  }
-
-  // Phase 10.2: Rating credibility weight based on account age + spend
-  let credibilityWeight = 1.0;
-  try {
-    const orgAge = await sql`
-      SELECT EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400 as age_days
-      FROM organizations WHERE org_id = ${user.org_id} LIMIT 1
+    // Phase 10.2: Anti-fraud — velocity checks. RLS on marketplace_ratings
+    // filters by rater_org_id automatically.
+    const recentRatings = await sql`
+      SELECT COUNT(*) as cnt FROM marketplace_ratings
+      WHERE listing_id = ${body.listing_id}
+        AND created_at > NOW() - INTERVAL '24 hours'
     `;
-    const ageDays = Number(orgAge[0]?.age_days || 0);
-    if (ageDays < 7) credibilityWeight = 0.1;
-    else if (ageDays < 30) credibilityWeight = 0.5;
-    // Spend check: weight by total spend
-    const spend = await sql`
-      SELECT COALESCE(SUM(amount_usd), 0) as total FROM credit_transactions
-      WHERE org_id = ${user.org_id} AND type = 'burn'
+    if (Number(recentRatings[0]?.cnt || 0) >= 3) {
+      return c.json({ error: "Rating limit: max 3 ratings per listing per 24h" }, 429);
+    }
+    const hourlyRatings = await sql`
+      SELECT COUNT(*) as cnt FROM marketplace_ratings
+      WHERE listing_id = ${body.listing_id}
+        AND created_at > NOW() - INTERVAL '1 hour'
     `;
-    const totalSpend = Number(spend[0]?.total || 0);
-    if (totalSpend < 1) credibilityWeight *= 0.2;
-    else if (totalSpend < 10) credibilityWeight *= 0.7;
-  } catch { /* best-effort — default full weight */ }
+    if (Number(hourlyRatings[0]?.cnt || 0) >= 10) {
+      return c.json({ error: "This listing has reached its hourly rating limit" }, 429);
+    }
 
-  // Apply credibility weight: weighted_rating = raw_rating * weight
-  // Low-credibility ratings contribute less to the average
-  const weightedRating = Math.round(body.rating * credibilityWeight * 100) / 100;
+    // Phase 10.2: Rating credibility weight based on account age + spend
+    let credibilityWeight = 1.0;
+    try {
+      const orgAge = await sql`
+        SELECT EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400 as age_days
+        FROM organizations WHERE org_id = ${user.org_id} LIMIT 1
+      `;
+      const ageDays = Number(orgAge[0]?.age_days || 0);
+      if (ageDays < 7) credibilityWeight = 0.1;
+      else if (ageDays < 30) credibilityWeight = 0.5;
+      // Spend check: weight by total spend
+      const spend = await sql`
+        SELECT COALESCE(SUM(amount_usd), 0) as total FROM credit_transactions
+        WHERE type = 'burn'
+      `;
+      const totalSpend = Number(spend[0]?.total || 0);
+      if (totalSpend < 1) credibilityWeight *= 0.2;
+      else if (totalSpend < 10) credibilityWeight *= 0.7;
+    } catch { /* best-effort — default full weight */ }
 
-  await submitRating(sql, body.listing_id, user.org_id, weightedRating, {
-    task_id: body.task_id,
-    review_text: body.review_text,
-    response_time_ms: body.response_time_ms,
-    credibility_weight: credibilityWeight,
-    raw_rating: body.rating,
+    // Apply credibility weight: weighted_rating = raw_rating * weight
+    // Low-credibility ratings contribute less to the average
+    const weightedRating = Math.round(body.rating * credibilityWeight * 100) / 100;
+
+    await submitRating(sql, body.listing_id, user.org_id, weightedRating, {
+      task_id: body.task_id,
+      review_text: body.review_text,
+      response_time_ms: body.response_time_ms,
+      credibility_weight: credibilityWeight,
+      raw_rating: body.rating,
+    });
+
+    return c.json({ rated: true, listing_id: body.listing_id, rating: body.rating, credibility_weight: credibilityWeight });
   });
-
-  return c.json({ rated: true, listing_id: body.listing_id, rating: body.rating, credibility_weight: credibilityWeight });
 });
 
 // ── POST /feature — Purchase featured placement ──────────────
@@ -315,21 +324,22 @@ const featureRoute = createRoute({
 marketplaceRoutes.openapi(featureRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const body = c.req.valid("json");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  // Pricing: $1/day for featured placement
-  const costUsd = body.duration_days * 1.0;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Pricing: $1/day for featured placement
+    const costUsd = body.duration_days * 1.0;
 
-  const result = await purchaseFeatured(sql, body.listing_id, user.org_id, body.duration_days, costUsd);
+    const result = await purchaseFeatured(sql, body.listing_id, user.org_id, body.duration_days, costUsd);
 
-  if (!result.success) return c.json({ error: result.error }, 400);
+    if (!result.success) return c.json({ error: result.error }, 400);
 
-  return c.json({
-    featured: true,
-    listing_id: body.listing_id,
-    duration_days: body.duration_days,
-    cost_usd: costUsd,
-    featured_until: result.featured_until,
+    return c.json({
+      featured: true,
+      listing_id: body.listing_id,
+      duration_days: body.duration_days,
+      cost_usd: costUsd,
+      featured_until: result.featured_until,
+    });
   });
 });
 
@@ -350,31 +360,33 @@ const listingDetailRoute = createRoute({
 
 marketplaceRoutes.openapi(listingDetailRoute, async (c): Promise<any> => {
   const { agent_name } = c.req.valid("param");
-  const user = c.get("user") as any;
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user?.org_id || "public");
 
-  const [listing] = await sql`
-    SELECT * FROM marketplace_listings WHERE agent_name = ${agent_name} AND is_published = true LIMIT 1
-  `;
-  if (!listing) return c.json({ error: "Listing not found" }, 404);
+  // Public listing detail endpoint — no auth required. Aggregates ratings
+  // across all rater orgs, so withAdminDb is the right tool.
+  return await withAdminDb(c.env, async (sql) => {
+    const [listing] = await sql`
+      SELECT * FROM marketplace_listings WHERE agent_name = ${agent_name} AND is_published = true LIMIT 1
+    `;
+    if (!listing) return c.json({ error: "Listing not found" }, 404);
 
-  // Get recent ratings
-  const ratings = await sql`
-    SELECT rating, review_text, created_at FROM marketplace_ratings
-    WHERE listing_id = ${listing.id} ORDER BY created_at DESC LIMIT 10
-  `;
+    // Get recent ratings
+    const ratings = await sql`
+      SELECT rating, review_text, created_at FROM marketplace_ratings
+      WHERE listing_id = ${listing.id} ORDER BY created_at DESC LIMIT 10
+    `;
 
-  return c.json({
-    ...listing,
-    price_per_task_usd: Number(listing.price_per_task_usd),
-    quality_score: Number(listing.quality_score),
-    avg_rating: Number(listing.avg_rating),
-    total_ratings: Number(listing.total_ratings),
-    recent_ratings: ratings.map((r: any) => ({
-      rating: r.rating,
-      review: r.review_text,
-      date: r.created_at,
-    })),
+    return c.json({
+      ...listing,
+      price_per_task_usd: Number(listing.price_per_task_usd),
+      quality_score: Number(listing.quality_score),
+      avg_rating: Number(listing.avg_rating),
+      total_ratings: Number(listing.total_ratings),
+      recent_ratings: ratings.map((r: any) => ({
+        rating: r.rating,
+        review: r.review_text,
+        date: r.created_at,
+      })),
+    });
   });
 });
 
@@ -398,13 +410,14 @@ const unpublishRoute = createRoute({
 marketplaceRoutes.openapi(unpublishRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { agent_name } = c.req.valid("json");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  const updated = await sql`
-    UPDATE marketplace_listings SET is_published = false, is_featured = false, updated_at = now()
-    WHERE agent_name = ${agent_name} AND org_id = ${user.org_id}
-  `;
+  return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const updated = await sql`
+      UPDATE marketplace_listings SET is_published = false, is_featured = false, updated_at = now()
+      WHERE agent_name = ${agent_name}
+    `;
 
-  if (updated.count === 0) return c.json({ error: "Listing not found" }, 404);
-  return c.json({ unpublished: true, agent_name });
+    if (updated.count === 0) return c.json({ error: "Listing not found" }, 404);
+    return c.json({ unpublished: true, agent_name });
+  });
 });
