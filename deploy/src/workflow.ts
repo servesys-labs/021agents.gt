@@ -1357,12 +1357,22 @@ ALWAYS:
           }
 
           // Phase 2.2: Inject deferred tool index on first turn so model knows
-          // what else exists without paying full schema cost
+          // what else exists without paying full schema cost.
+          // Insert BEFORE the user message so the model doesn't treat it as the
+          // primary instruction. Find the last system message before the first
+          // user message and insert after it.
           if (turn === 1 && queryProfile.include_deferred_tool_index) {
             const deferredIndex = buildDeferredToolIndex(allToolDefs, toolDefs);
             if (deferredIndex) {
               const hasIndex = messages.some(m => m.role === "system" && (m.content || "").includes("Additional Tools"));
-              if (!hasIndex) messages.push({ role: "system", content: deferredIndex });
+              if (!hasIndex) {
+                const firstUserIdx = messages.findIndex(m => m.role === "user");
+                if (firstUserIdx > 0) {
+                  messages.splice(firstUserIdx, 0, { role: "system", content: deferredIndex });
+                } else {
+                  messages.push({ role: "system", content: deferredIndex });
+                }
+              }
             }
           }
         }
