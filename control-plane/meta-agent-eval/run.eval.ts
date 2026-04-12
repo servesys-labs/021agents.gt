@@ -15,7 +15,36 @@
 // a wall of 401s. CI is expected to provide the vars explicitly.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
+import { existsSync } from "node:fs";
 import { buildEvalDbClientMock, type MockSqlFn } from "./fixtures/universe";
+
+// ── .env auto-loading ───────────────────────────────────────────────
+// Gateway credentials live in the repo-root .env by convention. Try a
+// couple of candidate paths and load the first one that exists. Uses
+// Node's native process.loadEnvFile() — no dotenv dependency. Silently
+// no-ops if nothing found; the env-check below will surface the
+// problem with a clear message.
+{
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    resolve(here, "../../.env"),    // <repo>/.env from meta-agent-eval/
+    resolve(here, "../.env"),       // control-plane/.env fallback
+    resolve(process.cwd(), ".env"), // CWD fallback
+  ];
+  for (const path of candidates) {
+    if (existsSync(path)) {
+      try {
+        // @ts-expect-error — process.loadEnvFile is stable in Node 22+
+        process.loadEnvFile(path);
+        break;
+      } catch {
+        // unreadable / malformed — try next candidate
+      }
+    }
+  }
+}
 
 // ── Stateful shared SQL mock ────────────────────────────────────────
 // The `let mockSql` indirection is required because vi.mock() is
