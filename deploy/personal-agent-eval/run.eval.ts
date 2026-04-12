@@ -132,12 +132,17 @@ async function judgeResponse(
   toolCalls: ToolCall[],
   response: string,
 ): Promise<{ correctness: number; relevance: number; tool_selection: number; average: number; notes: string }> {
-  const toolList = toolCalls.length === 0 ? "(no tools called)" : toolCalls.map(tc => tc.function.name).join(", ");
+  const toolList = toolCalls.length === 0
+    ? "(no tools called)"
+    : toolCalls.map(tc => {
+        const args = tc.function.arguments?.slice(0, 500) || "";
+        return `${tc.function.name}(${args})`;
+      }).join("\n");
   const judgeUserMsg = [
     `USER MESSAGE:\n${userMessage}`,
     `EXPECTED BEHAVIOR:\n${expectedBehavior}`,
-    `TOOLS CALLED:\n${toolList}`,
-    `AGENT RESPONSE:\n${response}`,
+    `TOOLS CALLED (with arguments):\n${toolList}`,
+    `AGENT TEXT RESPONSE:\n${response || "(no text — tool calls only, not executed in this test)"}`,
   ].join("\n\n");
 
   const result = await callGemma(gwConfig, [
