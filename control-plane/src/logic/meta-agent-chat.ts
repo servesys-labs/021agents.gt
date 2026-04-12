@@ -3269,9 +3269,24 @@ export async function runMetaChat(
           // change from the pre-class code (which incremented on every
           // non-throttled call including failures). The new behavior is
           // that a thrown tool does not consume budget, so the caller
-          // can retry. If we observe abusive retry-storms on throwing
-          // tools, revisit this — but the read-only nature of all
-          // capped tools today makes this safe.
+          // can retry.
+          //
+          // Why this is safe in practice: the `run_query` tool handler
+          // (the only capped tool today) wraps its entire body in a
+          // blanket `try { ... } catch (err: any) { return JSON.stringify
+          // ({ error: ... }); }` — see the `case "run_query":` branch
+          // earlier in this file. The SAVEPOINT/EXPLAIN path, the
+          // cost-exceeded check, the forbidden-keyword check, the table
+          // allowlist check, and the main execute all return a JSON
+          // error object instead of throwing out of `executeTool`. So
+          // `executeTool` essentially never throws for capped tools,
+          // which means `recordSuccess` fires on almost every non-
+          // throttled call regardless. The "read-only" framing in an
+          // earlier draft of this comment was a misread — the real
+          // invariant is the JSON-error-swallow in the handler.
+          //
+          // If a future capped tool doesn't swallow its errors to JSON
+          // returns, it could bypass the cap via retries. Revisit then.
         }
       }
       const toolLatencyMs = Date.now() - toolStart;

@@ -7,6 +7,7 @@ import {
   releaseCreditHold,
   reclaimExpiredCreditHolds,
   collectOutstandingCreditDebt,
+  addCredits,
 } from "../src/logic/credits";
 import { buildDbClientMock, mockEnv, type MockSqlFn } from "./helpers/test-env";
 
@@ -236,6 +237,25 @@ function createBillingSqlState(initialBalance = 5) {
     if (query.includes("UPDATE org_credit_balance") && query.includes("SET balance_usd = ?") && query.includes("lifetime_consumed_usd = lifetime_consumed_usd +") && !query.includes("GREATEST")) {
       state.balance = Number(values[0]);
       return [];
+    }
+
+    // ── addCredits handlers ──
+    // `INSERT INTO org_credit_balance ... ON CONFLICT DO UPDATE SET balance_usd = ... + X`
+    // Both the `last_purchase_at` variant and the fallback variant are
+    // covered by the same substring check since both use the same
+    // `INSERT INTO org_credit_balance ... ON CONFLICT (org_id) DO UPDATE`
+    // shape. We treat it as an ADD to the existing balance.
+    if (query.includes("INSERT INTO org_credit_balance") && query.includes("ON CONFLICT (org_id) DO UPDATE") && query.includes("balance_usd + ?")) {
+      const amount = Number(values[1]); // VALUES ($orgId, $amount, $amount, ...)
+      state.balance += amount;
+      return [];
+    }
+
+    // Post-upsert balance read — no FOR UPDATE, no reserved_usd. Matches
+    // `SELECT balance_usd FROM org_credit_balance WHERE org_id = ${orgId}`
+    // called by addCredits between the upsert and the audit-row INSERT.
+    if (query.includes("SELECT balance_usd FROM org_credit_balance") && !query.includes("reserved_usd") && !query.includes("FOR UPDATE")) {
+      return [{ balance_usd: state.balance }];
     }
 
     throw new Error(`Unhandled SQL in test double: ${query}`);
@@ -487,13 +507,28 @@ describe("credit holds fail-closed debtless", () => {
       .rejects.toThrow(/hold h-raced was not active/);
   });
 
-  // Bug 2 regression — batch_run billing ordering: settle must commit
-  // its effect BEFORE any downstream code runs, so a subsequent DB
-  // error (batch_tasks UPDATE failure under a Hyperdrive hiccup)
-  // cannot roll back the charge. This test simulates the new-flow
-  // sequence and verifies the state after settle is visible
-  // independent of any subsequent operation.
-  it("Bug 2 regression: batch_run settle commits independently of downstream batch_tasks UPDATE", async () => {
+  // Bug 2 sequential-shape smoke test (NOT a full regression guard).
+  //
+  // ⚠ Honesty note from the 3rd-pass code review: this test cannot
+  // actually catch a regression where settle gets rolled back by an
+  // outer-txn abort, because the test double models `state` as a plain
+  // JS object with zero transaction isolation. A refactor that reverts
+  // the Bug 2 fix (moving settle back after the UPDATE within the
+  // outer admin txn) would still pass this test — the reviewer traced
+  // through three hypothetical refactors and found only "remove settle
+  // entirely" is caught.
+  //
+  // What this test DOES verify: the happy-path ordering — settle
+  // returns successfully, balance/reserved reflect the charge, hold
+  // status is 'settled' — so a refactor that accidentally skips settle
+  // or returns the wrong cost would fail.
+  //
+  // The real Bug 2 regression guard lives in
+  // `test/queue-consumer-terminal-writes.test.ts`, which verifies the
+  // primitive that the fix relies on: `withOrgDb` and `withAdminDb`
+  // route to distinct sql handles, so an abort on one cannot affect
+  // a committed write on the other.
+  it("Bug 2 sequential-shape smoke test: settle returns correct state regardless of downstream ops", async () => {
     const { state, sql } = createBillingSqlState(5);
     const taskSessionId = "batch-b1-task-42";
 
@@ -550,5 +585,52 @@ describe("credit holds fail-closed debtless", () => {
     const holdRow = state.holds.get((hold as any).hold_id);
     expect(holdRow?.status).toBe("settled");
     expect(holdRow?.actual_cost_usd).toBeCloseTo(0.3, 6);
+  });
+
+  // Gap B wiring — closes the addCredits → collectOutstandingCreditDebt
+  // wiring gap from the 3rd-pass code review. The earlier Gap B test
+  // called `collectOutstandingCreditDebt` directly, which verified the
+  // function's behavior but NOT the wiring at credits.ts:511 where
+  // `addCredits` invokes it. A refactor that removes that line would
+  // still pass the direct test. This test exercises the full top-up
+  // flow: create debt, call `addCredits`, verify the debt is resolved
+  // AND a subsequent `reserveCreditHold` succeeds (gate cleared).
+  it("Gap B wiring: addCredits auto-collects outstanding debt and unblocks the reserve gate", async () => {
+    const { state, sql } = createBillingSqlState(0.2);
+    // Seed debt directly — simulates a prior unrecovered-cost overflow.
+    state.billingExceptions.push({
+      org_id: "org-1",
+      session_id: "s-prior",
+      hold_id: "h-prior",
+      kind: "unrecovered_cost",
+      amount_usd: 0.5,
+      resolved_at: null,
+    });
+
+    // Gate should be CLOSED at this point — any reserve attempt blocked.
+    const preTopupReserve = await reserveCreditHold(sql as any, "org-1", "s-pre", 0.3, 600, { agentName: "a" });
+    expect(preTopupReserve.success).toBe(false);
+    expect((preTopupReserve as any).reason).toBe("debt_pending");
+
+    // Top up via addCredits. The important bit: addCredits must call
+    // collectOutstandingCreditDebt as part of its flow, NOT just add
+    // the balance. We start with balance=$0.20 + debt=$0.50; after
+    // top-up of $1.00, balance goes to $1.20, and debt-collection
+    // should consume $0.50 of it, leaving balance=$0.70 and debt
+    // resolved.
+    const addResult = await addCredits(sql as any, "org-1", 1.0, "test top-up", "ref-1", "test");
+    // balance_after_usd is the balance AFTER the upsert but BEFORE
+    // debt collection. That's $0.20 + $1.00 = $1.20.
+    expect(addResult.balance_after_usd).toBeCloseTo(1.2, 6);
+    // State balance reflects the post-collection value.
+    expect(state.balance).toBeCloseTo(0.7, 6); // 1.20 - 0.50 (debt collected)
+    // Debt row is resolved.
+    expect(state.billingExceptions[0].resolved_at).not.toBeNull();
+    expect(state.billingExceptions[0].amount_usd).toBeCloseTo(0, 6);
+
+    // Gate should now be OPEN — subsequent reserve succeeds.
+    const postTopupReserve = await reserveCreditHold(sql as any, "org-1", "s-post", 0.3, 600, { agentName: "a" });
+    expect(postTopupReserve.success).toBe(true);
+    expect(state.balance).toBeCloseTo(0.4, 6); // 0.70 - 0.30 reserved
   });
 });

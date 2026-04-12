@@ -634,27 +634,49 @@ export default {
         const now = new Date().toISOString();
 
         if (job.type === "agent_run") {
-          // Dispatch agent run to runtime worker
+          // Dispatch agent run to runtime worker.
+          //
+          // Bug 2 symmetry fix: every credit operation AND every terminal
+          // state write runs in its own withOrgDb transaction so a
+          // Hyperdrive hiccup or connection abort in the outer withAdminDb
+          // txn cannot roll back committed billing or leave the job stuck
+          // in 'pending' after work completed. The `UPDATE ... SET
+          // status='running'` equivalent is absent here (agent_run is
+          // single-shot, not per-task), so there's no in-flight non-
+          // terminal marker to worry about.
           const { agent_name, task, org_id, project_id } = job.payload;
           const orgId = String(org_id || "");
           const agentName = String(agent_name || "");
+          const jobId = String(job.payload.job_id || "");
           const reservedSessionId = String(job.payload.session_id || job.payload.job_id || `agent-run-${orgId}-${agentName}`);
-          const hold = await reserveCreditHold(
-            sql,
-            orgId,
-            reservedSessionId,
-            DEFAULT_CREDIT_HOLD_USD,
-            undefined,
-            { agentName },
-          );
-          if (!hold.success) {
-            await sql`
-              UPDATE job_queue SET status = 'failed', error = 'insufficient_credits', completed_at = ${now}
-              WHERE job_id = ${String(job.payload.job_id || "")}
-            `.catch(() => {});
+
+          // Reserve in its own transaction.
+          let hold: Awaited<ReturnType<typeof reserveCreditHold>>;
+          try {
+            hold = await withOrgDb(env, orgId, (creditSql) =>
+              reserveCreditHold(creditSql, orgId, reservedSessionId, DEFAULT_CREDIT_HOLD_USD, undefined, { agentName }),
+            );
+          } catch (resErr: any) {
+            console.error(`[agent-run-billing] reserve failed org=${orgId} job=${jobId}: ${resErr?.message || resErr}`);
+            // Terminal write in its own txn so it survives outer-admin abort.
+            await withOrgDb(env, orgId, (stateSql) =>
+              stateSql`UPDATE job_queue SET status = 'failed', error = 'credit_reserve_error', completed_at = ${now} WHERE job_id = ${jobId}`,
+            ).catch((err: any) => {
+              console.error(`[agent-run-status] terminal-write failed org=${orgId} job=${jobId}: ${err?.message || err}`);
+            });
             msg.ack();
             return;
           }
+          if (!hold.success) {
+            await withOrgDb(env, orgId, (stateSql) =>
+              stateSql`UPDATE job_queue SET status = 'failed', error = 'insufficient_credits', completed_at = ${now} WHERE job_id = ${jobId}`,
+            ).catch((err: any) => {
+              console.error(`[agent-run-status] terminal-write failed org=${orgId} job=${jobId}: ${err?.message || err}`);
+            });
+            msg.ack();
+            return;
+          }
+
           const resp = await env.RUNTIME.fetch(
             new Request("https://runtime/run", {
               method: "POST",
@@ -666,29 +688,44 @@ export default {
             }),
           );
           const result = await resp.json() as Record<string, unknown>;
+
           if (resp.status < 400) {
-            await settleCreditHold(
-              sql,
-              orgId,
-              hold.hold_id,
-              Number(result.cost_usd || 0),
-              `Agent run: ${agentName}`,
-              agentName,
-              String(result.session_id || reservedSessionId),
-            ).catch((settleErr: any) => {
+            // Settle in its own txn. Billing commits independently of the
+            // downstream terminal-state write below.
+            try {
+              await withOrgDb(env, orgId, (creditSql) =>
+                settleCreditHold(
+                  creditSql,
+                  orgId,
+                  hold.hold_id,
+                  Number(result.cost_usd || 0),
+                  `Agent run: ${agentName}`,
+                  agentName,
+                  String(result.session_id || reservedSessionId),
+                ),
+              );
+            } catch (settleErr: any) {
               console.error(`[agent-run-billing] settle failed org=${orgId} hold=${hold.hold_id}: ${settleErr?.message || settleErr}`);
-            });
+            }
           } else {
-            await releaseCreditHold(sql, orgId, hold.hold_id, "crash").catch((relErr: any) => {
+            try {
+              await withOrgDb(env, orgId, (creditSql) =>
+                releaseCreditHold(creditSql, orgId, hold.hold_id, "crash"),
+              );
+            } catch (relErr: any) {
               console.error(`[agent-run-billing] release failed org=${orgId} hold=${hold.hold_id}: ${relErr?.message || relErr}`);
-            });
+            }
           }
 
-          // Update job status in DB
-          await sql`
-            UPDATE job_queue SET status = 'completed', result = ${JSON.stringify(result)}, completed_at = ${now}
-            WHERE job_id = ${String(job.payload.job_id || "")}
-          `.catch(() => {});
+          // Terminal state write in its own txn. Survives an outer-admin
+          // abort — without this, a Hyperdrive blip between the runtime
+          // call and the status UPDATE would leave the customer charged
+          // but the job row stuck in 'pending'.
+          await withOrgDb(env, orgId, (stateSql) =>
+            stateSql`UPDATE job_queue SET status = 'completed', result = ${JSON.stringify(result)}, completed_at = ${now} WHERE job_id = ${jobId}`,
+          ).catch((err: any) => {
+            console.error(`[agent-run-status] terminal-write failed org=${orgId} job=${jobId}: ${err?.message || err}`);
+          });
         } else if (job.type === "webhook_delivery") {
           // Deliver a webhook with retry
           const { deliverWebhook } = await import("./logic/webhook-delivery");
@@ -734,16 +771,29 @@ export default {
               );
             } catch (resErr: any) {
               console.error(`[batch-billing] reserve failed batch=${batchId} task=${task.task_id}: ${resErr?.message || resErr}`);
-              await sql`UPDATE batch_tasks SET status = 'failed', error = 'credit_reserve_error' WHERE task_id = ${task.task_id}`.catch(() => {});
+              // Terminal write in its own txn so the failed status survives
+              // outer-admin abort (part of the Bug 2 follow-up — see the
+              // agent_run handler above for the same pattern).
+              await withOrgDb(env, orgId, (stateSql) =>
+                stateSql`UPDATE batch_tasks SET status = 'failed', error = 'credit_reserve_error' WHERE task_id = ${task.task_id}`,
+              ).catch((err: any) => {
+                console.error(`[batch-status] terminal-write failed batch=${batchId} task=${task.task_id}: ${err?.message || err}`);
+              });
               failedCount++;
               continue;
             }
             if (!hold.success) {
-              await sql`
-                UPDATE batch_tasks SET status = 'failed', error = 'insufficient_credits'
-                WHERE batch_id = ${batchId} AND status = 'pending'
-              `.catch(() => {});
-              await sql`UPDATE batch_tasks SET status = 'failed', error = 'insufficient_credits' WHERE task_id = ${task.task_id}`.catch(() => {});
+              // Broad terminal write — marks ALL remaining pending tasks in
+              // this batch as failed (the gate failed for the whole batch,
+              // not just this task). In its own txn for Bug 2 survival.
+              await withOrgDb(env, orgId, (stateSql) =>
+                stateSql`
+                  UPDATE batch_tasks SET status = 'failed', error = 'insufficient_credits'
+                  WHERE batch_id = ${batchId} AND status = 'pending'
+                `,
+              ).catch((err: any) => {
+                console.error(`[batch-status] broad insufficient_credits write failed batch=${batchId}: ${err?.message || err}`);
+              });
               failedCount += tasks.length - completedCount - failedCount;
               break;
             }
@@ -789,12 +839,21 @@ export default {
                 console.error(`[batch-billing] settle failed batch=${batchId} task=${task.task_id}: ${settleErr?.message || settleErr}`);
               }
 
-              await sql`
-                UPDATE batch_tasks SET status = 'completed', output = ${String(result.output || "")},
-                  session_id = ${String(result.session_id || "")},
-                  cost_usd = ${Number(result.cost_usd || 0)}, latency_ms = ${Number(result.latency_ms || 0)}
-                WHERE task_id = ${task.task_id}
-              `;
+              // Terminal 'completed' write in its own txn. Bug 2 follow-up:
+              // if this write stayed in the outer admin txn, an abort on
+              // any later statement (batch_jobs update, webhook dispatch)
+              // would roll back the status and leave the row stuck at
+              // 'running' — customer charged, output lost, zombie task.
+              await withOrgDb(env, orgId, (stateSql) =>
+                stateSql`
+                  UPDATE batch_tasks SET status = 'completed', output = ${String(result.output || "")},
+                    session_id = ${String(result.session_id || "")},
+                    cost_usd = ${Number(result.cost_usd || 0)}, latency_ms = ${Number(result.latency_ms || 0)}
+                  WHERE task_id = ${task.task_id}
+                `,
+              ).catch((err: any) => {
+                console.error(`[batch-status] terminal 'completed' write failed batch=${batchId} task=${task.task_id}: ${err?.message || err}`);
+              });
               completedCount++;
             } catch (taskErr) {
               // Release also in its own transaction so the refund commits
@@ -806,15 +865,27 @@ export default {
               } catch (relErr: any) {
                 console.error(`[batch-billing] release failed batch=${batchId} task=${task.task_id}: ${relErr?.message || relErr}`);
               }
-              await sql`UPDATE batch_tasks SET status = 'failed', error = ${String(taskErr)} WHERE task_id = ${task.task_id}`.catch(() => {});
+              // Terminal 'failed' write also in its own txn (Bug 2 follow-up).
+              await withOrgDb(env, orgId, (stateSql) =>
+                stateSql`UPDATE batch_tasks SET status = 'failed', error = ${String(taskErr)} WHERE task_id = ${task.task_id}`,
+              ).catch((err: any) => {
+                console.error(`[batch-status] terminal 'failed' write failed batch=${batchId} task=${task.task_id}: ${err?.message || err}`);
+              });
               failedCount++;
             }
           }
 
-          await sql`
-            UPDATE batch_jobs SET status = 'completed', completed_tasks = ${completedCount}, failed_tasks = ${failedCount}, completed_at = ${now}
-            WHERE batch_id = ${batchId}
-          `.catch(() => {});
+          // Batch-level terminal write in its own txn (Bug 2 follow-up).
+          // Survives outer-admin abort on any subsequent operation
+          // (e.g., the callback webhook dispatch below).
+          await withOrgDb(env, orgId, (stateSql) =>
+            stateSql`
+              UPDATE batch_jobs SET status = 'completed', completed_tasks = ${completedCount}, failed_tasks = ${failedCount}, completed_at = ${now}
+              WHERE batch_id = ${batchId}
+            `,
+          ).catch((err: any) => {
+            console.error(`[batch-status] batch_jobs terminal write failed batch=${batchId}: ${err?.message || err}`);
+          });
 
           // Deliver callback webhook if configured
           const batchRow = await sql`SELECT callback_url, callback_secret FROM batch_jobs WHERE batch_id = ${batchId}`.catch(() => []);
