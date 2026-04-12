@@ -301,29 +301,48 @@ function deriveArtifactSignals(_payload: JsonRecord): SignalEnvelope[] {
 }
 
 function deriveTopicFromTurn(toolCalls: unknown[], llmContent: string): string {
+  // Prefer structured topics from tool call arguments (high signal)
   for (const raw of toolCalls) {
     const item = raw as JsonRecord;
     const args = parseStructured(item.arguments || item.args || {});
     const topic = normalizeTopic(args.query || args.key || args.path || args.url || "");
     if (topic) return topic;
   }
-  return normalizeTopic(llmContent);
+  // Fall back to LLM content only if it's substantive enough to be a real topic.
+  // Short conversational responses ("Hello!", "Sure, here you go") produce noise.
+  const trimmed = llmContent.trim();
+  if (trimmed.length < 40) return ""; // Too short to be a meaningful topic
+  const topic = normalizeTopic(trimmed);
+  // Require at least 3 distinct tokens after normalization to filter generic responses
+  if (topic.split(" ").length < 3) return "";
+  return topic;
 }
 
 function extractContradictionTopic(text: string): string {
   const lower = text.toLowerCase();
-  const markers = [
-    "actually ",
-    "correction:",
-    "to clarify",
-    "i was wrong",
-    "instead,",
-    "notably, i should correct",
+  // Require marker + correction-like follow-up to reduce false positives.
+  // "Actually, here's how to fix it" (transitional) should NOT trigger.
+  // "Actually, I was wrong about X" (correction) SHOULD trigger.
+  const correctionPatterns = [
+    // Explicit corrections — high confidence
+    /\bcorrection:\s*(.{10,120})/,
+    /\bi was wrong\b.{0,10}(.{10,120})/,
+    /\bi (?:should|need to) correct\b.{0,10}(.{10,120})/,
+    /\bmy (?:previous|earlier) (?:answer|response|statement) was (?:incorrect|wrong)\b.{0,10}(.{10,120})/,
+    // "actually" + negation/reversal — medium confidence
+    /\bactually,?\s+(?:it(?:'s| is|'s) not|that(?:'s| is|'s) not|no,|the correct)\s+(.{10,120})/,
+    // "instead" at sentence start after period — medium confidence
+    /\.\s+instead,\s+(.{10,120})/,
+    // "to clarify" + what was wrong — medium confidence
+    /\bto clarify,?\s+(?:it(?:'s| is)|that(?:'s| is)|the (?:correct|right|actual))\s+(.{10,120})/,
   ];
-  const marker = markers.find((entry) => lower.includes(entry));
-  if (!marker) return "";
-  const idx = lower.indexOf(marker);
-  return normalizeTopic(text.slice(idx + marker.length, idx + marker.length + 120));
+  for (const pattern of correctionPatterns) {
+    const match = lower.match(pattern);
+    if (match?.[1]) {
+      return normalizeTopic(match[1]);
+    }
+  }
+  return "";
 }
 
 function extractEntitiesFromText(text: string): string[] {
@@ -425,21 +444,24 @@ function compactEntities(input: unknown[]): string[] {
 }
 
 function normalizeTopic(input: unknown): string {
-  const raw = compactText(String(input || ""), 240);
+  const raw = compactText(String(input || ""), 320);
   let urlParts = "";
   try {
     const parsed = new URL(raw);
-    urlParts = `${parsed.hostname} ${parsed.pathname}`;
+    // Preserve path segments as meaningful tokens (e.g., /api/v1/users → "api v1 users")
+    urlParts = `${parsed.hostname} ${parsed.pathname.replace(/\//g, " ")}`;
   } catch {}
   const text = `${urlParts} ${raw}`
     .toLowerCase()
     .replace(/https?:\/\/\S+/g, " ")
-    .replace(/[^a-z0-9\s/_-]+/g, " ");
+    .replace(/[^a-z0-9\s/_.-]+/g, " ");
   const tokens = text
     .split(/\s+/)
     .map((token) => token.trim())
-    .filter((token) => token.length >= 3 && !TOPIC_STOPWORDS.has(token));
-  return tokens.slice(0, 8).join(" ");
+    // Keep tokens >= 2 chars (was 3 — lost "db", "io", "ui", etc.)
+    .filter((token) => token.length >= 2 && !TOPIC_STOPWORDS.has(token));
+  // Keep up to 12 tokens (was 8 — "fix auth bug" and "fix auth test" now stay distinct)
+  return tokens.slice(0, 12).join(" ");
 }
 
 function compactText(input: string, limit: number): string {

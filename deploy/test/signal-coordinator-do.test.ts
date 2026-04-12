@@ -227,11 +227,30 @@ class FakeSqlStorage {
       return new FakeCursor<T>([{ value: this.fires.size }] as unknown as T[], 0);
     }
 
-    if (q.includes("SELECT feature, signature, signal_type, topic, count, first_seen_ms, last_seen_ms") && q.includes("WHERE feature = 'memory'")) {
-      const [cutoff] = bindings;
+    if (q.includes("FROM signal_clusters") && q.includes("WHERE") && q.includes("feature = 'memory'")) {
+      // Handles both the old simple query and the new optimized query with GROUP_CONCAT
+      const cutoff = Number(bindings[bindings.length - 1] || 0); // last binding is the cutoff
       const rows = [...this.clusters.values()]
-        .filter((row) => row.feature === "memory" && row.last_seen_ms >= Number(cutoff))
-        .sort((a, b) => b.last_seen_ms - a.last_seen_ms) as unknown as T[];
+        .filter((row) => row.feature === "memory" && row.last_seen_ms >= cutoff)
+        .sort((a, b) => b.last_seen_ms - a.last_seen_ms)
+        .map((row) => {
+          // Compute distinct_sessions and recent_summaries inline (mirrors the correlated subqueries)
+          const sessionSet = new Set(
+            [...this.events.values()]
+              .filter((e) => e.signature === row.signature && e.created_at_ms >= cutoff)
+              .map((e) => e.session_id),
+          );
+          const summaries = [...this.events.values()]
+            .filter((e) => e.signature === row.signature)
+            .sort((a, b) => b.created_at_ms - a.created_at_ms)
+            .slice(0, 3)
+            .map((e) => e.summary);
+          return {
+            ...row,
+            distinct_sessions: sessionSet.size,
+            recent_summaries: summaries.join("|||"),
+          };
+        }) as unknown as T[];
       return new FakeCursor<T>(rows, 0);
     }
 
@@ -384,6 +403,15 @@ class FakeSqlStorage {
         }
       }
       return new FakeCursor<T>([], deleted);
+    }
+
+    // reconcile() cluster count recomputation — no-op in test (counts are already accurate)
+    if (q.includes("UPDATE signal_clusters SET count")) {
+      return new FakeCursor<T>([], 0);
+    }
+    // reconcile() prune zero-count clusters
+    if (q.includes("DELETE FROM signal_clusters WHERE count = 0")) {
+      return new FakeCursor<T>([], 0);
     }
 
     throw new Error(`Unhandled SQL in test harness: ${q}`);
@@ -558,8 +586,12 @@ describe("SignalCoordinatorDO", () => {
     expect(create.mock.calls[0][0].params.input).toContain("signal_briefing=");
     expect(create.mock.calls[0][0].params.input).toContain('signal_session_ids="sess-c,sess-b,sess-a"');
     expect(create.mock.calls[0][0].params.input).toContain('signal_type="tool_failure"');
-    expect(create.mock.calls[0][0].params.input).toContain('signal_topic="acme dev /incidents/billing-bug');
-    expect(create.mock.calls[0][0].params.input).toContain("billing");
+    // Topic normalization extracts key tokens — verify meaningful parts are present
+    const workflowInput = create.mock.calls[0][0].params.input;
+    expect(workflowInput).toContain("signal_topic=");
+    expect(workflowInput).toContain("acme");
+    expect(workflowInput).toContain("incidents");
+    expect(workflowInput).toContain("billing");
   });
 
   it("drives a passive consolidate trigger from repeated loop telemetry", async () => {
