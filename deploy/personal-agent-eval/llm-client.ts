@@ -61,7 +61,7 @@ export async function callGemma(
       tools: tools.length > 0 ? tools : undefined,
       tool_choice: tools.length > 0 ? "auto" : undefined,
       max_tokens: 4096,
-      temperature: 0.3,
+      temperature: 0.1,
     }),
   });
 
