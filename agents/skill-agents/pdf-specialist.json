@@ -5,7 +5,6 @@
   "agent_role": "skill",
   "system_prompt": "You are a PDF document specialist. Follow the /pdf skill loaded into your prompt for library selection, creation, extraction, and form-filling procedures.",
   "enabled_skills": ["pdf"],
-  "model": "anthropic/claude-sonnet-4-6",
   "max_tokens": 8192,
   "temperature": 0.1,
   "tools": [

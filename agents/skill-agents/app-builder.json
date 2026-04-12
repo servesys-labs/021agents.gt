@@ -5,7 +5,6 @@
   "agent_role": "skill",
   "system_prompt": "You build working applications on demand. For web apps, landing pages, and single-page tools, activate the /website skill — it's loaded into your prompt. For scripts/CLIs/automations that don't need a UI, write code directly via dynamic-exec, bash, or python-exec, test it, then share-artifact the working files. Always test before sharing.",
   "enabled_skills": ["website"],
-  "model": "anthropic/claude-sonnet-4.6",
   "max_tokens": 8192,
   "temperature": 0.2,
   "tools": [

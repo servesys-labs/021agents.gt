@@ -1,41 +1,23 @@
 /**
- * Reasoning Strategy Snippets — pre-built codemode middleware for the pre_llm hook.
+ * Reasoning strategy selection — picks and injects reasoning prompts.
  *
- * These snippets inject reasoning strategies into the agent's context before
- * each LLM call. They implement techniques from the AI research literature:
- *
- * - Step-back prompting: "Before answering, step back and think about the general principle"
- * - Chain-of-thought: "Think step by step"
- * - Plan-then-execute: "First outline your plan, then execute it"
- * - Reflection prompting: "After your initial answer, critique it and improve"
- * - Task decomposition: "Break this into smaller sub-tasks"
- *
- * Usage: Set the snippet ID in agent config:
- *   { "codemode_middleware": { "pre_llm": "<snippet_id>" } }
- *
- * Or use the built-in strategy names directly via the reasoning_strategy config field.
+ * Strategy definitions (names, descriptions, when-to-use) live in
+ * skills/meta/pick-reasoning/SKILL.md. This file contains only the
+ * execution code: the strategy→prompt map and selection functions.
  */
-
-// ── Strategy Definitions ──────────────────────────────────────
 
 export interface ReasoningStrategy {
   name: string;
   description: string;
-  /** The system message injected before the LLM call. */
   prompt: string;
-  /** When to apply: always, complex_only, or first_turn_only. */
   trigger: "always" | "complex_only" | "first_turn_only";
-  /** Heuristic: minimum task length to consider "complex". */
   complexity_threshold: number;
 }
 
 export const REASONING_STRATEGIES: Record<string, ReasoningStrategy> = {
   "step-back": {
     name: "Step-Back Prompting",
-    description:
-      "Before diving into the specific task, step back and identify the general " +
-      "principle or high-level approach. This improves accuracy on complex tasks " +
-      "by grounding the response in first principles.",
+    description: "Step back and identify the general principle before answering.",
     prompt:
       "[Reasoning Strategy: Step-Back]\n" +
       "Before answering, take a step back and consider:\n" +
@@ -46,12 +28,9 @@ export const REASONING_STRATEGIES: Record<string, ReasoningStrategy> = {
     trigger: "complex_only",
     complexity_threshold: 100,
   },
-
   "chain-of-thought": {
     name: "Chain of Thought",
-    description:
-      "Think through the problem step by step before producing a final answer. " +
-      "Particularly effective for multi-step reasoning, math, and logic tasks.",
+    description: "Think step by step before producing a final answer.",
     prompt:
       "[Reasoning Strategy: Chain of Thought]\n" +
       "Think through this step by step:\n" +
@@ -62,13 +41,9 @@ export const REASONING_STRATEGIES: Record<string, ReasoningStrategy> = {
     trigger: "complex_only",
     complexity_threshold: 80,
   },
-
   "plan-then-execute": {
     name: "Plan Then Execute",
-    description:
-      "Outline a concrete plan before taking any actions. Prevents the common " +
-      "failure mode where agents start executing immediately without thinking " +
-      "about the overall approach.",
+    description: "Outline a plan before taking actions.",
     prompt:
       "[Reasoning Strategy: Plan Then Execute]\n" +
       "MANDATORY: Your FIRST response must be a visible plan — NOT a tool call. Output a structured plan like this:\n\n" +
@@ -81,13 +56,9 @@ export const REASONING_STRATEGIES: Record<string, ReasoningStrategy> = {
     trigger: "first_turn_only",
     complexity_threshold: 0,
   },
-
   "verify-then-respond": {
     name: "Verify Then Respond",
-    description:
-      "After forming an answer, verify it against the original question before " +
-      "responding. Catches errors where the agent answers a slightly different " +
-      "question than what was asked.",
+    description: "Verify answer against the original question before responding.",
     prompt:
       "[Reasoning Strategy: Verify Then Respond]\n" +
       "Before giving your final answer:\n" +
@@ -98,13 +69,9 @@ export const REASONING_STRATEGIES: Record<string, ReasoningStrategy> = {
     trigger: "always",
     complexity_threshold: 0,
   },
-
   "decompose": {
     name: "Task Decomposition",
-    description:
-      "Break complex tasks into smaller, manageable sub-tasks before starting. " +
-      "Effective for large implementation tasks that would otherwise overwhelm " +
-      "the agent's working memory.",
+    description: "Break complex tasks into smaller sub-tasks.",
     prompt:
       "[Reasoning Strategy: Decompose]\n" +
       "This task may be complex. Before starting:\n" +
@@ -118,69 +85,43 @@ export const REASONING_STRATEGIES: Record<string, ReasoningStrategy> = {
   },
 };
 
-// ── Strategy Selection ────────────────────────────────────────
-
-/**
- * Select the appropriate reasoning strategy based on task characteristics.
- * Returns the strategy prompt to inject, or null if no strategy applies.
- */
+/** Select reasoning strategy by name. Returns prompt or null. */
 export function selectReasoningStrategy(
   strategyName: string | undefined,
   task: string,
   turn: number,
 ): string | null {
   if (!strategyName) return null;
-
   const strategy = REASONING_STRATEGIES[strategyName];
   if (!strategy) return null;
-
-  // Check trigger conditions
   if (strategy.trigger === "first_turn_only" && turn > 1) return null;
   if (strategy.trigger === "complex_only" && task.length < strategy.complexity_threshold) return null;
-
   return strategy.prompt;
 }
 
-/**
- * Auto-select a reasoning strategy based on task content.
- * Used when no explicit strategy is configured — provides a sensible default.
- */
+/** Auto-select a reasoning strategy from task content heuristics. */
 export function autoSelectStrategy(task: string, toolCount: number): string | null {
   const lower = task.toLowerCase();
 
-  // Code/implementation tasks → plan-then-execute
   if (lower.includes("implement") || lower.includes("build") || lower.includes("create") ||
       lower.includes("refactor") || lower.includes("migrate")) {
     if (task.length > 150) return REASONING_STRATEGIES["plan-then-execute"].prompt;
   }
-
-  // Debugging/investigation → step-back
   if (lower.includes("debug") || lower.includes("fix") || lower.includes("investigate") ||
       lower.includes("why") || lower.includes("root cause")) {
     return REASONING_STRATEGIES["step-back"].prompt;
   }
-
-  // Multi-step tasks with many tools → decompose
   if (toolCount > 10 && task.length > 200) {
     return REASONING_STRATEGIES["decompose"].prompt;
   }
-
-  // Complex analytical tasks → chain-of-thought
   if (lower.includes("analyze") || lower.includes("compare") || lower.includes("evaluate") ||
       lower.includes("calculate") || lower.includes("determine")) {
     if (task.length > 100) return REASONING_STRATEGIES["chain-of-thought"].prompt;
   }
-
   return null;
 }
 
-/**
- * Codemode snippet code for the pre_llm middleware hook.
- * This is what gets stored as a codemode_snippets row and referenced by snippet ID.
- *
- * The snippet receives `input` with: { messages, turn, cumulative_cost_usd, strategy, task, tool_count }
- * It returns: { action: "inject", modified: "<strategy prompt>" } or { action: "continue" }
- */
+/** Codemode snippet for the pre_llm middleware hook. */
 export const REASONING_STRATEGY_SNIPPET_CODE = `
 // Reasoning strategy middleware — runs before each LLM call.
 // Selects and injects an appropriate reasoning prompt based on task characteristics.

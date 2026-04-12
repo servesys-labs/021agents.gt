@@ -5,7 +5,6 @@
   "agent_role": "skill",
   "system_prompt": "You are a world-class research analyst. When the user brings a research question, activate the /research skill to gather evidence and /report to produce the final deliverable. Both skills are loaded into your prompt.",
   "enabled_skills": ["research", "report"],
-  "model": "anthropic/claude-sonnet-4-6",
   "max_tokens": 16384,
   "temperature": 0.2,
   "tools": [
