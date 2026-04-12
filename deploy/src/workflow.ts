@@ -52,7 +52,9 @@ import { registerSession, unregisterSession, isSessionLimitReached, refreshHeart
 import { BudgetError, AgentOSError, SSRFError } from "./runtime/errors";
 import { createChildAbortController } from "./runtime/abort";
 import { queueSessionEpisodicNote } from "./runtime/memory";
+import { buildMemoryConsolidateParams, buildMemoryDigestParams } from "./runtime/memory-digest";
 import { applyContentBudget, applyHistoryBudget, buildQueryIntentProfile } from "./runtime/query-profile";
+import type { RuntimeEventType } from "./runtime/events";
 
 // ── Cloud C4.3: Memoized module imports ──────────────────────────
 // Workflow step functions run in isolated contexts. Dynamic imports are
@@ -593,6 +595,26 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         type: "reasoning", strategy: config.reasoning_strategy || "auto",
       });
     }
+
+    // ── Memory agent variant assignment — emitted once per session for A/B analysis.
+    // Determines and logs which memory path this session uses BEFORE any memory
+    // operations occur, so analysis can attribute outcomes to variants.
+    let memoryAgentEnabled = false;
+    try {
+      const { isEnabled } = await import("./runtime/features");
+      memoryAgentEnabled = await isEnabled(this.env as any, "memory_agent_enabled", p.org_id || "");
+    } catch { /* fail-closed: treat as disabled */ }
+    (this.env as any).TELEMETRY_QUEUE?.send?.({
+      type: "runtime_event",
+      payload: {
+        event_type: "memory_agent_variant_assigned" satisfies RuntimeEventType,
+        session_id: sessionId,
+        org_id: p.org_id || "",
+        agent_name: p.agent_name,
+        variant: memoryAgentEnabled ? "memory_agent" : "baseline",
+        flag: "memory_agent_enabled",
+      },
+    }).catch(() => {});
 
     // ═══════════════════════════════════════════════════════════
     // STEP 1b: HYDRATE WORKSPACE — restore files from R2 into sandbox
@@ -1361,7 +1383,7 @@ ALWAYS:
                 telemetryQueue?.send?.({
                   type: "runtime_event",
                   payload: {
-                    event_type: "llm_fallback",
+                    event_type: "llm_fallback" satisfies RuntimeEventType,
                     session_id: sessionId,
                     trace_id: traceId,
                     org_id: p.org_id || "",
@@ -1383,7 +1405,7 @@ ALWAYS:
                   telemetryQueue?.send?.({
                     type: "runtime_event",
                     payload: {
-                      event_type: "llm_fallback_alert",
+                      event_type: "llm_fallback_alert" satisfies RuntimeEventType,
                       session_id: sessionId,
                       trace_id: traceId,
                       org_id: p.org_id || "",
@@ -2082,6 +2104,55 @@ ALWAYS:
               // Inject parent message into conversation
               messages.push({ role: "system", content: `[Message from parent agent]: ${mm.payload}` });
             }
+            if (mm.message_type === "permission_response") {
+              // Parent responded to a permission request from this child.
+              // Inject the decision so the LLM can act on it.
+              let decision: { approved?: boolean; reason?: string } = {};
+              try { decision = JSON.parse(mm.payload); } catch { decision = { reason: mm.payload }; }
+              const approved = decision.approved !== false;
+              messages.push({
+                role: "system",
+                content: approved
+                  ? `[Permission GRANTED by parent agent]${decision.reason ? `: ${decision.reason}` : ""}. You may proceed with the action you requested permission for.`
+                  : `[Permission DENIED by parent agent]${decision.reason ? `: ${decision.reason}` : ""}. Do NOT proceed with the requested action. Find an alternative approach or report back.`,
+              });
+              await this.emit(p.progress_key, {
+                type: "system",
+                message: `Permission ${approved ? "granted" : "denied"} by parent: ${decision.reason || "no reason given"}`,
+              });
+            }
+            if (mm.message_type === "plan_approval") {
+              // Parent approved or rejected a plan this child proposed.
+              let approval: { approved?: boolean; feedback?: string } = {};
+              try { approval = JSON.parse(mm.payload); } catch { approval = { feedback: mm.payload }; }
+              const approved = approval.approved !== false;
+              messages.push({
+                role: "system",
+                content: approved
+                  ? `[Plan APPROVED by parent agent]${approval.feedback ? `. Feedback: ${approval.feedback}` : ""}. Execute the plan now.`
+                  : `[Plan REJECTED by parent agent]${approval.feedback ? `. Feedback: ${approval.feedback}` : ""}. Revise your plan based on the feedback and propose again, or take a different approach.`,
+              });
+              await this.emit(p.progress_key, {
+                type: "system",
+                message: `Plan ${approved ? "approved" : "rejected"} by parent: ${approval.feedback || "no feedback"}`,
+              });
+            }
+            if (mm.message_type === "permission_request") {
+              // A child of THIS agent is requesting permission.
+              // Inject it so the LLM can decide and respond via mailbox.
+              let request: { action?: string; reason?: string; child_session_id?: string } = {};
+              try { request = JSON.parse(mm.payload); } catch { request = { reason: mm.payload }; }
+              messages.push({
+                role: "system",
+                content: `[Permission request from child agent (session: ${mm.from_session})]: ` +
+                  `Action: ${request.action || "unknown"}. Reason: ${request.reason || "none given"}. ` +
+                  `To respond, use the mailbox to send a permission_response to session ${mm.from_session}.`,
+              });
+              await this.emit(p.progress_key, {
+                type: "system",
+                message: `Child agent requesting permission: ${request.action || "unknown action"}`,
+              });
+            }
           }
         } catch { /* DO_SQL may not be available in workflow steps */ }
         if (shutdownRequested) break;
@@ -2442,6 +2513,30 @@ ALWAYS:
       toolCallCount: totalToolCalls,
     });
 
+    // Post-session: fire memory agent pipeline (fail-open, feature-gated).
+    // Phase 4.5: uses memoryAgentEnabled resolved at session start (variant assignment).
+    const digestParams = buildMemoryDigestParams(
+      p.agent_name, sessionId, p.org_id || "", p.parent_depth || 0, !!this.env.AGENT_RUN_WORKFLOW,
+    );
+    const consolidateParams = buildMemoryConsolidateParams(
+      p.agent_name, sessionId, p.org_id || "", p.parent_depth || 0, !!this.env.AGENT_RUN_WORKFLOW,
+    );
+    if (digestParams) {
+      try {
+        if (memoryAgentEnabled) {
+          await this.env.AGENT_RUN_WORKFLOW.create({ params: digestParams });
+          if (consolidateParams) {
+            await this.env.AGENT_RUN_WORKFLOW.create({ params: consolidateParams });
+          }
+          (this.env as any).TELEMETRY_QUEUE?.send?.({ type: "runtime_event", payload: { event_type: "memory_digest_fired" satisfies RuntimeEventType, session_id: sessionId, org_id: p.org_id || "", agent_name: p.agent_name } }).catch(() => {});
+        } else {
+          (this.env as any).TELEMETRY_QUEUE?.send?.({ type: "runtime_event", payload: { event_type: "memory_digest_skipped" satisfies RuntimeEventType, session_id: sessionId, org_id: p.org_id || "", agent_name: p.agent_name } }).catch(() => {});
+        }
+      } catch {
+        // Memory digest is non-critical — fail silently
+      }
+    }
+
     const result: RunOutput = {
       output: finalOutput,
       turns: turnRecords.length || 1,
@@ -2555,7 +2650,7 @@ ALWAYS:
             session_id: sessionId,
             trace_id: traceId,
             turn: lastWorkflowTurn || 0,
-            event_type: "completion_gate",
+            event_type: "completion_gate" satisfies RuntimeEventType,
             action: "intervened",
             plan: config.plan || "",
             provider: config.provider || "",
@@ -2581,7 +2676,7 @@ ALWAYS:
             session_id: sessionId,
             trace_id: traceId,
             turn: lastWorkflowTurn || 0,
-            event_type: "completion_contract",
+            event_type: "completion_contract" satisfies RuntimeEventType,
             action: "failed",
             plan: config.plan || "",
             provider: config.provider || "",
@@ -2603,7 +2698,7 @@ ALWAYS:
           session_id: sessionId,
           trace_id: traceId,
           turn: lastWorkflowTurn || 0,
-          event_type: "run_phase_state",
+          event_type: "run_phase_state" satisfies RuntimeEventType,
           action: "final_state",
           plan: config.plan || "",
           provider: config.provider || "",
@@ -2631,7 +2726,7 @@ ALWAYS:
           session_id: sessionId,
           trace_id: traceId,
           turn: 0,
-          event_type: "query_profile",
+          event_type: "query_profile" satisfies RuntimeEventType,
           action: "applied",
           plan: config.plan || "",
           provider: config.provider || "",
@@ -2663,7 +2758,7 @@ ALWAYS:
             session_id: sessionId,
             trace_id: traceId,
             turn: lastWorkflowTurn || 0,
-            event_type: "research_artifact",
+            event_type: "research_artifact" satisfies RuntimeEventType,
             action: "schema_synthesis",
             plan: config.plan || "",
             provider: config.provider || "",
@@ -2750,7 +2845,7 @@ ALWAYS:
             session_id: sessionId,
             trace_id: traceId,
             turn: turnData.turn,
-            event_type: "turn_phase",
+            event_type: "turn_phase" satisfies RuntimeEventType,
             action: "timing",
             plan: config.plan || "",
             provider: config.provider || "",

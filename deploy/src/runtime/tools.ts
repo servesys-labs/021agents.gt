@@ -19,6 +19,7 @@ import { parseJsonColumn } from "./parse-json-column";
 import { uint8ArrayToBase64 } from "./binary-enc";
 import { log } from "./log";
 import { curatedMemoryTool } from "./curated-memory";
+import type { RuntimeEventType } from "./events";
 
 const MAX_SANDBOX_TIMEOUT_SECONDS = 300; // 5 min — npm install/build on basic instance needs time
 const DEFAULT_SANDBOX_TIMEOUT_SECONDS = 30;
@@ -381,7 +382,7 @@ function emitSandboxStartEvent(queue: any, sandboxId: string, cold: boolean, lat
   queue.send({
     type: "runtime_event",
     payload: {
-      event_type: "sandbox_start",
+      event_type: "sandbox_start" satisfies RuntimeEventType,
       session_id: "",
       org_id: orgId || "",
       node_id: sandboxId,
@@ -1289,7 +1290,7 @@ function emitToolExecEvent(queue: any, toolName: string, latencyMs: number, stat
   queue.send({
     type: "runtime_event",
     payload: {
-      event_type: "tool_exec",
+      event_type: "tool_exec" satisfies RuntimeEventType,
       session_id: sessionId,
       org_id: orgId || "",
       node_id: toolName,
@@ -1302,7 +1303,7 @@ function emitToolExecEvent(queue: any, toolName: string, latencyMs: number, stat
 
 function emitMemoryEvent(
   queue: any,
-  eventType: "memory_write" | "memory_write_rejected" | "memory_read" | "memory_hit" | "memory_miss",
+  eventType: Extract<RuntimeEventType, `memory_${string}`>,
   sessionId: string,
   orgId: string,
   details: Record<string, unknown>,
@@ -3194,8 +3195,7 @@ async function dispatch(
           systemPromptOverride = contextBlock;
         }
 
-        const instance = await workflow.create({
-          params: {
+        const childWorkflowParams = {
             agent_name: agentName,
             input: task,
             org_id: orgId,
@@ -3209,10 +3209,43 @@ async function dispatch(
             ...(systemPromptOverride ? { system_prompt_override: systemPromptOverride } : {}),
             budget_limit_usd_override: childBudgetCap,
             ...(toolsOverride ? { tools_override: toolsOverride } : {}),
-          },
-        });
+        };
 
-        // Poll for child completion (max 5 min).
+        const instance = await workflow.create({ params: childWorkflowParams });
+
+        // ── Async mode: fire-and-forget, return immediately ──
+        // Parent gets child_session_id and can check on it later via check-agent.
+        // This unblocks the parent's turn for real parallelism.
+        if (args.async) {
+          const correlationId = crypto.randomUUID().slice(0, 12);
+          const parentSessionId = lineage?.session_id || sessionId;
+          // Store instance ID in KV so check-agent can find it
+          if (kv) {
+            try {
+              await kv.put(`delegation:${correlationId}`, JSON.stringify({
+                instance_id: (instance as any).id || "",
+                agent_name: agentName,
+                parent_session_id: parentSessionId,
+                parent_agent_name: lineage?.agent_name || "unknown",
+                org_id: orgId,
+                depth: parentDepth + 1,
+                child_budget_cap: childBudgetCap,
+                task_preview: task.slice(0, 200),
+                spawned_at: Date.now(),
+              }), { expirationTtl: 600 }); // 10 min TTL
+            } catch {} // non-blocking
+          }
+          return JSON.stringify({
+            status: "spawned",
+            async: true,
+            correlation_id: correlationId,
+            agent_name: agentName,
+            child_budget_cap: childBudgetCap,
+            message: `Sub-agent '${agentName}' spawned asynchronously. Use check-agent with correlation_id="${correlationId}" to get results when ready.`,
+          });
+        }
+
+        // ── Sync mode: poll for child completion (max 5 min) ──
         // Adaptive polling: 500ms for first 10 polls (5s fast path for quick tasks),
         // then 2s intervals for longer tasks. Reduces latency on memory recall / fact checks.
         let childOutput = "";
@@ -3247,7 +3280,6 @@ async function dispatch(
         const status = childOutput.startsWith("[Sub-agent error") || childOutput.startsWith("[Sub-agent was") ? "failed" : "completed";
 
         // ── Result filtering: strip tool traces, JSON blobs, and pruning markers ──
-        // Return only actionable text to keep the parent's context window clean.
         let filteredOutput = childOutput;
         filteredOutput = filteredOutput.replace(/\[tool result pruned:[^\]]*\]/g, "");
         filteredOutput = filteredOutput.replace(/\{[^}]{200,}\}/g, "[JSON object omitted]");
@@ -3292,6 +3324,73 @@ async function dispatch(
           } catch {}
         }
         return JSON.stringify({ output: "", error: `Delegation failed: ${err.message || err}` });
+      }
+    }
+
+    case "check-agent": {
+      // Check on an async-spawned sub-agent. Returns its output if complete,
+      // or its current status if still running.
+      const corrId = String(args.correlation_id || "");
+      if (!corrId) return JSON.stringify({ error: "check-agent requires correlation_id" });
+
+      const checkKv = (env as any).AGENT_PROGRESS_KV;
+      if (!checkKv) return JSON.stringify({ error: "KV not available", status: "unknown" });
+
+      try {
+        const meta = await checkKv.get(`delegation:${corrId}`, "json") as Record<string, any> | null;
+        if (!meta) {
+          return JSON.stringify({ error: "No delegation found for this correlation_id. It may have expired (10 min TTL) or the ID is incorrect.", status: "not_found" });
+        }
+
+        const checkWorkflow = (env as any).AGENT_RUN_WORKFLOW;
+        if (!checkWorkflow || !meta.instance_id) {
+          return JSON.stringify({ status: "unknown", agent_name: meta.agent_name, error: "Cannot resolve workflow instance" });
+        }
+
+        const inst = await checkWorkflow.get(meta.instance_id);
+        const st = await inst.status();
+
+        if (st.status === "complete") {
+          const out = (st as any).output;
+          let childOutput = out?.output || "";
+          // Apply same result filtering as sync path
+          childOutput = childOutput.replace(/\[tool result pruned:[^\]]*\]/g, "");
+          childOutput = childOutput.replace(/\{[^}]{200,}\}/g, "[JSON object omitted]");
+          childOutput = childOutput.replace(/\n{3,}/g, "\n\n").trim();
+          // Clean up KV entry
+          await checkKv.delete(`delegation:${corrId}`).catch(() => {});
+          return JSON.stringify({
+            status: "completed",
+            agent_name: meta.agent_name,
+            output: childOutput.slice(0, 9500),
+            cost_usd: out?.cost_usd || 0,
+            session_id: out?.session_id || "",
+            turns: out?.turns || 0,
+          });
+        }
+        if (st.status === "errored") {
+          await checkKv.delete(`delegation:${corrId}`).catch(() => {});
+          return JSON.stringify({
+            status: "failed",
+            agent_name: meta.agent_name,
+            error: (st as any).error?.message || "Unknown error",
+          });
+        }
+        if (st.status === "terminated") {
+          await checkKv.delete(`delegation:${corrId}`).catch(() => {});
+          return JSON.stringify({ status: "terminated", agent_name: meta.agent_name });
+        }
+        // Still running
+        const elapsedMs = Date.now() - (meta.spawned_at || Date.now());
+        return JSON.stringify({
+          status: "running",
+          agent_name: meta.agent_name,
+          elapsed_ms: elapsedMs,
+          task_preview: meta.task_preview || "",
+          message: `Sub-agent '${meta.agent_name}' is still running (${Math.round(elapsedMs / 1000)}s elapsed). Check again later.`,
+        });
+      } catch (err: any) {
+        return JSON.stringify({ error: `check-agent failed: ${err.message || err}`, status: "error" });
       }
     }
 
@@ -4158,16 +4257,116 @@ return { mode: "codemode", total_tasks: tasks.length, results };
       }
 
       if (resolvedMode === "agent") {
-        // Agent mode: delegate to run-agent for each task
-        // Instead of implementing full Workflow fan-out here, we tell the LLM
-        // to use run-agent multiple times. This keeps the implementation lean.
+        // Agent mode: spawn parallel Workflow instances with full LLM reasoning per task.
+        // Each task gets its own child agent run. Results collected via Promise.allSettled.
+        const agentWorkflow = (env as any).AGENT_RUN_WORKFLOW;
+        if (!agentWorkflow) {
+          return JSON.stringify({ mode: "agent", error: "AGENT_RUN_WORKFLOW binding not available" });
+        }
+
+        const lineage = (env as any).__delegationLineage as Record<string, any> | undefined;
+        const swarmOrgId = lineage?.org_id || "";
+        const swarmDepth = (Number(lineage?.depth) || 0) + 1;
+        if (swarmDepth > 6) {
+          return JSON.stringify({ mode: "agent", error: "delegation_depth_exceeded" });
+        }
+        const parentConfig = (env as any).__agentConfig as Record<string, any> | undefined;
+        const parentPrompt = parentConfig?.system_prompt || "";
+        const parentBudget = Number(lineage?.budget_limit_usd) || 10;
+        const parentSpent = Number(lineage?.cumulative_cost_usd) || 0;
+        const remainingBudget = Math.max(0.01, parentBudget - parentSpent);
+        // Split remaining budget evenly across tasks, cap each at $2
+        const perTaskBudget = Math.min(remainingBudget / swarmTasks.length, 2);
+
+        const AGENT_CONCURRENCY = 5; // max parallel agent Workflows
+        const agentTargetName = String(args.agent_name || "personal-assistant");
+
+        const agentResults: Array<{ index: number; status: string; output: string; cost_usd: number; error?: string; latency_ms: number }> = [];
+        let taskIdx = 0;
+
+        async function agentWorker() {
+          while (taskIdx < swarmTasks.length) {
+            const i = taskIdx++;
+            if (i >= swarmTasks.length) break;
+            const swarmTask = swarmTasks[i];
+            const taskStart = Date.now();
+            try {
+              const childKey = `swarm:${sessionId}:${i}:${Date.now()}`;
+              const toolsOv = Array.isArray(swarmTask.tools) && swarmTask.tools.length > 0
+                ? swarmTask.tools.map(String)
+                : undefined;
+              const inst = await agentWorkflow.create({
+                params: {
+                  agent_name: agentTargetName,
+                  input: swarmTask.input,
+                  org_id: swarmOrgId,
+                  project_id: lineage?.project_id || "",
+                  channel: "delegation",
+                  channel_user_id: "",
+                  history: [],
+                  progress_key: childKey,
+                  parent_session_id: lineage?.session_id || sessionId,
+                  parent_depth: swarmDepth,
+                  ...(parentPrompt ? { system_prompt_override: parentPrompt } : {}),
+                  budget_limit_usd_override: perTaskBudget,
+                  ...(toolsOv ? { tools_override: toolsOv } : {}),
+                },
+              });
+              // Adaptive polling (same as run-agent)
+              let output = "";
+              let costUsd = 0;
+              for (let p = 0; p < 150; p++) {
+                await new Promise(r => setTimeout(r, p < 10 ? 500 : 2000));
+                try {
+                  const st = await inst.status();
+                  if (st.status === "complete") {
+                    const o = (st as any).output;
+                    output = (o?.output || "").slice(0, 4000);
+                    costUsd = o?.cost_usd || 0;
+                    break;
+                  }
+                  if (st.status === "errored" || st.status === "terminated") {
+                    output = `[Agent error: ${(st as any).error?.message || st.status}]`;
+                    break;
+                  }
+                } catch {}
+              }
+              agentResults.push({
+                index: i,
+                status: output.startsWith("[Agent error") ? "fail" : "pass",
+                output,
+                cost_usd: costUsd,
+                latency_ms: Date.now() - taskStart,
+              });
+            } catch (err: any) {
+              agentResults.push({
+                index: i,
+                status: "fail",
+                output: "",
+                cost_usd: 0,
+                error: String(err.message || err),
+                latency_ms: Date.now() - taskStart,
+              });
+            }
+          }
+        }
+
+        const workers = Array.from(
+          { length: Math.min(AGENT_CONCURRENCY, swarmTasks.length) },
+          () => agentWorker(),
+        );
+        await Promise.all(workers);
+        agentResults.sort((a, b) => a.index - b.index);
+
+        const totalAgentCost = agentResults.reduce((s, r) => s + r.cost_usd, 0);
+
         return JSON.stringify({
           mode: "agent",
-          note: "For full agent reasoning per task, call run-agent individually for each task. The swarm tool does not spawn Workflow instances directly — use run-agent with different agent_name/task pairs for parallel agent delegation.",
-          tasks: swarmTasks.map((t, i) => ({
-            index: i,
-            suggested_call: { tool: "run-agent", args: { agent_name: "personal-assistant", task: t.input } },
-          })),
+          total_tasks: swarmTasks.length,
+          results: agentResults,
+          latency_ms: Date.now() - swarmStarted,
+          total_cost_usd: totalAgentCost,
+          per_task_budget: perTaskBudget,
         });
       }
 
@@ -5139,7 +5338,9 @@ async function memorySave(env: RuntimeEnv, args: Record<string, any>): Promise<s
       const entities = Array.isArray(args.entities) ? args.entities.map(String).filter(Boolean) : [];
       const sid = String(args.session_id || (env as any).__delegationLineage?.session_id || "");
       const existing = await sql`SELECT id FROM facts WHERE agent_name = ${agentName} AND org_id = ${orgId} AND key = ${factKey} AND scope = 'agent' LIMIT 1`;
+      let factId = id;
       if (existing.length > 0) {
+        factId = String(existing[0].id || id);
         await sql`UPDATE facts SET value = ${content}, category = ${category}, updated_at = ${now}, last_reinforced_at = ${now},
           source_session_ids = CASE WHEN ${sid} = '' THEN source_session_ids ELSE array_append(COALESCE(source_session_ids, '{}'), ${sid}) END,
           entities = CASE WHEN ${entities.length} = 0 THEN entities ELSE ${entities}::text[] END WHERE id = ${existing[0].id}`;
@@ -5147,7 +5348,35 @@ async function memorySave(env: RuntimeEnv, args: Record<string, any>): Promise<s
         await sql`INSERT INTO facts (id, agent_name, org_id, scope, key, value, category, created_at, last_reinforced_at, source_session_ids, entities)
           VALUES (${id}, ${agentName}, ${orgId}, 'agent', ${factKey}, ${content}, ${category}, ${now}, ${now}, ${sid ? [sid] : []}, ${entities})`;
       }
-      return JSON.stringify({ success: true, tool: "memory-save", saved: true, type: "semantic", id, key: factKey, category, message: "Semantic memory saved.", usage: "n/a", entry_count: 1 });
+      // Best-effort: also maintain semantic index row for deep retrieval.
+      // DB write above is the source of truth; vector failures are non-fatal.
+      const vectorize = (env as any).VECTORIZE;
+      if (vectorize) {
+        try {
+          const { embedSingle, canUpsertToVectorize } = await import("./embeddings");
+          const embResult = await embedSingle(content, env as any);
+          if (canUpsertToVectorize({ vectors: [embResult.vector], model: embResult.model, dimensions: embResult.dimensions })) {
+            await vectorize.upsert([{
+              id: `mem-fact:${factId}`,
+              values: embResult.vector,
+              metadata: {
+                text: content,
+                content,
+                key: factKey,
+                category,
+                source: sid || "memory-save",
+                agent_name: agentName,
+                org_id: orgId,
+                entities: entities.join(","),
+                fact_id: factId,
+              },
+            }]);
+          }
+        } catch {
+          // non-fatal
+        }
+      }
+      return JSON.stringify({ success: true, tool: "memory-save", saved: true, type: "semantic", id: factId, key: factKey, category, message: "Semantic memory saved.", usage: "n/a", entry_count: 1 });
     }
   } catch (err: any) {
     return JSON.stringify({ success: false, tool: "memory-save", error: `Memory save failed: ${err.message}` });
@@ -7045,11 +7274,28 @@ const TOOL_CATALOG: ToolDefinition[] = [
           context: { type: "string", description: "Delegation context — summarize what you've done so far and why you're delegating. The child agent sees this in its system prompt so it understands the broader goal." },
           relevant_files: { type: "array", items: { type: "string" }, description: "File paths relevant to the task. Helps the child agent focus." },
           tools: { type: "array", items: { type: "string" }, description: "Optional: scope sub-agent to only these tools for this run (e.g. [\"web-search\", \"browse\"]). If omitted, agent uses its full configured tool set." },
+          async: { type: "boolean", description: "If true, spawn the child and return immediately without waiting. Use check-agent with the returned correlation_id to get results later. Best for long-running tasks where you can do other work while waiting." },
           skip_parent_prompt: { type: "boolean", description: "If true, child uses its own system prompt instead of inheriting the parent's. Use when delegating to a specialist with a different persona." },
           channel: { type: "string", description: "Channel (default internal)" },
           org_id: { type: "string", description: "Org id (optional if same as caller)" },
         },
         required: ["agent_name", "task"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "check-agent",
+      description:
+        "Check on an async-spawned sub-agent. Returns its output if complete, or current status if still running. " +
+        "Use this after calling run-agent with async=true to collect results.",
+      parameters: {
+        type: "object",
+        properties: {
+          correlation_id: { type: "string", description: "The correlation_id returned by the async run-agent call" },
+        },
+        required: ["correlation_id"],
       },
     },
   },
