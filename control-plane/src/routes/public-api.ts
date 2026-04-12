@@ -339,7 +339,9 @@ publicAgentRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
     } else {
       await withOrgDb(c.env, orgId, async (creditSql) => {
         await releaseCreditHold(creditSql, orgId, holdId, "crash");
-      }).catch(() => {});
+      }).catch((err: any) => {
+        console.error(`[public-api-billing] release failed org=${orgId} hold=${holdId}: ${err?.message || err}`);
+      });
     }
 
     // Store idempotency cache if key was provided
@@ -398,7 +400,9 @@ publicAgentRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
   } catch (err) {
     await withOrgDb(c.env, orgId, async (creditSql) => {
       await releaseCreditHold(creditSql, orgId, holdId, "crash");
-    }).catch(() => {});
+    }).catch((relErr: any) => {
+      console.error(`[public-api-billing] release failed org=${orgId} hold=${holdId}: ${relErr?.message || relErr}`);
+    });
     return c.json(failSafe(err, "public-api/agents/run", { userMessage: "Agent execution failed. Please try again in a moment." }), 500);
   }
 });
@@ -597,7 +601,9 @@ publicAgentRoutes.openapi(agentRunStreamRoute, async (c): Promise<any> => {
       if (!holdClosed) {
         await withOrgDb(c.env, orgId, async (creditSql) => {
           await releaseCreditHold(creditSql, orgId, streamHoldId, "crash");
-        }).catch(() => {});
+        }).catch((relErr: any) => {
+          console.error(`[public-api/stream-billing] outer-catch release failed org=${orgId} hold=${streamHoldId}: ${relErr?.message || relErr}`);
+        });
         holdClosed = true;
       }
       sendSSE("error", { message: `Agent execution failed. Please try again in a moment. (ref: ${ref})`, ref });
@@ -605,7 +611,9 @@ publicAgentRoutes.openapi(agentRunStreamRoute, async (c): Promise<any> => {
       if (!holdClosed) {
         await withOrgDb(c.env, orgId, async (creditSql) => {
           await releaseCreditHold(creditSql, orgId, streamHoldId, "crash");
-        }).catch(() => {});
+        }).catch((relErr: any) => {
+          console.error(`[public-api/stream-billing] finally release failed org=${orgId} hold=${streamHoldId}: ${relErr?.message || relErr}`);
+        });
       }
       writer.close();
     }
@@ -860,7 +868,9 @@ publicAgentRoutes.openapi(agentRunUploadRoute, async (c): Promise<any> => {
     } else {
       await withOrgDb(c.env, orgId, async (creditSql) => {
         await releaseCreditHold(creditSql, orgId, uploadHoldId, "crash");
-      }).catch(() => {});
+      }).catch((relErr: any) => {
+        console.error(`[public-api-billing] upload release failed org=${orgId} hold=${uploadHoldId}: ${relErr?.message || relErr}`);
+      });
     }
 
     // Store idempotency cache if key was provided
@@ -880,7 +890,9 @@ publicAgentRoutes.openapi(agentRunUploadRoute, async (c): Promise<any> => {
   } catch (err) {
     await withOrgDb(c.env, orgId, async (creditSql) => {
       await releaseCreditHold(creditSql, orgId, uploadHoldId, "crash");
-    }).catch(() => {});
+    }).catch((relErr: any) => {
+      console.error(`[public-api-billing] upload outer-catch release failed org=${orgId} hold=${uploadHoldId}: ${relErr?.message || relErr}`);
+    });
     return c.json(failSafe(err, "public-api/agents/run-upload", { userMessage: "Agent execution failed. Please try again in a moment." }), 500);
   }
 });
@@ -1017,9 +1029,16 @@ publicAgentRoutes.openapi(createConversationRoute, async (c): Promise<any> => {
             `Agent run: ${agentName}`,
             agentName,
             String(runResult.session_id || conversationRunSessionId),
-          ).catch(() => {});
+          ).catch((settleErr: any) => {
+            // Bug 4 from the P0 code review: settle was silently swallowing
+            // errors while every other settle site logs them. If a data
+            // integrity issue makes settle throw, we want a grep target.
+            console.error(`[public-api/conversations] settle failed org=${orgId} hold=${conversationHold.hold_id}: ${settleErr?.message || settleErr}`);
+          });
         } else {
-          await releaseCreditHold(sql, orgId, conversationHold.hold_id, "crash").catch(() => {});
+          await releaseCreditHold(sql, orgId, conversationHold.hold_id, "crash").catch((relErr: any) => {
+            console.error(`[public-api/conversations] release failed org=${orgId} hold=${conversationHold.hold_id}: ${relErr?.message || relErr}`);
+          });
         }
       } catch (runErr: any) {
         // Any throw between reserve and settle/release (runtime fetch
@@ -1028,7 +1047,9 @@ publicAgentRoutes.openapi(createConversationRoute, async (c): Promise<any> => {
         // effectively holding the customer's credit for 10 minutes
         // after a transient failure.
         console.error(`[public-api/conversations] agent run failed after reserve: ${runErr?.message || runErr}`);
-        await releaseCreditHold(sql, orgId, conversationHold.hold_id, "crash").catch(() => {});
+        await releaseCreditHold(sql, orgId, conversationHold.hold_id, "crash").catch((relErr: any) => {
+          console.error(`[public-api/conversations] release-after-throw failed org=${orgId} hold=${conversationHold.hold_id}: ${relErr?.message || relErr}`);
+        });
         result.error = "runtime_unavailable";
       }
     }

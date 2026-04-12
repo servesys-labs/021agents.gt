@@ -397,7 +397,9 @@ runtimeProxyRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
     } else if (holdId) {
       await withOrgDb(c.env, orgId, (creditSql) =>
         releaseCreditHold(creditSql, orgId, holdId!, "crash"),
-      ).catch(() => {});
+      ).catch((err: any) => {
+        console.error(`[billing] release failed org=${orgId} hold=${holdId}: ${err?.message || err}`);
+      });
     }
 
     return c.json(result, resp.status as 200 | 400 | 401 | 403 | 404 | 500 | 502 | 503);
@@ -405,7 +407,9 @@ runtimeProxyRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
     if (holdId) {
       await withOrgDb(c.env, orgId, (creditSql) =>
         releaseCreditHold(creditSql, orgId, holdId!, "crash"),
-      ).catch(() => {});
+      ).catch((relErr: any) => {
+        console.error(`[billing] release failed org=${orgId} hold=${holdId}: ${relErr?.message || relErr}`);
+      });
     }
     return c.json(failSafe(err, "runtime-proxy/agent/run", { userMessage: "The runtime is temporarily unavailable. Please try again in a moment." }), 502);
   }
@@ -544,18 +548,25 @@ runtimeProxyRoutes.openapi(batchRoute, async (c): Promise<any> => {
               agentName,
               String(result!.session_id || itemSessionId),
             ),
-          ).catch(() => ({ success: false }));
+          ).catch((settleErr: any) => {
+            console.error(`[billing] batch settle failed org=${batchOrgId} hold=${holdResult.holdId}: ${settleErr?.message || settleErr}`);
+            return { success: false };
+          });
           if (!settled.success) {
             await withOrgDb(c.env, batchOrgId, (creditSql) =>
               releaseCreditHold(creditSql, batchOrgId, holdResult.holdId, "crash"),
-            ).catch(() => {});
+            ).catch((relErr: any) => {
+              console.error(`[billing] batch release failed org=${batchOrgId} hold=${holdResult.holdId}: ${relErr?.message || relErr}`);
+            });
           }
 
           return result!;
         } catch (err) {
           await withOrgDb(c.env, batchOrgId, (creditSql) =>
             releaseCreditHold(creditSql, batchOrgId, holdResult.holdId, "crash"),
-          ).catch(() => {});
+          ).catch((relErr: any) => {
+            console.error(`[billing] batch release failed org=${batchOrgId} hold=${holdResult.holdId}: ${relErr?.message || relErr}`);
+          });
           throw err;
         }
       }),
@@ -778,7 +789,9 @@ runtimeProxyRoutes.openapi(streamRoute, async (c): Promise<any> => {
       if (streamHoldId) {
         await withOrgDb(c.env, streamOrgId, (creditSql) =>
           releaseCreditHold(creditSql, streamOrgId, streamHoldId!, "crash"),
-        ).catch(() => {});
+        ).catch((err: any) => {
+          console.error(`[billing] stream release failed org=${streamOrgId} hold=${streamHoldId}: ${err?.message || err}`);
+        });
       }
       const text = await resp.text();
       // Return as SSE error event
@@ -864,7 +877,9 @@ runtimeProxyRoutes.openapi(streamRoute, async (c): Promise<any> => {
                     console.error(`[sse-billing] FAILED settle for org ${orgIdForBilling} hold ${streamHoldId}`);
                     await withOrgDb(c.env, orgIdForBilling, (creditSql) =>
                       releaseCreditHold(creditSql, orgIdForBilling, streamHoldId!, "crash"),
-                    ).catch(() => {});
+                    ).catch((err: any) => {
+                      console.error(`[sse-billing] release-after-settle-failure failed org=${orgIdForBilling} hold=${streamHoldId}: ${err?.message || err}`);
+                    });
                   } else {
                     billedDone = true;
                   }
@@ -881,7 +896,9 @@ runtimeProxyRoutes.openapi(streamRoute, async (c): Promise<any> => {
         if (!billedDone && streamHoldId) {
           await withOrgDb(c.env, orgIdForBilling, (creditSql) =>
             releaseCreditHold(creditSql, orgIdForBilling, streamHoldId!, "crash"),
-          ).catch(() => {});
+          ).catch((err: any) => {
+            console.error(`[sse-billing] finally release failed org=${orgIdForBilling} hold=${streamHoldId}: ${err?.message || err}`);
+          });
         }
         try { await writer.close(); } catch {}
       }
@@ -904,7 +921,9 @@ runtimeProxyRoutes.openapi(streamRoute, async (c): Promise<any> => {
     if (streamHoldId) {
       await withOrgDb(c.env, streamOrgId, (creditSql) =>
         releaseCreditHold(creditSql, streamOrgId, streamHoldId!, "crash"),
-      ).catch(() => {});
+      ).catch((err: any) => {
+        console.error(`[sse-billing] outer-catch release failed org=${streamOrgId} hold=${streamHoldId}: ${err?.message || err}`);
+      });
     }
 
     const encoder = new TextEncoder();

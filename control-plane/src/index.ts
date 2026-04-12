@@ -619,7 +619,7 @@ export default {
   // Per-job work that needs RLS-scoped writes can open nested withOrgDb
   // inside the admin callback using the job payload's org_id.
   async queue(batch: MessageBatch, env: Env): Promise<void> {
-    const { withAdminDb } = await import("./db/client");
+    const { withAdminDb, withOrgDb } = await import("./db/client");
     const {
       DEFAULT_CREDIT_HOLD_USD,
       releaseCreditHold,
@@ -675,9 +675,13 @@ export default {
               `Agent run: ${agentName}`,
               agentName,
               String(result.session_id || reservedSessionId),
-            ).catch(() => {});
+            ).catch((settleErr: any) => {
+              console.error(`[agent-run-billing] settle failed org=${orgId} hold=${hold.hold_id}: ${settleErr?.message || settleErr}`);
+            });
           } else {
-            await releaseCreditHold(sql, orgId, hold.hold_id, "crash").catch(() => {});
+            await releaseCreditHold(sql, orgId, hold.hold_id, "crash").catch((relErr: any) => {
+              console.error(`[agent-run-billing] release failed org=${orgId} hold=${hold.hold_id}: ${relErr?.message || relErr}`);
+            });
           }
 
           // Update job status in DB
@@ -717,14 +721,23 @@ export default {
 
           for (const task of tasks) {
             const taskSessionId = `batch-${batchId}-${String(task.task_id)}`;
-            const hold = await reserveCreditHold(
-              sql,
-              orgId,
-              taskSessionId,
-              DEFAULT_CREDIT_HOLD_USD,
-              undefined,
-              { agentName },
-            );
+
+            // Reserve in its own transaction so a downstream DB error in
+            // the outer job-handler transaction cannot roll back the hold.
+            // Bug 2 from the P0 code review: Hyperdrive hiccups between the
+            // runtime fetch and the batch_tasks UPDATE must not lose the
+            // charge for work that already ran.
+            let hold: Awaited<ReturnType<typeof reserveCreditHold>>;
+            try {
+              hold = await withOrgDb(env, orgId, (creditSql) =>
+                reserveCreditHold(creditSql, orgId, taskSessionId, DEFAULT_CREDIT_HOLD_USD, undefined, { agentName }),
+              );
+            } catch (resErr: any) {
+              console.error(`[batch-billing] reserve failed batch=${batchId} task=${task.task_id}: ${resErr?.message || resErr}`);
+              await sql`UPDATE batch_tasks SET status = 'failed', error = 'credit_reserve_error' WHERE task_id = ${task.task_id}`.catch(() => {});
+              failedCount++;
+              continue;
+            }
             if (!hold.success) {
               await sql`
                 UPDATE batch_tasks SET status = 'failed', error = 'insufficient_credits'
@@ -754,6 +767,28 @@ export default {
                 }),
               );
               const result = await resp.json() as Record<string, unknown>;
+
+              // Settle FIRST in its own transaction. If the subsequent
+              // batch_tasks UPDATE fails (outer-txn abort, Hyperdrive
+              // hiccup, network blip), the billing record is already
+              // committed. Customer is charged for the work that really
+              // ran, even if the task-status write lands on a retry.
+              try {
+                await withOrgDb(env, orgId, (creditSql) =>
+                  settleCreditHold(
+                    creditSql,
+                    orgId,
+                    hold.hold_id,
+                    Number(result.cost_usd || 0),
+                    `Batch run: ${agentName}`,
+                    agentName,
+                    String(result.session_id || taskSessionId),
+                  ),
+                );
+              } catch (settleErr: any) {
+                console.error(`[batch-billing] settle failed batch=${batchId} task=${task.task_id}: ${settleErr?.message || settleErr}`);
+              }
+
               await sql`
                 UPDATE batch_tasks SET status = 'completed', output = ${String(result.output || "")},
                   session_id = ${String(result.session_id || "")},
@@ -761,17 +796,16 @@ export default {
                 WHERE task_id = ${task.task_id}
               `;
               completedCount++;
-              await settleCreditHold(
-                sql,
-                orgId,
-                hold.hold_id,
-                Number(result.cost_usd || 0),
-                `Batch run: ${agentName}`,
-                agentName,
-                String(result.session_id || taskSessionId),
-              ).catch(() => {});
             } catch (taskErr) {
-              await releaseCreditHold(sql, orgId, hold.hold_id, "crash").catch(() => {});
+              // Release also in its own transaction so the refund commits
+              // even if the outer txn is aborted from the inner throw.
+              try {
+                await withOrgDb(env, orgId, (creditSql) =>
+                  releaseCreditHold(creditSql, orgId, hold.hold_id, "crash"),
+                );
+              } catch (relErr: any) {
+                console.error(`[batch-billing] release failed batch=${batchId} task=${task.task_id}: ${relErr?.message || relErr}`);
+              }
               await sql`UPDATE batch_tasks SET status = 'failed', error = ${String(taskErr)} WHERE task_id = ${task.task_id}`.catch(() => {});
               failedCount++;
             }
