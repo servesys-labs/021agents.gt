@@ -309,6 +309,40 @@ export async function releaseCreditHold(
   }
 }
 
+/**
+ * Look up an active hold by (org_id, session_id) and release it.
+ *
+ * Thin wrapper over `releaseCreditHold` for callers that don't have the
+ * hold_id (DLQ consumer, admin tools, support scripts). The lookup
+ * acquires FOR UPDATE to prevent a race where the cron reclaims the hold
+ * between the SELECT and the release.
+ *
+ * Returns `{ released: false }` when no active hold exists for the
+ * session — this is a normal DLQ race outcome (cron already reclaimed),
+ * NOT a data integrity violation, so it does NOT throw.
+ */
+export async function releaseHoldBySession(
+  sql: Sql,
+  orgId: string,
+  sessionId: string,
+  reason: "user_cancel" | "crash" | "expired",
+): Promise<{ released: boolean; hold_id?: string; hold_amount_usd?: number }> {
+  const [hold] = await sql`
+    SELECT hold_id, hold_amount_usd
+    FROM credit_holds
+    WHERE org_id = ${orgId} AND session_id = ${sessionId} AND status = 'active'
+    FOR UPDATE
+    LIMIT 1
+  `.catch(() => []);
+
+  if (!hold) return { released: false };
+
+  const holdId = String(hold.hold_id);
+  const holdAmount = Number(hold.hold_amount_usd || 0);
+  await releaseCreditHold(sql, orgId, holdId, reason);
+  return { released: true, hold_id: holdId, hold_amount_usd: holdAmount };
+}
+
 export async function reclaimExpiredCreditHolds(
   sql: Sql,
   limit: number = 200,

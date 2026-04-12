@@ -610,15 +610,101 @@ app.get("/api/v1/docs", (c) => {
   return c.html(html);
 });
 
+// ── DLQ consumer — release credit holds for dead-lettered jobs ────────────
+//
+// When an agent_run or batch_run message exhausts all retries and lands in
+// agentos-jobs-dlq, the associated credit hold sits active until the
+// reclaimExpiredCreditHolds cron catches it at TTL (10 min). During an
+// incident with many concurrent failures, this ties up customer balance.
+// The DLQ consumer releases holds immediately on DLQ delivery.
+//
+// Dedup with the reclaim cron is handled at the DB layer:
+// - releaseHoldBySession uses FOR UPDATE on the hold row
+// - reclaimExpiredCreditHolds uses FOR UPDATE SKIP LOCKED
+// Under all race orderings, exactly one actor succeeds, the other no-ops.
+// No custom dedup needed.
+async function handleDlqBatch(batch: MessageBatch, env: Env): Promise<void> {
+  const { withOrgDb } = await import("./db/client");
+  const { releaseHoldBySession } = await import("./logic/credits");
+
+  await Promise.allSettled(batch.messages.map(async (msg) => {
+    try {
+      const job = msg.body as { type: string; payload: Record<string, unknown> };
+      const orgId = String(job.payload.org_id || "");
+      if (!orgId || !job.type) {
+        msg.ack();
+        return;
+      }
+
+      const releaseSessions: string[] = [];
+
+      if (job.type === "agent_run") {
+        const agentName = String(job.payload.agent_name || "");
+        releaseSessions.push(
+          String(job.payload.session_id || job.payload.job_id || `agent-run-${orgId}-${agentName}`),
+        );
+      } else if (job.type === "batch_run") {
+        const batchId = String(job.payload.batch_id || "");
+        // Look up tasks that never reached a terminal state. Each may
+        // have an active hold reserved with session_id = `batch-${batchId}-${task_id}`.
+        const tasks = await withOrgDb(env, orgId, (sql) =>
+          sql`SELECT task_id FROM batch_tasks WHERE batch_id = ${batchId} AND status IN ('pending', 'running')`,
+        ).catch(() => [] as any[]);
+        for (const task of tasks) {
+          releaseSessions.push(`batch-${batchId}-${String(task.task_id)}`);
+        }
+      }
+      // Other job types (webhook_delivery, training_step, etc.) don't
+      // involve credit holds — silently ack.
+
+      for (const sessionId of releaseSessions) {
+        try {
+          const result = await withOrgDb(env, orgId, (sql) =>
+            releaseHoldBySession(sql, orgId, sessionId, "crash"),
+          );
+          if (result.released) {
+            console.warn(
+              `[dlq-billing] released hold org=${orgId} session=${sessionId} hold=${result.hold_id} amount=${result.hold_amount_usd} reason=dlq_exhausted`,
+            );
+            await withOrgDb(env, orgId, (sql) =>
+              sql`INSERT INTO billing_exceptions
+                    (org_id, session_id, hold_id, kind, amount_usd, exception_type,
+                     expected_usd, actual_usd, charged_usd, error_message, created_at)
+                  VALUES
+                    (${orgId}, ${sessionId}, ${result.hold_id || null}, 'dlq_hold_release',
+                     ${result.hold_amount_usd || 0}, 'dlq_exhausted',
+                     ${result.hold_amount_usd || 0}, 0, 0,
+                     'Hold released by DLQ consumer — job exhausted all retries', now())`,
+            ).catch((err: any) => {
+              console.error(`[dlq-billing] audit write failed org=${orgId} session=${sessionId}: ${err?.message || err}`);
+            });
+          } else {
+            console.log(`[dlq-billing] no active hold for session=${sessionId} org=${orgId} (already reclaimed or settled)`);
+          }
+        } catch (releaseErr: any) {
+          console.error(`[dlq-billing] release failed org=${orgId} session=${sessionId}: ${releaseErr?.message || releaseErr}`);
+        }
+      }
+
+      msg.ack();
+    } catch (err) {
+      console.error(`[dlq-billing] handler error:`, err);
+      msg.ack(); // Always ack — if release failed, reclaim cron catches it at TTL
+    }
+  }));
+}
+
 // ── Export ────────────────────────────────────────────────────────────────
 export default {
   fetch: app.fetch,
 
-  // Queue consumer — async job processing. This is a trusted backend
-  // iterating across many orgs per batch; it uses withAdminDb throughout.
-  // Per-job work that needs RLS-scoped writes can open nested withOrgDb
-  // inside the admin callback using the job payload's org_id.
+  // Queue consumer — async job processing + DLQ credit-hold cleanup.
+  // Routes on batch.queue: main jobs go to the existing handler,
+  // dead-lettered jobs go to handleDlqBatch for immediate hold release.
   async queue(batch: MessageBatch, env: Env): Promise<void> {
+    if (batch.queue === "agentos-jobs-dlq") {
+      return handleDlqBatch(batch, env);
+    }
     const { withAdminDb, withOrgDb } = await import("./db/client");
     const {
       DEFAULT_CREDIT_HOLD_USD,
