@@ -33,6 +33,20 @@ export type RuntimeEventType =
   | "memory_digest_fired"
   | "memory_digest_skipped"
   | "memory_agent_variant_assigned"
+  | "memory_shadow_delta"
+  // ── Signal substrate (→ runtime_events) ────────────────────────
+  | "signal_buffered"
+  | "signal_threshold_hit"
+  | "signal_cooldown_suppressed"
+  | "signal_workflow_fired"
+  | "signal_envelope_dropped"
+  // ── Approval protocol (→ runtime_events) ─────────────────────
+  | "permission_requested"
+  | "permission_granted"
+  | "permission_denied"
+  | "permission_timeout"
+  | "plan_approved"
+  | "plan_rejected"
   // ── Infra (→ runtime_events) ─────────────────────────────────
   | "config.update"
   | "kv_poll_loop"

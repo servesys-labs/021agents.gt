@@ -41,6 +41,20 @@ guard("memory_write_rejected");
 guard("memory_digest_fired");
 guard("memory_digest_skipped");
 guard("memory_agent_variant_assigned");
+guard("memory_shadow_delta");
+guard("signal_buffered");
+guard("signal_threshold_hit");
+guard("signal_cooldown_suppressed");
+guard("signal_workflow_fired");
+guard("signal_envelope_dropped");
+
+// Approval protocol
+guard("permission_requested");
+guard("permission_granted");
+guard("permission_denied");
+guard("permission_timeout");
+guard("plan_approved");
+guard("plan_rejected");
 
 // Infra
 guard("config.update");
@@ -60,6 +74,11 @@ type Covered =
   | "memory_read" | "memory_hit" | "memory_miss" | "memory_write"
   | "memory_write_rejected" | "memory_digest_fired"
   | "memory_digest_skipped" | "memory_agent_variant_assigned"
+  | "memory_shadow_delta"
+  | "signal_buffered" | "signal_threshold_hit" | "signal_cooldown_suppressed"
+  | "signal_workflow_fired" | "signal_envelope_dropped"
+  | "permission_requested" | "permission_granted" | "permission_denied"
+  | "permission_timeout" | "plan_approved" | "plan_rejected"
   | "config.update" | "kv_poll_loop" | "email.processed" | "rag_eval"
   | "do_eviction";
 

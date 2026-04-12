@@ -37,6 +37,13 @@ const DEFAULTS: Record<string, boolean> = {
   // Gradual rollout gate for routing complex tasks to Kimi.
   // Keep off by default; enable per-org as part of canary.
   kimi_complex_canary: false,
+  // Memory agent: post-session digest + decay ranking.
+  // Phase 4.5: enable per-org for staged A/B rollout.
+  memory_agent_enabled: false,
+  // Shared signal substrate: telemetry reduction + dedicated coordinator path.
+  signal_substrate_enabled: false,
+  // Memory passive signals: digest/consolidate driven by buffered telemetry.
+  memory_passive_signals_enabled: false,
 };
 
 /**

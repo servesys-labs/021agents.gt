@@ -304,6 +304,7 @@ describe("queue message type routing", () => {
     "session", "turn", "episode", "event",
     "runtime_event", "middleware_event", "billing_flush",
     "skill_activation", "skill_auto_activation", "loop_detected", "do_eviction",
+    "artifact_manifest", "signal_envelope",
   ]);
 
   it("all expected types are recognized", () => {

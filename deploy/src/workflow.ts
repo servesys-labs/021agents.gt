@@ -249,6 +249,9 @@ function evaluateCompletionContract(input: string, output: string, opts: {
   return { ok: reasons.length === 0, reasons };
 }
 
+// evaluateVerification lives in ./runtime/verification.ts for testability
+import { evaluateVerification } from "./runtime/verification";
+
 // ── Types ────────────────────────────────────────────────────
 
 export interface AgentRunParams {
@@ -277,6 +280,12 @@ export interface AgentRunParams {
   plan_override?: string;
   /** Override the agent's tool list for this run — scopes a sub-agent to only these tools */
   tools_override?: string[];
+  /** Glob patterns limiting file operations. Delegated runs default to ["/workspace/**", "/tmp/**"]. */
+  allowed_paths?: string[];
+  /** Shell command to run in sandbox after completion to verify task success. */
+  verify_command?: string;
+  /** Regex pattern — verify_command stdout must match for the task to be considered successful. */
+  pass_condition?: string;
   /** Conversation ID for persistent chat history */
   conversation_id?: string;
   /** DO session ID — used as stable sandbox identifier so hydrate-workspace and tools share the same container */
@@ -990,6 +999,15 @@ ALWAYS:
     let completionGateReason = "";
     let budgetPressureInjected = false;
     let planApprovedByParent = false;
+    // Path ACL: delegated runs default to sandbox boundaries; top-level runs are unconstrained.
+    const resolvedAllowedPaths: string[] | undefined = p.allowed_paths
+      ?? (p.parent_session_id ? ["/workspace/**", "/tmp/**"] : undefined);
+    // Fail-closed: when path ACL is active, strip tools that bypass file-level enforcement.
+    // Parent can re-add them explicitly via tools_override if it accepts the risk.
+    if (resolvedAllowedPaths && !p.tools_override) {
+      const ACL_BYPASS_TOOLS = ["bash", "python-exec", "sandbox-exec", "dynamic-exec"];
+      config.tools = config.tools.filter((t: string) => !ACL_BYPASS_TOOLS.includes(t));
+    }
     let maxTokensRecoveryCount = 0;
     const recentOutputDeltas: Array<{ tokens: number; successfulTools: number }> = [];
     let diminishingReturnsWarned = false;
@@ -1826,6 +1844,7 @@ ALWAYS:
                   __orgId: p.org_id || "default",
                   __agentName: p.agent_name || config?.name || "agent",
                   __channelUserId: p.channel_user_id || "",
+                  __allowedPaths: resolvedAllowedPaths,
                 } as any,
                 [{ id: tc.id, name: tc.name, arguments: tc.arguments }],
                 sessionId,
@@ -2603,6 +2622,32 @@ ALWAYS:
       failedToolCalls,
       artifactSynthesisValidated,
     });
+
+    // ── Structured verification contract ──────────────────────────
+    // If verify_command is set, run it in sandbox and evaluate via evaluateVerification().
+    // Fail-closed: if sandbox is unavailable, verification fails (not skipped).
+    if (p.verify_command) {
+      let execResult: { stdout?: string; stderr?: string; exitCode?: number } | null = null;
+      let sandboxError: string | undefined;
+      try {
+        const { getSafeSandbox, stableSandboxId } = await memo("tools", () => import("./runtime/tools"));
+        const sandbox = getSafeSandbox(this.env as any, stableSandboxId(this.env as any, sessionId));
+        execResult = await Promise.race([
+          sandbox.exec(`cd /workspace && (${p.verify_command})`, { timeout: 30 }),
+          new Promise<{ stdout: ""; stderr: ""; exitCode: -1 }>((resolve) =>
+            setTimeout(() => resolve({ stdout: "", stderr: "", exitCode: -1 }), 30_000),
+          ),
+        ]) as { stdout?: string; stderr?: string; exitCode?: number };
+      } catch (err: any) {
+        sandboxError = err?.message || String(err);
+      }
+      const verification = evaluateVerification(execResult, p.pass_condition, sandboxError);
+      if (!verification.ok && verification.reason) {
+        completionContract.reasons.push(verification.reason);
+        completionContract.ok = false;
+      }
+    }
+
     if (!completionContract.ok && terminationReason !== "completion_gate_exhausted") {
       terminationReason = "completion_contract_failed";
       await this.emit(p.progress_key, {
@@ -2920,6 +2965,8 @@ ALWAYS:
         queue.send({
           type: "turn",
           payload: {
+            org_id: p.org_id || "",
+            agent_name: config.name || p.agent_name || "",
             session_id: sessionId,
             turn_number: turnData.turn,
             model_used: turnData.model,

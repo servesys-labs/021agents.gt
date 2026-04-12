@@ -31,6 +31,10 @@
       {
         "name": "SESSION_COUNTER",
         "class_name": "SessionCounterDO"
+      },
+      {
+        "name": "SIGNAL_COORDINATOR",
+        "class_name": "SignalCoordinatorDO"
       }
     ]
   },
@@ -44,6 +48,10 @@
     {
       "tag": "v3",
       "new_classes": ["SessionCounterDO"]
+    },
+    {
+      "tag": "v4",
+      "new_sqlite_classes": ["SignalCoordinatorDO"]
     }
   ],
 
@@ -69,7 +77,8 @@
   // Queues — guaranteed delivery telemetry pipeline (DO → Queue → Supabase)
   "queues": {
     "producers": [
-      { "binding": "TELEMETRY_QUEUE", "queue": "agentos-telemetry" }
+      { "binding": "TELEMETRY_QUEUE", "queue": "agentos-telemetry" },
+      { "binding": "SIGNAL_QUEUE", "queue": "agentos-signals" }
     ],
     "consumers": [
       {
@@ -78,9 +87,23 @@
         "max_batch_timeout": 5,
         "max_retries": 5,
         "dead_letter_queue": "agentos-telemetry-dlq"
+      },
+      {
+        "queue": "agentos-signals",
+        "max_batch_size": 50,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "agentos-signals-dlq"
       }
     ]
   },
+
+  "analytics_engine_datasets": [
+    {
+      "binding": "SIGNAL_ANALYTICS",
+      "dataset": "agentos_signals"
+    }
+  ],
 
   // Hyperdrive — accelerated Supabase Postgres connection from edge.
   //

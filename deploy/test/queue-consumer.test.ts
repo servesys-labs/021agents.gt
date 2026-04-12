@@ -39,4 +39,12 @@ describe("queue consumer mapping", () => {
     expect(source).toContain("TRANSIENT FAILURE");
     expect(source).toContain("retryWithBackoff");
   });
+
+  it("fans selected telemetry into the signal queue without breaking the DB path", () => {
+    const source = loadSource();
+    expect(source).toContain("SIGNAL_QUEUE");
+    expect(source).toContain("deriveSignalEnvelopes");
+    expect(source).toContain("signal_envelope_dropped");
+    expect(source).toContain("agentos-signals");
+  });
 });

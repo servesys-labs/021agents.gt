@@ -195,9 +195,12 @@ export interface RuntimeEnv {
   VECTORIZE: VectorizeIndex;
   STORAGE: R2Bucket;
   SANDBOX: DurableObjectNamespace<any>;
+  SIGNAL_COORDINATOR?: DurableObjectNamespace<any>;
   LOADER: any;
   TELEMETRY_QUEUE: Queue;
+  SIGNAL_QUEUE?: Queue;
   BROWSER: Fetcher;
+  SIGNAL_ANALYTICS?: AnalyticsEngineDataset;
   CLOUDFLARE_ACCOUNT_ID?: string;
   CLOUDFLARE_API_TOKEN?: string;
   AI_GATEWAY_ID?: string;        // CF AI Gateway slug (e.g. "one-shots")

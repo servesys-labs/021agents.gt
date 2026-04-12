@@ -30,6 +30,14 @@ import {
 // streamRun removed — all execution goes through Cloudflare Workflows
 import { getCircuitStatus, getToolsBreakerSummary } from "./runtime/tools";
 import { parseJsonColumn } from "./runtime/parse-json-column";
+import { isEnabled } from "./runtime/features";
+import {
+  buildSignalCoordinatorKey,
+  deriveSignalEnvelopes,
+  getQueuePayload,
+  signalEnvelopeMessage,
+  type SignalEnvelope,
+} from "./runtime/signals";
 
 // ── Input size limit ──
 // Reject user messages exceeding 50 KB to avoid wasting LLM tokens.
@@ -347,6 +355,7 @@ function _assertOrgOwnsKey(orgId: string, key: string): Response | null {
 // Re-export Workflow and DOs so Cloudflare can discover them
 export { AgentRunWorkflow } from "./workflow";
 export { SessionCounterDO } from "./runtime/session-counter-do";
+export { SignalCoordinatorDO } from "./runtime/signal-coordinator-do";
 import type { RunOutput } from "./workflow";
 
 // ---------------------------------------------------------------------------
@@ -374,6 +383,9 @@ export interface Env extends Cloudflare.Env {
   VAPI_API_KEY?: string;         // Vapi API key (for make-voice-call tool)
   // AGENT_RUN_WORKFLOW — provided by Cloudflare.Env from wrangler.jsonc workflows binding
   // AGENT_PROGRESS_KV — provided by Cloudflare.Env from wrangler.jsonc KV binding
+  SIGNAL_QUEUE?: Queue;
+  SIGNAL_COORDINATOR?: DurableObjectNamespace<any>;
+  SIGNAL_ANALYTICS?: AnalyticsEngineDataset;
   CONTROL_PLANE?: { fetch: (url: string, init?: RequestInit) => Promise<Response> }; // Service binding to control-plane Worker
 }
 
@@ -566,6 +578,15 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           created_at REAL NOT NULL DEFAULT (unixepoch('now'))
         )`;
         this.sql`INSERT INTO _sql_schema_migrations (id) VALUES (5)`;
+      });
+    }
+
+    if (schemaVersion < 6) {
+      // v6: Add correlation_id to mailbox for approval protocol (harness hardening Phase 1)
+      this.ctx.storage.transactionSync(() => {
+        this.sql`ALTER TABLE mailbox ADD COLUMN correlation_id TEXT`;
+        this.sql`CREATE INDEX IF NOT EXISTS idx_mailbox_correlation ON mailbox(to_session, correlation_id, read_at)`;
+        this.sql`INSERT INTO _sql_schema_migrations (id) VALUES (6)`;
       });
     }
 
@@ -7699,11 +7720,8 @@ export default {
   // Messages flow: Agent DO → TELEMETRY_QUEUE → this consumer → Supabase
   // At-least-once delivery. Per-message ack/retry. Permanent failures acked to avoid poison loops.
   async queue(batch: MessageBatch<unknown>, env: Env): Promise<void> {
-    if (!env.HYPERDRIVE) {
-      batch.retryAll();
-      return;
-    }
-
+    const queueName = String((batch as any).queue || "");
+    const isSignalBatch = queueName === "agentos-signals";
     // ── Helpers ──
     /** Safe JSON parse — never throws, returns fallback on malformed input */
     function jp(input: unknown, fallback: any = {}): any {
@@ -7737,32 +7755,99 @@ export default {
       "session", "turn", "episode", "event",
       "runtime_event", "middleware_event", "billing_flush",
       "skill_activation", "skill_auto_activation", "loop_detected", "do_eviction",
-      "artifact_manifest",
+      "artifact_manifest", "signal_envelope",
     ]);
-
-    // Connect via Postgres.js + Hyperdrive (Worker-compatible driver)
-    const postgres = (await import("postgres")).default;
-    const sql: any = postgres(env.HYPERDRIVE.connectionString, {
-      max: 5,
-      fetch_types: false,
-      prepare: false,  // Hyperdrive requires prepare:false (transaction-mode pooling)
-      idle_timeout: 20,
-      connect_timeout: 10,
+    const messagesNeedDb = batch.messages.some((msg) => {
+      const body = (msg.body || {}) as Record<string, unknown>;
+      const type = String(body.type || "");
+      return !isSignalBatch && type && type !== "signal_envelope";
     });
-    const tableColumns = new Map<string, Set<string>>();
-    try {
-      const schemaRows = await sql<{ table_name: string; column_name: string }[]>`
-        SELECT table_name, column_name
-        FROM information_schema.columns
-        WHERE table_schema = 'public'
-          AND table_name IN ('otel_events', 'runtime_events')
-      `;
-      for (const row of schemaRows) {
-        if (!tableColumns.has(row.table_name)) tableColumns.set(row.table_name, new Set<string>());
-        tableColumns.get(row.table_name)!.add(String(row.column_name || ""));
+    if (messagesNeedDb && !env.HYPERDRIVE) {
+      batch.retryAll();
+      return;
+    }
+
+    const flagCache = new Map<string, Promise<{ substrate: boolean; passiveMemory: boolean }>>();
+    async function getSignalFlags(orgId: string): Promise<{ substrate: boolean; passiveMemory: boolean }> {
+      const key = orgId || "global";
+      if (!flagCache.has(key)) {
+        flagCache.set(key, (async () => ({
+          substrate: await isEnabled(env as any, "signal_substrate_enabled", orgId),
+          passiveMemory: await isEnabled(env as any, "memory_passive_signals_enabled", orgId),
+        }))());
       }
-    } catch (schemaErr: any) {
-      console.warn("[queue] schema introspection failed:", schemaErr?.message || String(schemaErr));
+      return flagCache.get(key)!;
+    }
+
+    async function emitSignalDrop(
+      eventType: "signal_envelope_dropped",
+      p: Record<string, any>,
+      details: Record<string, unknown>,
+    ): Promise<void> {
+      await env.TELEMETRY_QUEUE?.send?.({
+        type: "runtime_event",
+        payload: {
+          event_type: eventType,
+          org_id: p.org_id || "",
+          agent_name: p.agent_name || "",
+          session_id: p.session_id || "",
+          node_id: "signal-ingestion",
+          status: "dropped",
+          duration_ms: 0,
+          created_at: Date.now(),
+          details,
+        },
+      }).catch(() => {});
+    }
+
+    async function fanOutSignals(type: string, p: Record<string, any>): Promise<void> {
+      if (!env.SIGNAL_QUEUE) return;
+      const orgId = String(p.org_id || "").trim();
+      const flags = await getSignalFlags(orgId);
+      if (!flags.substrate) return;
+      const envelopes = deriveSignalEnvelopes(type, p).filter((envelope) => {
+        if (envelope.feature !== "memory") return true;
+        return flags.passiveMemory;
+      });
+      if (!envelopes.length) return;
+      for (const envelope of envelopes) {
+        await env.SIGNAL_QUEUE.send(signalEnvelopeMessage(envelope));
+      }
+    }
+
+    async function ingestSignalEnvelope(envelope: SignalEnvelope): Promise<void> {
+      if (!env.SIGNAL_COORDINATOR) return;
+      const doName = buildSignalCoordinatorKey(envelope.feature, envelope.org_id, envelope.agent_name);
+      const doId = (env.SIGNAL_COORDINATOR as any).idFromName(doName);
+      const stub = (env.SIGNAL_COORDINATOR as any).get(doId);
+      await (stub as any).ingest(envelope);
+    }
+
+    let sql: any = null;
+    const tableColumns = new Map<string, Set<string>>();
+    if (messagesNeedDb) {
+      const postgres = (await import("postgres")).default;
+      sql = postgres(env.HYPERDRIVE.connectionString, {
+        max: 5,
+        fetch_types: false,
+        prepare: false,  // Hyperdrive requires prepare:false (transaction-mode pooling)
+        idle_timeout: 20,
+        connect_timeout: 10,
+      });
+      try {
+        const schemaRows = await sql<{ table_name: string; column_name: string }[]>`
+          SELECT table_name, column_name
+          FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND table_name IN ('otel_events', 'runtime_events')
+        `;
+        for (const row of schemaRows) {
+          if (!tableColumns.has(row.table_name)) tableColumns.set(row.table_name, new Set<string>());
+          tableColumns.get(row.table_name)!.add(String(row.column_name || ""));
+        }
+      } catch (schemaErr: any) {
+        console.warn("[queue] schema introspection failed:", schemaErr?.message || String(schemaErr));
+      }
     }
     const otelCols = tableColumns.get("otel_events") || new Set<string>();
     const runtimeCols = tableColumns.get("runtime_events") || new Set<string>();
@@ -7771,9 +7856,9 @@ export default {
 
     try {
       for (const msg of batch.messages) {
-        const body = (msg.body || {}) as { type?: string; payload?: Record<string, unknown> };
+        const body = (msg.body || {}) as Record<string, unknown>;
         const type = String(body.type || "");
-        const p = (body.payload || {}) as Record<string, any>;
+        const p = getQueuePayload(body) as Record<string, any>;
 
         // Unknown message types — ack to prevent infinite retry, log for investigation
         if (!type || !KNOWN_TYPES.has(type)) {
@@ -7783,9 +7868,20 @@ export default {
         }
 
         try {
+          if (type === "signal_envelope") {
+            await ingestSignalEnvelope(p as SignalEnvelope);
+            msg.ack();
+            continue;
+          }
+          if (isSignalBatch) {
+            console.warn(`[queue] unexpected type="${type}" on signal queue — acking`);
+            msg.ack();
+            continue;
+          }
+
           // Set RLS org context per message (scoped to this transaction via SET LOCAL)
           const msgOrgId = String(p.org_id || "").trim();
-          if (msgOrgId) {
+          if (msgOrgId && sql) {
             await sql.unsafe(`SELECT set_config('app.current_org_id', $1, true)`, [msgOrgId]);
           }
 
@@ -7922,13 +8018,16 @@ export default {
               )`;
             } else {
               await sql`INSERT INTO otel_events (
-                session_id, turn, event_type, action, plan, tier,
-                provider, model, tool_name, status, latency_ms, details, created_at
+                org_id, agent_name, session_id, trace_id, event_type, event_data, created_at
               ) VALUES (
-                ${p.session_id || ""}, ${p.turn || 0}, ${p.event_type || ""},
-                ${p.action || ""}, ${p.plan || ""}, ${p.tier || ""},
-                ${p.provider || ""}, ${p.model || ""}, ${p.tool_name || ""},
-                ${p.status || ""}, ${p.latency_ms || 0}, ${jp(p.details, {})},
+                ${p.org_id || ""}, ${p.agent_name || ""}, ${p.session_id || ""},
+                ${p.trace_id || ""}, ${p.event_type || ""},
+                ${jp({
+                  turn: p.turn || 0, action: p.action || "", plan: p.plan || "",
+                  tier: p.tier || "", provider: p.provider || "", model: p.model || "",
+                  tool_name: p.tool_name || "", status: p.status || "",
+                  latency_ms: p.latency_ms || 0, ...jp(p.details, {}),
+                }, {})},
                 ${ts(p.created_at)}
               )`;
             }
@@ -7952,12 +8051,14 @@ export default {
               )`;
             } else {
               await sql`INSERT INTO runtime_events (
-                trace_id, session_id, org_id, event_type, node_id,
-                status, latency_ms, payload, created_at
+                org_id, agent_name, event_type, event_data, created_at
               ) VALUES (
-                ${p.trace_id || ""}, ${p.session_id || ""}, ${p.org_id || ""},
-                ${p.event_type || ""}, ${p.node_id || ""},
-                ${p.status || ""}, ${p.duration_ms || 0}, ${jp(p.details, {})},
+                ${p.org_id || ""}, ${p.agent_name || ""}, ${p.event_type || ""},
+                ${jp({
+                  trace_id: p.trace_id || "", session_id: p.session_id || "",
+                  node_id: p.node_id || "", status: p.status || "",
+                  duration_ms: Number(p.duration_ms || 0), ...jp(p.details, {}),
+                }, {})},
                 ${ts(p.created_at)}
               )`;
             }
@@ -8014,15 +8115,15 @@ export default {
               )`;
             } else {
               await sql`INSERT INTO runtime_events (
-                trace_id, session_id, org_id, event_type, node_id,
-                status, latency_ms, payload, created_at
+                org_id, agent_name, event_type, event_data, created_at
               ) VALUES (
-                ${p.trace_id || ""}, ${p.session_id || ""}, ${p.org_id || ""},
-                'do_eviction', ${p.agent_name || ""},
-                'evicted', ${p.uptime_ms || 0}, ${JSON.stringify({
+                ${p.org_id || ""}, ${p.agent_name || ""}, 'do_eviction',
+                ${jp({
+                  trace_id: p.trace_id || "", session_id: p.session_id || "",
+                  status: "evicted", duration_ms: Number(p.uptime_ms || 0),
                   turns: p.turns || 0, cost_usd: p.cost_usd || 0,
                   reason: p.reason || "unknown",
-                })},
+                }, {})},
                 ${new Date().toISOString()}
               )`;
             }
@@ -8047,6 +8148,16 @@ export default {
               size_bytes = GREATEST(COALESCE(run_artifacts.size_bytes, 0), COALESCE(EXCLUDED.size_bytes, 0)),
               updated_at = now()`;
           }
+          if (!isSignalBatch) {
+            try {
+              await fanOutSignals(type, p);
+            } catch (signalErr: any) {
+              await emitSignalDrop("signal_envelope_dropped", p, {
+                source_type: type,
+                reason: signalErr?.message || String(signalErr),
+              });
+            }
+          }
           msg.ack();
         } catch (err: any) {
           const errMsg = err?.message || String(err);
@@ -8062,8 +8173,10 @@ export default {
         }
       }
     } finally {
-      try { await sql.end(); } catch (e) {
-        console.error("[queue] sql.end() failed:", e instanceof Error ? e.message : e);
+      if (sql) {
+        try { await sql.end(); } catch (e) {
+          console.error("[queue] sql.end() failed:", e instanceof Error ? e.message : e);
+        }
       }
     }
   },
