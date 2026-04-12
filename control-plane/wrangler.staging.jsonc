@@ -1,0 +1,89 @@
+// wrangler.staging.jsonc — Staging override for load testing.
+//
+// Inherits EVERYTHING from wrangler.jsonc except the RUNTIME service
+// binding, which points at the load-test mock worker instead of the
+// real runtime. Deploy with:
+//
+//   npx wrangler deploy -c wrangler.staging.jsonc
+//
+// This deploys the control-plane as `agentos-control-plane-staging`
+// with the mock runtime. Production is untouched.
+//
+// To revert to production: `npx wrangler deploy` (uses wrangler.jsonc).
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "agentos-control-plane-staging",
+  "account_id": "ae92d4bf7c6c448f442d084a2358dcd5",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-03-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "limits": { "cpu_ms": 300000 },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+
+  // Same Hyperdrive bindings as production — load test targets
+  // the real Postgres via Hyperdrive to measure actual saturation.
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "id": "6f8984ddd503489895a7c97e6970f634"
+    },
+    {
+      "binding": "HYPERDRIVE_ADMIN",
+      "id": "775f7e11ce8c479993855531f728770a"
+    }
+  ],
+
+  "ai": { "binding": "AI" },
+
+  "r2_buckets": [
+    { "binding": "STORAGE", "bucket_name": "agentos-storage" }
+  ],
+
+  "vectorize": [
+    { "binding": "VECTORIZE", "index_name": "agentos-knowledge-v2" }
+  ],
+
+  // ── THE KEY OVERRIDE ─────────────────────────────────────────────
+  // Points RUNTIME at the load-test mock worker instead of the real
+  // runtime. The mock returns canned responses with configurable
+  // latency (50-200ms) and cost_usd=0.01. Deploy the mock first:
+  //   cd load-test/runtime-mock && npm i && npm run deploy
+  "services": [
+    {
+      "binding": "RUNTIME",
+      "service": "agentos-runtime-loadtest"
+    }
+  ],
+
+  "kv_namespaces": [
+    { "binding": "AGENT_PROGRESS_KV", "id": "30da23c287ee4f4c93d1a1f08cdd48a0" }
+  ],
+
+  "queues": {
+    "producers": [
+      { "binding": "JOB_QUEUE", "queue": "agentos-jobs" }
+    ],
+    "consumers": [
+      {
+        "queue": "agentos-jobs",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 3,
+        "dead_letter_queue": "agentos-jobs-dlq"
+      },
+      {
+        "queue": "agentos-jobs-dlq",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 0
+      }
+    ]
+  },
+
+  "triggers": {
+    "crons": ["*/1 * * * *"]
+  }
+}

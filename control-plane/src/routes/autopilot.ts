@@ -262,6 +262,7 @@ const DISPATCH_PAGE_SIZE = 500; // Sessions per DB query page
 export async function tickAutopilotSessions(env: any): Promise<{ dispatched: number; pages: number }> {
   let dispatched = 0;
   let pages = 0;
+  const tickStart = Date.now();
 
   try {
     const queue = env.JOB_QUEUE;
@@ -360,6 +361,11 @@ export async function tickAutopilotSessions(env: any): Promise<{ dispatched: num
     pages = result.pages;
   } catch {
     // DB unavailable — skip this tick cycle
+  }
+
+  const tickMs = Date.now() - tickStart;
+  if (dispatched > 0 || tickMs > 1000) {
+    console.log(`[cron-autopilot] fan-out completed: dispatched=${dispatched} pages=${pages} duration_ms=${tickMs}`);
   }
 
   return { dispatched, pages };
