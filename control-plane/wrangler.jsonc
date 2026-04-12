@@ -31,6 +31,11 @@
   //                      at a Hyperdrive config whose connection string
   //                      uses a role granted BYPASSRLS so admin access
   //                      is auditable at the database level too.
+  // Both bindings share the same Hyperdrive config since Railway uses a
+  // single superuser role. Admin bypass RLS is handled at the TypeScript
+  // level (withAdminDb skips set_config), not at the DB role level.
+  // Sharing one config halves the idle connection overhead — one pool
+  // instead of two, each capped at 60 by Hyperdrive's platform limit.
   "hyperdrive": [
     {
       "binding": "HYPERDRIVE",
@@ -38,7 +43,7 @@
     },
     {
       "binding": "HYPERDRIVE_ADMIN",
-      "id": "775f7e11ce8c479993855531f728770a"
+      "id": "6f8984ddd503489895a7c97e6970f634"
     }
   ],
 
