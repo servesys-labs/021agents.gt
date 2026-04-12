@@ -66,7 +66,7 @@ describe("buildCoordinatorPrompt", () => {
 
 // ── Permission Classifier ─────────────────────────────────────────
 
-import { classifyPermission, shouldAutoApprove, type PermissionLevel } from "../src/runtime/permission-classifier";
+import { classifyPermission, shouldAutoApprove, ALWAYS_REQUIRE_APPROVAL, type PermissionLevel } from "../src/runtime/permission-classifier";
 
 describe("classifyPermission", () => {
   // Safe tools
@@ -131,6 +131,22 @@ describe("classifyPermission", () => {
     expect(result.level).toBe("review");
     expect(result.autoApprove).toBe(false);
   });
+
+  // ALWAYS_REQUIRE_APPROVAL backstop
+  it("backstop tools are always dangerous + never auto-approved", () => {
+    for (const tool of ALWAYS_REQUIRE_APPROVAL) {
+      const result = classifyPermission(tool, {});
+      expect(result.level, `${tool} should be dangerous`).toBe("dangerous");
+      expect(result.autoApprove, `${tool} should never auto-approve`).toBe(false);
+      expect(result.reason).toBe("irreducible safety floor");
+    }
+  });
+
+  it("backstop cannot be bypassed by safe-looking args", () => {
+    const result = classifyPermission("delete-agent", { agent_name: "test" });
+    expect(result.autoApprove).toBe(false);
+    expect(result.reason).toBe("irreducible safety floor");
+  });
 });
 
 describe("shouldAutoApprove", () => {
@@ -151,6 +167,13 @@ describe("shouldAutoApprove", () => {
   it("allows safe bash with auto_approve + destructive check", () => {
     const config = { auto_approve: true, require_confirmation_for_destructive: true };
     expect(shouldAutoApprove("bash", { command: "ls -la" }, config)).toBe(true);
+  });
+
+  it("backstop tools are never auto-approved even with all flags enabled", () => {
+    const config = { auto_approve: true, require_confirmation_for_destructive: true };
+    for (const tool of ALWAYS_REQUIRE_APPROVAL) {
+      expect(shouldAutoApprove(tool, {}, config), `${tool} should not auto-approve`).toBe(false);
+    }
   });
 });
 
