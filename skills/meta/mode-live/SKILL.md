@@ -20,7 +20,7 @@ You MUST conduct a structured interview before creating the agent. Do NOT genera
 
 **Interview Round 2: DATA SOURCES (ask after Round 1)**
 - Where does the data this agent needs live?
-  - Database? (PostgreSQL, MySQL, Supabase, Airtable?) → need db-query tool + connection config
+  - Database? (PostgreSQL, MySQL, Supabase, Airtable?) → need sql tool + connection config
   - APIs? (REST, GraphQL?) → need http-request tool + auth headers
   - Files? (S3, R2, local?) → need read-file tool + storage config
   - Knowledge base? (docs, FAQs, wiki?) → need knowledge-search + store-knowledge tools

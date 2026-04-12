@@ -46,9 +46,7 @@ const PLATFORM_TOOLS = {
 
   // Data & APIs
   "http-request": "Make HTTP requests to external APIs",
-  "db-query": "Execute a SQL query against the database",
-  "db-batch": "Execute multiple SQL queries in a transaction",
-  "db-report": "Generate a formatted report from a SQL query",
+  "sql": "Execute templated database queries (modes: query, batch, report)",
   "query-pipeline": "Query data from a pipeline",
   "send-to-pipeline": "Send data into a pipeline for processing",
 
@@ -66,11 +64,10 @@ const PLATFORM_TOOLS = {
   "list-tools": "List all available tools",
   "security-scan": "Run a security scan on an agent",
   "conversation-intel": "Analyze conversation quality and sentiment",
-  "manage-issues": "Create, update, or resolve agent issues",
+  "platform": "Manage platform resources (issues, releases, slos, secrets, rag, policies, retention, workflows, projects, mcp, voice, gpu)",
   "compliance": "Check compliance status and policies",
   "view-costs": "View cost breakdowns by agent and session",
   "view-traces": "View execution traces for debugging",
-  "manage-releases": "Manage release channels and deployments",
   "autoresearch": "Run automated research on a topic",
 
   // DevOps
