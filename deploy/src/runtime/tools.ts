@@ -8,7 +8,13 @@
  */
 
 import { getSandbox } from "@cloudflare/sandbox";
-import type { ToolCall, ToolResult, ToolDefinition, RuntimeEnv } from "./types";
+import type {
+  FileMutationTelemetry,
+  ToolCall,
+  ToolResult,
+  ToolDefinition,
+  RuntimeEnv,
+} from "./types";
 import { validateUrl as ssrfValidateUrl } from "./ssrf";
 import { scratchWrite, scratchRead, scratchList } from "./scratch";
 import { retrieveToolResult, cleanupSessionResults } from "./result-storage";
@@ -24,6 +30,30 @@ import type { RuntimeEventType } from "./events";
 const MAX_SANDBOX_TIMEOUT_SECONDS = 300; // 5 min — npm install/build on basic instance needs time
 const DEFAULT_SANDBOX_TIMEOUT_SECONDS = 30;
 const TOOL_FETCH_TIMEOUT_MS = 30_000; // 30s max for external API calls (must complete before 90s Workflow idle limit)
+
+interface ToolDispatchEnvelope {
+  __tool_result: string;
+  file_mutation?: FileMutationTelemetry;
+}
+
+function wrapToolDispatchResult(result: string, fileMutation?: FileMutationTelemetry): ToolDispatchEnvelope {
+  return { __tool_result: result, file_mutation: fileMutation };
+}
+
+function unwrapToolDispatchResult(result: unknown): { result: string; file_mutation?: FileMutationTelemetry } {
+  if (
+    result
+    && typeof result === "object"
+    && "__tool_result" in result
+    && typeof (result as ToolDispatchEnvelope).__tool_result === "string"
+  ) {
+    const wrapped = result as ToolDispatchEnvelope;
+    return { result: wrapped.__tool_result, file_mutation: wrapped.file_mutation };
+  }
+  return {
+    result: typeof result === "string" ? result : JSON.stringify(result || ""),
+  };
+}
 
 /** Fetch with AbortSignal timeout — prevents tool calls from hanging indefinitely */
 function fetchWithTimeout(url: string | URL, init?: RequestInit, timeoutMs = TOOL_FETCH_TIMEOUT_MS): Promise<Response> {
@@ -471,6 +501,20 @@ function resolveToolIdentity(env: RuntimeEnv): { orgId: string; agentName: strin
     orgId: String((env as any).__orgId || cfg.orgId || cfg.org_id || ""),
     agentName: String((env as any).__agentName || cfg.agent_name || cfg.agentName || cfg.name || ""),
     userId: String((env as any).__channelUserId || ""),
+  };
+}
+
+export function resolveRunAgentTarget(args: Record<string, unknown>): {
+  agentId: string;
+  agentHandle: string;
+  routedName: string;
+} {
+  const agentId = String(args.agent_id || "");
+  const agentHandle = String(args.agent_handle || args.agent_name || "");
+  return {
+    agentId,
+    agentHandle,
+    routedName: agentHandle || agentId,
   };
 }
 
@@ -1293,7 +1337,8 @@ export async function executeSingleTool(
   }
 
   try {
-    const result = await dispatch(env, tc.name, args, sessionId, enabledTools);
+    const dispatched = await dispatch(env, tc.name, args, sessionId, enabledTools);
+    const normalized = unwrapToolDispatchResult(dispatched);
     const latencyMs = Date.now() - started;
 
     // Record success for circuit breaker (with telemetry)
@@ -1305,9 +1350,10 @@ export async function executeSingleTool(
     return {
       tool: tc.name,
       tool_call_id: tc.id,
-      result: typeof result === "string" ? result : JSON.stringify(result),
+      result: normalized.result,
       latency_ms: latencyMs,
       cost_usd: calculateToolCost(tc.name, latencyMs),
+      file_mutation: normalized.file_mutation,
     };
   } catch (err: any) {
     const latencyMs = Date.now() - started;
@@ -1627,7 +1673,7 @@ async function dispatch(
   args: Record<string, any>,
   sessionId: string,
   enabledTools?: string[],
-): Promise<string> {
+): Promise<string | ToolDispatchEnvelope> {
   // Normalize tool name: LLMs often convert hyphens to underscores (web_search → web-search)
   const normalizedTool = tool.replace(/_/g, "-");
   // Resolve the effective tool list for codemode — uses agent's enabled tools,
@@ -1799,10 +1845,15 @@ async function dispatch(
       const dir = filePath.substring(0, filePath.lastIndexOf("/"));
       if (dir) await sandbox.exec(`mkdir -p "${dir}"`, { timeout: 5 }).catch(() => {});
 
+      const existsCheck = await sandbox.exec(`test -e "${filePath}" && echo 1 || echo 0`, { timeout: 5 }).catch(() => ({ stdout: "0" }));
+      const existedBefore = (existsCheck.stdout || "0").trim() === "1";
+
       // Phase 9.5: Encoding preservation — detect and preserve BOM + line endings
       let writeContent = args.content || "";
-      const existingContent = await sandbox.exec(`cat "${filePath}" 2>/dev/null`, { timeout: 5 }).catch(() => ({ stdout: "" }));
-      if (existingContent.stdout) {
+      const existingContent = existedBefore
+        ? await sandbox.exec(`cat "${filePath}" 2>/dev/null`, { timeout: 5 }).catch(() => ({ stdout: "" }))
+        : { stdout: "" };
+      if (existedBefore && existingContent.stdout) {
         // Preserve CRLF if original uses it
         const hasCRLF = existingContent.stdout.includes("\r\n");
         if (hasCRLF && !writeContent.includes("\r\n")) {
@@ -1842,7 +1893,16 @@ async function dispatch(
         } catch {}
       }
 
-      return `Written ${writeContent.length} bytes to ${filePath}`;
+      return wrapToolDispatchResult(
+        `Written ${writeContent.length} bytes to ${filePath}`,
+        {
+          tool: "write-file",
+          path: filePath,
+          existed_before: existedBefore,
+          before_content: String(existingContent.stdout || ""),
+          after_content: writeContent,
+        },
+      );
     }
 
     case "edit-file": {
@@ -1941,7 +2001,16 @@ async function dispatch(
           oldLines.map((l: string) => `- ${l}`).join("\n") + "\n" +
           newLines.map((l: string) => `+ ${l}`).join("\n")
         : "";
-      return `Edited ${editPath}: replaced ${oldText.length} chars with ${(args.new_text || args.new_string || "").length} chars (lint: ok)${diffPreview}`;
+      return wrapToolDispatchResult(
+        `Edited ${editPath}: replaced ${oldText.length} chars with ${(args.new_text || args.new_string || "").length} chars (lint: ok)${diffPreview}`,
+        {
+          tool: "edit-file",
+          path: editPath,
+          existed_before: true,
+          before_content: content,
+          after_content: newContent,
+        },
+      );
     }
 
     case "grep": {
@@ -2976,8 +3045,10 @@ async function dispatch(
         try {
           const results = await Promise.all(
             queries.map(async (q: { query_id: string; params?: Record<string, unknown> }) => {
-              const result = await dispatch(env, "sql", { mode: "query", query_id: q.query_id, params: q.params || {}, org_id: bOrgId }, sessionId);
-              try { return JSON.parse(result); } catch { return { query_id: q.query_id, error: result }; }
+              const nested = unwrapToolDispatchResult(
+                await dispatch(env, "sql", { mode: "query", query_id: q.query_id, params: q.params || {}, org_id: bOrgId }, sessionId),
+              ).result;
+              try { return JSON.parse(nested); } catch { return { query_id: q.query_id, error: nested }; }
             }),
           );
           return JSON.stringify({ batch: true, count: results.length, results });
@@ -3002,7 +3073,7 @@ async function dispatch(
                 { query_id: "feedback.stats", params: { since_days: 7 } },
               ],
             }, sessionId);
-            const parsed = JSON.parse(batchResult);
+            const parsed = JSON.parse(unwrapToolDispatchResult(batchResult).result);
             return JSON.stringify({
               report: "agent_health", agent_name: agentName,
               sessions: parsed.results?.[0]?.rows?.[0] || {},
@@ -3020,7 +3091,7 @@ async function dispatch(
                 { query_id: "billing.by_agent", params: { since_days: 30 } },
               ],
             }, sessionId);
-            const parsed = JSON.parse(batchResult);
+            const parsed = JSON.parse(unwrapToolDispatchResult(batchResult).result);
             return JSON.stringify({
               report: "org_overview",
               sessions: parsed.results?.[0]?.rows?.[0] || {},
@@ -3217,9 +3288,9 @@ async function dispatch(
 
     case "run-agent": {
       // Delegate to a sub-agent via child Workflow (parallel, crash-safe, KV state sharing)
-      const agentName = String(args.agent_name || "");
+      const { agentId, agentHandle, routedName: agentName } = resolveRunAgentTarget(args as Record<string, unknown>);
       const task = String(args.task || "");
-      if (!agentName || !task) return "run-agent requires agent_name and task";
+      if (!agentName || !task) return "run-agent requires agent_handle (or agent_name) or agent_id, plus task";
 
       const lineage = (env as any).__delegationLineage as Record<string, any> | undefined;
       const orgId = String(args.org_id || lineage?.org_id || "");
@@ -3278,6 +3349,8 @@ async function dispatch(
         const parentTraceId = lineage?.trace_id || "";
 
         const childWorkflowParams = {
+            agent_id: agentId || undefined,
+            agent_handle: agentHandle || undefined,
             agent_name: agentName,
             input: task,
             org_id: orgId,
@@ -5498,8 +5571,12 @@ async function memorySave(env: RuntimeEnv, args: Record<string, any>): Promise<s
   const key = String(args.key || args.name || "").trim();
   if (!content) return JSON.stringify({ success: false, tool: "memory-save", error: "memory-save requires content" });
 
-  const agentName = (env as any).__agentConfig?.name || "my-assistant";
-  let orgId = (env as any).__agentConfig?.org_id || (env as any).__delegationLineage?.org_id || "";
+  // Target-agent override: memory-agent (or any subagent) can save against
+  // a different agent's memory by passing agent_name explicitly.
+  const agentName = String(args.agent_name || "").trim()
+    || (env as any).__agentConfig?.name || "my-assistant";
+  let orgId = String(args.org_id || "").trim()
+    || (env as any).__agentConfig?.org_id || (env as any).__delegationLineage?.org_id || "";
   const hyperdrive = (env as any).HYPERDRIVE;
 
   if (!hyperdrive) return JSON.stringify({ success: false, tool: "memory-save", error: "Memory not available (no database)" });
@@ -5712,8 +5789,13 @@ async function syncWorkspaceProcedures(
 async function memoryRecall(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
   const query = String(args.query || args.key || "").trim();
   const memoryType = String(args.type || "all").trim();
-  const agentName = (env as any).__agentConfig?.name || "my-assistant";
-  const orgId = (env as any).__agentConfig?.org_id || "";
+  const sessionId = String(args.session_id || "").trim();
+  // Target-agent override: memory-agent (or any subagent) can recall against
+  // a different agent's memory by passing agent_name explicitly.
+  const agentName = String(args.agent_name || "").trim()
+    || (env as any).__agentConfig?.name || "my-assistant";
+  const orgId = String(args.org_id || "").trim()
+    || (env as any).__agentConfig?.org_id || "";
   const hyperdrive = (env as any).HYPERDRIVE;
   if (!hyperdrive) return JSON.stringify({ success: false, tool: "memory-recall", error: "Memory not available" });
 
@@ -5721,6 +5803,53 @@ async function memoryRecall(env: RuntimeEnv, args: Record<string, any>): Promise
     const { getDb } = await import("./db");
     const sql = await getDb(hyperdrive);
     const results: any[] = [];
+
+    // Session-ID lookup: fetch a specific session's input/output directly.
+    // This is the primary path for memory-digest to retrieve session evidence.
+    if (sessionId) {
+      const sessionRows = await sql`
+        SELECT session_id, agent_name, input_text, output_text, status, cost_total_usd, created_at
+        FROM sessions
+        WHERE session_id = ${sessionId}
+          AND (${orgId} = '' OR org_id = ${orgId})
+        LIMIT 1
+      `;
+      if (sessionRows.length > 0) {
+        const s = sessionRows[0] as any;
+        results.push({
+          type: "session",
+          session_id: s.session_id,
+          agent_name: s.agent_name,
+          input: s.input_text,
+          output: s.output_text,
+          status: s.status,
+          created: s.created_at,
+        });
+      }
+      // Also fetch turns for richer evidence
+      const turnRows = await sql`
+        SELECT turn_number, model_used, input_tokens, output_tokens,
+               LEFT(output_text, 500) AS output_preview,
+               tool_calls, tool_results, stop_reason, created_at
+        FROM turns
+        WHERE session_id = ${sessionId}
+        ORDER BY turn_number ASC
+        LIMIT 20
+      `;
+      for (const t of turnRows) {
+        results.push({
+          type: "turn",
+          session_id: sessionId,
+          turn: (t as any).turn_number,
+          model: (t as any).model_used,
+          output_preview: (t as any).output_preview,
+          tool_calls: (t as any).tool_calls,
+          tool_results: (t as any).tool_results,
+          stop_reason: (t as any).stop_reason,
+          created: (t as any).created_at,
+        });
+      }
+    }
 
     if (memoryType === "all" || memoryType === "semantic") {
       const rows = query
@@ -5741,6 +5870,8 @@ async function memoryRecall(env: RuntimeEnv, args: Record<string, any>): Promise
       tool: "memory-recall",
       message: `Returned ${results.length} memory entries.`,
       query: query || undefined,
+      session_id: sessionId || undefined,
+      agent_name: agentName,
       usage: `${results.length} entries`,
       entry_count: results.length,
       count: results.length,
@@ -5753,7 +5884,9 @@ async function memoryRecall(env: RuntimeEnv, args: Record<string, any>): Promise
 
 async function memoryDelete(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
   const memoryType = String(args.type || "semantic").trim();
-  const agentName = (env as any).__agentConfig?.name || "my-assistant";
+  // Target-agent override: consistent with memory-recall and memory-save.
+  const agentName = String(args.agent_name || "").trim()
+    || (env as any).__agentConfig?.name || "my-assistant";
   const orgId = (env as any).__agentConfig?.org_id || "";
   const hyperdrive = (env as any).HYPERDRIVE;
   if (!hyperdrive) return JSON.stringify({ success: false, tool: "memory-delete", error: "Memory not available" });
@@ -7475,6 +7608,8 @@ const TOOL_CATALOG: ToolDefinition[] = [
         type: "object",
         properties: {
           agent_name: { type: "string", description: "Agent to run" },
+          agent_handle: { type: "string", description: "Unique runnable handle for the target agent" },
+          agent_id: { type: "string", description: "Canonical agent id for the target agent" },
           task: { type: "string", description: "Task/message to send" },
           context: { type: "string", description: "Delegation context — summarize what you've done so far and why you're delegating. The child agent sees this in its system prompt so it understands the broader goal." },
           relevant_files: { type: "array", items: { type: "string" }, description: "File paths relevant to the task. Helps the child agent focus." },
@@ -7485,7 +7620,7 @@ const TOOL_CATALOG: ToolDefinition[] = [
           channel: { type: "string", description: "Channel (default internal)" },
           org_id: { type: "string", description: "Org id (optional if same as caller)" },
         },
-        required: ["agent_name", "task"],
+        required: ["task"],
       },
     },
   },
