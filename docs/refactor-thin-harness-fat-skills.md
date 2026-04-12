@@ -4,7 +4,41 @@ A comprehensive phased refactor to invert this repo from "fat harness, thin skil
 
 ## ▶︎ Resume here (2026-04-11)
 
-**Status:** Phases 0, 1, 2, 3, 4, 5, 6, **7 ✅ done**. **Resume at Phase 6.5** (second-ask detector + auto-fire wiring, deferred from Phase 6).
+**Status:** Phases 0, 1, 2, 3, 4, 5, 6, 7, **6.5 ✅ done**. **Resume at the meta-agent eval harness prerequisite** — a fixed-input grader that scores "did the meta-agent produce a better/worse agent configuration" against a canonical input set. Phase 8 (latent logic extraction — `reasoning-strategies.ts`, `intent-router.ts`, `permission-classifier.ts` → `skills/meta/`) is blocked on this prerequisite because unlike Phase 7, those extractions will not be byte-identical and byte-identity tests cannot catch semantic regressions. Phase 9 (`tools.ts` consolidation to ~10 verbs) is structurally unblocked but also wants the eval harness first so "we shrunk the tool catalog without regressing agent-creation quality" can be proven rather than asserted.
+
+### Phase 6.5 snapshot — complete
+
+Phase 6.5 activated the skill learning loop end-to-end. The auto-fire detector now scans `evolve-agent` analyzer output for recurring failure clusters and routes proposals through the control-plane `/append-rule` endpoint, which enforces dual-bucket rate limiting (5/day auto, 10/day human), prompt-injection scanning, tamper-checked audit, admin revert, and a server-side dedup guard against click-spam. Written under `agentName=""` (org-wide overlay scope) so the rule loads under any agent's `/improve` invocation — the meta-agent's in particular.
+
+| # | Commit | Ref | Scope |
+|---|---|---|---|
+| 0 | Advisory xact lock in `appendRule` rate limiter | `998522a7` | race-fix prerequisite — serializes `(org, skill)` COUNT→INSERT pair via `pg_advisory_xact_lock` |
+| 0-hot | Pass lock through deploy round-trip mock | `f7970c83` | hotfix for deploy-side stateful mock that fails-closed on unknown queries |
+| 6.5.1 | Dual-bucket rate limit — 5/day auto, 10/day human | `4571e737` | partitioned `COUNT(*) FILTER (...)` query; prevents auto-fire runaway from starving human admin calls |
+| 6.5.2 | `skill-feedback` detector + `/append-rule` route | `74b450d3` | new `deploy/src/runtime/skill-feedback.ts` + sibling route on `skills-admin.ts`; org-wide overlay scope asserted by a round-trip test that writes with `agentName=""` and reads with a different agent |
+| 6.5.3 | Wire auto-fire into `evolve-agent` + server-side dedup `[fixture-bump]` | `4b36a92b` | capability activation at `tools.ts:3099` (ceiling 8080 → 8092); 7-day dedup window on `pattern=X` in audit reason; fail-open on both detector and fire throws |
+
+**Architectural shifts in Phase 6.5:**
+
+- **Dual-bucket rate limit** — `skill-mutation.ts` now partitions by `source LIKE 'auto-fire%'`. Human bucket is 10/day (unchanged from Phase 6), auto bucket is 5/day (new, tighter). The `SKILL_MUTATION_RATE_LIMIT_PER_DAY` constant survives as a `@deprecated` alias to `HUMAN_PER_DAY` for backwards-compat with Phase 6 tests.
+- **Org-wide overlay scope** — the Phase 6.5 correctness load-bearer. Rules are written with `agentName=""` so `loadSkillOverlays(hyperdrive, orgId, X)`'s `WHERE agent_name = X OR agent_name = ''` query matches them for any agent `X`, including the meta-agent's `/improve` runs (which use a different agent name than the analyzed target). Asserted by a round-trip test at `deploy/test/skill-learning-loop.test.ts` that writes under `""` and reads under `"completely-different-agent"`.
+- **PII scrub + session-ID drop** — `example_errors` embedded in rule text are truncated to 120 chars and run through a secret-pattern scrubber (Anthropic/OpenAI keys, Bearer tokens, emails, Slack/GitHub/AWS keys). Affected session IDs are dropped entirely — inference-useless at `/improve` time and belong in `skill_audit` forensics, not overlays shipped to the model.
+- **Fail-open detector** — all detector and fire calls are wrapped in try/catch with `log.warn`. A broken detector cannot break the analyzer response path. Asserted by two integration tests that force throws at each boundary and verify `evolve-agent` still returns its report.
+- **Server-side dedup, auto-fire-only** — `/append-rule` extracts `pattern=X` from the `reason` field and runs a 7-day `SELECT 1 FROM skill_audit WHERE source LIKE 'auto-fire%' AND reason LIKE '%pattern=X%'` guard before calling `appendRule`. Human admin calls bypass dedup entirely (re-appending is intentional override). Fallthrough is graceful — missing `pattern=` token defers to the rate limiter as the structural safety net. Dedup returns 200 with `{ appended: false, skipped: "duplicate_within_7_days", pattern }` (not 4xx) because the client request was valid and the server chose not to create a duplicate.
+- **Dynamic import at the hook point** — `tools.ts` uses `await import("./skill-feedback")` inside a try/catch rather than a top-of-file import. Keeps the import section clean and gives the try/catch the widest possible fail-open surface (import-failure, type mismatch, or runtime throw all degrade to `log.warn` + analyzer response unchanged).
+- **Service-binding auth synthesis** — the deploy-side `fireSkillFeedback` POSTs via `env.CONTROL_PLANE.fetch` with `Authorization: Bearer ${SERVICE_TOKEN}` + `X-Org-Id: ${orgId}`. The control-plane auth middleware at `auth.ts:48-63` synthesizes a `{ role: "owner", org_id: <X-Org-Id> }` user for the route handler, so no new role type or schema change was needed. Attribution happens via the `source` field (`auto-fire:evolve`), which is also the rate-limiter partition key.
+
+**Validation at Phase 6.5 close:**
+
+- control-plane: **815/815** tests green (was 766 at Phase 7 close; +49 = 28 from orthogonal credit-holds landings + 21 from Phase 6.5)
+- deploy: **513/513** tests green (was 481 at Phase 6 round-trip; +32 = 25 new detector + 1 overlay-scope round-trip + 6 auto-fire integration)
+- Both `tsc --noEmit` clean on control-plane and deploy
+- `tools.ts`: **8092/8092** at ceiling (Phase 6.5 consumed the 2-line headroom and added 10 real lines)
+- `skills.ts`: 180/180 unchanged
+- `meta-agent-chat.ts`: **16,597/16,597** unchanged — Phase 7 floor preserved, no Phase 6.5 work touched the meta prompt
+- `prompt_budget.json`: untouched
+- `skill_hashes.json`, `skill_manifest.json`: untouched
+- Phase 7 byte-identity invariants: all 19 meta skills still byte-identical to their pre-extraction source
 
 ### Phase 7 snapshot — complete
 
