@@ -11,7 +11,7 @@ function load(filePath: string): string {
 describe("tool org-scope hardening", () => {
   it("enforces org context and mismatch guard for connector/mcp/db tools", () => {
     const source = load(TOOLS_PATH);
-    expect(source).toContain("const orgScopedTools = new Set([\"connector\", \"mcp-call\", \"manage-mcp\", \"db-query\", \"db-batch\", \"db-report\"])");
+    expect(source).toContain("const orgScopedTools = new Set([\"connector\", \"mcp-call\", \"manage-mcp\", \"platform\", \"db-query\", \"db-batch\", \"db-report\"])");
     expect(source).toContain("error: \"missing_org_context\"");
     expect(source).toContain("code: \"ORG_SCOPE_MISMATCH\"");
     expect(source).toContain("args = { ...args, org_id: identity.orgId };");

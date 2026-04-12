@@ -1109,7 +1109,7 @@ async function executeSingleTool(
   // ── Governance: org-scoped tool context enforcement ───────────
   // Connectors/MCP/internal DB tooling must never trust org_id from tool args.
   const identity = resolveToolIdentity(env);
-  const orgScopedTools = new Set(["connector", "mcp-call", "manage-mcp", "db-query", "db-batch", "db-report"]);
+  const orgScopedTools = new Set(["connector", "mcp-call", "manage-mcp", "platform", "db-query", "db-batch", "db-report"]);
   if (orgScopedTools.has(tc.name)) {
     const requestedOrg = String(args.org_id || "").trim();
     if (!identity.orgId) {
@@ -1308,6 +1308,256 @@ function isExternalServiceError(err: any): boolean {
     || classified.kind === "timeout"
     || classified.kind === "rate_limit"
     || (classified.kind === "http" && (classified.status ?? 0) >= 500);
+}
+
+// manage-* → platform aliases for backward compatibility with stored configs.
+// getToolDefinitions expands these so agents configured with manage-issues
+// also get the canonical platform tool definition.
+const TOOL_ALIASES: Record<string, string> = {
+  "manage-issues": "platform",
+  "manage-releases": "platform",
+  "manage-slos": "platform",
+  "manage-secrets": "platform",
+  "manage-rag": "platform",
+  "manage-policies": "platform",
+  "manage-retention": "platform",
+  "manage-workflows": "platform",
+  "manage-projects": "platform",
+  "manage-mcp": "platform",
+  "manage-voice": "platform",
+  "manage-gpu": "platform",
+};
+
+async function handlePlatformResource(
+  env: RuntimeEnv,
+  resource: string,
+  args: Record<string, any>,
+): Promise<string> {
+  const action = String(args.action || "list");
+  const orgId = args.org_id || "";
+
+  if (resource === "rag") {
+    const agentName = String(args.agent_name || "");
+    if (!agentName) return "platform:rag requires agent_name";
+    const storage = (env as any).STORAGE as R2Bucket;
+    if (!storage) return "platform:rag requires R2 storage access";
+    try {
+      const listResult = await storage.list({ prefix: `rag/${agentName}/`, limit: 50 });
+      const docs = listResult.objects.map((o: any) => ({ key: o.key, size: o.size, uploaded: o.uploaded }));
+      return JSON.stringify({ agent_name: agentName, document_count: docs.length, documents: docs });
+    } catch (err: any) {
+      return `platform:rag failed: ${err.message || err}`;
+    }
+  }
+
+  const hyperdrive = (env as any).HYPERDRIVE;
+  if (!hyperdrive) return `platform:${resource} requires database access`;
+  const { getDb } = await import("./db");
+  const sql = await getDb(hyperdrive);
+
+  try {
+    switch (resource) {
+      case "issues": {
+        if (action === "list") {
+          const agentName = args.agent_name ? String(args.agent_name) : null;
+          const rows = agentName
+            ? await sql`SELECT issue_id, agent_name, title, severity, status, created_at FROM issues WHERE org_id = ${orgId} AND agent_name = ${agentName} ORDER BY created_at DESC LIMIT 50`
+            : await sql`SELECT issue_id, agent_name, title, severity, status, created_at FROM issues WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
+          return JSON.stringify(rows);
+        }
+        if (action === "create") {
+          const issueId = crypto.randomUUID().slice(0, 12);
+          const title = String(args.title || "Untitled issue");
+          const desc = String(args.description || "");
+          const agentName = String(args.agent_name || "");
+          await sql`INSERT INTO issues (issue_id, org_id, agent_name, title, description, severity, status, created_at)
+            VALUES (${issueId}, ${orgId}, ${agentName}, ${title}, ${desc}, 'medium', 'open', ${new Date().toISOString()})`;
+          return JSON.stringify({ created: true, issue_id: issueId });
+        }
+        if (action === "auto-fix") {
+          const issueId = String(args.issue_id || "");
+          if (!issueId) return "auto-fix requires issue_id";
+          await sql`UPDATE issues SET status = 'resolved', resolved_at = ${new Date().toISOString()} WHERE issue_id = ${issueId} AND org_id = ${orgId}`;
+          return JSON.stringify({ resolved: true, issue_id: issueId });
+        }
+        return `Unknown action: ${action}. Use list, create, or auto-fix.`;
+      }
+      case "releases": {
+        const agentName = String(args.agent_name || "");
+        if (action === "list") {
+          const rows = await sql`SELECT agent_name, channel, version, promoted_at FROM release_channels WHERE org_id = ${orgId} ${agentName ? sql`AND agent_name = ${agentName}` : sql``} ORDER BY promoted_at DESC LIMIT 50`;
+          return JSON.stringify(rows);
+        }
+        if (action === "promote") {
+          if (!agentName) return "promote requires agent_name";
+          const toChannel = String(args.to_channel || "staging");
+          const releaseId = crypto.randomUUID().slice(0, 12);
+          await sql`INSERT INTO release_channels (id, org_id, agent_name, channel, version, promoted_at)
+            VALUES (${releaseId}, ${orgId}, ${agentName}, ${toChannel}, 'latest', ${new Date().toISOString()})`;
+          return JSON.stringify({ promoted: true, agent_name: agentName, channel: toChannel });
+        }
+        if (action === "canary") {
+          if (!agentName) return "canary requires agent_name";
+          const weight = Math.min(Math.max(Number(args.canary_weight) || 0.1, 0), 1);
+          await sql`INSERT INTO release_channels (id, org_id, agent_name, channel, version, promoted_at)
+            VALUES (${crypto.randomUUID().slice(0, 12)}, ${orgId}, ${agentName}, 'canary', ${String(weight)}, ${new Date().toISOString()})`;
+          return JSON.stringify({ canary: true, agent_name: agentName, weight });
+        }
+        return `Unknown action: ${action}. Use list, promote, or canary.`;
+      }
+      case "slos": {
+        if (action === "list") {
+          const rows = await sql`SELECT slo_id, agent_name, metric, threshold, created_at FROM slo_definitions WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
+          return JSON.stringify(rows);
+        }
+        if (action === "create") {
+          const agentName = String(args.agent_name || "");
+          const metric = String(args.metric || "success_rate");
+          const threshold = Number(args.threshold) || 0.95;
+          const sloId = crypto.randomUUID().slice(0, 12);
+          await sql`INSERT INTO slo_definitions (slo_id, org_id, agent_name, metric, threshold, created_at)
+            VALUES (${sloId}, ${orgId}, ${agentName}, ${metric}, ${threshold}, ${new Date().toISOString()})`;
+          return JSON.stringify({ created: true, slo_id: sloId, metric, threshold });
+        }
+        if (action === "check") {
+          const agentName = String(args.agent_name || "");
+          const slos = await sql`SELECT slo_id, metric, threshold FROM slo_definitions WHERE org_id = ${orgId} AND agent_name = ${agentName}`;
+          return JSON.stringify({ agent_name: agentName, slos, message: "Compare thresholds against session stats from view-traces or db-query" });
+        }
+        return `Unknown action: ${action}. Use list, create, or check.`;
+      }
+      case "secrets": {
+        if (action === "list") {
+          const rows = await sql`SELECT name, created_at FROM secrets WHERE org_id = ${orgId} ORDER BY name`;
+          return JSON.stringify(rows);
+        }
+        if (action === "create" || action === "set") {
+          const name = String(args.name || "");
+          const value = String(args.value || "");
+          if (!name || !value) return "create requires name and value";
+          const encKey = (env as any).SECRETS_ENCRYPTION_KEY || "";
+          if (!encKey) return "Server misconfiguration: SECRETS_ENCRYPTION_KEY not set. Cannot store secrets securely.";
+          await sql`INSERT INTO secrets (name, org_id, encrypted_value, created_at)
+            VALUES (${name}, ${orgId}, pgp_sym_encrypt(${value}, ${encKey}), ${new Date().toISOString()})
+            ON CONFLICT (name, org_id) DO UPDATE SET encrypted_value = pgp_sym_encrypt(EXCLUDED.encrypted_value::text, ${encKey})`;
+          return JSON.stringify({ stored: true, name });
+        }
+        if (action === "rotate") {
+          const name = String(args.name || "");
+          const value = String(args.value || "");
+          if (!name || !value) return "rotate requires name and new value";
+          const encKey = (env as any).SECRETS_ENCRYPTION_KEY || "";
+          if (!encKey) return "Server misconfiguration: SECRETS_ENCRYPTION_KEY not set.";
+          await sql`UPDATE secrets SET encrypted_value = pgp_sym_encrypt(${value}, ${encKey}) WHERE name = ${name} AND org_id = ${orgId}`;
+          return JSON.stringify({ rotated: true, name });
+        }
+        if (action === "delete") {
+          const name = String(args.name || "");
+          if (!name) return "delete requires name";
+          await sql`DELETE FROM secrets WHERE name = ${name} AND org_id = ${orgId}`;
+          return JSON.stringify({ deleted: true, name });
+        }
+        return `Unknown action: ${action}. Use list, create, rotate, or delete.`;
+      }
+      case "policies": {
+        if (action === "list") {
+          const rows = await sql`SELECT policy_id, name, policy, created_at FROM policy_templates WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
+          return JSON.stringify(rows);
+        }
+        if (action === "create") {
+          const name = String(args.name || "default");
+          const budgetLimit = Number(args.budget_limit_usd) || 10.0;
+          const blockedTools = Array.isArray(args.blocked_tools) ? args.blocked_tools : [];
+          const policyJson = JSON.stringify({ budget_limit_usd: budgetLimit, blocked_tools: blockedTools });
+          const policyId = crypto.randomUUID().slice(0, 12);
+          await sql`INSERT INTO policy_templates (policy_id, org_id, name, policy, created_at)
+            VALUES (${policyId}, ${orgId}, ${name}, ${policyJson}, ${new Date().toISOString()})`;
+          return JSON.stringify({ created: true, policy_id: policyId, name, budget_limit_usd: budgetLimit });
+        }
+        return `Unknown action: ${action}. Use list or create.`;
+      }
+      case "retention": {
+        if (action === "list") {
+          const rows = await sql`SELECT policy_id, resource_type, retention_days, created_at FROM retention_policies WHERE org_id = ${orgId} ORDER BY resource_type`;
+          return JSON.stringify(rows);
+        }
+        if (action === "apply") {
+          return JSON.stringify({ message: "Retention policies are applied automatically by the background worker." });
+        }
+        return `Unknown action: ${action}. Use list or apply.`;
+      }
+      case "workflows": {
+        if (action === "list") {
+          const rows = await sql`SELECT workflow_id, name, status, steps, created_at FROM workflows WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
+          return JSON.stringify(rows);
+        }
+        if (action === "create") {
+          const name = String(args.name || "");
+          if (!name) return "create requires name";
+          const steps = Array.isArray(args.steps) ? JSON.stringify(args.steps) : "[]";
+          const wfId = crypto.randomUUID().slice(0, 12);
+          await sql`INSERT INTO workflows (workflow_id, org_id, name, steps, status, created_at)
+            VALUES (${wfId}, ${orgId}, ${name}, ${steps}, 'draft', ${new Date().toISOString()})`;
+          return JSON.stringify({ created: true, workflow_id: wfId, name });
+        }
+        if (action === "validate") {
+          const steps = Array.isArray(args.steps) ? args.steps : [];
+          const valid = steps.length > 0 && steps.every((s: any) => s.agent_name || s.tool);
+          return JSON.stringify({ valid, step_count: steps.length, message: valid ? "Workflow is valid" : "Each step needs agent_name or tool" });
+        }
+        return `Unknown action: ${action}. Use list, create, or validate.`;
+      }
+      case "projects": {
+        const rows = await sql`SELECT project_id, name, slug, description, default_plan, created_at FROM projects WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
+        return JSON.stringify(rows);
+      }
+      case "mcp": {
+        if (action === "list") {
+          const rows = await sql`SELECT server_id, name, url, status, created_at FROM mcp_servers WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
+          return JSON.stringify(rows);
+        }
+        if (action === "register") {
+          const name = String(args.name || "");
+          const url = String(args.url || "");
+          if (!name || !url) return "register requires name and url";
+          const mcpId = crypto.randomUUID().slice(0, 12);
+          await sql`INSERT INTO mcp_servers (server_id, org_id, name, url, status, created_at)
+            VALUES (${mcpId}, ${orgId}, ${name}, ${url}, 'active', ${new Date().toISOString()})`;
+          return JSON.stringify({ registered: true, mcp_id: mcpId, name, url });
+        }
+        return `Unknown action: ${action}. Use list or register.`;
+      }
+      case "voice": {
+        const rows = await sql`SELECT * FROM voice_calls WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 20`.catch(() => []);
+        return JSON.stringify({ calls: rows, count: rows.length });
+      }
+      case "gpu": {
+        if (action === "list") {
+          const rows = await sql`SELECT * FROM gpu_endpoints WHERE org_id = ${orgId} ORDER BY created_at DESC`.catch(() => []);
+          return JSON.stringify({ endpoints: rows, count: rows.length });
+        }
+        if (action === "provision") {
+          const gpuType = String(args.gpu_type || "h100");
+          const modelId = String(args.model_id || "");
+          const gpuId = crypto.randomUUID().slice(0, 12);
+          await sql`INSERT INTO gpu_endpoints (id, org_id, model_id, gpu_type, status, created_at)
+            VALUES (${gpuId}, ${orgId}, ${modelId}, ${gpuType}, 'provisioning', ${new Date().toISOString()})`;
+          return JSON.stringify({ provisioned: true, gpu_id: gpuId, gpu_type: gpuType });
+        }
+        if (action === "terminate") {
+          const gpuId = String(args.gpu_id || "");
+          if (!gpuId) return "terminate requires gpu_id";
+          await sql`UPDATE gpu_endpoints SET status = 'terminated' WHERE id = ${gpuId} AND org_id = ${orgId}`;
+          return JSON.stringify({ terminated: true, gpu_id: gpuId });
+        }
+        return `Unknown action: ${action}. Use list, provision, or terminate.`;
+      }
+      default:
+        return `Unknown platform resource: ${resource}. Available: issues, releases, slos, secrets, rag, policies, retention, workflows, projects, mcp, voice, gpu.`;
+    }
+  } catch (err: any) {
+    return `platform:${resource} failed: ${err.message || err}`;
+  }
 }
 
 async function dispatch(
@@ -3227,42 +3477,23 @@ async function dispatch(
       }
     }
 
-    case "manage-issues": {
-      const hyperdrive = (env as any).HYPERDRIVE;
-      if (!hyperdrive) return "manage-issues requires database access";
-      const { getDb } = await import("./db");
-      const sql = await getDb(hyperdrive);
-      const orgId = args.org_id || "";
-      const action = String(args.action || "list");
-      try {
-        if (action === "list") {
-          const agentName = args.agent_name ? String(args.agent_name) : null;
-          const rows = agentName
-            ? await sql`SELECT issue_id, agent_name, title, severity, status, created_at FROM issues WHERE org_id = ${orgId} AND agent_name = ${agentName} ORDER BY created_at DESC LIMIT 50`
-            : await sql`SELECT issue_id, agent_name, title, severity, status, created_at FROM issues WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
-          return JSON.stringify(rows);
-        }
-        if (action === "create") {
-          const issueId = crypto.randomUUID().slice(0, 12);
-          const title = String(args.title || "Untitled issue");
-          const desc = String(args.description || "");
-          const agentName = String(args.agent_name || "");
-          await sql`
-            INSERT INTO issues (issue_id, org_id, agent_name, title, description, severity, status, created_at)
-            VALUES (${issueId}, ${orgId}, ${agentName}, ${title}, ${desc}, 'medium', 'open', ${new Date().toISOString()})
-          `;
-          return JSON.stringify({ created: true, issue_id: issueId });
-        }
-        if (action === "auto-fix") {
-          const issueId = String(args.issue_id || "");
-          if (!issueId) return "auto-fix requires issue_id";
-          await sql`UPDATE issues SET status = 'resolved', resolved_at = ${new Date().toISOString()} WHERE issue_id = ${issueId} AND org_id = ${orgId}`;
-          return JSON.stringify({ resolved: true, issue_id: issueId });
-        }
-        return `Unknown action: ${action}. Use list, create, or auto-fix.`;
-      } catch (err: any) {
-        return `manage-issues failed: ${err.message || err}`;
-      }
+    // ── Platform verb aliases (backward compat for stored configs) ──
+    case "manage-issues": return handlePlatformResource(env, "issues", args);
+    case "manage-releases": return handlePlatformResource(env, "releases", args);
+    case "manage-slos": return handlePlatformResource(env, "slos", args);
+    case "manage-secrets": return handlePlatformResource(env, "secrets", args);
+    case "manage-rag": return handlePlatformResource(env, "rag", args);
+    case "manage-policies": return handlePlatformResource(env, "policies", args);
+    case "manage-retention": return handlePlatformResource(env, "retention", args);
+    case "manage-workflows": return handlePlatformResource(env, "workflows", args);
+    case "manage-projects": return handlePlatformResource(env, "projects", args);
+    case "manage-mcp": return handlePlatformResource(env, "mcp", args);
+    case "manage-voice": return handlePlatformResource(env, "voice", args);
+    case "manage-gpu": return handlePlatformResource(env, "gpu", args);
+    case "platform": {
+      const resource = String(args.resource || "");
+      if (!resource) return "platform requires a resource parameter (e.g., issues, releases, secrets)";
+      return handlePlatformResource(env, resource, args);
     }
 
     case "compliance": {
@@ -3338,77 +3569,7 @@ async function dispatch(
       }
     }
 
-    case "manage-releases": {
-      const hyperdrive = (env as any).HYPERDRIVE;
-      if (!hyperdrive) return "manage-releases requires database access";
-      const { getDb } = await import("./db");
-      const sql = await getDb(hyperdrive);
-      const orgId = args.org_id || "";
-      const action = String(args.action || "list");
-      const agentName = String(args.agent_name || "");
-      try {
-        if (action === "list") {
-          const rows = await sql`SELECT agent_name, channel, version, promoted_at FROM release_channels WHERE org_id = ${orgId} ${agentName ? sql`AND agent_name = ${agentName}` : sql``} ORDER BY promoted_at DESC LIMIT 50`;
-          return JSON.stringify(rows);
-        }
-        if (action === "promote") {
-          if (!agentName) return "promote requires agent_name";
-          const toChannel = String(args.to_channel || "staging");
-          const releaseId = crypto.randomUUID().slice(0, 12);
-          await sql`
-            INSERT INTO release_channels (id, org_id, agent_name, channel, version, promoted_at)
-            VALUES (${releaseId}, ${orgId}, ${agentName}, ${toChannel}, 'latest', ${new Date().toISOString()})
-          `;
-          return JSON.stringify({ promoted: true, agent_name: agentName, channel: toChannel });
-        }
-        if (action === "canary") {
-          if (!agentName) return "canary requires agent_name";
-          const weight = Math.min(Math.max(Number(args.canary_weight) || 0.1, 0), 1);
-          await sql`
-            INSERT INTO release_channels (id, org_id, agent_name, channel, version, promoted_at)
-            VALUES (${crypto.randomUUID().slice(0, 12)}, ${orgId}, ${agentName}, 'canary', ${String(weight)}, ${new Date().toISOString()})
-          `;
-          return JSON.stringify({ canary: true, agent_name: agentName, weight });
-        }
-        return `Unknown action: ${action}. Use list, promote, or canary.`;
-      } catch (err: any) {
-        return `manage-releases failed: ${err.message || err}`;
-      }
-    }
-
-    case "manage-slos": {
-      const hyperdrive = (env as any).HYPERDRIVE;
-      if (!hyperdrive) return "manage-slos requires database access";
-      const { getDb } = await import("./db");
-      const sql = await getDb(hyperdrive);
-      const orgId = args.org_id || "";
-      const action = String(args.action || "list");
-      try {
-        if (action === "list") {
-          const rows = await sql`SELECT slo_id, agent_name, metric, threshold, created_at FROM slo_definitions WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
-          return JSON.stringify(rows);
-        }
-        if (action === "create") {
-          const agentName = String(args.agent_name || "");
-          const metric = String(args.metric || "success_rate");
-          const threshold = Number(args.threshold) || 0.95;
-          const sloId = crypto.randomUUID().slice(0, 12);
-          await sql`
-            INSERT INTO slo_definitions (slo_id, org_id, agent_name, metric, threshold, created_at)
-            VALUES (${sloId}, ${orgId}, ${agentName}, ${metric}, ${threshold}, ${new Date().toISOString()})
-          `;
-          return JSON.stringify({ created: true, slo_id: sloId, metric, threshold });
-        }
-        if (action === "check") {
-          const agentName = String(args.agent_name || "");
-          const slos = await sql`SELECT slo_id, metric, threshold FROM slo_definitions WHERE org_id = ${orgId} AND agent_name = ${agentName}`;
-          return JSON.stringify({ agent_name: agentName, slos, message: "Compare thresholds against session stats from view-traces or db-query" });
-        }
-        return `Unknown action: ${action}. Use list, create, or check.`;
-      } catch (err: any) {
-        return `manage-slos failed: ${err.message || err}`;
-      }
-    }
+    // manage-releases, manage-slos: handled by aliases above
 
     case "view-audit": {
       const hyperdrive = (env as any).HYPERDRIVE;
@@ -3429,53 +3590,7 @@ async function dispatch(
       }
     }
 
-    case "manage-secrets": {
-      const hyperdrive = (env as any).HYPERDRIVE;
-      if (!hyperdrive) return "manage-secrets requires database access";
-      const { getDb } = await import("./db");
-      const sql = await getDb(hyperdrive);
-      const orgId = args.org_id || "";
-      const action = String(args.action || "list");
-      try {
-        if (action === "list") {
-          // Never return values
-          const rows = await sql`SELECT name, created_at FROM secrets WHERE org_id = ${orgId} ORDER BY name`;
-          return JSON.stringify(rows);
-        }
-        if (action === "create" || action === "set") {
-          const name = String(args.name || "");
-          const value = String(args.value || "");
-          if (!name || !value) return "create requires name and value";
-          // Encrypt value using pgcrypto — ENCRYPTION_KEY must be set in env
-          const encKey = (env as any).SECRETS_ENCRYPTION_KEY || "";
-          if (!encKey) return "Server misconfiguration: SECRETS_ENCRYPTION_KEY not set. Cannot store secrets securely.";
-          await sql`
-            INSERT INTO secrets (name, org_id, encrypted_value, created_at)
-            VALUES (${name}, ${orgId}, pgp_sym_encrypt(${value}, ${encKey}), ${new Date().toISOString()})
-            ON CONFLICT (name, org_id) DO UPDATE SET encrypted_value = pgp_sym_encrypt(EXCLUDED.encrypted_value::text, ${encKey})
-          `;
-          return JSON.stringify({ stored: true, name });
-        }
-        if (action === "rotate") {
-          const name = String(args.name || "");
-          const value = String(args.value || "");
-          if (!name || !value) return "rotate requires name and new value";
-          const encKey = (env as any).SECRETS_ENCRYPTION_KEY || "";
-          if (!encKey) return "Server misconfiguration: SECRETS_ENCRYPTION_KEY not set.";
-          await sql`UPDATE secrets SET encrypted_value = pgp_sym_encrypt(${value}, ${encKey}) WHERE name = ${name} AND org_id = ${orgId}`;
-          return JSON.stringify({ rotated: true, name });
-        }
-        if (action === "delete") {
-          const name = String(args.name || "");
-          if (!name) return "delete requires name";
-          await sql`DELETE FROM secrets WHERE name = ${name} AND org_id = ${orgId}`;
-          return JSON.stringify({ deleted: true, name });
-        }
-        return `Unknown action: ${action}. Use list, create, rotate, or delete.`;
-      } catch (err: any) {
-        return `manage-secrets failed: ${err.message || err}`;
-      }
-    }
+    // manage-secrets: handled by alias above
 
     case "compare-agents": {
       const hyperdrive = (env as any).HYPERDRIVE;
@@ -3496,166 +3611,7 @@ async function dispatch(
       }
     }
 
-    case "manage-rag": {
-      const action = String(args.action || "status");
-      const agentName = String(args.agent_name || "");
-      if (!agentName) return "manage-rag requires agent_name";
-      const storage = (env as any).STORAGE as R2Bucket;
-      if (!storage) return "manage-rag requires R2 storage access";
-      try {
-        const listResult = await storage.list({ prefix: `rag/${agentName}/`, limit: 50 });
-        const docs = listResult.objects.map((o: any) => ({ key: o.key, size: o.size, uploaded: o.uploaded }));
-        return JSON.stringify({ agent_name: agentName, document_count: docs.length, documents: docs });
-      } catch (err: any) {
-        return `manage-rag failed: ${err.message || err}`;
-      }
-    }
-
-    case "manage-policies": {
-      const hyperdrive = (env as any).HYPERDRIVE;
-      if (!hyperdrive) return "manage-policies requires database access";
-      const { getDb } = await import("./db");
-      const sql = await getDb(hyperdrive);
-      const orgId = args.org_id || "";
-      const action = String(args.action || "list");
-      try {
-        if (action === "list") {
-          const rows = await sql`SELECT policy_id, name, policy, created_at FROM policy_templates WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
-          return JSON.stringify(rows);
-        }
-        if (action === "create") {
-          const name = String(args.name || "default");
-          const budgetLimit = Number(args.budget_limit_usd) || 10.0;
-          const blockedTools = Array.isArray(args.blocked_tools) ? args.blocked_tools : [];
-          const policyJson = JSON.stringify({ budget_limit_usd: budgetLimit, blocked_tools: blockedTools });
-          const policyId = crypto.randomUUID().slice(0, 12);
-          await sql`
-            INSERT INTO policy_templates (policy_id, org_id, name, policy, created_at)
-            VALUES (${policyId}, ${orgId}, ${name}, ${policyJson}, ${new Date().toISOString()})
-          `;
-          return JSON.stringify({ created: true, policy_id: policyId, name, budget_limit_usd: budgetLimit });
-        }
-        return `Unknown action: ${action}. Use list or create.`;
-      } catch (err: any) {
-        return `manage-policies failed: ${err.message || err}`;
-      }
-    }
-
-    case "manage-retention": {
-      const hyperdrive = (env as any).HYPERDRIVE;
-      if (!hyperdrive) return "manage-retention requires database access";
-      const { getDb } = await import("./db");
-      const sql = await getDb(hyperdrive);
-      const orgId = args.org_id || "";
-      const action = String(args.action || "list");
-      try {
-        if (action === "list") {
-          const rows = await sql`SELECT policy_id, resource_type, retention_days, created_at FROM retention_policies WHERE org_id = ${orgId} ORDER BY resource_type`;
-          return JSON.stringify(rows);
-        }
-        if (action === "apply") {
-          return JSON.stringify({ message: "Retention policies are applied automatically by the background worker." });
-        }
-        return `Unknown action: ${action}. Use list or apply.`;
-      } catch (err: any) {
-        return `manage-retention failed: ${err.message || err}`;
-      }
-    }
-
-    case "manage-workflows": {
-      const hyperdrive = (env as any).HYPERDRIVE;
-      if (!hyperdrive) return "manage-workflows requires database access";
-      const { getDb } = await import("./db");
-      const sql = await getDb(hyperdrive);
-      const orgId = args.org_id || "";
-      const action = String(args.action || "list");
-      try {
-        if (action === "list") {
-          const rows = await sql`SELECT workflow_id, name, status, steps, created_at FROM workflows WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
-          return JSON.stringify(rows);
-        }
-        if (action === "create") {
-          const name = String(args.name || "");
-          if (!name) return "create requires name";
-          const steps = Array.isArray(args.steps) ? JSON.stringify(args.steps) : "[]";
-          const wfId = crypto.randomUUID().slice(0, 12);
-          await sql`
-            INSERT INTO workflows (workflow_id, org_id, name, steps, status, created_at)
-            VALUES (${wfId}, ${orgId}, ${name}, ${steps}, 'draft', ${new Date().toISOString()})
-          `;
-          return JSON.stringify({ created: true, workflow_id: wfId, name });
-        }
-        if (action === "validate") {
-          const steps = Array.isArray(args.steps) ? args.steps : [];
-          const valid = steps.length > 0 && steps.every((s: any) => s.agent_name || s.tool);
-          return JSON.stringify({ valid, step_count: steps.length, message: valid ? "Workflow is valid" : "Each step needs agent_name or tool" });
-        }
-        return `Unknown action: ${action}. Use list, create, or validate.`;
-      } catch (err: any) {
-        return `manage-workflows failed: ${err.message || err}`;
-      }
-    }
-
-    case "manage-projects": {
-      const hyperdrive = (env as any).HYPERDRIVE;
-      if (!hyperdrive) return "manage-projects requires database access";
-      const { getDb } = await import("./db");
-      const sql = await getDb(hyperdrive);
-      const orgId = args.org_id || "";
-      try {
-        const rows = await sql`SELECT project_id, name, slug, description, default_plan, created_at FROM projects WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
-        return JSON.stringify(rows);
-      } catch (err: any) {
-        return `manage-projects failed: ${err.message || err}`;
-      }
-    }
-
-    case "manage-mcp": {
-      const hyperdrive = (env as any).HYPERDRIVE;
-      if (!hyperdrive) return "manage-mcp requires database access";
-      const { getDb } = await import("./db");
-      const sql = await getDb(hyperdrive);
-      const orgId = args.org_id || "";
-      const action = String(args.action || "list");
-      try {
-        if (action === "list") {
-          const rows = await sql`SELECT server_id, name, url, status, created_at FROM mcp_servers WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
-          return JSON.stringify(rows);
-        }
-        if (action === "register") {
-          const name = String(args.name || "");
-          const url = String(args.url || "");
-          if (!name || !url) return "register requires name and url";
-          const mcpId = crypto.randomUUID().slice(0, 12);
-          await sql`
-            INSERT INTO mcp_servers (server_id, org_id, name, url, status, created_at)
-            VALUES (${mcpId}, ${orgId}, ${name}, ${url}, 'active', ${new Date().toISOString()})
-          `;
-          return JSON.stringify({ registered: true, mcp_id: mcpId, name, url });
-        }
-        return `Unknown action: ${action}. Use list or register.`;
-      } catch (err: any) {
-        return `manage-mcp failed: ${err.message || err}`;
-      }
-    }
-
-    case "manage-voice": {
-      const hyperdrive = (env as any).HYPERDRIVE;
-      if (!hyperdrive) return "manage-voice requires database access";
-      const { getDb } = await import("./db");
-      const sql = await getDb(hyperdrive);
-      const orgId = args.org_id || "";
-      const action = String(args.action || "list");
-      try {
-        if (action === "list") {
-          const rows = await sql`SELECT * FROM voice_calls WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 20`.catch(() => []);
-          return JSON.stringify({ calls: rows, count: rows.length });
-        }
-        return `Unknown action: ${action}. Use list.`;
-      } catch (err: any) {
-        return `manage-voice failed: ${err.message || err}`;
-      }
-    }
+    // manage-rag through manage-voice: handled by aliases above
 
     case "make-voice-call": {
       const hyperdrive = (env as any).HYPERDRIVE;
@@ -3739,39 +3695,7 @@ async function dispatch(
       }
     }
 
-    case "manage-gpu": {
-      const hyperdrive = (env as any).HYPERDRIVE;
-      if (!hyperdrive) return "manage-gpu requires database access";
-      const { getDb } = await import("./db");
-      const sql = await getDb(hyperdrive);
-      const orgId = args.org_id || "";
-      const action = String(args.action || "list");
-      try {
-        if (action === "list") {
-          const rows = await sql`SELECT * FROM gpu_endpoints WHERE org_id = ${orgId} ORDER BY created_at DESC`.catch(() => []);
-          return JSON.stringify({ endpoints: rows, count: rows.length });
-        }
-        if (action === "provision") {
-          const gpuType = String(args.gpu_type || "h100");
-          const modelId = String(args.model_id || "");
-          const gpuId = crypto.randomUUID().slice(0, 12);
-          await sql`
-            INSERT INTO gpu_endpoints (id, org_id, model_id, gpu_type, status, created_at)
-            VALUES (${gpuId}, ${orgId}, ${modelId}, ${gpuType}, 'provisioning', ${new Date().toISOString()})
-          `;
-          return JSON.stringify({ provisioned: true, gpu_id: gpuId, gpu_type: gpuType });
-        }
-        if (action === "terminate") {
-          const gpuId = String(args.gpu_id || "");
-          if (!gpuId) return "terminate requires gpu_id";
-          await sql`UPDATE gpu_endpoints SET status = 'terminated' WHERE id = ${gpuId} AND org_id = ${orgId}`;
-          return JSON.stringify({ terminated: true, gpu_id: gpuId });
-        }
-        return `Unknown action: ${action}. Use list, provision, or terminate.`;
-      } catch (err: any) {
-        return `manage-gpu failed: ${err.message || err}`;
-      }
-    }
+    // manage-gpu: handled by alias above
 
     // ── Git Tools (SWE-agent ACI pattern: version control for deployed agents) ──
     // All git tools check for git availability first and return a helpful error if not installed.
@@ -5958,11 +5882,17 @@ export function getToolDefinitions(enabledTools: string[], blockedTools: string[
   // marketplace-search + a2a-send are always available so every agent can discover
   // and delegate to specialist skill agents in the marketplace.
   const blocked = new Set(blockedTools);
+  // Expand aliases: if config has manage-issues, also include the canonical platform tool
+  const expanded = new Set(enabledTools);
+  for (const t of enabledTools) {
+    const canonical = TOOL_ALIASES[t];
+    if (canonical) expanded.add(canonical);
+  }
   return TOOL_CATALOG.filter(
     (t) => {
       const name = t.function.name;
-      if (blocked.has(name)) return false; // Governance: blocked tools never available
-      return enabledTools.includes(name) || ALWAYS_AVAILABLE.has(name);
+      if (blocked.has(name)) return false;
+      return expanded.has(name) || ALWAYS_AVAILABLE.has(name);
     },
   );
 }
@@ -6000,7 +5930,7 @@ const TOOL_KEYWORDS: Record<string, string[]> = {
   // File operations
   "file|read|write|save|create|edit|document|folder|directory": ["read-file", "write-file", "edit-file", "view-file", "search-file", "find-file", "load-folder"],
   "grep|search file|find in": ["grep", "glob", "search-file", "find-file"],
-  "project|workspace|load project|save project": ["save-project", "load-project", "load-folder", "manage-projects"],
+  "project|workspace|load project|save project": ["save-project", "load-project", "load-folder", "platform"],
   // Memory & knowledge
   "remember|memory|recall|forget|save fact|take note|store fact|store this|MEMORY\\.md|sync memory": [
     "memory",
@@ -6014,7 +5944,7 @@ const TOOL_KEYWORDS: Record<string, string[]> = {
     "team-fact-write",
     "team-observation",
   ],
-  "knowledge|rag|embed|retrieval|ocr|pdf|document|scan": ["knowledge-search", "store-knowledge", "ingest-document", "manage-rag"],
+  "knowledge|rag|embed|retrieval|ocr|pdf|document|scan": ["knowledge-search", "store-knowledge", "ingest-document", "platform"],
   "profile|preference|about me|my name": ["user-profile-save", "user-profile-load"],
   // Media
   "image|picture|photo|draw|generate image|illustration|diagram": ["image-generate", "vision-analyze"],
@@ -6037,13 +5967,13 @@ const TOOL_KEYWORDS: Record<string, string[]> = {
   "todo|task|checklist|plan": ["todo"],
   // Governance & security
   "security|scan|vulnerability|audit": ["security-scan", "view-audit", "compliance"],
-  "policy|policies|permission|governance": ["manage-policies", "compliance"],
-  "secret|credential|api key|token|password": ["manage-secrets"],
-  "release|deploy|rollback|version": ["manage-releases"],
-  "slo|sla|reliability|uptime": ["manage-slos"],
-  "retention|cleanup|expire|ttl": ["manage-retention"],
-  "workflow|automation|orchestrate": ["manage-workflows"],
-  "issue|bug|ticket|incident": ["manage-issues"],
+  "policy|policies|permission|governance": ["platform", "compliance"],
+  "secret|credential|api key|token|password": ["platform"],
+  "release|deploy|rollback|version": ["platform"],
+  "slo|sla|reliability|uptime": ["platform"],
+  "retention|cleanup|expire|ttl": ["platform"],
+  "workflow|automation|orchestrate": ["platform"],
+  "issue|bug|ticket|incident": ["platform"],
   // Social & feedback
   "post|feed|share|publish|social": ["feed-post", "share-artifact"],
   "feedback|rate|review|submit feedback": ["submit-feedback"],
@@ -7341,18 +7271,40 @@ const TOOL_CATALOG: ToolDefinition[] = [
   {
     type: "function",
     function: {
-      name: "manage-issues",
-      description: "Create, list, or auto-fix agent issues. Actions: list, create, auto-fix.",
+      name: "platform",
+      description:
+        "Manage platform resources: issues, releases, slos, secrets, rag, policies, " +
+        "retention, workflows, projects, mcp, voice, gpu. " +
+        "Pass resource + action (default: list). " +
+        "Examples: { resource: 'issues', action: 'create', title: 'Bug' }, " +
+        "{ resource: 'secrets', action: 'rotate', name: 'API_KEY', value: '...' }",
       parameters: {
         type: "object",
         properties: {
-          action: { type: "string", description: "Action: list, create, auto-fix" },
-          agent_name: { type: "string", description: "Agent name (for list/create)" },
+          resource: {
+            type: "string",
+            enum: ["issues", "releases", "slos", "secrets", "rag", "policies", "retention", "workflows", "projects", "mcp", "voice", "gpu"],
+            description: "Platform resource to manage",
+          },
+          action: { type: "string", description: "Action (varies by resource — default: list)" },
+          agent_name: { type: "string", description: "Agent name (for resource-specific filtering)" },
+          name: { type: "string", description: "Resource name (for create/register)" },
           issue_id: { type: "string", description: "Issue ID (for auto-fix)" },
-          title: { type: "string", description: "Issue title (for create)" },
-          description: { type: "string", description: "Issue description (for create)" },
+          title: { type: "string", description: "Title (for issue creation)" },
+          value: { type: "string", description: "Value (for secrets create/rotate)" },
+          to_channel: { type: "string", description: "Target channel (for release promote)" },
+          canary_weight: { type: "number", description: "Canary weight 0-1 (for release canary)" },
+          metric: { type: "string", description: "Metric name (for SLO create)" },
+          threshold: { type: "number", description: "Threshold value (for SLO create)" },
+          url: { type: "string", description: "URL (for MCP register)" },
+          steps: { type: "array", items: { type: "object" }, description: "Steps (for workflow create/validate)" },
+          budget_limit_usd: { type: "number", description: "Budget limit (for policy create)" },
+          blocked_tools: { type: "array", items: { type: "string" }, description: "Blocked tools (for policy create)" },
+          gpu_type: { type: "string", description: "GPU type (for GPU provision)" },
+          gpu_id: { type: "string", description: "GPU endpoint ID (for GPU terminate)" },
+          model_id: { type: "string", description: "Model ID (for GPU provision)" },
         },
-        required: ["action"],
+        required: ["resource"],
       },
     },
   },
@@ -7401,43 +7353,7 @@ const TOOL_CATALOG: ToolDefinition[] = [
       },
     },
   },
-  {
-    type: "function",
-    function: {
-      name: "manage-releases",
-      description:
-        "Promote agents through release channels (draft -> staging -> production) " +
-        "or configure canary traffic splits. Actions: list, promote, canary.",
-      parameters: {
-        type: "object",
-        properties: {
-          action: { type: "string", description: "Action: list, promote, canary" },
-          agent_name: { type: "string", description: "Agent name" },
-          from_channel: { type: "string", description: "Source channel" },
-          to_channel: { type: "string", description: "Target channel (for promote)" },
-          canary_weight: { type: "number", description: "Canary traffic weight 0-1 (for canary)" },
-        },
-        required: ["action"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "manage-slos",
-      description: "Create or check SLO (Service Level Objective) status. Actions: list, create, check.",
-      parameters: {
-        type: "object",
-        properties: {
-          action: { type: "string", description: "Action: list, create, check" },
-          agent_name: { type: "string", description: "Agent name (for create/check)" },
-          metric: { type: "string", description: "Metric name (e.g., success_rate, latency_p99)" },
-          threshold: { type: "number", description: "Threshold value (e.g., 0.95)" },
-        },
-        required: ["action"],
-      },
-    },
-  },
+  // manage-releases, manage-slos: consolidated into platform verb above
   {
     type: "function",
     function: {
@@ -7453,24 +7369,7 @@ const TOOL_CATALOG: ToolDefinition[] = [
       },
     },
   },
-  {
-    type: "function",
-    function: {
-      name: "manage-secrets",
-      description:
-        "Manage the secrets vault. List only returns names (never values). " +
-        "Actions: list, create, rotate, delete.",
-      parameters: {
-        type: "object",
-        properties: {
-          action: { type: "string", description: "Action: list, create, rotate, delete" },
-          name: { type: "string", description: "Secret name" },
-          value: { type: "string", description: "Secret value (for create/rotate)" },
-        },
-        required: ["action"],
-      },
-    },
-  },
+  // manage-secrets: consolidated into platform verb above
   {
     type: "function",
     function: {
@@ -7487,96 +7386,7 @@ const TOOL_CATALOG: ToolDefinition[] = [
       },
     },
   },
-  {
-    type: "function",
-    function: {
-      name: "manage-rag",
-      description: "List RAG knowledge base documents for an agent. Reads from R2 storage.",
-      parameters: {
-        type: "object",
-        properties: {
-          action: { type: "string", description: "Action: list, status" },
-          agent_name: { type: "string", description: "Agent name" },
-        },
-        required: ["agent_name"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "manage-policies",
-      description: "Create or list governance policy templates. Actions: list, create.",
-      parameters: {
-        type: "object",
-        properties: {
-          action: { type: "string", description: "Action: list, create" },
-          name: { type: "string", description: "Policy name (for create)" },
-          budget_limit_usd: { type: "number", description: "Budget limit in USD (for create)" },
-          blocked_tools: { type: "array", items: { type: "string" }, description: "Tools to block (for create)" },
-        },
-        required: ["action"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "manage-retention",
-      description: "List or apply data retention policies. Actions: list, apply.",
-      parameters: {
-        type: "object",
-        properties: {
-          action: { type: "string", description: "Action: list, apply" },
-        },
-        required: ["action"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "manage-workflows",
-      description: "List, create, or validate multi-agent workflows. Actions: list, create, validate.",
-      parameters: {
-        type: "object",
-        properties: {
-          action: { type: "string", description: "Action: list, create, validate" },
-          name: { type: "string", description: "Workflow name (for create)" },
-          steps: { type: "array", items: { type: "object" }, description: "Workflow steps (for create/validate)" },
-        },
-        required: ["action"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "manage-projects",
-      description: "List all projects for the current org.",
-      parameters: {
-        type: "object",
-        properties: {},
-        required: [],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "manage-mcp",
-      description: "List or register MCP (Model Context Protocol) servers. Actions: list, register.",
-      parameters: {
-        type: "object",
-        properties: {
-          action: { type: "string", description: "Action: list, register" },
-          name: { type: "string", description: "MCP server name (for register)" },
-          url: { type: "string", description: "MCP server URL (for register)" },
-        },
-        required: ["action"],
-      },
-    },
-  },
+  // manage-rag through manage-mcp: consolidated into platform verb above
 
   // ── MCP Wrapper (v0.2.1 codemode/mcp integration) ──────────────
 
