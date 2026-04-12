@@ -973,7 +973,7 @@ const CONCURRENT_SAFE_TOOLS = new Set([
   "discover-tools",                                   // Pure logic
 ]);
 
-function isConcurrentSafe(toolName: string): boolean {
+export function isConcurrentSafe(toolName: string): boolean {
   return CONCURRENT_SAFE_TOOLS.has(toolName);
 }
 
@@ -1066,7 +1066,7 @@ export async function executeTools(
 // Re-export abort utilities for use in workflow.ts and index.ts
 export { createChildAbortController, createSiblingGroup } from "./abort";
 
-async function executeSingleTool(
+export async function executeSingleTool(
   env: RuntimeEnv,
   tc: ToolCall,
   sessionId: string,

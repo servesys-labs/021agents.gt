@@ -19,12 +19,13 @@
 
 import type { LLMMessage, LLMResponse, ToolCall, ToolDefinition, RuntimeEnv, ToolResult } from "./types";
 import type { RuntimeEvent, TurnEndEvent, DoneEvent } from "./protocol";
-import { executeTools, getToolDefinitions } from "./tools";
+import { executeTools, executeSingleTool, isConcurrentSafe, getToolDefinitions } from "./tools";
 import { loadAgentConfig, resolvePlanRouting, writeSession, writeTurn, writeBillingRecord } from "./db";
 import { createWorkingMemory, queueFactExtraction, queueSessionEpisodicNote } from "./memory";
 import { createMemoryManager } from "./memory-manager";
 import { selectModel, type PlanRouting } from "./router";
 import { createLoopState, detectLoop, maybeSummarize } from "./middleware";
+import { pruneToolResults } from "./compact";
 import { serializeForWebSocket } from "./protocol";
 import { createBackpressureController } from "./backpressure";
 import { estimateTokenCost, estimateTokensFromText } from "./pricing";
@@ -144,7 +145,13 @@ async function streamLLM(
   env: RuntimeEnv,
   messages: LLMMessage[],
   tools: ToolDefinition[],
-  opts: { model: string; provider?: string; max_tokens?: number; temperature?: number; signal?: AbortSignal },
+  opts: {
+    model: string; provider?: string; max_tokens?: number; temperature?: number; signal?: AbortSignal;
+    /** Called when a tool_use block completes during streaming. Enables
+     *  callers to start executing concurrency-safe tools before the full
+     *  response is ready — saving latency on multi-tool turns. */
+    onToolCallReady?: (tc: ToolCall) => void;
+  },
   send: WsSend,
 ): Promise<LLMResponse> {
   const model = opts.model;
@@ -216,6 +223,8 @@ async function streamLLM(
   let inputTokens = 0;
   let outputTokens = 0;
   let resolvedModel = model;
+  let lastFinishReason = "";
+  const emittedToolIndices = new Set<number>();
 
   // Accumulate partial tool calls by index
   const partialToolCalls: Map<number, { id: string; name: string; arguments: string }> = new Map();
@@ -267,8 +276,11 @@ async function streamLLM(
 
       // Detect finish_reason to handle stream close
       const finishReason = chunk.choices?.[0]?.finish_reason;
-      if (finishReason === "stop" || finishReason === "tool_calls" || finishReason === "length") {
-        streamDone = true;
+      if (finishReason) {
+        lastFinishReason = finishReason;
+        if (finishReason === "stop" || finishReason === "tool_calls" || finishReason === "length") {
+          streamDone = true;
+        }
       }
 
       // Token content
@@ -278,10 +290,25 @@ async function streamLLM(
         backpressureSend(send, bp, JSON.stringify({ type: "token", content: delta.content }));
       }
 
-      // Tool call chunks (streamed incrementally)
+      // Tool call chunks (streamed incrementally).
+      // When a new index appears, the previous tool call is complete — fire
+      // the onToolCallReady callback so the caller can start execution early.
       if (delta.tool_calls) {
         for (const tc of delta.tool_calls) {
           const idx = tc.index ?? 0;
+          // If we're seeing a NEW index, the previous one is finalized
+          if (opts.onToolCallReady && idx > 0 && !partialToolCalls.has(idx)) {
+            const prevIdx = idx - 1;
+            const prev = partialToolCalls.get(prevIdx);
+            if (prev && prev.name && !emittedToolIndices.has(prevIdx)) {
+              emittedToolIndices.add(prevIdx);
+              opts.onToolCallReady({
+                id: prev.id || crypto.randomUUID().slice(0, 12),
+                name: prev.name,
+                arguments: prev.arguments || "{}",
+              });
+            }
+          }
           const existing = partialToolCalls.get(idx) || { id: "", name: "", arguments: "" };
           if (tc.id) existing.id = tc.id;
           if (tc.function?.name) existing.name = tc.function.name;
@@ -319,14 +346,21 @@ async function streamLLM(
   // Clean up reader
   try { reader.cancel(); } catch {}
 
-  // Finalize tool calls
-  toolCalls = Array.from(partialToolCalls.values())
-    .filter((tc) => tc.name)
-    .map((tc) => ({
-      id: tc.id || crypto.randomUUID().slice(0, 12),
-      name: tc.name,
-      arguments: tc.arguments || "{}",
-    }));
+  // Finalize tool calls — emit any that haven't been sent via onToolCallReady yet
+  toolCalls = Array.from(partialToolCalls.entries())
+    .filter(([_, tc]) => tc.name)
+    .map(([idx, tc]) => {
+      const finalized: ToolCall = {
+        id: tc.id || crypto.randomUUID().slice(0, 12),
+        name: tc.name,
+        arguments: tc.arguments || "{}",
+      };
+      if (opts.onToolCallReady && !emittedToolIndices.has(idx)) {
+        emittedToolIndices.add(idx);
+        opts.onToolCallReady(finalized);
+      }
+      return finalized;
+    });
 
   // Fallback token estimation when API doesn't report usage.
   // Uses word-based estimation (more accurate than chars/4 across languages):
@@ -347,6 +381,7 @@ async function streamLLM(
     usage: { input_tokens: inputTokens, output_tokens: outputTokens },
     cost_usd: estimateTokenCost(resolvedModel, inputTokens, outputTokens),
     latency_ms: latencyMs,
+    stop_reason: lastFinishReason || undefined,
   };
 }
 
@@ -644,6 +679,7 @@ export async function streamRun(
     // Checkpointing handled by Workflow steps — no manual DO SQLite checkpoints needed.
 
     let budgetPressureInjected = false;
+    let maxTokensRecoveryCount = 0;
 
     for (let turn = 1; turn <= config.max_turns; turn++) {
       lastTurnUsed = turn;
@@ -666,8 +702,13 @@ export async function streamRun(
         }
       }
 
-      // ── CONTEXT COMPRESSION — summarize when messages exceed token budget ──
+      // ── CONTEXT COMPRESSION — prune tool results first, then summarize if needed ──
       if (turn > 2 && !isVoiceChannel) {
+        // Cheap first pass: prune old tool result bodies
+        const { messages: pruned, pruned: prunedCount } = pruneToolResults(messages as any, 8);
+        if (prunedCount > 0) {
+          messages.splice(0, messages.length, ...(pruned as LLMMessage[]));
+        }
         try {
           const compressed = await maybeSummarize(env, messages, {
             maxChars: 80_000,
@@ -723,7 +764,19 @@ export async function streamRun(
 
       send(serializeForWebSocket({ type: "turn_start", turn, model: route.model }));
 
-      // Stream LLM response (with per-turn timeout + model fallback chain)
+      // Stream LLM response (with per-turn timeout + model fallback chain).
+      // Streaming tool execution: start executing concurrency-safe tools as
+      // soon as their tool_use block completes during streaming, rather than
+      // waiting for the full response. This saves latency on multi-tool turns.
+      const earlyExecPromises = new Map<string, Promise<ToolResult>>();
+      const onToolCallReady = config.parallel_tool_calls
+        ? (tc: ToolCall) => {
+            if (isConcurrentSafe(tc.name)) {
+              earlyExecPromises.set(tc.id, executeSingleTool(env, tc, sessionId, config.tools));
+            }
+          }
+        : undefined;
+
       let llmResponse: LLMResponse | null = null;
       try {
         const PER_TURN_TIMEOUT_MS = 120_000; // 2 min max per turn
@@ -741,6 +794,7 @@ export async function streamRun(
                 provider: candidate.provider,
                 max_tokens: route.max_tokens,
                 signal: opts?.signal,
+                onToolCallReady,
               }, send),
               new Promise<never>((_, reject) =>
                 setTimeout(() => reject(new Error(`Turn ${turn} timed out after ${PER_TURN_TIMEOUT_MS / 1000}s`)), PER_TURN_TIMEOUT_MS),
@@ -831,6 +885,26 @@ export async function streamRun(
         } as any));
       }
 
+      // ── Max-tokens recovery: retry truncated responses ──
+      if (llmResponse.stop_reason === "length" || llmResponse.stop_reason === "max_tokens") {
+        if (llmResponse.tool_calls.length > 0) {
+          // Tool call JSON may be truncated — ask model to retry
+          messages.push({ role: "assistant", content: llmResponse.content || "" });
+          messages.push({
+            role: "system",
+            content: "Your previous response was truncated (hit output token limit). One or more tool calls may have incomplete JSON arguments. Please retry your tool calls — output them completely this time.",
+          });
+          send(serializeForWebSocket({ type: "warning" as any, message: "Response truncated — retrying tool calls." }));
+          continue;
+        } else if (llmResponse.content && maxTokensRecoveryCount < 2) {
+          maxTokensRecoveryCount++;
+          messages.push({ role: "assistant", content: llmResponse.content });
+          messages.push({ role: "user", content: "Continue from where you left off." });
+          send(serializeForWebSocket({ type: "system", message: "Response truncated — requesting continuation." } as any));
+          continue;
+        }
+      }
+
       // No tool calls → final answer
       if (llmResponse.tool_calls.length === 0) {
         output = llmResponse.content;
@@ -852,7 +926,7 @@ export async function streamRun(
         break;
       }
 
-      // Tool execution
+      // Tool execution — results from streaming early-exec + remaining batch
       messages.push({ role: "assistant", content: llmResponse.content, tool_calls: llmResponse.tool_calls });
 
       for (const tc of llmResponse.tool_calls) {
@@ -864,28 +938,37 @@ export async function streamRun(
         send(serializeForWebSocket({ type: "tool_call", name: tc.name, tool_call_id: tc.id, args_preview: argsPreview }));
       }
 
+      // Collect early-started results (from onToolCallReady during streaming)
+      // and execute any remaining tools that weren't started early.
+      const earlyResultMap = new Map<string, Promise<ToolResult>>();
+
+      // Tools that were started during streaming are in earlyExecPromises
+      for (const [id, promise] of earlyExecPromises) {
+        earlyResultMap.set(id, promise);
+      }
+
+      // Execute remaining tools that weren't started during streaming
+      const remainingCalls = llmResponse.tool_calls.filter(tc => !earlyResultMap.has(tc.id));
+      const remainingPromise = remainingCalls.length > 0
+        ? executeTools(env, remainingCalls, sessionId, config.parallel_tool_calls, config.tools)
+        : Promise.resolve([]);
+
       // P0 Fix: Report progress for ALL long-running tools, not just the first
       const LONG_RUNNING_TOOLS = new Set(["python-exec", "bash", "web-crawl", "browser-render"]);
       const longRunningToolCalls = llmResponse.tool_calls.filter((tc) => LONG_RUNNING_TOOLS.has(tc.name));
 
-      // Send initial "Executing..." for each long-running tool
+      // Send initial "Executing..." for each long-running tool (only for non-early ones)
       for (const tc of longRunningToolCalls) {
-        send(serializeForWebSocket({
-          type: "tool_progress",
-          name: tc.name,
-          tool_call_id: tc.id,
-          progress: { status: "running", elapsed_ms: 0, message: "Executing..." },
-        }));
+        if (!earlyResultMap.has(tc.id)) {
+          send(serializeForWebSocket({
+            type: "tool_progress",
+            name: tc.name,
+            tool_call_id: tc.id,
+            progress: { status: "running", elapsed_ms: 0, message: "Executing..." },
+          }));
+        }
       }
 
-      // Progress timer reports ALL active long-running tools
-      const toolResultsPromise = executeTools(
-        env,
-        llmResponse.tool_calls,
-        sessionId,
-        config.parallel_tool_calls,
-        config.tools,
-      );
       let toolProgressTimer: ReturnType<typeof setInterval> | null = null;
       let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
       if (longRunningToolCalls.length > 0) {
@@ -916,9 +999,25 @@ export async function streamRun(
         }, 15000);
       }
 
+      // Await all results: early-started + remaining batch
       let toolResults: ToolResult[];
       try {
-        toolResults = await toolResultsPromise;
+        const [earlySettled, remainingResults] = await Promise.all([
+          Promise.all(
+            llmResponse.tool_calls
+              .filter(tc => earlyResultMap.has(tc.id))
+              .map(tc => earlyResultMap.get(tc.id)!),
+          ),
+          remainingPromise,
+        ]);
+        // Merge in original tool_call order
+        const allResults = new Map<string, ToolResult>();
+        for (const r of [...earlySettled, ...remainingResults]) {
+          allResults.set(r.tool_call_id, r);
+        }
+        toolResults = llmResponse.tool_calls.map(tc =>
+          allResults.get(tc.id) || { tool: tc.name, tool_call_id: tc.id, result: "", error: "Result missing", latency_ms: 0, cost_usd: 0 },
+        );
       } finally {
         if (toolProgressTimer) clearInterval(toolProgressTimer);
         if (heartbeatTimer) clearInterval(heartbeatTimer);

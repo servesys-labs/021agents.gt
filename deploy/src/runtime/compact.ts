@@ -44,6 +44,40 @@ export function shouldCompact(
 }
 
 /**
+ * Lightweight pre-compaction pass: replace old tool result bodies with short
+ * summaries. Tool results are the highest-token, lowest-value content in long
+ * sessions. This defers expensive LLM summarization by cheaply shrinking the
+ * conversation first. Only prunes results outside the `keepRecent` tail.
+ */
+export function pruneToolResults(
+  messages: Array<{ role: string; content: string; tool_calls?: any[]; tool_call_id?: string; name?: string }>,
+  keepRecent: number = 6,
+): { messages: Array<{ role: string; content: string; tool_calls?: any[]; tool_call_id?: string; name?: string }>; pruned: number } {
+  const system = messages.filter(m => m.role === "system");
+  const conversation = messages.filter(m => m.role !== "system");
+
+  if (conversation.length <= keepRecent + 2) {
+    return { messages, pruned: 0 };
+  }
+
+  const cutoff = conversation.length - keepRecent;
+  let pruned = 0;
+
+  const prunedConversation = conversation.map((msg, i) => {
+    if (i >= cutoff) return msg; // in the keep-recent tail
+    if (msg.role !== "tool") return msg;
+    const body = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content || "");
+    if (body.length <= 200) return msg; // already small
+    pruned++;
+    const isError = body.toLowerCase().includes("error") || body.toLowerCase().includes("failed");
+    const preview = isError ? body.slice(0, 200) : `OK (${body.length} chars)`;
+    return { ...msg, content: `[tool result pruned: ${msg.name || "unknown"} → ${preview}]` };
+  });
+
+  return { messages: [...system, ...prunedConversation], pruned };
+}
+
+/**
  * Compress conversation by summarizing old messages.
  * Keeps system prompts + last N messages intact.
  * Middle section is summarized into a single "conversation summary" message.
