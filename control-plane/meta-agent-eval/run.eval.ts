@@ -63,6 +63,23 @@ import { FIXTURES, type EvalFixture } from "./fixtures/inputs";
 import { summarizeTrace, runL1Checks, type TraceSummary } from "./l1-checks";
 import { judgeTrace } from "./l2-judge";
 
+// ── Fixture invariants — validated once at module load ─────────────
+// Exactly one of `min_judge_score` or `judge_ceiling` must be set per
+// fixture. Enforcing this at load time (rather than branching on the
+// presence of either at runtime) means a malformed fixture fails the
+// whole suite immediately with a clear error, instead of silently
+// taking the wrong scoring path.
+for (const f of FIXTURES) {
+  const hasFloor = typeof f.min_judge_score === "number";
+  const hasCeiling = !!f.judge_ceiling;
+  if (hasFloor === hasCeiling) {
+    throw new Error(
+      `[fixture ${f.id}] must set exactly one of min_judge_score | judge_ceiling ` +
+      `(got min_judge_score=${f.min_judge_score}, judge_ceiling=${JSON.stringify(f.judge_ceiling)})`,
+    );
+  }
+}
+
 // ── Environment ─────────────────────────────────────────────────────
 
 interface GatewayEnv {
@@ -108,18 +125,16 @@ describe.skipIf(!gatewayEnv)("meta-agent eval harness", () => {
       //
       //   a) Normal fixture — call runMetaChat end-to-end, summarize.
       //   b) Calibration tripwire (`canned_trace` set) — skip the
-      //      meta-agent call entirely and build the summary from the
-      //      hardcoded fields. The tripwire grades the judge, not the
+      //      meta-agent call entirely and feed the hardcoded trace
+      //      straight through. The tripwire grades the judge, not the
       //      agent, so running the real meta-agent would be wasted
       //      latency and wouldn't guarantee a known-bad response.
+      //
+      // `canned_trace` is typed as `TraceSummary` so the assignment is
+      // a direct structural pass-through — no manual unpack.
       let summary: TraceSummary;
       if (fixture.canned_trace) {
-        summary = {
-          tool_call_names: fixture.canned_trace.tool_call_names,
-          rounds: fixture.canned_trace.rounds,
-          cost_usd: fixture.canned_trace.cost_usd,
-          final_response: fixture.canned_trace.final_response,
-        };
+        summary = fixture.canned_trace;
       } else {
         // MetaChatContext is not exported; assemble a structurally-
         // typed plain object matching the shape runMetaChat consumes.
@@ -201,14 +216,24 @@ describe.skipIf(!gatewayEnv)("meta-agent eval harness", () => {
         expect(
           blind,
           `[CALIBRATION TRIPWIRE FAILED — judge may be blind, escalate to Sonnet] ` +
+          `judge_model=${judge.judge_model} ` +
           `correctness=${judge.scores.correctness} (max ${ceiling.correctness_max}) ` +
-          `avg=${judge.average.toFixed(2)} (max ${ceiling.average_max})`,
+          `relevance=${judge.scores.relevance} ` +
+          `tool_selection=${judge.scores.tool_selection} ` +
+          `avg=${judge.average.toFixed(2)} (max ${ceiling.average_max}) ` +
+          `notes="${judge.scores.notes}" ` +
+          `— to escalate, set DEFAULT_JUDGE_MODEL in ` +
+          `control-plane/meta-agent-eval/l2-judge.ts`,
         ).toBe(false);
       } else {
+        // Non-null assertion: the load-time validator at the top of
+        // this file guarantees min_judge_score is present whenever
+        // judge_ceiling is absent.
+        const floor = fixture.min_judge_score!;
         expect(
           judge.average,
-          `judge average ${judge.average.toFixed(2)} < min ${fixture.min_judge_score}`,
-        ).toBeGreaterThanOrEqual(fixture.min_judge_score);
+          `judge average ${judge.average.toFixed(2)} < min ${floor}`,
+        ).toBeGreaterThanOrEqual(floor);
       }
     },
   );
