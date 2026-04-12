@@ -11,7 +11,7 @@
 # Reads DATABASE_URL from the project .env file.
 
 set -euo pipefail
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")/../../control-plane"
 
 # Load DATABASE_URL from .env
 if [ -f .env ]; then
