@@ -38,7 +38,7 @@ class NonRetryableError extends Error {
 import { sanitizeUnicode, sanitizeDeep } from "./runtime/sanitize";
 import { calculateDetailedCost } from "./runtime/cost";
 import { validateUrl } from "./runtime/ssrf";
-import { shouldCompact, compactMessages } from "./runtime/compact";
+import { shouldCompact, compactMessages, pruneToolResults } from "./runtime/compact";
 import { repairConversation } from "./runtime/conversation-repair";
 import { migrateConfig } from "./runtime/config-migrations";
 import { createJsonlLogger, type JsonlLogger } from "./runtime/logger";
@@ -965,6 +965,9 @@ ALWAYS:
     let completionGateInterventions = 0;
     let completionGateReason = "";
     let budgetPressureInjected = false;
+    let maxTokensRecoveryCount = 0;
+    const recentOutputDeltas: Array<{ tokens: number; successfulTools: number }> = [];
+    let diminishingReturnsWarned = false;
     let runPhase: RunPhase = "setup";
     const runPhaseHistory: RunPhase[] = ["setup"];
     const allowedTransitions: Record<RunPhase, RunPhase[]> = {
@@ -1170,6 +1173,16 @@ ALWAYS:
       }
 
       // ── Phase 2.4: Context compression — auto-compact when approaching token limit ──
+      // First pass: prune old tool result bodies (cheap, no LLM call).
+      // This may push us back below the threshold, avoiding full compaction entirely.
+      if (bootstrap.featureFlags?.context_compression !== false && shouldCompact(messages)) {
+        const { messages: pruned, pruned: prunedCount } = pruneToolResults(messages, 6);
+        if (prunedCount > 0) {
+          messages = pruned;
+          logger.info("tool_result_prune", { pruned: prunedCount, turn });
+        }
+      }
+      // Second pass: full compaction if still over threshold after pruning.
       if (bootstrap.featureFlags?.context_compression !== false && shouldCompact(messages)) {
         const compacted = await compactMessages(
           messages,
@@ -1498,6 +1511,41 @@ ALWAYS:
         });
         finalOutput = llm.content;
         break;
+      }
+
+      // ── Max-tokens recovery: retry truncated responses ──
+      // If stop_reason is "length" or "max_tokens", the response was truncated.
+      // For tool calls: truncated JSON args cause silent failures → retry with continuation.
+      // For text: inject a continuation prompt so the model finishes its response.
+      if (llm.stop_reason === "length" || llm.stop_reason === "max_tokens") {
+        if (llm.tool_calls.length > 0) {
+          // Tool call JSON may be truncated — push the truncated content and ask to retry
+          logger.warn("max_tokens_truncated_tools", { turn, tool_count: llm.tool_calls.length, stop_reason: llm.stop_reason });
+          messages.push({ role: "assistant", content: llm.content || "" });
+          messages.push({
+            role: "system",
+            content: "Your previous response was truncated (hit output token limit). One or more tool calls may have incomplete JSON arguments. Please retry your tool calls — output them completely this time.",
+          });
+          await this.emit(p.progress_key, {
+            type: "warning",
+            message: "Response truncated — retrying tool calls with continuation prompt.",
+          });
+          continue; // retry the turn
+        } else if (llm.content && maxTokensRecoveryCount < 2) {
+          // Text was cut off — inject continuation prompt
+          maxTokensRecoveryCount++;
+          logger.info("max_tokens_continuation", { turn, recovery_count: maxTokensRecoveryCount, stop_reason: llm.stop_reason });
+          messages.push({ role: "assistant", content: llm.content });
+          messages.push({
+            role: "user",
+            content: "Continue from where you left off.",
+          });
+          await this.emit(p.progress_key, {
+            type: "system",
+            message: "Response was truncated — requesting continuation.",
+          });
+          continue; // retry the turn
+        }
       }
 
       // ── Thinking trace (only when LLM is reasoning before tool calls) ──
@@ -2082,6 +2130,41 @@ ALWAYS:
         finalOutput = `Multiple tools are failing repeatedly (${failingTools.join(", ")}). Stopped to avoid wasting resources.`;
         terminationReason = "loop_detected";
         break;
+      }
+
+      // ── Diminishing returns detection ──
+      // Track output tokens per turn. If 3+ consecutive turns produce very few
+      // new tokens with no successful tool calls, the agent is spinning without
+      // making meaningful progress. Inject a nudge or break.
+      {
+        const successfulTools = toolResultEntries.filter(tr => !tr.error).length;
+        recentOutputDeltas.push({ tokens: llm.output_tokens, successfulTools });
+        if (recentOutputDeltas.length > 5) recentOutputDeltas.shift();
+        if (recentOutputDeltas.length >= 3) {
+          const lastThree = recentOutputDeltas.slice(-3);
+          const allLowOutput = lastThree.every(d => d.tokens < 500);
+          const noSuccessfulTools = lastThree.every(d => d.successfulTools === 0);
+          if (allLowOutput && noSuccessfulTools) {
+            if (!diminishingReturnsWarned) {
+              diminishingReturnsWarned = true;
+              messages.push({
+                role: "system",
+                content: "You appear to be making very little progress over the last few turns (low output, no successful tool calls). Either try a fundamentally different approach or provide your best answer now.",
+              });
+              await this.emit(p.progress_key, {
+                type: "warning",
+                message: "Diminishing returns detected — agent nudged to change approach or conclude.",
+              });
+              logger.warn("diminishing_returns", { turn, recent_deltas: lastThree });
+            } else {
+              // Already warned once — break
+              terminationReason = "diminishing_returns";
+              finalOutput = "I was unable to make meaningful progress after several attempts. Please try rephrasing your request or breaking it into smaller steps.";
+              await this.emit(p.progress_key, { type: "warning", message: "Diminishing returns — stopping after repeated low-progress turns." });
+              break;
+            }
+          }
+        }
       }
 
       // Keep messages under 1 MiB (Workflow step return limit)
