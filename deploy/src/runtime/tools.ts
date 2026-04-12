@@ -2521,7 +2521,6 @@ async function dispatch(
       return JSON.stringify({ success: cmResult.success, result: cmResult.result, error: cmResult.error, logs: cmResult.logs, toolCallCount: cmResult.toolCallCount, latencyMs: cmResult.latencyMs, costUsd: cmResult.costUsd });
     }
 
-    case "codemode-transform":
     case "codemode": {
       const codemodeAction = args.action || normalizedTool.replace("codemode-", "") || "transform";
       const allToolsForCm = effectiveToolDefs();
