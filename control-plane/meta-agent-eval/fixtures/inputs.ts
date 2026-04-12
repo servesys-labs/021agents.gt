@@ -91,6 +91,99 @@ export const FIXTURES: EvalFixture[] = [
     max_cost_usd: 0.01,
     min_judge_score: 3.0,
   },
+  // ── Zero-tool capability questions ──────────────────────────────
+  // Three fixtures that exercise the meta-agent's prose-only
+  // capability-enumeration path. None of them should call any tool.
+  // forbidden_tools uses the canonical 7-item mutation set (all write
+  // paths) derived from the meta-agent-chat.ts tool catalog. Read
+  // tools (read_agent_config, read_sessions, read_observability, etc.)
+  // are permitted — the LLM may choose to peek at live state to
+  // illustrate its explanation, which is fine for capability questions.
+  {
+    id: "explain-tools-zero-tools",
+    mode: "live",
+    agent_name: "test-research-agent",
+    user_message: "What tools can you use to configure my agent?",
+    judge_expected_behavior:
+      "A good response enumerates the configuration-management tools " +
+      "available to the meta-agent (reading and updating agent config, " +
+      "managing connectors, managing feature flags, managing skills) in " +
+      "plain prose. It should NOT call any mutation tools — this is a " +
+      "capability-enumeration question, not a request to change anything. " +
+      "Calling read_agent_config to illustrate is acceptable but not " +
+      "required.",
+    required_tools: [],
+    forbidden_tools: [
+      "update_agent_config",
+      "create_sub_agent",
+      "run_query",
+      "start_training",
+      "activate_trained_config",
+      "rollback_training",
+      "manage_skills",
+    ],
+    max_rounds: 2,
+    max_cost_usd: 0.01,
+    min_judge_score: 3.0,
+  },
+  {
+    id: "explain-modes-zero-tools",
+    mode: "live",
+    agent_name: "test-research-agent",
+    user_message: "What's the difference between demo mode and live mode?",
+    judge_expected_behavior:
+      "A good response explains that demo mode is a showcase/exploration " +
+      "experience (minimal questions, auto-generated sample agents, " +
+      "emphasis on what's possible) while live mode is a structured " +
+      "interview for building production agents (data sources, connectors, " +
+      "access patterns, business rules). This is a pure conceptual question " +
+      "with a canonical answer in the system prompt — zero tool calls are " +
+      "needed. Any mutation tool call is wrong.",
+    required_tools: [],
+    forbidden_tools: [
+      "update_agent_config",
+      "create_sub_agent",
+      "run_query",
+      "start_training",
+      "activate_trained_config",
+      "rollback_training",
+      "manage_skills",
+    ],
+    max_rounds: 2,
+    max_cost_usd: 0.01,
+    min_judge_score: 3.0,
+  },
+  // Mode-variation canary. Identical user_message to the first fixture
+  // (`explain-skills-zero-tools`) but `mode: "demo"`. Asserts that the
+  // demo-mode prompt extraction (Phase 7.3) still produces a coherent
+  // capability explanation — this is the canary for Phase 8/9 mode-
+  // specific prompt refactors. If demo-mode starts scoring lower than
+  // live-mode on the same question, the mode body has regressed.
+  {
+    id: "explain-skills-demo-mode",
+    mode: "demo",
+    agent_name: "test-research-agent",
+    user_message: "Explain what skills you can help me manage on this agent.",
+    judge_expected_behavior:
+      "A good response describes the skill-management capabilities in " +
+      "plain prose. Demo mode voices may be more energetic or showcase-" +
+      "oriented than live mode, but the substance of the answer must " +
+      "still be accurate — what skills are, how they're managed, what " +
+      "the meta-agent can do for them. No mutation tool calls.",
+    required_tools: [],
+    forbidden_tools: [
+      "update_agent_config",
+      "create_sub_agent",
+      "run_query",
+      "start_training",
+      "activate_trained_config",
+      "rollback_training",
+      "manage_skills",
+    ],
+    max_rounds: 2,
+    max_cost_usd: 0.01,
+    min_judge_score: 3.0,
+  },
   // ── Calibration tripwire ────────────────────────────────────────
   // Grades the JUDGE, not the meta-agent. Ships a pre-baked nonsense
   // response paired with a perfectly normal user message. A sharp
