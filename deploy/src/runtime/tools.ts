@@ -1018,9 +1018,18 @@ export async function executeTools(
         ))
       : [];
 
-    // Execute unsafe tools serially (each gets its own child abort)
+    // Execute unsafe tools serially (each gets its own child abort).
+    // Check parent abort between iterations so user cancellation skips remaining tools.
     const unsafeResults: ToolResult[] = [];
     for (const tc of unsafe) {
+      if (turnAbort.signal.aborted) {
+        unsafeResults.push({
+          tool: tc.name, tool_call_id: tc.id, result: "",
+          error: `Tool execution skipped: ${turnAbort.signal.reason || "parent aborted"}`,
+          latency_ms: 0, cost_usd: 0,
+        });
+        continue;
+      }
       const childAbort = createChildAbortController(turnAbort);
       unsafeResults.push(await executeSingleTool(env, tc, sessionId, effectiveEnabledTools, childAbort.signal));
     }
@@ -1034,9 +1043,19 @@ export async function executeTools(
       tool: tc.name, tool_call_id: tc.id, name: tc.name, result: "", error: "Result missing", latency_ms: 0, cost_usd: 0,
     });
   }
+  // Non-parallel path: execute all tools serially.
+  // Pass parent abort through so cancellation skips remaining tools.
   const results: ToolResult[] = [];
   for (const tc of toolCalls) {
-    results.push(await executeSingleTool(env, tc, sessionId, effectiveEnabledTools));
+    if (parentAbort?.signal.aborted) {
+      results.push({
+        tool: tc.name, tool_call_id: tc.id, result: "",
+        error: `Tool execution skipped: ${parentAbort.signal.reason || "aborted"}`,
+        latency_ms: 0, cost_usd: 0,
+      });
+      continue;
+    }
+    results.push(await executeSingleTool(env, tc, sessionId, effectiveEnabledTools, parentAbort?.signal));
   }
   return results;
 }

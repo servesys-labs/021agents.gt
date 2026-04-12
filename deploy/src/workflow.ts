@@ -964,6 +964,7 @@ ALWAYS:
     let artifactSynthesisValidated = false;
     let completionGateInterventions = 0;
     let completionGateReason = "";
+    let budgetPressureInjected = false;
     let runPhase: RunPhase = "setup";
     const runPhaseHistory: RunPhase[] = ["setup"];
     const allowedTransitions: Record<RunPhase, RunPhase[]> = {
@@ -1058,6 +1059,32 @@ ALWAYS:
       lastWorkflowTurn = turn;
       const turnStartedAt = Date.now();
 
+      // ── Budget pressure signaling — warn the model before hard cutoffs ──
+      // Inspired by Hermes: inject a system message at ~80% so the model
+      // wraps up gracefully instead of being abruptly terminated.
+      {
+        const elapsed = Date.now() - startTime;
+        const turnPct = turn / config.max_turns;
+        const wallPct = elapsed / 270_000;
+        const costPct = totalCost / config.budget_limit_usd;
+        const maxPct = Math.max(turnPct, wallPct, costPct);
+        if (maxPct >= 0.8 && maxPct < 1.0 && !budgetPressureInjected) {
+          budgetPressureInjected = true;
+          const reasons: string[] = [];
+          if (turnPct >= 0.8) reasons.push(`${config.max_turns - turn} turns remaining`);
+          if (wallPct >= 0.8) reasons.push(`~${Math.round((270_000 - elapsed) / 1000)}s wall-clock remaining`);
+          if (costPct >= 0.8) reasons.push(`$${(config.budget_limit_usd - totalCost).toFixed(4)} budget remaining`);
+          messages.push({
+            role: "system",
+            content: `⚠️ Resources running low (${reasons.join(", ")}). Prioritize completing your current approach and provide a final answer soon.`,
+          });
+          await this.emit(p.progress_key, {
+            type: "warning",
+            message: `Budget pressure: ${reasons.join(", ")}. Agent notified to wrap up.`,
+          });
+        }
+      }
+
       // ── Wall-clock guard (4.5 min cap — 30s buffer before CF 5-min limit) ──
       if (Date.now() - startTime > 270_000) {
         terminationReason = "wall_clock_limit";
@@ -1151,6 +1178,17 @@ ALWAYS:
         compactionCount++;
         turnCompactionTriggered = true;
         turnMessagesDropped += Math.max(0, dropped);
+        // Compaction can orphan tool_use/tool_result pairs at the keep boundary.
+        // Re-run repair so the LLM never sees mismatched pairs (→ API 400).
+        {
+          const { messages: postCompactRepaired, repairs: postCompactRepairs } = repairConversation(messages);
+          const postCompactTotal = postCompactRepairs.orphanedUses + postCompactRepairs.orphanedResults + postCompactRepairs.duplicateIds + postCompactRepairs.emptyResults;
+          if (postCompactTotal > 0) {
+            messages = postCompactRepaired;
+            repairCount += postCompactTotal;
+            logger.info("post_compact_repair", postCompactRepairs);
+          }
+        }
         await this.emit(p.progress_key, {
           type: "system",
           message: `Context compressed: ${dropped} messages summarized to stay within token limits.`,

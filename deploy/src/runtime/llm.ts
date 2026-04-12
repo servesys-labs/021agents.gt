@@ -290,16 +290,19 @@ async function _doCallLLM(
   }
 
   // Phase 2.5: Prompt cache optimization for Anthropic models
-  // Mark the last system message as cacheable. The API caches everything
-  // up to this point, giving ~90% cost savings on repeated prefixes.
+  // Mark the FIRST system message as cacheable — it contains the stable
+  // system prompt that doesn't change between turns. Marking the last
+  // system message (which may contain dynamic reasoning strategy or
+  // coordinator prompts) would move the cache boundary every turn,
+  // negating savings. The API caches everything up to the marked block.
   if (model.includes("anthropic/") || model.includes("claude")) {
     const systemMsgs = payload.messages.filter((m: any) => m.role === "system");
     if (systemMsgs.length > 0) {
-      const lastSystem = systemMsgs[systemMsgs.length - 1];
+      const stableSystem = systemMsgs[0];
       // Anthropic cache_control on content blocks
-      if (typeof lastSystem.content === "string") {
-        lastSystem.content = [
-          { type: "text", text: lastSystem.content, cache_control: { type: "ephemeral" } }
+      if (typeof stableSystem.content === "string") {
+        stableSystem.content = [
+          { type: "text", text: stableSystem.content, cache_control: { type: "ephemeral" } }
         ];
       }
     }
