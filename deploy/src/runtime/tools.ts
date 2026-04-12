@@ -817,14 +817,14 @@ const TOOL_COSTS: Record<string, ToolCostModel> = {
   "query-pipeline":    { flat_usd: 0.00001,   per_ms_usd: 0 },          // DB query + R2 read
   "send-to-pipeline":  { flat_usd: 0.00005, per_ms_usd: 0.0000001 },     // R2 PUT + Workers AI embed + Vectorize write
 
-  // Codemode extended tools (V8 isolate compute + tool call costs)
+  // Codemode (consolidated verb — V8 isolate compute)
   "run-codemode":          { flat_usd: 0.0001,  per_ms_usd: 0.000012 },  // Snippet load + isolate
-  "codemode-transform":    { flat_usd: 0,        per_ms_usd: 0.000012 },  // Isolate only
-  "codemode-validate":     { flat_usd: 0,        per_ms_usd: 0.000012 },  // Isolate only
-  "codemode-orchestrate":  { flat_usd: 0,        per_ms_usd: 0.000012 },  // Isolate only
-  "codemode-test":         { flat_usd: 0,        per_ms_usd: 0.000012 },  // Isolate only
-  "codemode-generate-mcp": { flat_usd: 0,        per_ms_usd: 0.000012 },  // Isolate only
+  "codemode":              { flat_usd: 0,        per_ms_usd: 0.000012 },  // Isolate only
   "mcp-wrap":              { flat_usd: 0.001,    per_ms_usd: 0 },         // Spec parsing + R2 write
+
+  // Consolidated verbs (Phase 9)
+  "platform":              { flat_usd: 0.00005,  per_ms_usd: 0 },         // DB query per resource action
+  "sql":                   { flat_usd: 0.00005,  per_ms_usd: 0 },         // Templated DB query
 
   // Self-awareness (DB queries)
   "self-check":           { flat_usd: 0.00005,  per_ms_usd: 0 },          // DB query
@@ -5970,7 +5970,7 @@ const TOOL_KEYWORDS: Record<string, string[]> = {
   "session|conversation|history|past chat": ["session-search", "conversation-intel"],
   // HTTP & API
   "api|http|request|fetch|post|get|endpoint|webhook": ["http-request", "mcp-call"],
-  "mcp|model context|external tool": ["mcp-call", "manage-mcp", "mcp-wrap"],
+  "mcp|model context|external tool": ["mcp-call", "platform", "mcp-wrap"],
   // Multi-agent
   "mixture|ensemble|multiple models|multi-agent": ["mixture-of-agents"],
   // Inter-agent coordination (delegated runs)
