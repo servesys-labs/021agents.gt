@@ -62,6 +62,7 @@ const REQUIRED_META_SKILLS = [
   "wf-feature-flags",
   "wf-cost-analysis",
   "pick-reasoning",
+  "classify-permission",
 ] as const;
 for (const name of REQUIRED_META_SKILLS) {
   if (!META_SKILL_BODIES[name]) {

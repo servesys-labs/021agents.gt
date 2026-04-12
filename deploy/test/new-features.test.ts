@@ -68,71 +68,7 @@ describe("buildCoordinatorPrompt", () => {
 
 import { classifyPermission, shouldAutoApprove, ALWAYS_REQUIRE_APPROVAL, type PermissionLevel } from "../src/runtime/permission-classifier";
 
-describe("classifyPermission", () => {
-  // Safe tools
-  it("classifies read-only tools as safe", () => {
-    const safeTools = ["read-file", "grep", "glob", "web-search", "knowledge-search", "discover-tools"];
-    for (const tool of safeTools) {
-      const result = classifyPermission(tool, {});
-      expect(result.level).toBe("safe");
-      expect(result.autoApprove).toBe(true);
-    }
-  });
-
-  // Dangerous tools
-  it("classifies dangerous tools correctly", () => {
-    const dangerousTools = ["bash", "python-exec", "dynamic-exec", "delete-agent"];
-    for (const tool of dangerousTools) {
-      const result = classifyPermission(tool, { command: "some-command" });
-      expect(result.level).toBe("dangerous");
-    }
-  });
-
-  it("detects destructive bash commands", () => {
-    const result = classifyPermission("bash", { command: "rm -rf /workspace" });
-    expect(result.level).toBe("dangerous");
-    expect(result.autoApprove).toBe(false);
-    expect(result.reason).toContain("destructive");
-  });
-
-  it("auto-approves safe bash patterns", () => {
-    const safeCmds = ["ls -la", "git status", "npm test", "pwd", "cat file.txt"];
-    for (const cmd of safeCmds) {
-      const result = classifyPermission("bash", { command: cmd });
-      expect(result.autoApprove).toBe(true);
-    }
-  });
-
-  it("blocks DROP TABLE in bash", () => {
-    const result = classifyPermission("bash", { command: 'psql -c "DROP TABLE users"' });
-    expect(result.autoApprove).toBe(false);
-  });
-
-  // Review tools
-  it("classifies write-file as review", () => {
-    const result = classifyPermission("write-file", { path: "/etc/passwd" });
-    expect(result.level).toBe("review");
-  });
-
-  it("auto-approves workspace writes", () => {
-    const result = classifyPermission("write-file", { path: "/workspace/src/index.ts" });
-    expect(result.autoApprove).toBe(true);
-    expect(result.reason).toContain("safe location");
-  });
-
-  it("auto-approves test file writes", () => {
-    const result = classifyPermission("edit-file", { path: "/some/test_helper.ts" });
-    expect(result.autoApprove).toBe(true);
-  });
-
-  // Unknown tools
-  it("conservatively handles unknown tools", () => {
-    const result = classifyPermission("unknown-tool-xyz", {});
-    expect(result.level).toBe("review");
-    expect(result.autoApprove).toBe(false);
-  });
-
-  // ALWAYS_REQUIRE_APPROVAL backstop
+describe("classifyPermission — simplified (Phase 9.4)", () => {
   it("backstop tools are always dangerous + never auto-approved", () => {
     for (const tool of ALWAYS_REQUIRE_APPROVAL) {
       const result = classifyPermission(tool, {});
@@ -147,24 +83,50 @@ describe("classifyPermission", () => {
     expect(result.autoApprove).toBe(false);
     expect(result.reason).toBe("irreducible safety floor");
   });
+
+  it("detects destructive bash commands", () => {
+    const result = classifyPermission("bash", { command: "rm -rf /workspace" });
+    expect(result.level).toBe("dangerous");
+    expect(result.autoApprove).toBe(false);
+    expect(result.reason).toContain("destructive");
+  });
+
+  it("blocks DROP TABLE in args", () => {
+    const result = classifyPermission("bash", { command: 'psql -c "DROP TABLE users"' });
+    expect(result.autoApprove).toBe(false);
+  });
+
+  it("allows non-destructive tools through", () => {
+    const tools = ["read-file", "grep", "glob", "web-search", "write-file", "bash"];
+    for (const tool of tools) {
+      const result = classifyPermission(tool, {});
+      expect(result.autoApprove, `${tool} should auto-approve without destructive args`).toBe(true);
+    }
+  });
+
+  it("allows unknown tools with default allow", () => {
+    const result = classifyPermission("unknown-tool-xyz", {});
+    expect(result.level).toBe("review");
+    expect(result.autoApprove).toBe(true);
+  });
 });
 
-describe("shouldAutoApprove", () => {
+describe("shouldAutoApprove — simplified (Phase 9.4)", () => {
   it("returns false when auto_approve not configured", () => {
     expect(shouldAutoApprove("read-file", {}, {})).toBe(false);
     expect(shouldAutoApprove("read-file", {}, undefined)).toBe(false);
   });
 
-  it("returns true for safe tools when auto_approve enabled", () => {
+  it("returns true for non-destructive tools when auto_approve enabled", () => {
     expect(shouldAutoApprove("grep", {}, { auto_approve: true })).toBe(true);
   });
 
-  it("blocks dangerous tools even with auto_approve", () => {
+  it("blocks destructive args even with auto_approve", () => {
     const config = { auto_approve: true, require_confirmation_for_destructive: true };
     expect(shouldAutoApprove("bash", { command: "rm -rf /" }, config)).toBe(false);
   });
 
-  it("allows safe bash with auto_approve + destructive check", () => {
+  it("allows safe bash with auto_approve", () => {
     const config = { auto_approve: true, require_confirmation_for_destructive: true };
     expect(shouldAutoApprove("bash", { command: "ls -la" }, config)).toBe(true);
   });

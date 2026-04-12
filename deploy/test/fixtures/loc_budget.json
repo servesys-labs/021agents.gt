@@ -5,7 +5,7 @@
     "src/runtime/skills.ts": 180,
     "src/runtime/tools.ts": 8045,
     "src/runtime/reasoning-strategies.ts": 223,
-    "src/runtime/permission-classifier.ts": 155
+    "src/runtime/permission-classifier.ts": 62
   },
   "phase_targets": {
     "_comment": "Target LoC after each phase completes. Not enforced; documentation of intent.",
