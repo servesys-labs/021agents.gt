@@ -42,7 +42,7 @@ import { shouldCompact, compactMessages, pruneToolResults } from "./runtime/comp
 import { repairConversation } from "./runtime/conversation-repair";
 import { migrateConfig } from "./runtime/config-migrations";
 import { createJsonlLogger, type JsonlLogger } from "./runtime/logger";
-import { readMailbox } from "./runtime/mailbox";
+import { readMailbox, waitForCorrelatedResponse, PERMISSION_TIMEOUT_MS, POLL_INTERVAL_MS } from "./runtime/mailbox";
 import { stepIdempotencyKey, hashArgs, getStepResult, cacheStepResult, isDuplicateWrite, writeUUID, clearSessionDedup } from "./runtime/idempotency";
 import { backupCostState, hydrateFromSnapshot } from "./runtime/do-lifecycle";
 import { compactProgressEvents } from "./runtime/ws-dedup";
@@ -263,6 +263,8 @@ export interface AgentRunParams {
   /** If set, this is a delegated sub-agent run */
   parent_session_id?: string;
   parent_depth?: number;
+  /** Parent's trace_id — links child to parent in telemetry for cross-agent tracing */
+  parent_trace_id?: string;
   /** Override the system prompt for this run (used by training eval) */
   system_prompt_override?: string;
   /** Media URLs attached to the user message (images, audio, documents) */
@@ -987,6 +989,7 @@ ALWAYS:
     let completionGateInterventions = 0;
     let completionGateReason = "";
     let budgetPressureInjected = false;
+    let planApprovedByParent = false;
     let maxTokensRecoveryCount = 0;
     const recentOutputDeltas: Array<{ tokens: number; successfulTools: number }> = [];
     let diminishingReturnsWarned = false;
@@ -1579,7 +1582,7 @@ ALWAYS:
       // ── No tools → final answer (stream as tokens for the frontend) ──
       if (llm.tool_calls.length === 0) {
         transitionPhase("synthesizing");
-        const completionGate = planOnlyRequested
+        const completionGate = (planOnlyRequested || planApprovedByParent)
           ? { blocked: false, reason: "" }
           : looksLikePrematurePlanCompletion(llm.content, p.input, totalToolCalls);
         if (completionGate.blocked) {
@@ -1817,6 +1820,7 @@ ALWAYS:
                   CONTROL_PLANE_URL: (this.env as any).CONTROL_PLANE_URL,
                   LOCAL_SEARCH_URL: (this.env as any).LOCAL_SEARCH_URL,
                   // MVP: No paid model API keys — Gemma only
+                  DO_SQL: (this.env as any).DO_SQL,
                   DO_SESSION_ID: p.do_session_id,
                   __agentConfig: config,
                   __orgId: p.org_id || "default",
@@ -2084,14 +2088,103 @@ ALWAYS:
         backupCostState(this.env as any, sessionId, totalCost, turn).catch(() => {});
       }
 
-      // ── Phase 6.1: Mailbox IPC — check for messages from parent/siblings ──
+      // ── Phase 6.1: Mailbox IPC ──────────────────────────────────
+      // All agents poll their mailbox — parents receive permission_request
+      // from children, children receive permission_response / plan_approval
+      // from parents, and any agent can receive text / shutdown.
       let shutdownRequested = false;
-      if (p.parent_session_id) {
-        try {
-          const mailMessages = readMailbox(
-            (this.env as any).DO_SQL,
-            sessionId,
-          );
+
+      // Part A: Blocking wait — if this turn's tools sent a permission_request,
+      // pause the turn loop until the correlated response arrives or timeout.
+      for (const tr of toolResultEntries) {
+        if (tr.name !== "send-message" || tr.error) continue;
+        let parsed: { awaiting_approval?: boolean; correlation_id?: string } | undefined;
+        try { parsed = JSON.parse(tr.result); } catch { continue; }
+        if (!parsed?.awaiting_approval || !parsed.correlation_id) continue;
+
+        const cid = parsed.correlation_id;
+        const doSql = (this.env as any).DO_SQL;
+        if (!doSql) break; // no mailbox available
+
+        (this.env as any).TELEMETRY_QUEUE?.send?.({
+          type: "runtime_event",
+          payload: {
+            event_type: "permission_requested" satisfies RuntimeEventType,
+            session_id: sessionId, org_id: p.org_id || "", agent_name: p.agent_name,
+            correlation_id: cid, turn,
+          },
+        }).catch(() => {});
+
+        await this.emit(p.progress_key, {
+          type: "system",
+          message: "Waiting for permission from parent agent…",
+        });
+
+        const response = await waitForCorrelatedResponse(
+          doSql, sessionId, cid, PERMISSION_TIMEOUT_MS, POLL_INTERVAL_MS,
+        );
+
+        if (!response) {
+          // Timeout — treat as denial
+          terminationReason = "permission_timeout";
+          finalOutput = "Permission request timed out — parent agent did not respond within the allowed window.";
+          (this.env as any).TELEMETRY_QUEUE?.send?.({
+            type: "runtime_event",
+            payload: {
+              event_type: "permission_timeout" satisfies RuntimeEventType,
+              session_id: sessionId, org_id: p.org_id || "", agent_name: p.agent_name,
+              correlation_id: cid, turn,
+            },
+          }).catch(() => {});
+          await this.emit(p.progress_key, { type: "system", message: "Permission request timed out." });
+          shutdownRequested = true;
+          break;
+        }
+
+        // Got a response — inject decision into conversation
+        let decision: { approved?: boolean; reason?: string } = {};
+        try { decision = JSON.parse(response.payload); } catch { decision = { reason: response.payload }; }
+        const approved = decision.approved !== false;
+        const eventType = approved
+          ? "permission_granted" satisfies RuntimeEventType
+          : "permission_denied" satisfies RuntimeEventType;
+
+        (this.env as any).TELEMETRY_QUEUE?.send?.({
+          type: "runtime_event",
+          payload: {
+            event_type: eventType,
+            session_id: sessionId, org_id: p.org_id || "", agent_name: p.agent_name,
+            correlation_id: cid, turn, approved, reason: decision.reason || "",
+          },
+        }).catch(() => {});
+
+        if (approved) {
+          messages.push({
+            role: "system",
+            content: `[Permission GRANTED by parent agent]${decision.reason ? `: ${decision.reason}` : ""}. You may proceed with the action you requested permission for.`,
+          });
+          await this.emit(p.progress_key, {
+            type: "system",
+            message: `Permission granted by parent: ${decision.reason || "no reason given"}`,
+          });
+        } else {
+          terminationReason = "permission_denied";
+          finalOutput = `Permission denied by parent agent${decision.reason ? `: ${decision.reason}` : ""}. Task cannot proceed.`;
+          await this.emit(p.progress_key, {
+            type: "system",
+            message: `Permission denied by parent: ${decision.reason || "no reason given"}`,
+          });
+          shutdownRequested = true;
+          break;
+        }
+      }
+      if (shutdownRequested) break;
+
+      // Part B: Read incoming messages from parent, children, or siblings.
+      try {
+        const doSql = (this.env as any).DO_SQL;
+        if (doSql) {
+          const mailMessages = readMailbox(doSql, sessionId);
           for (const mm of mailMessages) {
             if (mm.message_type === "shutdown") {
               await this.emit(p.progress_key, { type: "system", message: "Received shutdown signal from parent agent." });
@@ -2101,12 +2194,11 @@ ALWAYS:
               break;
             }
             if (mm.message_type === "text") {
-              // Inject parent message into conversation
               messages.push({ role: "system", content: `[Message from parent agent]: ${mm.payload}` });
             }
             if (mm.message_type === "permission_response") {
-              // Parent responded to a permission request from this child.
-              // Inject the decision so the LLM can act on it.
+              // Unsolicited or late permission_response (no blocking wait matched it).
+              // Inject so the LLM sees it anyway.
               let decision: { approved?: boolean; reason?: string } = {};
               try { decision = JSON.parse(mm.payload); } catch { decision = { reason: mm.payload }; }
               const approved = decision.approved !== false;
@@ -2122,10 +2214,21 @@ ALWAYS:
               });
             }
             if (mm.message_type === "plan_approval") {
-              // Parent approved or rejected a plan this child proposed.
               let approval: { approved?: boolean; feedback?: string } = {};
               try { approval = JSON.parse(mm.payload); } catch { approval = { feedback: mm.payload }; }
               const approved = approval.approved !== false;
+              if (approved) planApprovedByParent = true;
+              const eventType = approved
+                ? "plan_approved" satisfies RuntimeEventType
+                : "plan_rejected" satisfies RuntimeEventType;
+              (this.env as any).TELEMETRY_QUEUE?.send?.({
+                type: "runtime_event",
+                payload: {
+                  event_type: eventType,
+                  session_id: sessionId, org_id: p.org_id || "", agent_name: p.agent_name,
+                  correlation_id: mm.correlation_id || "", turn,
+                },
+              }).catch(() => {});
               messages.push({
                 role: "system",
                 content: approved
@@ -2139,14 +2242,24 @@ ALWAYS:
             }
             if (mm.message_type === "permission_request") {
               // A child of THIS agent is requesting permission.
-              // Inject it so the LLM can decide and respond via mailbox.
               let request: { action?: string; reason?: string; child_session_id?: string } = {};
               try { request = JSON.parse(mm.payload); } catch { request = { reason: mm.payload }; }
+              (this.env as any).TELEMETRY_QUEUE?.send?.({
+                type: "runtime_event",
+                payload: {
+                  event_type: "permission_requested" satisfies RuntimeEventType,
+                  session_id: sessionId, org_id: p.org_id || "", agent_name: p.agent_name,
+                  from_child: mm.from_session, correlation_id: mm.correlation_id || "",
+                  action: request.action || "", turn,
+                },
+              }).catch(() => {});
               messages.push({
                 role: "system",
-                content: `[Permission request from child agent (session: ${mm.from_session})]: ` +
+                content: `[Permission request from child agent (session: ${mm.from_session})]` +
+                  `${mm.correlation_id ? ` (correlation: ${mm.correlation_id})` : ""}: ` +
                   `Action: ${request.action || "unknown"}. Reason: ${request.reason || "none given"}. ` +
-                  `To respond, use the mailbox to send a permission_response to session ${mm.from_session}.`,
+                  `To respond, use send-message with message_type "permission_response", ` +
+                  `to "${mm.from_session}", and correlation_id "${mm.correlation_id || ""}".`,
               });
               await this.emit(p.progress_key, {
                 type: "system",
@@ -2154,9 +2267,9 @@ ALWAYS:
               });
             }
           }
-        } catch { /* DO_SQL may not be available in workflow steps */ }
-        if (shutdownRequested) break;
-      }
+        }
+      } catch { /* DO_SQL may not be available in workflow steps */ }
+      if (shutdownRequested) break;
 
       // ── Phase 1.4: Loop detection ──
       // Track tool call signatures (name + args hash + error presence).
@@ -2632,6 +2745,9 @@ ALWAYS:
           compaction_count: compactionCount,
           termination_reason: result.termination_reason || "completed",
           trace_id: traceId,
+          parent_session_id: p.parent_session_id || "",
+          parent_trace_id: p.parent_trace_id || "",
+          depth: Number(p.parent_depth) || 0,
           channel: p.channel || "workflow",
           ...(p.conversation_id ? { conversation_id: p.conversation_id } : {}),
           query_profile: queryProfile.key,

@@ -787,16 +787,23 @@ CREATE TABLE IF NOT EXISTS a2a_artifacts (
 );
 
 CREATE TABLE IF NOT EXISTS delegation_events (
-  id                BIGSERIAL PRIMARY KEY,
-  org_id            TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
-  parent_session_id TEXT,
-  child_session_id  TEXT,
-  caller_agent      TEXT NOT NULL DEFAULT '',
-  callee_agent      TEXT NOT NULL DEFAULT '',
-  task_summary      TEXT NOT NULL DEFAULT '',
-  status            TEXT NOT NULL DEFAULT '',
-  cost_usd          NUMERIC(18,8) NOT NULL DEFAULT 0,
-  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  id                  BIGSERIAL PRIMARY KEY,
+  org_id              TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+  parent_session_id   TEXT,
+  child_session_id    TEXT,
+  parent_agent_name   TEXT NOT NULL DEFAULT '',
+  child_agent_name    TEXT NOT NULL DEFAULT '',
+  parent_trace_id     TEXT,
+  child_trace_id      TEXT,
+  depth               INT NOT NULL DEFAULT 0,
+  correlation_id      TEXT,
+  status              TEXT NOT NULL DEFAULT '',
+  child_cost_usd      NUMERIC(18,8) NOT NULL DEFAULT 0,
+  input_preview       TEXT NOT NULL DEFAULT '',
+  output_preview      TEXT NOT NULL DEFAULT '',
+  spawn_mode          TEXT NOT NULL DEFAULT 'sync' CHECK (spawn_mode IN ('sync', 'async', 'swarm')),
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at        TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS run_artifacts (
@@ -2300,6 +2307,8 @@ CREATE INDEX IF NOT EXISTS idx_run_artifacts_org_created ON run_artifacts(org_id
 CREATE INDEX IF NOT EXISTS idx_run_artifacts_storage_key ON run_artifacts(storage_key);
 CREATE INDEX IF NOT EXISTS idx_delegation_events_org_id ON delegation_events(org_id);
 CREATE INDEX IF NOT EXISTS idx_delegation_events_parent_session ON delegation_events(parent_session_id);
+CREATE INDEX IF NOT EXISTS idx_delegation_events_parent_trace ON delegation_events(parent_trace_id);
+CREATE INDEX IF NOT EXISTS idx_delegation_events_correlation ON delegation_events(correlation_id);
 
 -- Observability & Telemetry
 CREATE INDEX IF NOT EXISTS idx_otel_events_org_agent ON otel_events(org_id, agent_name);
