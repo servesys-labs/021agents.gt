@@ -2435,7 +2435,7 @@ async function executeTool(
           "delegation_events", "tool_executions", "session_progress",
           "trace_annotations", "trace_lineage",
           // Feedback & quality
-          "session_feedback", "session_feedback", "span_feedback",
+          "session_feedback", "span_feedback",
           // Security & audit
           "audit_log", "security_events", "guardrail_events", "api_access_log",
           // Alerting & SLOs

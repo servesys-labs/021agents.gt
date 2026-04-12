@@ -186,7 +186,7 @@ export async function settleCreditHold(
 ): Promise<SettleCreditHoldResult> {
   const safeActualCost = Math.max(0, Number(actualCostUsd) || 0);
   const [hold] = await sql`
-    SELECT hold_id, hold_amount_usd, status
+    SELECT hold_id, hold_amount_usd, status, actual_cost_usd
     FROM credit_holds
     WHERE hold_id = ${holdId} AND org_id = ${orgId}
     FOR UPDATE
