@@ -36,7 +36,6 @@ import { buildEvalDbClientMock, type MockSqlFn } from "./fixtures/universe";
   for (const path of candidates) {
     if (existsSync(path)) {
       try {
-        // @ts-expect-error — process.loadEnvFile is stable in Node 22+
         process.loadEnvFile(path);
         break;
       } catch {
@@ -61,7 +60,7 @@ vi.mock("../src/db/client", () => buildEvalDbClientMock(() => mockSql));
 import { runMetaChat, type MetaChatMessage } from "../src/logic/meta-agent-chat";
 import { createUniverseSqlMock } from "./fixtures/universe";
 import { FIXTURES, type EvalFixture } from "./fixtures/inputs";
-import { summarizeTrace, runL1Checks } from "./l1-checks";
+import { summarizeTrace, runL1Checks, type TraceSummary } from "./l1-checks";
 import { judgeTrace } from "./l2-judge";
 
 // ── Environment ─────────────────────────────────────────────────────
@@ -105,43 +104,59 @@ describe.skipIf(!gatewayEnv)("meta-agent eval harness", () => {
     async (_id: string, fixture: EvalFixture) => {
       const env = gatewayEnv!;
 
-      // Build a MetaChatContext structurally — the interface is not
-      // exported, so we assemble a plain object that matches the shape
-      // consumed by runMetaChat. Hyperdrive is passed through to
-      // withOrgDb which is mocked, so {} works.
-      const ctx = {
-        agentName: fixture.agent_name,
-        orgId: "eval-org",
-        userId: "eval-user",
-        userRole: "owner",
-        hyperdrive: {} as unknown,
-        openrouterApiKey: "",
-        cloudflareAccountId: env.cloudflareAccountId,
-        aiGatewayId: env.aiGatewayId,
-        cloudflareApiToken: env.aiGatewayToken,
-        aiGatewayToken: env.aiGatewayToken,
-        gpuServiceKey: env.gpuServiceKey,
-        // Force the Gemma path unconditionally — the whole reason this
-        // harness exists is to grade the production gemma-4-31b path.
-        modelPath: "gemma" as const,
-        mode: fixture.mode,
-        env: {
-          RUNTIME: undefined,
-          SERVICE_TOKEN: env.gpuServiceKey,
-          JOB_QUEUE: { send: async () => {} },
-        },
-      };
+      // Build the TraceSummary that both L1 and L2 consume. Two paths:
+      //
+      //   a) Normal fixture — call runMetaChat end-to-end, summarize.
+      //   b) Calibration tripwire (`canned_trace` set) — skip the
+      //      meta-agent call entirely and build the summary from the
+      //      hardcoded fields. The tripwire grades the judge, not the
+      //      agent, so running the real meta-agent would be wasted
+      //      latency and wouldn't guarantee a known-bad response.
+      let summary: TraceSummary;
+      if (fixture.canned_trace) {
+        summary = {
+          tool_call_names: fixture.canned_trace.tool_call_names,
+          rounds: fixture.canned_trace.rounds,
+          cost_usd: fixture.canned_trace.cost_usd,
+          final_response: fixture.canned_trace.final_response,
+        };
+      } else {
+        // MetaChatContext is not exported; assemble a structurally-
+        // typed plain object matching the shape runMetaChat consumes.
+        // Hyperdrive is passed to withOrgDb which is mocked, so {} works.
+        const ctx = {
+          agentName: fixture.agent_name,
+          orgId: "eval-org",
+          userId: "eval-user",
+          userRole: "owner",
+          hyperdrive: {} as unknown,
+          openrouterApiKey: "",
+          cloudflareAccountId: env.cloudflareAccountId,
+          aiGatewayId: env.aiGatewayId,
+          cloudflareApiToken: env.aiGatewayToken,
+          aiGatewayToken: env.aiGatewayToken,
+          gpuServiceKey: env.gpuServiceKey,
+          // Force the Gemma path unconditionally — the whole reason this
+          // harness exists is to grade the production gemma-4-31b path.
+          modelPath: "gemma" as const,
+          mode: fixture.mode,
+          env: {
+            RUNTIME: undefined,
+            SERVICE_TOKEN: env.gpuServiceKey,
+            JOB_QUEUE: { send: async () => {} },
+          },
+        };
 
-      const messages: MetaChatMessage[] = [
-        { role: "user", content: fixture.user_message },
-      ];
+        const messages: MetaChatMessage[] = [
+          { role: "user", content: fixture.user_message },
+        ];
 
-      const result = await runMetaChat(messages, ctx as Parameters<typeof runMetaChat>[1]);
-
-      const summary = summarizeTrace(result.messages, {
-        cost_usd: result.cost_usd,
-        turns: result.turns,
-      });
+        const result = await runMetaChat(messages, ctx as Parameters<typeof runMetaChat>[1]);
+        summary = summarizeTrace(result.messages, {
+          cost_usd: result.cost_usd,
+          turns: result.turns,
+        });
+      }
 
       const l1 = runL1Checks(fixture, summary);
       if (!l1.passed) {
@@ -173,10 +188,28 @@ describe.skipIf(!gatewayEnv)("meta-agent eval harness", () => {
         `tool_selection=${judge.scores.tool_selection} — ${judge.scores.notes}`,
       );
 
-      expect(
-        judge.average,
-        `judge average ${judge.average.toFixed(2)} < min ${fixture.min_judge_score}`,
-      ).toBeGreaterThanOrEqual(fixture.min_judge_score);
+      if (fixture.judge_ceiling) {
+        // Inverted assertion — calibration tripwire. Scores must come
+        // in BELOW the ceiling. If this fails, the judge rubber-stamped
+        // nonsense and the only acceptable response is to escalate the
+        // judge globally to a stronger model (Sonnet). Do NOT silence
+        // by raising the ceiling.
+        const ceiling = fixture.judge_ceiling;
+        const blind =
+          judge.scores.correctness > ceiling.correctness_max ||
+          judge.average > ceiling.average_max;
+        expect(
+          blind,
+          `[CALIBRATION TRIPWIRE FAILED — judge may be blind, escalate to Sonnet] ` +
+          `correctness=${judge.scores.correctness} (max ${ceiling.correctness_max}) ` +
+          `avg=${judge.average.toFixed(2)} (max ${ceiling.average_max})`,
+        ).toBe(false);
+      } else {
+        expect(
+          judge.average,
+          `judge average ${judge.average.toFixed(2)} < min ${fixture.min_judge_score}`,
+        ).toBeGreaterThanOrEqual(fixture.min_judge_score);
+      }
     },
   );
 });
