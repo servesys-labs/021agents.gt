@@ -99,6 +99,30 @@ const TOOL_GROUPS: Record<string, string[]> = {
 // Always-included tools (cheap to send, always useful)
 const CORE_TOOLS = ["read_agent_config", "update_agent_config", "run_query"];
 
+// Per-turn caps for expensive tools. Applies across all rounds of a single
+// user turn (not per-round). run_query uses a 5s statement_timeout and hits
+// Hyperdrive/Postgres directly — a runaway loop of 20+ calls can serialize
+// ~100s of DB load onto one org. Cap the budget so the model surfaces a
+// "query budget exhausted" error and has to reason about it instead.
+// Exported so tests can assert the contract without reimplementing it.
+export const PER_TURN_TOOL_CAPS: Record<string, number> = {
+  run_query: 5,
+};
+
+// Stable prefix on the error string of throttled tool results. Downstream
+// analytics can key on this to distinguish "safety guard fired" from
+// "tool genuinely broke".
+export const TOOL_THROTTLED_PREFIX = "throttled:";
+
+// Max `EXPLAIN (FORMAT JSON, COSTS TRUE)` Total Cost for a run_query.
+// Postgres cost units are abstract (~1 per CPU op, 4 per disk page).
+// Rough reference points on our schema: indexed lookup on turns ~10, small
+// analytical join with date filter ~10K-50K, full seqscan over 1M turns
+// ~50K, pathological cartesian CTE over turns >500K. 500K catches the
+// worst CTE footguns while leaving headroom for legitimate analytical
+// work. Pre-flight EXPLAIN is cheap (no ANALYZE = microseconds).
+export const RUN_QUERY_MAX_PLAN_COST = 500_000;
+
 function selectMetaTools(context: string): ToolDef[] {
   const selected = new Set(CORE_TOOLS);
 
@@ -2348,13 +2372,40 @@ async function executeTool(
     }
 
     case "run_query": {
-      const query = String(args.query || "").trim();
+      const rawQuery = String(args.query || "").trim();
+      if (!rawQuery) return JSON.stringify({ error: "query is required" });
+
+      // Strip trailing semicolons so EXPLAIN wrapping stays clean. After
+      // stripping, any remaining `;` is a multi-statement attempt and we
+      // reject it: the existing sql.unsafe path otherwise accepts chained
+      // statements, which bypasses the intent of "run one read-only query"
+      // (e.g. `SELECT 1; SELECT pg_sleep(4)`). Heuristic false-positives on
+      // semicolons inside string literals are acceptable — analytical
+      // queries against agent telemetry rarely embed them.
+      const query = rawQuery.replace(/;\s*$/, "").trim();
       if (!query) return JSON.stringify({ error: "query is required" });
+      if (query.includes(";")) {
+        return JSON.stringify({
+          error: "Multi-statement queries are not allowed. Submit a single SELECT, WITH (CTE), or EXPLAIN statement.",
+        });
+      }
 
       // Strict read-only enforcement — use word boundaries to avoid false positives
       // (e.g. "created_at" should NOT match "CREATE")
       const normalized = query.replace(/--.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "").trim().toUpperCase();
-      const forbidden = ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE", "CREATE", "GRANT", "REVOKE", "EXEC", "EXECUTE", "COPY"];
+      // ANALYZE is here for two reasons: (1) `EXPLAIN ANALYZE <q>` actually
+      // executes the inner query and would bypass the plan-cost pre-check
+      // below, since isExplainQuery=true skips the pre-check; (2) standalone
+      // `ANALYZE <table>` mutates pg_statistic and has no FROM clause for
+      // the allowlist regex to catch. Word-boundary matching means
+      // `analyze_result` columns or functions are unaffected.
+      //
+      // SET_CONFIG blocks `SELECT set_config('app.current_org_id', 'victim',
+      // true), ...` — a crafted single-statement SELECT that flips the RLS
+      // GUC mid-transaction. Blast radius is already small because each
+      // run_query call runs in its own withOrgDb transaction, but defense
+      // in depth is cheap.
+      const forbidden = ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE", "CREATE", "GRANT", "REVOKE", "EXEC", "EXECUTE", "COPY", "ANALYZE", "SET_CONFIG"];
       for (const keyword of forbidden) {
         const re = new RegExp(`\\b${keyword}\\b`);
         if (re.test(normalized)) {
@@ -2412,6 +2463,65 @@ async function executeTool(
             return JSON.stringify({ error: `Table '${table}' is not accessible. Allowed tables: ${SCOPED_TABLES.join(", ")}` });
           }
           accessedTables.push(table);
+        }
+
+        // ── Pre-flight plan cost check ──────────────────────────────
+        // EXPLAIN without ANALYZE is cheap (microseconds) and rejects
+        // queries whose estimated cost exceeds the threshold before they
+        // burn the 5s statement_timeout on Hyperdrive. Wrapped in a
+        // SAVEPOINT so EXPLAIN errors (e.g. invalid syntax, unknown
+        // column) don't poison the outer transaction — we fall through
+        // and let the real execution below produce a consistent error.
+        const isExplainQuery = /^\s*EXPLAIN\b/i.test(query);
+        if (!isExplainQuery) {
+          let savepointCreated = false;
+          try {
+            await sql.unsafe("SAVEPOINT run_query_explain", [], { prepare: false });
+            savepointCreated = true;
+            const planRows = await sql.unsafe(
+              `EXPLAIN (FORMAT JSON, COSTS TRUE) ${query}`,
+              [],
+              { prepare: false },
+            );
+            await sql.unsafe("RELEASE SAVEPOINT run_query_explain", [], { prepare: false });
+            savepointCreated = false;
+
+            // postgres.js returns EXPLAIN (FORMAT JSON) rows with a
+            // "QUERY PLAN" column that is either a parsed array or a
+            // JSON string, depending on driver version.
+            const firstRow = Array.isArray(planRows) && planRows.length > 0 ? (planRows[0] as Record<string, unknown>) : null;
+            let planNode: unknown = firstRow?.["QUERY PLAN"] ?? firstRow;
+            if (typeof planNode === "string") {
+              try { planNode = JSON.parse(planNode); } catch { planNode = null; }
+            }
+            const topLevel = Array.isArray(planNode) ? planNode[0] : planNode;
+            const plan = (topLevel as { Plan?: { "Total Cost"?: number } } | null)?.Plan;
+            const totalCost = plan?.["Total Cost"];
+
+            if (typeof totalCost === "number" && totalCost > RUN_QUERY_MAX_PLAN_COST) {
+              console.warn(
+                `[meta-agent-chat] run_query plan cost ${Math.round(totalCost)} exceeds limit ${RUN_QUERY_MAX_PLAN_COST} org=${ctx.orgId} agent=${ctx.agentName}`,
+              );
+              return JSON.stringify({
+                error: `Query plan cost ${Math.round(totalCost).toLocaleString()} exceeds the limit of ${RUN_QUERY_MAX_PLAN_COST.toLocaleString()}. Add more restrictive WHERE clauses, reduce joins, or target indexed columns to lower the estimated cost.`,
+                estimated_cost: totalCost,
+                cost_limit: RUN_QUERY_MAX_PLAN_COST,
+              });
+            }
+          } catch (explainErr) {
+            // EXPLAIN threw — roll back the savepoint if we created one,
+            // then fall through so the real execution can produce the
+            // canonical error message the model already knows how to
+            // interpret. Swallowing the rollback error is safe: if it
+            // fails too, the outer try/catch at the end of this case
+            // handles whatever state the transaction is in.
+            if (savepointCreated) {
+              try {
+                await sql.unsafe("ROLLBACK TO SAVEPOINT run_query_explain", [], { prepare: false });
+                await sql.unsafe("RELEASE SAVEPOINT run_query_explain", [], { prepare: false });
+              } catch { /* noop */ }
+            }
+          }
         }
 
         // Run the original query with RLS active + LIMIT + timeout.
@@ -2949,6 +3059,7 @@ export async function runMetaChat(
     tool_results: Array<{ name: string; result: string; latency_ms: number; error?: string }>;
   }> = [];
   const sessionId = `meta_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
+  const toolCallCountsByName: Record<string, number> = {};
 
   while (round < MAX_TOOL_ROUNDS) {
     round++;
@@ -3062,11 +3173,28 @@ export async function runMetaChat(
       const toolStart = Date.now();
       let result: string;
       let toolError: string | undefined;
-      try {
-        result = await executeTool(tc.function.name, args, ctx);
-      } catch (err: any) {
-        toolError = err.message || "Tool execution failed";
-        result = JSON.stringify({ error: toolError });
+
+      const perTurnCap = PER_TURN_TOOL_CAPS[tc.function.name];
+      const currentCount = toolCallCountsByName[tc.function.name] ?? 0;
+      let throttled = false;
+      if (perTurnCap !== undefined && currentCount >= perTurnCap) {
+        throttled = true;
+        toolError = `${TOOL_THROTTLED_PREFIX} per-turn budget exhausted for ${tc.function.name} (cap: ${perTurnCap})`;
+        result = JSON.stringify({
+          error: toolError,
+          hint: `This tool is rate-limited to ${perTurnCap} calls per user turn to protect shared database capacity. Reason about the results you already have, or ask the user a clarifying question instead of issuing more ${tc.function.name} calls.`,
+        });
+        console.warn(
+          `[meta-agent-chat] tool throttled org=${ctx.orgId} agent=${ctx.agentName} tool=${tc.function.name} cap=${perTurnCap}`,
+        );
+      } else {
+        toolCallCountsByName[tc.function.name] = currentCount + 1;
+        try {
+          result = await executeTool(tc.function.name, args, ctx);
+        } catch (err: any) {
+          toolError = err.message || "Tool execution failed";
+          result = JSON.stringify({ error: toolError });
+        }
       }
       const toolLatencyMs = Date.now() - toolStart;
 
@@ -3078,7 +3206,11 @@ export async function runMetaChat(
         error: toolError,
       });
 
-      totalToolCalls++;
+      // Don't count throttled calls as real tool actions — they never hit
+      // executeTool. Inflating action_count pollutes downstream telemetry
+      // (evolution-analyzer flags action_count>20 as "excessive tool calls",
+      // observability sums action_count as total_actions, etc).
+      if (!throttled) totalToolCalls++;
 
       const toolMsg: MetaChatMessage = {
         role: "tool",
