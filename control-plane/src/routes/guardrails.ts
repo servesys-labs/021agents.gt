@@ -17,6 +17,7 @@ import {
   type GuardrailPolicy,
 } from "../logic/guardrail-engine";
 import { logSecurityEvent } from "../logic/security-events";
+import type { SecurityEventType, GuardrailEventType } from "../telemetry/events";
 
 export const guardrailRoutes = createOpenAPIRouter();
 
@@ -133,7 +134,7 @@ guardrailRoutes.openapi(scanRoute, async (c): Promise<any> => {
           text_preview, matches, created_at
         ) VALUES (
           ${genId()}, ${user.org_id}, ${agent_name ?? "unknown"},
-          ${scan_type}, ${result.action},
+          ${scan_type satisfies GuardrailEventType}, ${result.action},
           ${textPreview(text)}, ${JSON.stringify({
             pii: piiMatches.length,
             injection_score: injectionResult.score,
@@ -151,7 +152,7 @@ guardrailRoutes.openapi(scanRoute, async (c): Promise<any> => {
       try {
         logSecurityEvent(sql, {
           org_id: user.org_id,
-          event_type: result.action === "block" ? "guardrail.blocked" : "guardrail.triggered",
+          event_type: (result.action === "block" ? "guardrail.blocked" : "guardrail.triggered") satisfies SecurityEventType,
           actor_id: user.user_id,
           actor_type: "user",
           severity: "high",

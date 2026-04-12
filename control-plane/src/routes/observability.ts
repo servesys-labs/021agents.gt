@@ -8,6 +8,7 @@ import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { parseJsonColumn } from "../lib/parse-json-column";
+import type { AuditAction } from "../telemetry/events";
 import {
   applyDedupeWindow,
   buildCircuitIncident,
@@ -704,7 +705,7 @@ observabilityRoutes.openapi(traceIntegrityRoute, async (c): Promise<any> => {
         VALUES (
           ${user.org_id},
           ${user.user_id},
-          'trace.integrity_breach',
+          ${"trace.integrity_breach" satisfies AuditAction},
           'trace',
           ${traceId},
           ${JSON.stringify({

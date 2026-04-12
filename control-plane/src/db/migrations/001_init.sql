@@ -305,7 +305,7 @@ CREATE TABLE IF NOT EXISTS session_progress (
 );
 
 CREATE TABLE IF NOT EXISTS session_feedback (
-  id            BIGSERIAL PRIMARY KEY,
+  id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
   session_id    TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
   org_id        TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
   agent_name    TEXT NOT NULL DEFAULT '',
@@ -453,6 +453,9 @@ CREATE TABLE IF NOT EXISTS billing_records (
   trace_id         TEXT,
   billing_user_id  TEXT,
   api_key_id       TEXT,
+  unit             TEXT DEFAULT 'session',
+  quantity         INT DEFAULT 1,
+  unit_price_usd   NUMERIC(18,8) DEFAULT 0,
   created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -1213,9 +1216,14 @@ CREATE TABLE IF NOT EXISTS facts (
   end_user_id  TEXT,
   author_agent TEXT,
   score        NUMERIC(8,4) NOT NULL DEFAULT 0,
-  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_reinforced_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  source_session_ids  TEXT[]      NOT NULL DEFAULT '{}',
+  entities            TEXT[]      NOT NULL DEFAULT '{}'
 );
+
+CREATE INDEX IF NOT EXISTS idx_facts_entities ON facts USING GIN (entities);
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_facts_semantic
   ON facts (agent_name, org_id, key) WHERE scope = 'agent' AND key != '';
@@ -2682,15 +2690,17 @@ CREATE INDEX IF NOT EXISTS idx_rag_chunks_pipeline
 -- Multi-org tables (A2A tasks / artifacts, credit transfers) allow either
 -- side of the relationship to read the row.
 --
--- Tables legitimately NOT covered: orgs, users, org_members, org_settings
--- (user/membership tables — handled at the application layer, see audit);
--- turns, session_progress, conversation_messages, eval_trials,
--- training_iterations, training_rewards, secrets_key_rotations,
--- webhook_deliveries, prompt_versions, api_key_agent_scopes (inherit
--- isolation via FK parent); pricing_catalog, credit_packages,
--- stripe_events_processed, connector_tools, policy_templates, event_types,
--- network_stats, idempotency_cache, do_conversation_messages (global or
--- transient, not org-scoped).
+-- Tables NOT RLS-covered (no org_id, global, or transient):
+-- pricing_catalog, credit_packages, stripe_events_processed,
+-- connector_tools, policy_templates, event_types, network_stats,
+-- idempotency_cache, do_conversation_messages, session_progress,
+-- api_key_agent_scopes, secrets_key_rotations, webhook_deliveries,
+-- prompt_versions, training_rewards (no org_id, inherit access via
+-- FK parent + application-layer checks).
+--
+-- FK-child tables with subquery-based RLS (scope through parent):
+-- conversation_messages, eval_trials, training_iterations.
+-- Users table: scoped via org_members membership.
 -- ============================================================================
 
 -- Helper macro expanded below per table.
@@ -3479,6 +3489,42 @@ COMMENT ON TABLE rag_chunks IS 'BM25 full-text search index. Parallel to Vectori
 -- superuser session — no password needed, and no persistent credentials
 -- are exposed to the test environment.
 -- ============================================================================
+
+-- ── Tier 15: FK-child tables (subquery-based RLS) ───────────────────────
+
+ALTER TABLE conversation_messages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE conversation_messages FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY conversation_messages_org_isolation ON conversation_messages
+  FOR ALL USING (
+    conversation_id IN (SELECT id FROM conversations WHERE org_id = current_org_id())
+  );
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE eval_trials ENABLE ROW LEVEL SECURITY;
+ALTER TABLE eval_trials FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY eval_trials_org_isolation ON eval_trials
+  FOR ALL USING (
+    eval_run_id IN (SELECT eval_run_id FROM eval_runs WHERE org_id = current_org_id())
+  );
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE training_iterations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE training_iterations FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY training_iterations_org_isolation ON training_iterations
+  FOR ALL USING (
+    job_id IN (SELECT id FROM training_jobs WHERE org_id = current_org_id())
+  );
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ── Tier 16: Users (org-membership scoped) ──────────────────────────────
+
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE users FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY users_org_isolation ON users
+  FOR ALL USING (
+    user_id IN (SELECT user_id FROM org_members WHERE org_id = current_org_id())
+  );
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
   CREATE ROLE app_user NOLOGIN;

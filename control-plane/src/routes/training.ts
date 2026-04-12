@@ -8,6 +8,7 @@
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { errorResponses } from "../schemas/openapi";
+import type { AuditAction, GuardrailEventType } from "../telemetry/events";
 import { requireScope } from "../middleware/auth";
 import { withOrgDb } from "../db/client";
 import { getAlgorithm } from "../logic/training-algorithms";
@@ -50,7 +51,7 @@ async function emitTrainingEvent(
 /** Fire-and-forget audit log for training events. */
 async function auditTraining(
   sql: any, orgId: string, userId: string,
-  action: string, resourceId: string, details: Record<string, unknown>,
+  action: AuditAction, resourceId: string, details: Record<string, unknown>,
 ): Promise<void> {
   try {
     await sql`
@@ -705,7 +706,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
         // Write to guardrail_events so reward aggregator can read it
         await sql`
           INSERT INTO guardrail_events (org_id, agent_name, event_type, action, text_preview, matches_json, created_at)
-          VALUES (${user.org_id}, ${job.agent_name}, 'output', ${scanResult.action},
+          VALUES (${user.org_id}, ${job.agent_name}, ${"output" satisfies GuardrailEventType}, ${scanResult.action},
                   ${output.slice(0, 200)}, ${JSON.stringify(scanResult.reasons)}, now())
         `.catch(() => {}); // Non-critical — don't fail training if table doesn't exist
       }

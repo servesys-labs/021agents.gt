@@ -3,14 +3,9 @@
  * Used by auth middleware, MFA enforcement, and session management.
  */
 import type { Sql } from "../db/client";
+import type { SecurityEventType } from "../telemetry/events";
 
-export type SecurityEventType =
-  | "login.success"
-  | "login.failed"
-  | "login.mfa_verified"
-  | "session.expired"
-  | "session.revoked"
-  | "session.revoked_all";
+export { type SecurityEventType };
 
 export interface SecurityEvent {
   event_type: SecurityEventType;

@@ -13,6 +13,7 @@ import type { Env } from "../env";
 import { withOrgDb } from "../db/client";
 import { fernetEncrypt, fernetDecrypt } from "../logic/fernet";
 import { requireRole } from "../middleware/auth";
+import type { SecurityEventType } from "../telemetry/events";
 
 export const secretsRotationRoutes = createOpenAPIRouter();
 
@@ -146,7 +147,7 @@ secretsRotationRoutes.openapi(rotateKeysRoute, async (c): Promise<any> => {
     try {
       await sql`
         INSERT INTO security_events (id, org_id, event_type, actor_id, metadata, created_at)
-        VALUES (${genId()}, ${user.org_id}, 'secrets.rotated', ${user.user_id},
+        VALUES (${genId()}, ${user.org_id}, ${"secrets.rotated" satisfies SecurityEventType}, ${user.user_id},
                 ${JSON.stringify({ rotation_id: rotationId, secrets_re_encrypted: reEncrypted, errors })},
                 now())
       `;

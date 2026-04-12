@@ -8,6 +8,7 @@ import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { parseJsonColumn } from "../lib/parse-json-column";
+import type { AuditAction } from "../telemetry/events";
 
 export const policyRoutes = createOpenAPIRouter();
 
@@ -103,7 +104,7 @@ policyRoutes.openapi(createPolicyRoute, async (c): Promise<any> => {
     try {
       await sql`
         INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
-        VALUES (${user.org_id}, ${user.user_id}, 'policy.create', 'policy', ${policyId}, ${JSON.stringify({ name })}, ${now})
+        VALUES (${user.org_id}, ${user.user_id}, ${"policy.create" satisfies AuditAction}, 'policy', ${policyId}, ${JSON.stringify({ name })}, ${now})
       `;
     } catch {}
 

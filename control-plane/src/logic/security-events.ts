@@ -3,10 +3,11 @@
  * Never throws. Used across routes for compliance-grade security audit trail.
  */
 import type { Sql } from "../db/client";
+import type { SecurityEventType } from "../telemetry/events";
 
 export interface SecurityEvent {
   org_id: string;
-  event_type: string; // e.g., 'login.success', 'api_key.revoked'
+  event_type: SecurityEventType;
   actor_id: string;
   actor_type?: "user" | "system" | "api_key" | "end_user";
   target_id?: string;

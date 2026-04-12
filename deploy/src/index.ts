@@ -19,6 +19,7 @@ import {
 import { getSandbox, Sandbox } from "@cloudflare/sandbox";
 // @ts-expect-error — ContainerProxy exists at runtime but may not be in type defs
 import { ContainerProxy } from "@cloudflare/containers";
+import type { RuntimeEventType } from "./runtime/events";
 import {
   loadRuntimeEventsPage, replayOtelEventsAtCursor, buildRuntimeRunTree,
   writeEvalRun, writeEvalTrial, listEvalRuns, getEvalRun, listEvalTrialsByRun,
@@ -233,7 +234,7 @@ export class AgentSandbox extends Sandbox<Env> {
       this.env.TELEMETRY_QUEUE.send({
         type: "event",
         payload: {
-          event_type: "sandbox.error",
+          event_type: "sandbox.error" satisfies RuntimeEventType,
           error: String(error).slice(0, 500),
           instance_id: this.ctx.id.toString().slice(0, 16),
           created_at: new Date().toISOString(),
@@ -929,7 +930,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         this.env.TELEMETRY_QUEUE.send({
           type: "event",
           payload: {
-            event_type: "config.update",
+            event_type: "config.update" satisfies RuntimeEventType,
             agent_name: updated.agentName || "agentos",
             field_changed: key,
             old_value: JSON.stringify(before[key as keyof AgentConfig] ?? ""),
@@ -1445,7 +1446,9 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                     const { writeBillingRecord } = await import("./runtime/db");
                     writeBillingRecord(this.env.HYPERDRIVE, {
                       session_id: events[i].session_id || "", org_id: data.org_id || "",
-                      agent_name: wsAgentName, model: "workflow",
+                      agent_name: wsAgentName,
+                      model: String(events[i].model || events[i].model_used || this.state?.config?.model || "unknown"),
+                      provider: String(events[i].provider || this.state?.config?.provider || this.env.DEFAULT_PROVIDER || ""),
                       input_tokens: events[i].input_tokens || 0,
                       output_tokens: events[i].output_tokens || 0,
                       cost_usd: events[i].cost_usd || 0, plan: this.state?.config?.plan || this.env.DEFAULT_PLAN || "free",
@@ -1520,7 +1523,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         if (this.env.TELEMETRY_QUEUE) {
           this.env.TELEMETRY_QUEUE.send({
             type: "runtime_event",
-            event_type: "kv_poll_loop",
+            event_type: "kv_poll_loop" satisfies RuntimeEventType,
             session_id: data.session_id || "",
             org_id: data.org_id || "",
             node_id: progressKey,
@@ -1684,7 +1687,9 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                 const { writeBillingRecord } = await import("./runtime/db");
                 await writeBillingRecord(this.env.HYPERDRIVE, {
                   session_id: out.session_id || "", org_id: this.state.config.orgId || "",
-                  agent_name: this.state.config.agentName || "agentos", model: "workflow",
+                  agent_name: this.state.config.agentName || "agentos",
+                  model: String((out as any).model || (out as any).model_used || this.state?.config?.model || "unknown"),
+                  provider: String((out as any).provider || this.state?.config?.provider || this.env.DEFAULT_PROVIDER || ""),
                   input_tokens: out.input_tokens || 0,
                   output_tokens: out.output_tokens || 0,
                   cost_usd: out.cost_usd, plan: this.state?.config?.plan || this.env.DEFAULT_PLAN || "free",
@@ -1776,7 +1781,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         this.env.TELEMETRY_QUEUE.send({
           type: "event",
           payload: {
-            event_type: "email.processed",
+            event_type: "email.processed" satisfies RuntimeEventType,
             agent_name: this.state.config.agentName,
             from_email: from,
             subject,
@@ -1960,9 +1965,11 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
             // Write billing record + session record (critical — without this, runs are free)
             if (this.env.HYPERDRIVE) {
               const { writeBillingRecord, writeSession } = await import("./runtime/db");
+              const resultModel = String(result.model || result.model_used || this.state?.config?.model || "unknown");
+              const resultProvider = String(result.provider || this.state?.config?.provider || this.env.DEFAULT_PROVIDER || "");
               writeBillingRecord(this.env.HYPERDRIVE, {
                 session_id: result.session_id || "", org_id: runOrgId,
-                agent_name: agentName, model: "workflow",
+                agent_name: agentName, model: resultModel, provider: resultProvider,
                 input_tokens: result.input_tokens || 0,
                 output_tokens: result.output_tokens || 0,
                 cost_usd: result.cost_usd || 0, plan: this.state?.config?.plan || this.env.DEFAULT_PLAN || "free",
@@ -1974,7 +1981,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                 session_id: result.session_id || "", org_id: runOrgId,
                 project_id: data.project_id || "", agent_name: agentName,
                 status: "success", input_text: inputText,
-                output_text: result.output || "", model: "workflow",
+                output_text: result.output || "", model: resultModel,
                 trace_id: result.trace_id || "",
                 step_count: result.turns || 1, action_count: result.tool_calls || 0,
                 wall_clock_seconds: 0, cost_total_usd: result.cost_usd || 0,
@@ -2304,7 +2311,9 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                   const { writeBillingRecord, getDb } = await import("./runtime/db");
                   await writeBillingRecord(this.env.HYPERDRIVE, {
                     session_id: voiceSessionId, org_id: orgId,
-                    agent_name: agentName, model: "workflow",
+                    agent_name: agentName,
+                    model: String(voiceResult.model || voiceResult.model_used || this.state?.config?.model || "unknown"),
+                    provider: String(voiceResult.provider || this.state?.config?.provider || this.env.DEFAULT_PROVIDER || ""),
                     input_tokens: voiceResult.input_tokens || 0,
                     output_tokens: voiceResult.output_tokens || 0,
                     cost_usd: voiceCost,
@@ -6402,7 +6411,7 @@ export default {
               await env.TELEMETRY_QUEUE.send({
                 type: "event",
                 payload: {
-                  event_type: "rag_eval",
+                  event_type: "rag_eval" satisfies RuntimeEventType,
                   query: body.query.slice(0, 200),
                   overall_score: result.overall,
                   context_precision: result.context_precision,
@@ -7882,8 +7891,10 @@ export default {
               tool_results = EXCLUDED.tool_results`;
 
           } else if (type === "episode") {
-            await sql`INSERT INTO episodes (session_id, input, output)
-              VALUES (${p.session_id || ""}, ${p.input || ""}, ${p.output || ""})`;
+            await sql`INSERT INTO episodes (org_id, agent_name, session_id, title, summary, content, source, created_at)
+              VALUES (${p.org_id || ""}, ${p.agent_name || ""}, ${p.session_id || ""},
+                      ${p.title || "Session episode"}, ${p.summary || p.input || ""},
+                      ${p.content || p.output || ""}, ${"queue"}, ${ts(p.created_at)})`;
 
           } else if (type === "event") {
             if (otelUsesEventData) {
@@ -7952,14 +7963,14 @@ export default {
             }
 
           } else if (type === "middleware_event") {
-            // Table schema: session_id, middleware_name, action, details, turn_number, created_at
             await sql`INSERT INTO middleware_events (
-              session_id, middleware_name, action,
-              details, turn_number, created_at
+              org_id, agent_name, middleware_name, event_type,
+              payload, created_at
             ) VALUES (
-              ${p.session_id || ""}, ${p.middleware_name || ""},
+              ${p.org_id || ""}, ${p.agent_name || ""},
+              ${p.middleware_name || ""},
               ${p.event_type || p.action || ""},
-              ${jp(p.details, {})}, ${p.turn_number || p.turn || 0},
+              ${jp({ session_id: p.session_id, turn_number: p.turn_number || p.turn, ...jp(p.details, {}) }, {})},
               ${ts(p.created_at)}
             )`;
 
@@ -7988,7 +7999,7 @@ export default {
               await sql`INSERT INTO runtime_events (
                 org_id, agent_name, event_type, event_data, created_at
               ) VALUES (
-                ${p.org_id || ""}, ${p.agent_name || ""}, 'do_eviction',
+                ${p.org_id || ""}, ${p.agent_name || ""}, ${"do_eviction" satisfies RuntimeEventType},
                 ${jp({
                   trace_id: p.trace_id || "",
                   session_id: p.session_id || "",

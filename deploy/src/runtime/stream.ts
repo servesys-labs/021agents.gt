@@ -18,6 +18,7 @@
  */
 
 import type { LLMMessage, LLMResponse, ToolCall, ToolDefinition, RuntimeEnv, ToolResult } from "./types";
+import type { RuntimeEventType } from "./events";
 import type { RuntimeEvent, TurnEndEvent, DoneEvent } from "./protocol";
 import { executeTools, executeSingleTool, isConcurrentSafe, getToolDefinitions } from "./tools";
 import { loadAgentConfig, resolvePlanRouting, writeSession, writeTurn, writeBillingRecord } from "./db";
@@ -822,7 +823,7 @@ export async function streamRun(
               (env as any).TELEMETRY_QUEUE?.send?.({
                 type: "runtime_event",
                 payload: {
-                  event_type: "llm_fallback",
+                  event_type: "llm_fallback" satisfies RuntimeEventType,
                   session_id: sessionId,
                   trace_id: traceId,
                   org_id: config.org_id || "",
@@ -844,7 +845,7 @@ export async function streamRun(
                 (env as any).TELEMETRY_QUEUE?.send?.({
                   type: "runtime_event",
                   payload: {
-                    event_type: "llm_fallback_alert",
+                    event_type: "llm_fallback_alert" satisfies RuntimeEventType,
                     session_id: sessionId,
                     trace_id: traceId,
                     org_id: config.org_id || "",
@@ -1175,7 +1176,8 @@ export async function streamRun(
     // Billing write (fire-and-forget, with KV dead-letter on failure)
     writeBillingRecord(hyperdrive, {
       session_id: sessionId, org_id: config.org_id, agent_name: config.agent_name,
-      model: lastModel, input_tokens: totalInputTokens, output_tokens: totalOutputTokens,
+      model: lastModel, provider: config.provider || "",
+      input_tokens: totalInputTokens, output_tokens: totalOutputTokens,
       cost_usd: cumulativeCost, plan: config.plan,
       trace_id: traceId,
       billing_user_id: opts?.channel_user_id,

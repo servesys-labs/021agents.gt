@@ -15,6 +15,7 @@ import { authMiddleware } from "./middleware/auth";
 import { rateLimitMiddleware } from "./middleware/rate-limit";
 import { createApp } from "./lib/openapi";
 import { parseJsonColumn } from "./lib/parse-json-column";
+import type { AuditAction } from "./telemetry/events";
 
 // Route imports (added as phases are implemented)
 import { authRoutes } from "./routes/auth";
@@ -1738,7 +1739,7 @@ export default {
           await sql`UPDATE canary_splits SET is_active = false WHERE org_id = ${orgId} AND agent_name = ${agentName}`;
           await sql`
             INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
-            VALUES (${orgId}, 'system', 'canary.auto_rollback', 'agent', ${agentName},
+            VALUES (${orgId}, 'system', ${"canary.auto_rollback" satisfies AuditAction}, 'agent', ${agentName},
                     ${JSON.stringify({ error_rate: errorRate, threshold: 0.15, canary_version: canary.canary_version })}, now())
           `.catch(() => {});
           console.log(`[cron] Auto-rollback canary for ${agentName}: error rate ${(errorRate * 100).toFixed(1)}%`);
@@ -1752,7 +1753,7 @@ export default {
           await sql`UPDATE canary_splits SET is_active = false WHERE org_id = ${orgId} AND agent_name = ${agentName}`;
           await sql`
             INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
-            VALUES (${orgId}, 'system', 'canary.auto_promote', 'agent', ${agentName},
+            VALUES (${orgId}, 'system', ${"canary.auto_promote" satisfies AuditAction}, 'agent', ${agentName},
                     ${JSON.stringify({ error_rate: errorRate, canary_version: canary.canary_version })}, now())
           `.catch(() => {});
           console.log(`[cron] Auto-promoted canary for ${agentName}: error rate ${(errorRate * 100).toFixed(1)}%`);
