@@ -387,3 +387,152 @@ describe("POST /admin/skills/append-rule — status code mapping", () => {
     expect(res.status).toBe(429);
   });
 });
+
+describe("POST /admin/skills/append-rule — dedup (Phase 6.5.3)", () => {
+  it("auto-fire source with duplicate pattern within 7 days returns 200 skipped", async () => {
+    // Dedup query returns a row → existing auto-fire mutation within
+    // the 7-day window. The route short-circuits before appendRule
+    // and returns a no-op success response.
+    mockSql = queueWithLock([
+      [{ "?column?": 1 }],  // dedup SELECT returns a match
+    ]);
+    const app = buildApp("admin");
+    const res = await app.request(
+      "/append-rule",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          skill_name: "improve",
+          rule_text: "ATTENTION: pattern 'tool:web-search' caused failures",
+          source: "auto-fire:evolve",
+          reason: "failure_cluster pattern=tool:web-search count=5 severity=0.8",
+        }),
+      },
+      mockEnv(),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body.appended).toBe(false);
+    expect(body.skipped).toBe("duplicate_within_7_days");
+    expect(body.pattern).toBe("tool:web-search");
+  });
+
+  it("auto-fire source with NO duplicate falls through to appendRule (writes normally)", async () => {
+    // Dedup SELECT returns empty → no prior audit row with that pattern.
+    // Route continues through to appendRule which writes the overlay.
+    mockSql = queueWithLock([
+      [],                                                 // dedup SELECT: no match
+      [{ auto_count: 0, human_count: 0 }],                // rate limit check
+      [],                                                  // prior overlays
+      [{ overlay_id: "ov-1" }],                           // overlay insert
+      [{ audit_id: "au-1" }],                             // audit insert
+    ]);
+    const app = buildApp("admin");
+    const res = await app.request(
+      "/append-rule",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          skill_name: "improve",
+          rule_text: "ATTENTION: pattern 'tool:new-cluster' caused failures",
+          source: "auto-fire:evolve",
+          reason: "failure_cluster pattern=tool:new-cluster count=3",
+        }),
+      },
+      mockEnv(),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body.appended).toBe(true);
+  });
+
+  it("HUMAN source with same pattern in reason bypasses dedup and always appends", async () => {
+    // Human admin re-appending with the same pattern is intentional
+    // override, not click-spam. Dedup must NOT run for non-auto-fire
+    // sources — the SELECT query should never execute.
+    mockSql = queueWithLock([
+      [{ auto_count: 0, human_count: 0 }],                // rate limit check (first call)
+      [],                                                  // prior overlays
+      [{ overlay_id: "ov-1" }],                           // overlay insert
+      [{ audit_id: "au-1" }],                             // audit insert
+    ]);
+    const app = buildApp("admin");
+    const res = await app.request(
+      "/append-rule",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          skill_name: "improve",
+          rule_text: "manual override rule",
+          source: "improve",  // human source
+          reason: "failure_cluster pattern=tool:web-search count=5",
+        }),
+      },
+      mockEnv(),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body.appended).toBe(true);
+  });
+
+  it("auto-fire source with no pattern= token in reason falls through gracefully", async () => {
+    // Reason lacking a pattern token means the detector didn't
+    // generate this rule (manual auto-fire call?) — skip dedup and
+    // rely on the rate limiter as the safety net. The SELECT must
+    // not execute.
+    mockSql = queueWithLock([
+      [{ auto_count: 0, human_count: 0 }],                // rate limit check
+      [],                                                  // prior overlays
+      [{ overlay_id: "ov-1" }],                           // overlay insert
+      [{ audit_id: "au-1" }],                             // audit insert
+    ]);
+    const app = buildApp("admin");
+    const res = await app.request(
+      "/append-rule",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          skill_name: "improve",
+          rule_text: "x",
+          source: "auto-fire:custom",
+          reason: "no pattern field here",
+        }),
+      },
+      mockEnv(),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body.appended).toBe(true);
+  });
+
+  it("auto-fire source with empty reason falls through gracefully", async () => {
+    mockSql = queueWithLock([
+      [{ auto_count: 0, human_count: 0 }],
+      [],
+      [{ overlay_id: "ov-1" }],
+      [{ audit_id: "au-1" }],
+    ]);
+    const app = buildApp("admin");
+    const res = await app.request(
+      "/append-rule",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          skill_name: "improve",
+          rule_text: "x",
+          source: "auto-fire:evolve",
+          // reason intentionally omitted
+        }),
+      },
+      mockEnv(),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body.appended).toBe(true);
+  });
+});
