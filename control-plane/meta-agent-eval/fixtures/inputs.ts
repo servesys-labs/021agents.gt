@@ -189,8 +189,9 @@ export const FIXTURES: EvalFixture[] = [
   },
   // ── Read-heavy diagnostic fixtures ──────────────────────────────
   // Fixtures that exercise real tool dispatch against the seeded
-  // universe. Each targets a specific diagnostic tool via keyword
-  // routing verified against `selectMetaTools` in meta-agent-chat.ts.
+  // universe. Each targets a specific diagnostic tool — the model
+  // self-selects from the full tool catalog guided by tool descriptions
+  // and system prompt workflows.
   // Option B assertions: `required_tools: []`, trust `forbidden_tools`
   // + judge scoring to enforce quality. The L1 check still catches
   // mutation attempts; the judge scores substantive-fit.

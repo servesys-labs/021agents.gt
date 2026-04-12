@@ -2,11 +2,11 @@
  * Meta-agent behavior tests — end-to-end verification that the meta-agent
  * can CREATE, TEST, EVALUATE, and EVOLVE agents using all its tools.
  *
- * Tests the full tool execution pipeline: tool definitions → selectMetaTools() →
+ * Tests the full tool execution pipeline: tool definitions →
  * executeTool() → SQL queries → response formatting.
  *
  * Does NOT call the LLM — tests tool execution directly to verify:
- * 1. Progressive tool discovery selects the right tools per context
+ * 1. System prompt contains expected tool and workflow documentation
  * 2. Every tool executes without SQL errors
  * 3. Config changes propagate correctly
  * 4. New tools (diagnostics, feature flags, skills, sub-agents, connectors, eval) work
@@ -93,9 +93,7 @@ const SAMPLE_AGENT_CONFIG = {
 // 1. PROGRESSIVE TOOL DISCOVERY
 // ══════════════════════════════════════════════════════════════════
 
-describe("progressive tool discovery — selectMetaTools", () => {
-  // We can't import selectMetaTools directly (it's not exported),
-  // so we test it indirectly via the prompt and tool group structure.
+describe("system prompt and tool documentation", () => {
 
   it("system prompt exists and is under 6000 tokens (live mode)", () => {
     const prompt = buildMetaAgentChatPrompt("test-agent", "live");

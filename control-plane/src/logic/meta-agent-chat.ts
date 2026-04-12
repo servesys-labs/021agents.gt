@@ -83,23 +83,6 @@ interface MetaChatContext {
   };
 }
 
-/* ── Progressive tool discovery ─────────────────────────────────── */
-
-// Tool groups — only send relevant tools each turn to save tokens
-const TOOL_GROUPS: Record<string, string[]> = {
-  config: ["read_agent_config", "update_agent_config"],
-  sessions: ["read_sessions", "read_session_messages", "read_observability", "read_conversation_quality"],
-  training: ["start_training", "read_training_status", "activate_trained_config", "rollback_training", "read_training_circuit_breaker"],
-  eval: ["read_eval_results", "add_eval_test_cases", "test_agent", "analyze_and_suggest", "run_eval", "mine_session_failures"],
-  agents: ["create_sub_agent", "manage_connectors"],
-  marketplace: ["marketplace_publish", "marketplace_stats"],
-  analytics: ["run_query"],
-  infrastructure: ["read_session_diagnostics", "read_feature_flags", "set_feature_flag", "read_audit_log", "manage_skills"],
-};
-
-// Always-included tools (cheap to send, always useful)
-const CORE_TOOLS = ["read_agent_config", "update_agent_config", "run_query"];
-
 // Per-turn caps for expensive tools. Applies across all rounds of a single
 // user turn (not per-round). run_query uses a 5s statement_timeout and hits
 // Hyperdrive/Postgres directly — a runaway loop of 20+ calls can serialize
@@ -186,58 +169,6 @@ export class ToolCallBudget {
 // worst CTE footguns while leaving headroom for legitimate analytical
 // work. Pre-flight EXPLAIN is cheap (no ANALYZE = microseconds).
 export const RUN_QUERY_MAX_PLAN_COST = 500_000;
-
-function selectMetaTools(context: string): ToolDef[] {
-  const selected = new Set(CORE_TOOLS);
-
-  // Match context to tool groups
-  if (/session|user|usage|conversation|message|activity|error|fail|log/.test(context)) {
-    TOOL_GROUPS.sessions.forEach(t => selected.add(t));
-  }
-  if (/train|improv|optimi|apo|iteration|score|reward/.test(context)) {
-    TOOL_GROUPS.training.forEach(t => selected.add(t));
-  }
-  if (/eval|test|pass|fail|grader|rubric|quality/.test(context)) {
-    TOOL_GROUPS.eval.forEach(t => selected.add(t));
-  }
-  if (/publish|marketplace|rating|listing|earn/.test(context)) {
-    TOOL_GROUPS.marketplace.forEach(t => selected.add(t));
-  }
-  if (/cost|expensive|spend|billing|credit|budget|bash|tool_calls|diagnos/.test(context)) {
-    TOOL_GROUPS.analytics.forEach(t => selected.add(t));
-    TOOL_GROUPS.sessions.forEach(t => selected.add(t));
-  }
-  if (/how.*doing|health|overview|status|check/.test(context)) {
-    TOOL_GROUPS.sessions.forEach(t => selected.add(t));
-    TOOL_GROUPS.eval.forEach(t => selected.add(t));
-  }
-  if (/delegat|sub.?agent|specialist|create.*agent|spawn|child/.test(context)) {
-    TOOL_GROUPS.agents.forEach(t => selected.add(t));
-  }
-  if (/connect|integrat|crm|slack|email|calendar|jira|notion|hubspot|salesforce|pipedream|mcp/.test(context)) {
-    TOOL_GROUPS.agents.forEach(t => selected.add(t));
-  }
-  if (/run.*eval|run.*test|test.*suite|benchmark|measure|baseline/.test(context)) {
-    TOOL_GROUPS.eval.forEach(t => selected.add(t));
-  }
-  if (/stop|crash|loop|truncat|cut.?off|forgot|cancel|circuit|breaker|abort|block|ssrf|flag|feature|audit|who.?changed|skill|slash/.test(context)) {
-    TOOL_GROUPS.infrastructure.forEach(t => selected.add(t));
-  }
-  if (/diagnos|debug|why.*stop|why.*fail|what.*happen|went.*wrong/.test(context)) {
-    TOOL_GROUPS.infrastructure.forEach(t => selected.add(t));
-    TOOL_GROUPS.sessions.forEach(t => selected.add(t));
-  }
-
-  // Progressive discovery: if nothing matched beyond core, send core + a
-  // starter set (sessions + eval) — NOT all 26 tools. The system prompt
-  // documents all capabilities so the LLM knows what to ask for.
-  if (selected.size <= CORE_TOOLS.length) {
-    TOOL_GROUPS.sessions.forEach(t => selected.add(t));
-    TOOL_GROUPS.eval.forEach(t => selected.add(t));
-  }
-
-  return META_TOOLS.filter(t => selected.has(t.function.name));
-}
 
 /* ── Tool definitions ───────────────────────────────────────────── */
 
@@ -3134,23 +3065,9 @@ export async function runMetaChat(
   while (round < MAX_TOOL_ROUNDS) {
     round++;
 
-    // ── Progressive tool discovery: select relevant tools for this turn ──
-    // Build context from the last user message + recent tool results
-    const recentContext = llmMessages
-      .slice(-4)
-      .map((m: any) => String(m.content || "").slice(0, 200))
-      .join(" ")
-      .toLowerCase();
-
-    const relevantTools = selectMetaTools(recentContext);
-
-    // Progressive infrastructure docs injection: only include detailed runtime
-    // docs when diagnostic/infrastructure tools are selected. Saves ~600 tokens
-    // on most turns. Follows Claude Code's deferred loading pattern.
-    const hasInfraTools = relevantTools.some(t =>
-      TOOL_GROUPS.infrastructure.includes(t.function.name)
-    );
-    if (hasInfraTools && !llmMessages.some((m: any) => m.content?.includes("Runtime Infrastructure — Detailed"))) {
+    // All tools sent every turn — model self-selects via tool descriptions +
+    // system prompt guidance. Infrastructure docs injected once (first round).
+    if (!llmMessages.some((m: any) => m.content?.includes("Runtime Infrastructure — Detailed"))) {
       const { RUNTIME_INFRASTRUCTURE_DOCS } = await import("../prompts/meta-agent-chat");
       llmMessages.push({ role: "system" as const, content: RUNTIME_INFRASTRUCTURE_DOCS });
     }
@@ -3168,7 +3085,7 @@ export async function runMetaChat(
       {
         model: metaModel,
         messages: llmMessages as any,
-        tools: relevantTools,
+        tools: META_TOOLS,
         tool_choice: "auto",
         max_tokens: 8192,
         temperature: 0.3,
