@@ -3164,6 +3164,36 @@ async function dispatch(
           ? args.tools.map(String)
           : undefined;
 
+        // ── Context inheritance: give the child knowledge of what the parent is doing ──
+        // Build a structured context block appended to the parent's system prompt.
+        // Child inherits persona + domain knowledge + delegation-specific context.
+        const parentConfig = (env as any).__agentConfig as Record<string, any> | undefined;
+        const parentSystemPrompt = parentConfig?.system_prompt || "";
+        const delegationContext = String(args.context || "").slice(0, 2000);
+        const relevantFiles = Array.isArray(args.relevant_files)
+          ? args.relevant_files.map(String).slice(0, 20).join(", ")
+          : "";
+        const contextParts: string[] = [];
+        if (delegationContext) contextParts.push(`## Delegation Context\n${delegationContext}`);
+        if (relevantFiles) contextParts.push(`## Relevant Files\n${relevantFiles}`);
+        const contextBlock = contextParts.join("\n\n");
+
+        // ── Budget propagation: cap child to parent's remaining budget ──
+        // Prevents a parent with $0.50 left from spawning a child that spends $10.
+        const parentBudget = Number(lineage?.budget_limit_usd) || 10;
+        const parentSpent = Number(lineage?.cumulative_cost_usd) || 0;
+        const childBudgetCap = Math.min(Math.max(0.01, parentBudget - parentSpent), 10);
+
+        // Build system_prompt_override: parent prompt + delegation context
+        let systemPromptOverride: string | undefined;
+        if (parentSystemPrompt && !args.skip_parent_prompt) {
+          systemPromptOverride = contextBlock
+            ? `${parentSystemPrompt}\n\n${contextBlock}`
+            : parentSystemPrompt;
+        } else if (contextBlock) {
+          systemPromptOverride = contextBlock;
+        }
+
         const instance = await workflow.create({
           params: {
             agent_name: agentName,
@@ -3172,20 +3202,25 @@ async function dispatch(
             project_id: lineage?.project_id || "",
             channel: "delegation",
             channel_user_id: "",
-            history: [], // child starts fresh — no parent context
+            history: [],
             progress_key: childProgressKey,
             parent_session_id: lineage?.session_id || sessionId,
             parent_depth: parentDepth + 1,
+            ...(systemPromptOverride ? { system_prompt_override: systemPromptOverride } : {}),
+            budget_limit_usd_override: childBudgetCap,
             ...(toolsOverride ? { tools_override: toolsOverride } : {}),
           },
         });
 
-        // Poll for child completion (max 5 min)
+        // Poll for child completion (max 5 min).
+        // Adaptive polling: 500ms for first 10 polls (5s fast path for quick tasks),
+        // then 2s intervals for longer tasks. Reduces latency on memory recall / fact checks.
         let childOutput = "";
         let childSessionId = "";
         let childCostUsd = 0;
-        for (let i = 0; i < 150; i++) {
-          await new Promise(r => setTimeout(r, 2000));
+        const MAX_POLL_ITERATIONS = 150;
+        for (let i = 0; i < MAX_POLL_ITERATIONS; i++) {
+          await new Promise(r => setTimeout(r, i < 10 ? 500 : 2000));
           try {
             const st = await instance.status();
             if (st.status === "complete") {
@@ -3211,6 +3246,13 @@ async function dispatch(
         const parentAgentName = lineage?.agent_name || "unknown";
         const status = childOutput.startsWith("[Sub-agent error") || childOutput.startsWith("[Sub-agent was") ? "failed" : "completed";
 
+        // ── Result filtering: strip tool traces, JSON blobs, and pruning markers ──
+        // Return only actionable text to keep the parent's context window clean.
+        let filteredOutput = childOutput;
+        filteredOutput = filteredOutput.replace(/\[tool result pruned:[^\]]*\]/g, "");
+        filteredOutput = filteredOutput.replace(/\{[^}]{200,}\}/g, "[JSON object omitted]");
+        filteredOutput = filteredOutput.replace(/\n{3,}/g, "\n\n").trim();
+
         // Write delegation event to DB for observability + audit
         if ((env as any).HYPERDRIVE) {
           try {
@@ -3218,13 +3260,13 @@ async function dispatch(
             const sql = await getDb((env as any).HYPERDRIVE);
             await sql`
               INSERT INTO delegation_events (parent_session_id, child_session_id, parent_agent_name, child_agent_name, org_id, depth, correlation_id, status, child_cost_usd, input_preview, output_preview, created_at, completed_at)
-              VALUES (${parentSessionId}, ${childSessionId}, ${parentAgentName}, ${agentName}, ${orgId}, ${parentDepth + 1}, ${correlationId}, ${status}, ${childCostUsd}, ${task.slice(0, 500)}, ${childOutput.slice(0, 500)}, now(), ${(status as string) !== "running" ? "now()" : null})
+              VALUES (${parentSessionId}, ${childSessionId}, ${parentAgentName}, ${agentName}, ${orgId}, ${parentDepth + 1}, ${correlationId}, ${status}, ${childCostUsd}, ${task.slice(0, 500)}, ${filteredOutput.slice(0, 500)}, now(), ${(status as string) !== "running" ? "now()" : null})
             `;
           } catch {} // non-blocking
         }
 
         return JSON.stringify({
-          output: childOutput.slice(0, 9500),
+          output: filteredOutput.slice(0, 9500),
           delegation_trace: {
             parent_session_id: parentSessionId,
             child_session_id: childSessionId,
@@ -3232,6 +3274,7 @@ async function dispatch(
             child_agent_name: agentName,
             child_depth: parentDepth + 1,
             child_cost_usd: childCostUsd,
+            child_budget_cap: childBudgetCap,
             correlation_id: correlationId,
             status,
           },
@@ -5093,33 +5136,18 @@ async function memorySave(env: RuntimeEnv, args: Record<string, any>): Promise<s
       });
     } else {
       const factKey = key || content.slice(0, 50);
-      // Upsert: check if fact with same key exists for this agent, update if so
-      const existing = await sql`
-        SELECT id FROM facts WHERE agent_name = ${agentName} AND org_id = ${orgId} AND key = ${factKey} AND scope = 'agent' LIMIT 1
-      `;
+      const entities = Array.isArray(args.entities) ? args.entities.map(String).filter(Boolean) : [];
+      const sid = String(args.session_id || (env as any).__delegationLineage?.session_id || "");
+      const existing = await sql`SELECT id FROM facts WHERE agent_name = ${agentName} AND org_id = ${orgId} AND key = ${factKey} AND scope = 'agent' LIMIT 1`;
       if (existing.length > 0) {
-        await sql`
-          UPDATE facts SET value = ${content}, category = ${category}, updated_at = ${now}
-          WHERE id = ${existing[0].id}
-        `;
+        await sql`UPDATE facts SET value = ${content}, category = ${category}, updated_at = ${now}, last_reinforced_at = ${now},
+          source_session_ids = CASE WHEN ${sid} = '' THEN source_session_ids ELSE array_append(COALESCE(source_session_ids, '{}'), ${sid}) END,
+          entities = CASE WHEN ${entities.length} = 0 THEN entities ELSE ${entities}::text[] END WHERE id = ${existing[0].id}`;
       } else {
-        await sql`
-          INSERT INTO facts (id, agent_name, org_id, scope, key, value, category, created_at)
-          VALUES (${id}, ${agentName}, ${orgId}, 'agent', ${factKey}, ${content}, ${category}, ${now})
-        `;
+        await sql`INSERT INTO facts (id, agent_name, org_id, scope, key, value, category, created_at, last_reinforced_at, source_session_ids, entities)
+          VALUES (${id}, ${agentName}, ${orgId}, 'agent', ${factKey}, ${content}, ${category}, ${now}, ${now}, ${sid ? [sid] : []}, ${entities})`;
       }
-      return JSON.stringify({
-        success: true,
-        tool: "memory-save",
-        saved: true,
-        type: "semantic",
-        id,
-        key: factKey,
-        category,
-        message: "Semantic memory saved.",
-        usage: "n/a",
-        entry_count: 1,
-      });
+      return JSON.stringify({ success: true, tool: "memory-save", saved: true, type: "semantic", id, key: factKey, category, message: "Semantic memory saved.", usage: "n/a", entry_count: 1 });
     }
   } catch (err: any) {
     return JSON.stringify({ success: false, tool: "memory-save", error: `Memory save failed: ${err.message}` });
@@ -6339,9 +6367,10 @@ const TOOL_CATALOG: ToolDefinition[] = [
           type: { type: "string", description: "Memory type: 'semantic' for facts/preferences (default), 'episodic' for events/observations" },
           category: {
             type: "string",
-            description:
-              "One of: user | feedback | project | reference (default: reference). Maps legacy labels (e.g. preferences, general) automatically.",
+            description: "One of: user | feedback | project | reference (default: reference). Maps legacy labels automatically.",
           },
+          entities: { type: "array", items: { type: "string" }, description: "Entity names this fact relates to. Lowercase." },
+          session_id: { type: "string", description: "Session ID for provenance tracking. Auto-detected when available." },
         },
         required: ["content"],
       },
