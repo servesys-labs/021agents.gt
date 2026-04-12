@@ -13,8 +13,8 @@ import { hashPassword, verifyPassword } from "../auth/password";
 import { verifyCfAccessToken, cfAccessEnabled, deriveDisplayName } from "../auth/cf-access";
 import { withAdminDb, type AdminSql } from "../db/client";
 import { sendPasswordResetEmail, sendVerificationEmail, sendWelcomeEmail } from "../lib/email";
-import { buildPersonalAgentPrompt } from "../prompts/personal-agent";
 import { logSecurityEvent } from "../logic/security-events";
+import { seedDefaultInternalAgents } from "../logic/internal-agents";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { failSafe } from "../lib/error-response";
 import { ErrorSchema, RateLimitErrorSchema, AuthTokenResponse, UserProfile, TokenVerifyResponse, errorResponses } from "../schemas/openapi";
@@ -320,47 +320,15 @@ authRoutes.openapi(signupRoute, async (c): Promise<any> => {
       VALUES (${orgId}, ${userId}, ${"owner"}, ${nowEpoch})
     `;
 
-    // Auto-create personal agent (every user gets one on signup)
-    const personalAgentId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
-    const personalName = "my-assistant";
-    const personalDescription = `${name || email.split("@")[0]}'s personal AI assistant`;
-    const personalConfig = {
-      name: personalName,
-      description: personalDescription,
-      system_prompt: buildPersonalAgentPrompt(name || email.split("@")[0]),
-      model: "",  // Let plan routing handle model selection
-      plan: "free",
-      // Core tools the PA uses on most turns. Progressive discovery
-      // makes all 100+ tools available on demand.
-      tools: [
-        "web-search", "browse",           // research
-        "python-exec", "bash",            // code execution
-        "read-file", "write-file", "edit-file", // workspace
-        "execute-code", "swarm",          // multi-step orchestration + parallel fan-out
-        "memory-save", "memory-recall",   // persistence across sessions
-        "create-schedule", "list-schedules", "delete-schedule", // automation
-      ],
-      // Skills activated — tool docs, error recovery, app-building workflows,
-      // and delegation routing come from skills, not the system prompt.
-      enabled_skills: [
-        "research", "debug", "remember", "batch", "verify", "build-app",
-      ],
-      max_turns: 50,
-      temperature: 0.7,
-      tags: ["personal", "assistant"],
-      version: "2.0.0",
-      governance: { budget_limit_usd: 10 },
-      reasoning_strategy: "",
-      use_code_mode: true,
-      parallel_tool_calls: true,
-      is_personal: true,
-    };
-
-    await sql`
-      INSERT INTO agents (agent_id, name, org_id, description, config, version, is_active, created_by, created_at, updated_at)
-      VALUES (${personalAgentId}, ${personalName}, ${orgId}, ${personalDescription}, ${JSON.stringify(personalConfig)}, '1.0.0', ${true}, ${userId}, now(), now())
-    `;
-    console.log(`[auth/signup] Personal agent created for ${email}`);
+    const seeded = await seedDefaultInternalAgents(sql, {
+      orgId,
+      userId,
+      displayName: name || email.split("@")[0],
+      nowIso: nowEpoch,
+    });
+    if (seeded.length > 0) {
+      console.log(`[auth/signup] Seeded internal agents for ${email}: ${seeded.join(", ")}`);
+    }
 
     // Meta-agent is ambient — no DB row needed. It uses its own system prompt
     // from prompts/meta-agent-chat.ts and operates on any agent via /agents/:name/meta-chat.
@@ -755,45 +723,19 @@ authRoutes.openapi(cfAccessExchangeRoute, async (c): Promise<any> => {
       `;
     } catch {}
 
-    // Auto-create personal agent (same as email signup)
+    // Auto-create default internal agents (same as email signup)
     try {
-      const personalAgentId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
-      const personalName = "my-assistant";
       const displayName = userName || cfClaims.email.split("@")[0];
-      const personalDescription = `${displayName}'s personal AI assistant`;
-      const personalConfig = {
-        name: personalName,
-        description: personalDescription,
-        system_prompt: buildPersonalAgentPrompt(displayName),
-        model: "",
-        plan: "free",
-        tools: [
-          "web-search", "browse",
-          "python-exec", "bash",
-          "read-file", "write-file", "edit-file",
-          "execute-code", "swarm",
-          "memory-save", "memory-recall",
-          "create-schedule", "list-schedules", "delete-schedule",
-        ],
-        enabled_skills: [
-          "research", "debug", "remember", "batch", "verify", "build-app",
-        ],
-        max_turns: 50,
-        temperature: 0.7,
-        tags: ["personal", "assistant"],
-        version: "2.0.0",
-        governance: { budget_limit_usd: 10 },
-        reasoning_strategy: "",
-        use_code_mode: true,
-        parallel_tool_calls: true,
-        is_personal: true,
-      };
-      await sql`
-        INSERT INTO agents (agent_id, name, org_id, description, config, version, is_active, created_by, created_at, updated_at)
-        VALUES (${personalAgentId}, ${personalName}, ${orgId}, ${personalDescription}, ${JSON.stringify(personalConfig)}, '1.0.0', ${true}, ${userId}, ${nowEpoch}, ${nowEpoch})
-      `;
-      console.log(`[auth/cf-access] Personal agent created for ${cfClaims.email}`);
-    } catch (e: any) { console.warn(`[auth/cf-access] Personal agent creation failed: ${e.message}`); }
+      const seeded = await seedDefaultInternalAgents(sql, {
+        orgId,
+        userId,
+        displayName,
+        nowIso: nowEpoch,
+      });
+      if (seeded.length > 0) {
+        console.log(`[auth/cf-access] Seeded internal agents for ${cfClaims.email}: ${seeded.join(", ")}`);
+      }
+    } catch (e: any) { console.warn(`[auth/cf-access] Internal agent creation failed: ${e.message}`); }
 
     // Meta-agent is ambient — no DB row needed.
 
