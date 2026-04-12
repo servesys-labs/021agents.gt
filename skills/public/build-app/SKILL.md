@@ -14,6 +14,7 @@ allowed-tools:
   - glob
   - python-exec
   - execute-code
+  - save-project
 ---
 Build: {{ARGS}}
 

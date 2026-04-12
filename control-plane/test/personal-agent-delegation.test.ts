@@ -101,7 +101,7 @@ describe("signup flow — agent creation", () => {
       tools: [
         "web-search", "browse",
         "python-exec", "bash",
-        "read-file", "write-file",
+        "read-file", "write-file", "edit-file",
         "execute-code", "swarm",
         "memory-save", "memory-recall",
         "create-schedule", "list-schedules", "delete-schedule",
@@ -109,7 +109,7 @@ describe("signup flow — agent creation", () => {
       enabled_skills: ["research", "debug", "remember", "batch", "verify", "build-app"],
     };
 
-    expect(personalConfig.tools).toHaveLength(13);
+    expect(personalConfig.tools).toHaveLength(14);
     expect(personalConfig.enabled_skills).toHaveLength(6);
     expect(personalConfig.tools).not.toContain("marketplace-search");
     expect(personalConfig.tools).not.toContain("mcp-call");
@@ -128,6 +128,14 @@ describe("signup flow — agent creation", () => {
     expect(metaConfig.max_turns).toBe(20);
     expect(metaConfig.governance.budget_limit_usd).toBe(2);
     expect(metaConfig.is_meta).toBe(true);
+  });
+
+  it("all enabled_skills are real skill names in the catalog", async () => {
+    const { SKILL_CATALOG_NAMES } = await import("../src/lib/skill-catalog.generated");
+    const enabledSkills = ["research", "debug", "remember", "batch", "verify", "build-app"];
+    for (const name of enabledSkills) {
+      expect(SKILL_CATALOG_NAMES.has(name), `enabled_skill "${name}" not found in SKILL_CATALOG`).toBe(true);
+    }
   });
 
   it("personal assistant uses auto reasoning strategy", () => {
