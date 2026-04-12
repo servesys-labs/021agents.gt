@@ -6938,6 +6938,8 @@ const TOOL_CATALOG: ToolDefinition[] = [
           },
           entities: { type: "array", items: { type: "string" }, description: "Entity names this fact relates to. Lowercase." },
           session_id: { type: "string", description: "Session ID for provenance tracking. Auto-detected when available." },
+          agent_name: { type: "string", description: "Target agent to save memory under (default: current agent). Use when saving on behalf of another agent." },
+          org_id: { type: "string", description: "Target org (default: current org). Rarely needed." },
         },
         required: ["content"],
       },
@@ -6947,12 +6949,15 @@ const TOOL_CATALOG: ToolDefinition[] = [
     type: "function",
     function: {
       name: "memory-recall",
-      description: "Recall saved memories. Search by keyword or browse by type. Use this to remember user preferences, past decisions, project context.",
+      description: "Recall saved memories. Search by keyword, browse by type, or fetch a specific session's full transcript by session_id. Use agent_name to recall another agent's memory (e.g., when running as memory-agent digesting my-assistant's sessions).",
       parameters: {
         type: "object",
         properties: {
-          query: { type: "string", description: "Search query to find relevant memories" },
+          query: { type: "string", description: "Search query to find relevant memories by keyword" },
           type: { type: "string", description: "Filter by type: 'semantic', 'episodic', or 'all' (default: all)" },
+          session_id: { type: "string", description: "Fetch a specific session's input/output and turns directly. Use this for digest workflows that need the full session transcript." },
+          agent_name: { type: "string", description: "Target agent whose memory to search (default: current agent). Use when recalling/digesting another agent's memory." },
+          org_id: { type: "string", description: "Target org (default: current org). Rarely needed." },
         },
         required: [],
       },
