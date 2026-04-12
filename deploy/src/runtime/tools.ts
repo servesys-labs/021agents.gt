@@ -1109,7 +1109,7 @@ async function executeSingleTool(
   // ── Governance: org-scoped tool context enforcement ───────────
   // Connectors/MCP/internal DB tooling must never trust org_id from tool args.
   const identity = resolveToolIdentity(env);
-  const orgScopedTools = new Set(["connector", "mcp-call", "manage-mcp", "platform", "db-query", "db-batch", "db-report"]);
+  const orgScopedTools = new Set(["connector", "mcp-call", "manage-mcp", "platform", "db-query", "db-batch", "db-report", "sql"]);
   if (orgScopedTools.has(tc.name)) {
     const requestedOrg = String(args.org_id || "").trim();
     if (!identity.orgId) {
@@ -2538,39 +2538,39 @@ async function dispatch(
       return JSON.stringify({ success: cmResult.success, result: cmResult.result, error: cmResult.error, logs: cmResult.logs, toolCallCount: cmResult.toolCallCount, latencyMs: cmResult.latencyMs, costUsd: cmResult.costUsd });
     }
 
-    case "codemode-transform": {
-      const { executeTransform } = await import("./codemode");
-      const allToolsForTransform = effectiveToolDefs();
-      const transformResult = await executeTransform(env, args.code || "", args.data, allToolsForTransform, sessionId);
-      return JSON.stringify({ success: transformResult.success, result: transformResult.result, error: transformResult.error, logs: transformResult.logs });
-    }
-
-    case "codemode-validate": {
-      const { executeValidator } = await import("./codemode");
-      const allToolsForValidate = effectiveToolDefs();
-      const valResult = await executeValidator(env, args.code || "", args.data, allToolsForValidate, sessionId);
-      return JSON.stringify(valResult);
-    }
-
-    case "codemode-orchestrate": {
-      const { executeOrchestrator } = await import("./codemode");
-      const allToolsForOrch = effectiveToolDefs();
-      const orchResult = await executeOrchestrator(env, args.code || "", args.message || "", args.context || {}, allToolsForOrch, sessionId);
-      return JSON.stringify(orchResult);
-    }
-
-    case "codemode-test": {
-      const { executeTestRunner } = await import("./codemode");
-      const allToolsForTest = effectiveToolDefs();
-      const testResult = await executeTestRunner(env, args.code || "", args.test_context || {}, allToolsForTest, sessionId);
-      return JSON.stringify(testResult);
-    }
-
-    case "codemode-generate-mcp": {
-      const { executeMcpGenerator } = await import("./codemode");
-      const allToolsForMcp = effectiveToolDefs();
-      const mcpResult = await executeMcpGenerator(env, args.code || "", args.api_spec, allToolsForMcp, sessionId);
-      return JSON.stringify({ tools: mcpResult, count: mcpResult.length });
+    case "codemode-transform":
+    case "codemode-validate":
+    case "codemode-orchestrate":
+    case "codemode-test":
+    case "codemode-generate-mcp":
+    case "codemode": {
+      const codemodeAction = args.action || normalizedTool.replace("codemode-", "") || "transform";
+      const allToolsForCm = effectiveToolDefs();
+      const cm = await import("./codemode");
+      switch (codemodeAction) {
+        case "transform": {
+          const r = await cm.executeTransform(env, args.code || "", args.data, allToolsForCm, sessionId);
+          return JSON.stringify({ success: r.success, result: r.result, error: r.error, logs: r.logs });
+        }
+        case "validate": {
+          const r = await cm.executeValidator(env, args.code || "", args.data, allToolsForCm, sessionId);
+          return JSON.stringify(r);
+        }
+        case "orchestrate": {
+          const r = await cm.executeOrchestrator(env, args.code || "", args.message || "", args.context || {}, allToolsForCm, sessionId);
+          return JSON.stringify(r);
+        }
+        case "test": {
+          const r = await cm.executeTestRunner(env, args.code || "", args.test_context || {}, allToolsForCm, sessionId);
+          return JSON.stringify(r);
+        }
+        case "generate-mcp": {
+          const r = await cm.executeMcpGenerator(env, args.code || "", args.api_spec, allToolsForCm, sessionId);
+          return JSON.stringify({ tools: r, count: r.length });
+        }
+        default:
+          return `Unknown codemode action: ${codemodeAction}. Use transform, validate, orchestrate, test, or generate-mcp.`;
+      }
     }
 
     case "mcp-wrap": {
@@ -2883,7 +2883,81 @@ async function dispatch(
     // ── DB Query Tools (codemode-safe, templated) ─────────────────
     // These use the /cf/db/query allowlist — no raw SQL, always org-scoped.
 
-    case "db-query": {
+    case "db-query":
+    case "db-batch":
+    case "db-report":
+    case "sql": {
+      const sqlMode = args.mode || normalizedTool.replace("db-", "") || "query";
+      if (sqlMode === "batch") {
+        const queries = args.queries;
+        if (!Array.isArray(queries) || queries.length === 0) return "sql:batch requires queries array";
+        if (queries.length > 10) return "sql:batch max 10 queries per batch";
+        const bOrgId = String(args.org_id || "");
+        if (!bOrgId) return JSON.stringify({ error: "sql:batch requires org context", code: "ORG_CONTEXT_REQUIRED" });
+        const bHd = (env as any).HYPERDRIVE;
+        if (!bHd) return "sql:batch requires database access";
+        try {
+          const results = await Promise.all(
+            queries.map(async (q: { query_id: string; params?: Record<string, unknown> }) => {
+              const result = await dispatch(env, "sql", { mode: "query", query_id: q.query_id, params: q.params || {}, org_id: bOrgId }, sessionId);
+              try { return JSON.parse(result); } catch { return { query_id: q.query_id, error: result }; }
+            }),
+          );
+          return JSON.stringify({ batch: true, count: results.length, results });
+        } catch (err: any) {
+          return `sql:batch failed: ${err.message || err}`;
+        }
+      }
+      if (sqlMode === "report") {
+        const reportId = String(args.report_id || "");
+        const rOrgId = String(args.org_id || "");
+        if (!rOrgId) return JSON.stringify({ error: "sql:report requires org context", code: "ORG_CONTEXT_REQUIRED" });
+        if (!reportId) return "sql:report requires report_id (e.g., 'agent_health', 'org_overview')";
+        try {
+          if (reportId === "agent_health") {
+            const agentName = String(args.agent_name || "");
+            if (!agentName) return "agent_health report requires agent_name";
+            const batchResult = await dispatch(env, "sql", {
+              mode: "batch", org_id: rOrgId, queries: [
+                { query_id: "sessions.stats", params: { agent_name: agentName, since_days: 7 } },
+                { query_id: "issues.summary", params: {} },
+                { query_id: "eval.latest_run", params: { agent_name: agentName } },
+                { query_id: "feedback.stats", params: { since_days: 7 } },
+              ],
+            }, sessionId);
+            const parsed = JSON.parse(batchResult);
+            return JSON.stringify({
+              report: "agent_health", agent_name: agentName,
+              sessions: parsed.results?.[0]?.rows?.[0] || {},
+              issues: parsed.results?.[1]?.rows || [],
+              eval: parsed.results?.[2]?.rows?.[0] || null,
+              feedback: parsed.results?.[3]?.rows || [],
+            });
+          }
+          if (reportId === "org_overview") {
+            const batchResult = await dispatch(env, "sql", {
+              mode: "batch", org_id: rOrgId, queries: [
+                { query_id: "sessions.stats", params: { since_days: 7 } },
+                { query_id: "issues.summary", params: {} },
+                { query_id: "billing.usage", params: { since_days: 30 } },
+                { query_id: "billing.by_agent", params: { since_days: 30 } },
+              ],
+            }, sessionId);
+            const parsed = JSON.parse(batchResult);
+            return JSON.stringify({
+              report: "org_overview",
+              sessions: parsed.results?.[0]?.rows?.[0] || {},
+              issues: parsed.results?.[1]?.rows || [],
+              billing: parsed.results?.[2]?.rows?.[0] || {},
+              billing_by_agent: parsed.results?.[3]?.rows || [],
+            });
+          }
+          return `Unknown report_id: ${reportId}. Available: agent_health, org_overview`;
+        } catch (err: any) {
+          return `sql:report failed: ${err.message || err}`;
+        }
+      }
+      // Default: query mode
       // Execute a single templated DB query
       const queryId = String(args.query_id || "");
       if (!queryId) return "db-query requires query_id (e.g., 'sessions.list', 'issues.open', 'eval.runs')";
@@ -2955,92 +3029,7 @@ async function dispatch(
       }
     }
 
-    case "db-batch": {
-      // Execute multiple queries in one call — saves tokens vs multiple tool calls
-      const queries = args.queries;
-      if (!Array.isArray(queries) || queries.length === 0) return "db-batch requires queries array";
-      if (queries.length > 10) return "db-batch max 10 queries per batch";
-
-      const orgId = String(args.org_id || "");
-      if (!orgId) return JSON.stringify({ error: "db-batch requires org context", code: "ORG_CONTEXT_REQUIRED" });
-      const hyperdrive = (env as any).HYPERDRIVE;
-      if (!hyperdrive) return "db-batch requires database access";
-
-      try {
-        // Execute all queries via recursive tool call (reuse db-query logic)
-        const results = await Promise.all(
-          queries.map(async (q: { query_id: string; params?: Record<string, unknown> }) => {
-            const result = await dispatch(
-              env, "db-query",
-              { query_id: q.query_id, params: q.params || {}, org_id: orgId },
-              sessionId,
-            );
-            try { return JSON.parse(result); } catch { return { query_id: q.query_id, error: result }; }
-          }),
-        );
-        return JSON.stringify({ batch: true, count: results.length, results });
-      } catch (err: any) {
-        return `db-batch failed: ${err.message || err}`;
-      }
-    }
-
-    case "db-report": {
-      // Pre-built composite reports — agent health, org overview
-      const reportId = String(args.report_id || "");
-      const orgId = String(args.org_id || "");
-      if (!orgId) return JSON.stringify({ error: "db-report requires org context", code: "ORG_CONTEXT_REQUIRED" });
-      if (!reportId) return "db-report requires report_id (e.g., 'agent_health', 'org_overview')";
-
-      try {
-        if (reportId === "agent_health") {
-          const agentName = String(args.agent_name || "");
-          if (!agentName) return "agent_health report requires agent_name";
-          // Batch 4 queries for a single agent
-          const batchResult = await dispatch(env, "db-batch", {
-            org_id: orgId,
-            queries: [
-              { query_id: "sessions.stats", params: { agent_name: agentName, since_days: 7 } },
-              { query_id: "issues.summary", params: {} },
-              { query_id: "eval.latest_run", params: { agent_name: agentName } },
-              { query_id: "feedback.stats", params: { since_days: 7 } },
-            ],
-          }, sessionId);
-          const parsed = JSON.parse(batchResult);
-          return JSON.stringify({
-            report: "agent_health",
-            agent_name: agentName,
-            sessions: parsed.results?.[0]?.rows?.[0] || {},
-            issues: parsed.results?.[1]?.rows || [],
-            eval: parsed.results?.[2]?.rows?.[0] || null,
-            feedback: parsed.results?.[3]?.rows || [],
-          });
-        }
-
-        if (reportId === "org_overview") {
-          const batchResult = await dispatch(env, "db-batch", {
-            org_id: orgId,
-            queries: [
-              { query_id: "sessions.stats", params: { since_days: 7 } },
-              { query_id: "issues.summary", params: {} },
-              { query_id: "billing.usage", params: { since_days: 30 } },
-              { query_id: "billing.by_agent", params: { since_days: 30 } },
-            ],
-          }, sessionId);
-          const parsed = JSON.parse(batchResult);
-          return JSON.stringify({
-            report: "org_overview",
-            sessions: parsed.results?.[0]?.rows?.[0] || {},
-            issues: parsed.results?.[1]?.rows || [],
-            billing: parsed.results?.[2]?.rows?.[0] || {},
-            billing_by_agent: parsed.results?.[3]?.rows || [],
-          });
-        }
-
-        return `Unknown report_id: ${reportId}. Available: agent_health, org_overview`;
-      } catch (err: any) {
-        return `db-report failed: ${err.message || err}`;
-      }
-    }
+    // db-batch, db-report: handled by sql verb aliases above
 
     // ── Agent Lifecycle Tools ──────────────────────────────────────
 
@@ -5926,7 +5915,7 @@ const TOOL_KEYWORDS: Record<string, string[]> = {
   // Code & execution
   "code|script|program|python|calculate|compute|analyze data|csv|chart|plot|graph": ["python-exec", "execute-code", "bash"],
   "run code|run script|run command|execute|shell|command line|terminal|install|npm|pip": ["bash", "python-exec", "execute-code"],
-  "codemode|transform|validate|orchestrate|generate mcp": ["run-codemode", "codemode-transform", "codemode-validate", "codemode-orchestrate", "codemode-test", "codemode-generate-mcp"],
+  "codemode|transform|validate|orchestrate|generate mcp": ["run-codemode", "codemode"],
   // File operations
   "file|read|write|save|create|edit|document|folder|directory": ["read-file", "write-file", "edit-file", "view-file", "search-file", "find-file", "load-folder"],
   "grep|search file|find in": ["grep", "glob", "search-file", "find-file"],
@@ -5951,7 +5940,7 @@ const TOOL_KEYWORDS: Record<string, string[]> = {
   "voice|speak|audio|call|phone|tts|speech": ["text-to-speech", "speech-to-text", "make-voice-call"],
   "video|vision|see|look at|screenshot|describe image": ["vision-analyze"],
   // Data & analytics
-  "database|sql|query|db|table|report": ["db-query", "db-batch", "db-report"],
+  "database|sql|query|db|table|report": ["sql"],
   "pipeline|stream|ingest|data pipeline": ["query-pipeline", "send-to-pipeline"],
   "cost|billing|spend|usage|how much": ["view-costs"],
   "trace|debug|log|observe": ["view-traces", "view-audit"],
@@ -6921,69 +6910,28 @@ const TOOL_CATALOG: ToolDefinition[] = [
       },
     },
   },
-  // ── DB Query Tools (codemode-safe, templated) ─────────────────
+  // ── SQL verb (consolidates db-query, db-batch, db-report) ──────
   {
     type: "function",
     function: {
-      name: "db-query",
+      name: "sql",
       description:
-        "Execute a templated database query. Uses predefined query IDs (no raw SQL). " +
-        "Always org-scoped. Available queries: sessions.stats, issues.summary, eval.latest_run, " +
-        "billing.usage, billing.by_agent, feedback.stats. More efficient than multiple API calls.",
+        "Execute templated database queries (no raw SQL). Modes: " +
+        "query (single query by ID), batch (multiple queries, max 10), " +
+        "report (pre-built composite: agent_health, org_overview). " +
+        "Query IDs: sessions.stats, issues.summary, eval.latest_run, " +
+        "billing.usage, billing.by_agent, feedback.stats.",
       parameters: {
         type: "object",
         properties: {
-          query_id: { type: "string", description: "Query template ID (e.g., 'sessions.stats', 'billing.by_agent')" },
-          params: {
-            type: "object",
-            description: "Query parameters (varies by query_id). Common: agent_name, since_days, limit.",
-          },
+          mode: { type: "string", enum: ["query", "batch", "report"], description: "SQL mode (default: query)" },
+          query_id: { type: "string", description: "Query ID (for mode=query)" },
+          params: { type: "object", description: "Query parameters (agent_name, since_days, etc.)" },
+          queries: { type: "array", items: { type: "object", properties: { query_id: { type: "string" }, params: { type: "object" } }, required: ["query_id"] }, description: "Queries array (for mode=batch)" },
+          report_id: { type: "string", description: "Report ID (for mode=report)" },
+          agent_name: { type: "string", description: "Agent name (for report or query filtering)" },
         },
-        required: ["query_id"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "db-batch",
-      description:
-        "Execute multiple templated queries in one call. Saves tokens vs multiple db-query calls. Max 10 queries per batch.",
-      parameters: {
-        type: "object",
-        properties: {
-          queries: {
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                query_id: { type: "string" },
-                params: { type: "object" },
-              },
-              required: ["query_id"],
-            },
-            description: "Array of {query_id, params} objects",
-          },
-        },
-        required: ["queries"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "db-report",
-      description:
-        "Generate a pre-built composite report. Combines multiple queries into a structured result. " +
-        "Available reports: 'agent_health' (sessions + issues + eval + feedback for one agent), " +
-        "'org_overview' (sessions + issues + billing across all agents).",
-      parameters: {
-        type: "object",
-        properties: {
-          report_id: { type: "string", description: "Report ID: 'agent_health' or 'org_overview'" },
-          agent_name: { type: "string", description: "Agent name (required for agent_health report)" },
-        },
-        required: ["report_id"],
+        required: ["mode"],
       },
     },
   },
@@ -7009,86 +6957,23 @@ const TOOL_CATALOG: ToolDefinition[] = [
   {
     type: "function",
     function: {
-      name: "codemode-transform",
+      name: "codemode",
       description:
-        "Run a data transformation using inline JavaScript code. " +
-        "Input data is available as `input` in the sandbox. Return the transformed data.",
+        "Run sandboxed JavaScript/TypeScript code. Actions: transform (data transform), " +
+        "validate (return {valid, error?}), orchestrate (multi-agent routing), " +
+        "test (run self-tests), generate-mcp (API spec → tool definitions).",
       parameters: {
         type: "object",
         properties: {
-          code: { type: "string", description: "JavaScript transform code" },
-          data: { description: "Input data to transform" },
+          action: { type: "string", enum: ["transform", "validate", "orchestrate", "test", "generate-mcp"], description: "Codemode action" },
+          code: { type: "string", description: "JavaScript/TypeScript code to execute" },
+          data: { description: "Input data (for transform/validate)" },
+          message: { type: "string", description: "User message (for orchestrate)" },
+          context: { type: "object", description: "Additional context (for orchestrate)" },
+          test_context: { type: "object", description: "Test context (for test)" },
+          api_spec: { description: "API specification (for generate-mcp)" },
         },
-        required: ["code", "data"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "codemode-validate",
-      description:
-        "Run a custom validation on data using JavaScript code. " +
-        "Code should return {valid: boolean, error?: string}.",
-      parameters: {
-        type: "object",
-        properties: {
-          code: { type: "string", description: "JavaScript validation code" },
-          data: { description: "Data to validate" },
-        },
-        required: ["code", "data"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "codemode-orchestrate",
-      description:
-        "Run multi-agent orchestration code. Input includes a message and context. " +
-        "Code should return {targetAgent, input, context}.",
-      parameters: {
-        type: "object",
-        properties: {
-          code: { type: "string", description: "JavaScript orchestration code" },
-          message: { type: "string", description: "User message to route" },
-          context: { type: "object", description: "Additional routing context" },
-        },
-        required: ["code", "message"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "codemode-test",
-      description:
-        "Run self-test code against an agent configuration. " +
-        "Returns {passed, failed, total, results[]}.",
-      parameters: {
-        type: "object",
-        properties: {
-          code: { type: "string", description: "JavaScript test code" },
-          test_context: { type: "object", description: "Test context (agent config, test data, etc.)" },
-        },
-        required: ["code"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "codemode-generate-mcp",
-      description:
-        "Generate MCP tool definitions from an API specification. " +
-        "Returns array of {name, description, parameters, handlerCode}.",
-      parameters: {
-        type: "object",
-        properties: {
-          code: { type: "string", description: "JavaScript code that processes API spec into tool definitions" },
-          api_spec: { description: "API specification (OpenAPI, custom JSON, etc.)" },
-        },
-        required: ["code", "api_spec"],
+        required: ["action", "code"],
       },
     },
   },

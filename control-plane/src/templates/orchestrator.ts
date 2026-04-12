@@ -140,9 +140,7 @@ Permanent delete requires explicit confirmation.
 - \`delete-schedule\` — Remove a schedule.
 
 ### Structured Data Access
-- \`db-query\` — Execute templated DB queries (sessions.stats, billing.usage, etc.).
-- \`db-batch\` — Multiple queries in one call.
-- \`db-report\` — Pre-built composite reports (agent_health, org_overview).
+- \`sql\` — Execute templated DB queries (mode: query/batch/report). Query IDs: sessions.stats, billing.usage, billing.by_agent, eval.latest_run, issues.summary, feedback.stats.
 
 ### Planning
 - \`todo\` — Manage a task list. Plan multi-step work before executing.
@@ -338,10 +336,8 @@ export const ORCHESTRATOR_TOOLS: string[] = [
   "create-schedule",
   "list-schedules",
   "delete-schedule",
-  // Structured data access
-  "db-query",
-  "db-batch",
-  "db-report",
+  // Structured data access (consolidated verb)
+  "sql",
   // Sandbox
   "sandbox_file_write",
   "sandbox_file_read",
