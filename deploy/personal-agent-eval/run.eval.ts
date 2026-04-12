@@ -41,16 +41,23 @@ const GPU_KEY = process.env.GPU_SERVICE_KEY || process.env.SERVICE_TOKEN || "";
 const EVAL_MODEL = process.env.EVAL_MODEL || "gemma-4-31b";
 const JUDGE_MODEL = process.env.JUDGE_MODEL || "gemma-4-31b";
 const IS_ANTHROPIC = EVAL_MODEL.includes("claude") || EVAL_MODEL.includes("haiku") || EVAL_MODEL.includes("sonnet");
+const IS_WORKERS_AI = EVAL_MODEL.startsWith("@cf/");
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY || "";
 
-const SKIP = !ACCOUNT_ID || (!GPU_KEY && !IS_ANTHROPIC) || (IS_ANTHROPIC && !ANTHROPIC_KEY);
+// Workers AI only needs AI_GW_TOKEN. Custom Gemma needs GPU_KEY. Anthropic needs ANTHROPIC_API_KEY.
+const SKIP = !ACCOUNT_ID ||
+  (IS_ANTHROPIC && !ANTHROPIC_KEY) ||
+  (IS_WORKERS_AI && !AI_GW_TOKEN) ||
+  (!IS_ANTHROPIC && !IS_WORKERS_AI && !GPU_KEY);
 
 if (SKIP) {
+  const hint = IS_ANTHROPIC
+    ? "Set CLOUDFLARE_ACCOUNT_ID + ANTHROPIC_API_KEY in .env for Claude models."
+    : IS_WORKERS_AI
+      ? "Set CLOUDFLARE_ACCOUNT_ID + AI_GATEWAY_TOKEN in .env for Workers AI models."
+      : "Set CLOUDFLARE_ACCOUNT_ID + GPU_SERVICE_KEY in .env for Gemma models.";
   console.warn(
-    "[personal-agent-eval] SKIP — missing credentials. " +
-    (IS_ANTHROPIC
-      ? "Set CLOUDFLARE_ACCOUNT_ID + ANTHROPIC_API_KEY in .env for Claude models."
-      : "Set CLOUDFLARE_ACCOUNT_ID + GPU_SERVICE_KEY in .env for Gemma models."),
+    "[personal-agent-eval] SKIP — missing credentials. " + hint,
   );
 } else {
   console.log(`[personal-agent-eval] model=${EVAL_MODEL} judge=${JUDGE_MODEL}`);
