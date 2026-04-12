@@ -48,8 +48,40 @@ skillsAdminRoutes.post("/append-rule", async (c) => {
   }
 
   const env = c.env as any;
-  const result = await withOrgDb({ HYPERDRIVE: env.HYPERDRIVE }, user.org_id, (sql) =>
-    appendRule(
+  const result = await withOrgDb({ HYPERDRIVE: env.HYPERDRIVE }, user.org_id, async (sql) => {
+    // Phase 6.5 dedup — auto-fire-only. A user clicking "analyze" three
+    // times in ten minutes would otherwise fire three identical proposals
+    // per qualifying cluster, burning 3 slots against the 5/day auto
+    // bucket for no learning gain. Dedup is keyed to the `pattern=X`
+    // token in reason (format: "failure_cluster pattern=X count=N ...")
+    // and scoped to a 7-day window. Human-sourced calls bypass dedup
+    // because re-appending is an intentional admin override, not noise.
+    // If reason lacks a pattern token, fall through to appendRule and
+    // rely on the rate limiter as the structural safety net.
+    const isAutoFire = String(body.source || "").startsWith("auto-fire");
+    if (isAutoFire) {
+      const patternMatch = String(body.reason || "").match(/pattern=([^\s]+)/);
+      if (patternMatch) {
+        const pattern = patternMatch[1];
+        const existing = await sql`
+          SELECT 1 FROM skill_audit
+          WHERE skill_name = ${skillName}
+            AND source LIKE 'auto-fire%'
+            AND reason LIKE ${`%pattern=${pattern}%`}
+            AND created_at > NOW() - INTERVAL '7 days'
+          LIMIT 1
+        `;
+        if (existing.length > 0) {
+          return {
+            appended: false as const,
+            skipped: "duplicate_within_7_days" as const,
+            skill_name: skillName,
+            pattern,
+          };
+        }
+      }
+    }
+    return appendRule(
       sql,
       {
         orgId: user.org_id,
@@ -60,10 +92,16 @@ skillsAdminRoutes.post("/append-rule", async (c) => {
         userRole: user.role,
       },
       { skillName, ruleText, source: body.source, reason: body.reason },
-    ),
-  );
+    );
+  });
 
   if (!result.appended) {
+    // Dedup skip is a successful no-op, not an error — return 200
+    // so the client (and the deploy-side fireSkillFeedback fail-open
+    // check) treats it as a normal response.
+    if ("skipped" in result) {
+      return c.json(result, 200);
+    }
     const status =
       result.code === "forbidden" ? 403 :
       result.code === "unknown_skill" ? 404 :

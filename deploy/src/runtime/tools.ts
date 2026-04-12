@@ -3097,6 +3097,19 @@ async function dispatch(
           );
           if (resp.ok) {
             const result = await resp.json() as Record<string, unknown>;
+            // Phase 6.5 auto-fire: scan failure_clusters, POST qualifying
+            // proposals via the control-plane /append-rule route. Fail-open
+            // — any throw is swallowed so the analyzer response still
+            // returns. Server-side dedup at the route prevents repeats
+            // within a 7-day window, and the dual-bucket rate limiter
+            // caps unattended blast radius at 5/day per skill.
+            try {
+              const { detectEvolveFeedback, fireSkillFeedback } = await import("./skill-feedback");
+              const proposals = detectEvolveFeedback((result as any).report, agentName);
+              if (proposals.length > 0) await fireSkillFeedback(env, { orgId }, proposals);
+            } catch (err: any) {
+              log.warn(`[evolve-agent] auto-fire detector failed: ${err?.message || err}`);
+            }
             return JSON.stringify({
               agent_name: agentName,
               sessions_analyzed: result.sessions_analyzed || 0,
