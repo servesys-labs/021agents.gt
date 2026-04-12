@@ -27,15 +27,23 @@
       {
         "name": "SANDBOX",
         "class_name": "AgentSandbox"
+      },
+      {
+        "name": "SESSION_COUNTER",
+        "class_name": "SessionCounterDO"
       }
     ]
   },
 
-  // Durable Object migrations — AgentSandbox is a new container-backed SQLite class
+  // Durable Object migrations
   "migrations": [
     {
       "tag": "v2",
       "new_sqlite_classes": ["AgentSandbox"]
+    },
+    {
+      "tag": "v3",
+      "new_classes": ["SessionCounterDO"]
     }
   ],
 
