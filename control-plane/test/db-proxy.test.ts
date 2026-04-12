@@ -33,7 +33,25 @@ function createMockSql() {
 }
 
 // ---------------------------------------------------------------------------
-// Simulated dispatch — mirrors the /cf/db/query endpoint logic from index.ts
+// Simulated dispatch — mirrors the /cf/db/query endpoint logic from
+// `deploy/src/index.ts` (the runtime worker).
+//
+// ⚠ Drift warning (3rd-pass code review):
+// This IS a local reimplementation of production logic — the same anti-
+// pattern we fixed in meta-agent-chat.test.ts by extracting a class
+// (see commit 5fef2563). It's harder to fix here because the production
+// code lives in a sibling package (`deploy/`) that the control-plane test
+// harness cannot import from. The options to close this properly are:
+//   (1) Extract the dispatcher into a shared package (`lib/` or similar)
+//       so both `deploy/` and `control-plane/test/` can import it.
+//   (2) Move this test into `deploy/test/` where it can import the real
+//       code path directly, and delete the local reimplementation here.
+//   (3) Live with the drift and document it (this comment).
+//
+// Today we're at option (3). If you touch this file for anything more
+// than a trivial change, consider whether (1) or (2) is worth the yak
+// shave — the drift class is: production behavior change in deploy/
+// while this test silently passes against the stale reimplementation.
 // ---------------------------------------------------------------------------
 
 interface QueryRequest {
