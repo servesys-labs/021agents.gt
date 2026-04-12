@@ -1,0 +1,17 @@
+{
+  "_comment": "Memory quality baseline — measured before memory agent implementation. Rerun after Phase 4 to compare.",
+  "measured_at": "2026-04-12",
+  "schema_version": "004_memory_agent",
+  "new_columns": ["last_reinforced_at", "source_session_ids", "entities"],
+  "fact_count_per_agent": "TBD",
+  "duplicate_rate": "TBD",
+  "staleness": {
+    "facts_older_than_30d": "TBD",
+    "facts_older_than_90d": "TBD",
+    "facts_never_reinforced": "TBD"
+  },
+  "retrieval_relevance": {
+    "method": "manual: 10 queries, human-judged top-5 relevance",
+    "precision_at_5": "TBD"
+  }
+}
