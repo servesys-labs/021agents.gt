@@ -1,16 +1,17 @@
 /**
- * Personal assistant + meta-agent delegation tests.
+ * Personal assistant + internal-agent wiring tests.
  *
  * Verifies:
  * 1. Personal assistant prompt is lean (8 core tools, not 26)
  * 2. PA knows when and how to delegate to meta-agent
- * 3. Signup creates both my-assistant AND meta-agent
+ * 3. Signup seeds the personal assistant and memory-agent
  * 4. Meta-agent delegation is properly documented
  * 5. Progressive discovery patterns applied to PA
  * 6. Token budget is reasonable
  */
 
 import { describe, it, expect } from "vitest";
+import { buildDefaultInternalAgents } from "../src/logic/internal-agents";
 import { buildPersonalAgentPrompt } from "../src/prompts/personal-agent";
 
 // ══════════════════════════════════════════════════════════════════
@@ -70,7 +71,9 @@ describe("personal assistant — meta-agent delegation", () => {
   });
 
   it("lists when to delegate to meta-agent", () => {
-    expect(prompt).toContain("create, configure, test, train, diagnose");
+    expect(prompt).toContain("create an agent");
+    expect(prompt).toContain("configure agent");
+    expect(prompt).toContain("diagnose agent");
   });
 
   it("shows how to delegate via run-agent", () => {
@@ -80,7 +83,7 @@ describe("personal assistant — meta-agent delegation", () => {
 
   it("delegates agent management to meta-agent", () => {
     expect(prompt).toContain("Delegate to meta-agent");
-    expect(prompt).toContain("manage agents");
+    expect(prompt).toContain("agent management");
   });
 
   it("still has marketplace delegation for domain tasks", () => {
@@ -91,43 +94,49 @@ describe("personal assistant — meta-agent delegation", () => {
 });
 
 // ══════════════════════════════════════════════════════════════════
-// 3. SIGNUP CREATES BOTH AGENTS
+// 3. SIGNUP SEEDS DEFAULT INTERNAL AGENTS
 // ══════════════════════════════════════════════════════════════════
 
 describe("signup flow — agent creation", () => {
-  it("personal assistant config has core tool list + enabled_skills", () => {
-    // Simulate the config that auth.ts creates
-    const personalConfig = {
-      tools: [
-        "web-search", "browse",
-        "python-exec", "bash",
-        "read-file", "write-file", "edit-file",
-        "execute-code", "swarm",
-        "memory-save", "memory-recall",
-        "create-schedule", "list-schedules", "delete-schedule",
-      ],
-      enabled_skills: ["research", "debug", "remember", "batch", "verify", "build-app"],
-    };
+  const seededAgents = buildDefaultInternalAgents("TestUser");
+  const personalConfig = seededAgents.find((agent) => agent.name === "my-assistant")!.config as {
+    tools: string[];
+    enabled_skills: string[];
+    reasoning_strategy: string;
+    parallel_tool_calls: boolean;
+  };
+  const memoryConfig = seededAgents.find((agent) => agent.name === "memory-agent")!.config as {
+    tools: string[];
+    enabled_skills: string[];
+    internal: boolean;
+    max_turns: number;
+    governance: { budget_limit_usd: number };
+  };
 
+  it("seeds my-assistant with the core tool list + enabled_skills", () => {
     expect(personalConfig.tools).toHaveLength(14);
     expect(personalConfig.enabled_skills).toHaveLength(6);
     expect(personalConfig.tools).not.toContain("marketplace-search");
     expect(personalConfig.tools).not.toContain("mcp-call");
   });
 
-  it("meta-agent config is minimal (no runtime tools)", () => {
-    const metaConfig = {
-      name: "meta-agent",
-      tools: [],
-      max_turns: 20,
-      governance: { budget_limit_usd: 2 },
-      is_meta: true,
-    };
-
-    expect(metaConfig.tools).toHaveLength(0); // Meta-agent uses its own tool system
-    expect(metaConfig.max_turns).toBe(20);
-    expect(metaConfig.governance.budget_limit_usd).toBe(2);
-    expect(metaConfig.is_meta).toBe(true);
+  it("seeds memory-agent as an internal curation worker", () => {
+    expect(memoryConfig.tools).toEqual([
+      "memory-save",
+      "memory-recall",
+      "memory-delete",
+      "memory-health",
+      "curated-memory",
+      "knowledge-search",
+    ]);
+    expect(memoryConfig.enabled_skills).toEqual([
+      "memory-digest",
+      "memory-consolidate",
+      "memory-recall-deep",
+    ]);
+    expect(memoryConfig.max_turns).toBe(5);
+    expect(memoryConfig.governance.budget_limit_usd).toBe(2);
+    expect(memoryConfig.internal).toBe(true);
   });
 
   it("all enabled_skills are real skill names in the catalog", async () => {
@@ -139,13 +148,11 @@ describe("signup flow — agent creation", () => {
   });
 
   it("personal assistant uses auto reasoning strategy", () => {
-    const config = { reasoning_strategy: "" };
-    expect(config.reasoning_strategy).toBe(""); // auto-select
+    expect(personalConfig.reasoning_strategy).toBe(""); // auto-select
   });
 
   it("personal assistant has parallel_tool_calls enabled", () => {
-    const config = { parallel_tool_calls: true };
-    expect(config.parallel_tool_calls).toBe(true);
+    expect(personalConfig.parallel_tool_calls).toBe(true);
   });
 });
 
@@ -229,7 +236,7 @@ describe("personal assistant prompt — quality checks", () => {
   it("has memory protocol", () => {
     expect(prompt).toContain("# Memory protocol");
     expect(prompt).toContain("Recall at session start");
-    expect(prompt).toContain("Save after significant work");
+    expect(prompt).toContain("memory agent");
   });
 
   it("has constraints/safety section", () => {

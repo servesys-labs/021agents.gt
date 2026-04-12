@@ -12,6 +12,9 @@ const DEFAULTS: Record<string, boolean> = {
   mailbox_ipc: true,
   idle_watchdog: true,
   prompt_caching: true,
+  memory_agent_enabled: true,
+  signal_substrate_enabled: true,
+  memory_passive_signals_enabled: true,
 };
 
 export const featuresRoutes = createOpenAPIRouter();
