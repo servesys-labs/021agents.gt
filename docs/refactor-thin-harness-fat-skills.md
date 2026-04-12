@@ -4,7 +4,7 @@ A comprehensive phased refactor to invert this repo from "fat harness, thin skil
 
 ## ▶︎ Resume here (2026-04-11)
 
-**Status:** Phases 0, 1, 2, 3, 4, 5, 6, 7, **6.5 ✅**, **eval harness v1 ✅**, **Phase 8 ✅ done**. **Resume at Phase 9** — `tools.ts` consolidation (40 → ~10 verbs) + deferred deploy-side extractions (`intent-router.ts`, `permission-classifier.ts`). Phase 9 prerequisites: deploy-side test coverage for both files + `ALWAYS_REQUIRE_APPROVAL` deterministic backstop for permission-classifier.
+**Status:** Phases 0-9 complete. `tools.ts` 8092 → 7740 (−352 lines). Three consolidated verbs: `platform` (12 manage-*), `codemode` (5 codemode-*), `sql` (3 db-*). Deploy-side extractions done: `intent-router.ts` deleted, `permission-classifier.ts` simplified to backstop + destructive pattern. Module extraction to ≤2,500 LoC is Phase 10 if ever needed.
 
 ### Phase 6.5 snapshot — complete
 
