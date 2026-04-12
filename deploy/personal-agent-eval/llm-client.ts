@@ -38,16 +38,21 @@ export interface GatewayConfig {
 /**
  * Resolve AI Gateway provider path and auth headers for a given model.
  */
-function resolveProvider(model: string): { providerPath: string; isAnthropic: boolean } {
+type ProviderType = "anthropic" | "workers-ai" | "custom-gemma" | "openai";
+
+function resolveProvider(model: string): { providerPath: string; type: ProviderType } {
   if (model.includes("claude") || model.includes("haiku") || model.includes("sonnet") || model.includes("opus")) {
-    return { providerPath: "anthropic", isAnthropic: true };
+    return { providerPath: "anthropic", type: "anthropic" };
+  }
+  if (model.startsWith("@cf/")) {
+    return { providerPath: "workers-ai", type: "workers-ai" };
   }
   const isCustomGemma = model.startsWith("gemma-4") || model.includes("gemma4");
   if (isCustomGemma) {
     const isFast = model.includes("26b") || model.includes("moe") || model.includes("fast");
-    return { providerPath: isFast ? "custom-gemma4-fast" : "custom-gemma4-local", isAnthropic: false };
+    return { providerPath: isFast ? "custom-gemma4-fast" : "custom-gemma4-local", type: "custom-gemma" };
   }
-  return { providerPath: "openai", isAnthropic: false };
+  return { providerPath: "openai", type: "openai" };
 }
 
 export async function callLLM(
@@ -56,24 +61,37 @@ export async function callLLM(
   tools: ToolDef[],
   model = "gemma-4-31b",
 ): Promise<LLMResult> {
-  const { providerPath, isAnthropic } = resolveProvider(model);
+  const { providerPath, type } = resolveProvider(model);
 
-  if (isAnthropic) {
+  if (type === "anthropic") {
     return callAnthropic(config, messages, tools, model, providerPath);
   }
 
-  // OpenAI-compatible path (Gemma, OpenAI, etc.)
-  const url = `https://gateway.ai.cloudflare.com/v1/${config.accountId}/${config.gatewayId}/${providerPath}/v1/chat/completions`;
-
+  // Workers AI uses the /compat endpoint with "workers-ai/@cf/..." model prefix
+  // Custom Gemma and OpenAI use their own provider paths
+  let url: string;
+  let requestModel: string;
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (config.aiGatewayToken) headers["cf-aig-authorization"] = `Bearer ${config.aiGatewayToken}`;
-  if (config.gpuServiceKey) headers["Authorization"] = `Bearer ${config.gpuServiceKey}`;
+
+  if (type === "workers-ai") {
+    // AI Gateway compat endpoint: model = "workers-ai/@cf/moonshotai/kimi-k2.5"
+    url = `https://gateway.ai.cloudflare.com/v1/${config.accountId}/${config.gatewayId}/compat/v1/chat/completions`;
+    requestModel = `workers-ai/${model}`;
+    // Workers AI via compat uses the AI Gateway token as the API key
+    if (config.aiGatewayToken) headers["Authorization"] = `Bearer ${config.aiGatewayToken}`;
+  } else {
+    // Custom Gemma or OpenAI
+    url = `https://gateway.ai.cloudflare.com/v1/${config.accountId}/${config.gatewayId}/${providerPath}/v1/chat/completions`;
+    requestModel = model;
+    if (config.aiGatewayToken) headers["cf-aig-authorization"] = `Bearer ${config.aiGatewayToken}`;
+    if (config.gpuServiceKey) headers["Authorization"] = `Bearer ${config.gpuServiceKey}`;
+  }
 
   const resp = await fetch(url, {
     method: "POST",
     headers,
     body: JSON.stringify({
-      model,
+      model: requestModel,
       messages,
       tools: tools.length > 0 ? tools : undefined,
       tool_choice: tools.length > 0 ? "auto" : undefined,
