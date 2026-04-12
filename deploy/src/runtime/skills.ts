@@ -161,6 +161,7 @@ const BUILTIN_SKILL_ORDER = [
   "spreadsheet",
   "analyze",
   "website",
+  "build-app",
   "game",
   "docx",
   "pptx",
