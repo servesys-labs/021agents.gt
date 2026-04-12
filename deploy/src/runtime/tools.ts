@@ -5623,15 +5623,15 @@ async function memorySave(env: RuntimeEnv, args: Record<string, any>): Promise<s
       let factId = id;
       if (existing.length > 0) {
         factId = String(existing[0].id || id);
-        const updateEntities = entities.length > 0 ? `{${entities.map(e => `"${e.replace(/"/g, '\\"')}"`).join(",")}}` : null;
+        const updateEntitiesJson = entities.length > 0 ? JSON.stringify(entities) : null;
         await sql`UPDATE facts SET value = ${content}, category = ${category}, updated_at = ${now}, last_reinforced_at = ${now},
           source_session_ids = CASE WHEN ${sid} = '' THEN source_session_ids ELSE array_append(COALESCE(source_session_ids, '{}'), ${sid}) END,
-          entities = CASE WHEN ${updateEntities} IS NULL THEN entities ELSE ${updateEntities}::text[] END WHERE id = ${existing[0].id}`;
+          entities = CASE WHEN ${updateEntitiesJson} IS NULL THEN entities ELSE ${updateEntitiesJson}::jsonb END WHERE id = ${existing[0].id}`;
       } else {
         const sessionIds = sid ? `{${sid}}` : "{}";
-        const entitiesArr = entities.length > 0 ? `{${entities.map(e => `"${e.replace(/"/g, '\\"')}"`).join(",")}}` : "{}";
+        const entitiesJson = JSON.stringify(entities);
         await sql`INSERT INTO facts (id, agent_name, org_id, scope, key, value, category, created_at, last_reinforced_at, source_session_ids, entities)
-          VALUES (${id}, ${agentName}, ${orgId}, 'agent', ${factKey}, ${content}, ${category}, ${now}, ${now}, ${sessionIds}::text[], ${entitiesArr}::text[])`;
+          VALUES (${id}, ${agentName}, ${orgId}, 'agent', ${factKey}, ${content}, ${category}, ${now}, ${now}, ${sessionIds}::text[], ${entitiesJson}::jsonb)`;
       }
       // Best-effort: also maintain semantic index row for deep retrieval.
       // DB write above is the source of truth; vector failures are non-fatal.
