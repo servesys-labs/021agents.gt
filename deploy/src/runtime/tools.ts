@@ -2630,34 +2630,6 @@ async function dispatch(
       }
     }
 
-    case "route-to-agent": {
-      // P1 Fix: Use cached agent capabilities instead of DB query per call
-      const { classifyIntent, decomposeIntents, getAgentCapabilitiesCached } = await import("./intent-router");
-      const routeInput = args.input || args.query || "";
-      if (!routeInput) return "route-to-agent requires input text";
-
-      const intents = decomposeIntents(routeInput);
-
-      // Load agent capabilities (cached for 60s)
-      const hyperdrive = (env as any).HYPERDRIVE;
-      const orgId = args.org_id || "";
-      const capabilities = hyperdrive
-        ? await getAgentCapabilitiesCached(hyperdrive, orgId)
-        : [];
-
-      const results = intents.map((i) => {
-        const cls = classifyIntent(i.subtask, capabilities);
-        return {
-          ...i,
-          suggested_agent: cls.suggested_agent,
-          all_intents: cls.all_intents,
-          reasoning: cls.reasoning,
-        };
-      });
-
-      return JSON.stringify({ routing: results, agent_count: capabilities.length });
-    }
-
     // ── DB Query Tools (codemode-safe, templated) ─────────────────
     // These use the /cf/db/query allowlist — no raw SQL, always org-scoped.
 
@@ -6057,7 +6029,7 @@ const TOOL_KEYWORDS: Record<string, string[]> = {
   "git|commit|branch|diff|repo|version control|stash": ["git-init", "git-status", "git-diff", "git-commit", "git-log", "git-branch", "git-stash"],
   // Agent management
   "create agent|new agent|clone agent|deploy agent|deploy my agent|list agent|manage agent": ["create-agent", "delete-agent", "list-agents"],
-  "run agent|delegate|ask another|specialist|hire": ["run-agent", "route-to-agent", "a2a-send"],
+  "run agent|delegate|ask another|specialist|hire": ["run-agent", "a2a-send"],
   "eval agent|test agent|evaluate|benchmark|compare agent|run eval": ["eval-agent", "compare-agents", "evolve-agent"],
   "train|improve|optimize|adapt": ["evolve-agent", "adapt-strategy", "autoresearch"],
   // Scheduling & automation
@@ -7016,24 +6988,6 @@ const TOOL_CATALOG: ToolDefinition[] = [
           channel: { type: "string", description: "Channel: api, websocket, portal, etc." },
         },
         required: ["rating"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "route-to-agent",
-      description:
-        "Classify user intent and route to the best-matching agent. " +
-        "Supports compound requests (e.g. 'deploy the API and show me the logs') " +
-        "by decomposing into sub-tasks with separate intent classifications.",
-      parameters: {
-        type: "object",
-        properties: {
-          input: { type: "string", description: "User input text to classify and route" },
-          org_id: { type: "string", description: "Organization ID (to look up available agents)" },
-        },
-        required: ["input"],
       },
     },
   },
