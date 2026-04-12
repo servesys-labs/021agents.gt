@@ -772,7 +772,16 @@ export async function streamRun(
       const onToolCallReady = config.parallel_tool_calls
         ? (tc: ToolCall) => {
             if (isConcurrentSafe(tc.name)) {
-              earlyExecPromises.set(tc.id, executeSingleTool(env, tc, sessionId, config.tools));
+              // Wrap in .catch() to convert rejections (circuit breaker, etc.)
+              // into error ToolResults — prevents unhandled rejection between
+              // the callback fire and the eventual Promise.all await.
+              earlyExecPromises.set(tc.id,
+                executeSingleTool(env, tc, sessionId, config.tools).catch((err: any) => ({
+                  tool: tc.name, tool_call_id: tc.id, result: "",
+                  error: `Early execution failed: ${err?.message || String(err)}`,
+                  latency_ms: 0, cost_usd: 0,
+                })),
+              );
             }
           }
         : undefined;
@@ -786,6 +795,9 @@ export async function streamRun(
         let resolved = false;
 
         for (let i = 0; i < candidates.length; i++) {
+          // Clear early-exec state between candidates to prevent stale results
+          // from a failed streaming attempt leaking into the successful one.
+          earlyExecPromises.clear();
           const candidate = candidates[i];
           try {
             const candidateResponse = await Promise.race([
@@ -887,8 +899,9 @@ export async function streamRun(
 
       // ── Max-tokens recovery: retry truncated responses ──
       if (llmResponse.stop_reason === "length" || llmResponse.stop_reason === "max_tokens") {
-        if (llmResponse.tool_calls.length > 0) {
-          // Tool call JSON may be truncated — ask model to retry
+        if (llmResponse.tool_calls.length > 0 && maxTokensRecoveryCount < 2) {
+          // Tool call JSON may be truncated — ask model to retry (capped to prevent infinite loop)
+          maxTokensRecoveryCount++;
           messages.push({ role: "assistant", content: llmResponse.content || "" });
           messages.push({
             role: "system",
