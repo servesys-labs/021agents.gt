@@ -329,23 +329,29 @@ authRoutes.openapi(signupRoute, async (c): Promise<any> => {
       system_prompt: buildPersonalAgentPrompt(name || email.split("@")[0]),
       model: "",  // Let plan routing handle model selection
       plan: "free",
-      // Lean tool list: 8 core tools the PA uses on most turns.
-      // The runtime's progressive tool discovery makes all 100+ tools
-      // available on demand — they don't need to be in this list.
+      // Core tools the PA uses on most turns. Progressive discovery
+      // makes all 100+ tools available on demand.
       tools: [
-        "web-search", "browse",           // research (daily use)
+        "web-search", "browse",           // research
         "python-exec", "bash",            // code execution
         "read-file", "write-file",        // workspace
+        "execute-code", "swarm",          // multi-step orchestration + parallel fan-out
         "memory-save", "memory-recall",   // persistence across sessions
         "create-schedule", "list-schedules", "delete-schedule", // automation
+      ],
+      // Skills activated for the personal agent — tool docs, error recovery,
+      // app-building workflows, and delegation routing come from skills,
+      // not from the system prompt.
+      enabled_skills: [
+        "research", "debug", "remember", "batch", "verify", "build-app",
       ],
       max_turns: 50,
       temperature: 0.7,
       tags: ["personal", "assistant"],
-      version: "1.0.0",
+      version: "2.0.0",
       governance: { budget_limit_usd: 10 },
-      reasoning_strategy: "",  // auto-select is best for a generalist
-      use_code_mode: true,     // Collapse tool schema for better latency and fewer direct tool calls.
+      reasoning_strategy: "",
+      use_code_mode: true,
       parallel_tool_calls: true,
       is_personal: true,
     };
@@ -765,13 +771,17 @@ authRoutes.openapi(cfAccessExchangeRoute, async (c): Promise<any> => {
           "web-search", "browse",
           "python-exec", "bash",
           "read-file", "write-file",
+          "execute-code", "swarm",
           "memory-save", "memory-recall",
           "create-schedule", "list-schedules", "delete-schedule",
+        ],
+        enabled_skills: [
+          "research", "debug", "remember", "batch", "verify", "build-app",
         ],
         max_turns: 50,
         temperature: 0.7,
         tags: ["personal", "assistant"],
-        version: "1.0.0",
+        version: "2.0.0",
         governance: { budget_limit_usd: 10 },
         reasoning_strategy: "",
         use_code_mode: true,
