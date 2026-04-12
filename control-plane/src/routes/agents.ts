@@ -9,6 +9,7 @@ import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, AgentCreateBody, AgentTemplate, AgentSummary, errorResponses } from "../schemas/openapi";
 import { withOrgDb, type OrgSql } from "../db/client";
 import { failSafe } from "../lib/error-response";
+import type { AuditAction } from "../telemetry/events";
 import { latestEvalGate, rolloutRecommendation } from "../logic/gate-pack";
 import { buildFromDescription, recommendTools, expandEvalConfig, generateEvolutionSuggestions, type EvalTestCase, type EvalRubric } from "../logic/meta-agent";
 import { normalizeEnabledSkills } from "../logic/meta-agent-chat";
@@ -579,7 +580,7 @@ agentRoutes.openapi(updateAgentRoute, async (c): Promise<any> => {
       if (oldVal !== newVal) {
         sql`
           INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
-          VALUES (${user.org_id}, ${user.user_id}, 'config_change', 'agent', ${name},
+          VALUES (${user.org_id}, ${user.user_id}, ${"config_change" satisfies AuditAction}, 'agent', ${name},
             ${JSON.stringify({ field, old_hash: oldVal?.slice(0, 50), new_hash: newVal?.slice(0, 50), version: newVersion })},
             NOW())
         `.catch(() => {}); // fire-and-forget
@@ -693,7 +694,7 @@ agentRoutes.openapi(deleteAgentRoute, async (c): Promise<any> => {
     // Audit log (fire-and-forget)
     sql`
       INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
-      VALUES (${user.org_id}, ${user.user_id}, 'delete', 'agent', ${name}, ${JSON.stringify({
+      VALUES (${user.org_id}, ${user.user_id}, ${"delete" satisfies AuditAction}, 'agent', ${name}, ${JSON.stringify({
         hard_delete: hardDelete,
       })}::jsonb, now())
     `.catch(() => {});

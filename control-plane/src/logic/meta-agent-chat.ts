@@ -14,6 +14,7 @@ import { parseJsonColumn } from "../lib/parse-json-column";
 import { SKILL_CATALOG, SKILL_CATALOG_NAMES } from "../lib/skill-catalog.generated";
 import { appendRule } from "./skill-mutation";
 import { buildMetaAgentChatPrompt as buildMetaAgentChatPromptImpl } from "../prompts/meta-agent-chat";
+import type { AuditAction } from "../telemetry/events";
 
 /**
  * Normalize an enabled_skills input from the LLM: coerce to string[],
@@ -899,7 +900,7 @@ async function executeTool(
       try {
         await sql`
           INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
-          VALUES (${ctx.orgId}, ${ctx.userId}, 'update_config', 'agent', ${ctx.agentName},
+          VALUES (${ctx.orgId}, ${ctx.userId}, ${"update_config" satisfies AuditAction}, 'agent', ${ctx.agentName},
             ${JSON.stringify({ changed_fields: changed, new_version: newVersion, source: "meta-agent" })}, now())
         `;
       } catch {}
@@ -2693,7 +2694,7 @@ async function executeTool(
         try {
           await sql`
             INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
-            VALUES (${ctx.orgId}, ${ctx.userId}, 'set_feature_flag', 'feature_flag', ${flag}, ${JSON.stringify({ flag, enabled, set_by: "meta-agent" })}, now())
+            VALUES (${ctx.orgId}, ${ctx.userId}, ${"set_feature_flag" satisfies AuditAction}, 'feature_flag', ${flag}, ${JSON.stringify({ flag, enabled, set_by: "meta-agent" })}, now())
           `;
         } catch {}
         return JSON.stringify({ updated: true, flag, enabled, message: `Feature flag '${flag}' set to ${enabled} for your organization.` });

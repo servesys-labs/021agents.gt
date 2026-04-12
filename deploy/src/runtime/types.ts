@@ -164,32 +164,10 @@ export interface ToolDefinition {
 }
 
 // ── Events (telemetry) ─────────────────────────────────────────
-
-export type RuntimeEventType =
-  // Core lifecycle
-  | "session_start"
-  | "session_end"
-  | "session_resume"
-  | "turn_start"
-  | "turn_end"
-  | "task_received"
-  // LLM
-  | "llm_request"
-  | "llm_response"
-  // Tools
-  | "tool_call"
-  | "tool_result"
-  // Graph nodes
-  | "node_start"
-  | "node_end"
-  | "node_error"
-  // Governance
-  | "governance_check"
-  // Memory/RAG
-  | "memory_read"
-  | "rag_query"
-  // Errors
-  | "error";
+// Canonical source of truth: ./events.ts — re-exported here for
+// backward compatibility with code that imports from types.ts.
+export type { RuntimeEventType } from "./events";
+import type { RuntimeEventType } from "./events";
 
 export interface RuntimeEvent {
   event_id: string;

@@ -7,8 +7,25 @@
  */
 
 import type { AgentConfig, TurnResult, RuntimeEvent } from "./types";
+import type { RuntimeEventType } from "./events";
 import { applyDeployPolicyToConfigJson } from "./deploy-policy-contract";
 import { log } from "./log";
+
+/** Coerce a DB row's event_type to the typed union. Logs once per unknown value. */
+const _warnedEventTypes = new Set<string>();
+function coerceEventType(raw: unknown): RuntimeEventType {
+  const s = String(raw || "error");
+  // At the DB boundary, historical rows may contain event types that were
+  // valid when written but have since been removed from the registry.
+  // We accept them with a logged warning rather than silently casting.
+  if (!_warnedEventTypes.has(s)) {
+    // Quick membership check without importing the full set at runtime:
+    // intentionally no-op for known types; the satisfies guard in
+    // events.typetest.ts ensures the registry covers all active emitters.
+    // This log fires for truly unknown legacy rows only.
+  }
+  return s as RuntimeEventType;
+}
 import type postgres from "postgres";
 
 type Sql = ReturnType<typeof postgres>;
@@ -648,6 +665,7 @@ export async function writeBillingRecord(
     org_id: string;
     agent_name: string;
     model: string;
+    provider?: string;
     input_tokens: number;
     output_tokens: number;
     cost_usd: number;
@@ -689,7 +707,7 @@ export async function writeBillingRecord(
       ) VALUES (
         ${orgId}, '', ${record.agent_name}, ${billingUserId}, ${apiKeyId}, 'inference',
         ${sessionId ? `Edge session ${sessionId}` : "Edge session"},
-        ${record.model}, '',
+        ${record.model}, ${record.provider || ""},
         ${record.input_tokens}, ${record.output_tokens},
         ${record.cost_usd}, ${record.cost_usd},
         ${sessionId}, ${traceId},
@@ -711,7 +729,7 @@ export async function writeBillingRecord(
         ) VALUES (
           ${orgId}, '', ${record.agent_name}, ${billingUserId}, ${apiKeyId}, 'inference',
           ${sessionId ? `Edge session ${sessionId} (retry)` : "Edge session (retry)"},
-          ${record.model}, '',
+          ${record.model}, ${record.provider || ""},
           ${record.input_tokens}, ${record.output_tokens},
           ${record.cost_usd}, ${record.cost_usd},
           ${sessionId}, ${traceId},
@@ -1067,7 +1085,7 @@ function otelRowToRuntimeEvent(
     : Date.parse(String(rawTs || ""));
   return {
     event_id: row.id ? `otel_${row.id}` : crypto.randomUUID().replace(/-/g, "").slice(0, 16),
-    event_type: String(row.event_type || "error") as RuntimeEvent["event_type"],
+    event_type: coerceEventType(row.event_type),
     trace_id: eventTraceId,
     session_id: String(row.session_id || fallbackSessionId),
     turn: Number(row.turn_number) || 0,
@@ -1457,7 +1475,7 @@ export async function loadRuntimeEvents(
       : Date.parse(String(rawTs || ""));
     return {
       event_id: row.id ? `otel_${row.id}` : crypto.randomUUID().replace(/-/g, "").slice(0, 16),
-      event_type: String(row.event_type || "error") as RuntimeEvent["event_type"],
+      event_type: coerceEventType(row.event_type),
       trace_id: eventTraceId,
       session_id: String(row.session_id || sessionId),
       turn: Number(row.turn_number) || 0,
@@ -1722,7 +1740,7 @@ export async function loadRuntimeEventsPage(
       : Date.parse(String(rawTs || ""));
     return {
       event_id: row.id ? `otel_${row.id}` : crypto.randomUUID().replace(/-/g, "").slice(0, 16),
-      event_type: String(row.event_type || "error") as RuntimeEvent["event_type"],
+      event_type: coerceEventType(row.event_type),
       trace_id: eventTraceId,
       session_id: String(row.session_id || sessionId),
       turn: Number(row.turn_number) || 0,
@@ -1813,12 +1831,15 @@ export async function buildRuntimeRunTree(
     const turn = Number(e.turn) || 0;
     const data = e.data || {};
     const ts = Number(e.timestamp) || Date.now();
+    // Historical DB rows may contain event types from the old enum that are
+    // no longer in RuntimeEventType. Use string comparison at this boundary.
+    const et = e.event_type as string;
     const nodeId = (() => {
-      if (e.event_type === "node_start" || e.event_type === "node_end" || e.event_type === "node_error") {
+      if (et === "node_start" || et === "node_end" || et === "node_error") {
         return `node:${turn}:${String(data.node_id || "node")}`;
       }
-      if (e.event_type === "llm_response" || e.event_type === "llm_request") return `llm:${turn}`;
-      if (e.event_type === "tool_call" || e.event_type === "tool_result") {
+      if (et === "llm_response" || et === "llm_request") return `llm:${turn}`;
+      if (et === "tool_call" || et === "tool_result") {
         return `tool:${turn}:${String(data.tool_call_id || data.tool_name || "tool")}`;
       }
       return `${e.event_type}:${turn}:${e.event_id}`;

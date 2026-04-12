@@ -18,13 +18,14 @@ import { logSecurityEvent } from "../logic/security-events";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { failSafe } from "../lib/error-response";
 import { ErrorSchema, RateLimitErrorSchema, AuthTokenResponse, UserProfile, TokenVerifyResponse, errorResponses } from "../schemas/openapi";
+import type { AuditAction, SecurityEventType, SeedEventType } from "../telemetry/events";
 
 export const authRoutes = createOpenAPIRouter();
 
 /** Fire-and-forget audit log for auth events */
 async function auditAuthEvent(
   sql: AdminSql,
-  action: string,
+  action: AuditAction,
   userId: string,
   orgId: string,
   details?: Record<string, unknown>,
@@ -408,7 +409,7 @@ authRoutes.openapi(signupRoute, async (c): Promise<any> => {
     } catch {} // non-blocking within tx
 
     // Seed default event_types for the org (best-effort, idempotent)
-    const defaultEventTypes = [
+    const defaultEventTypes: { event_type: SeedEventType; category: string; description: string }[] = [
       { event_type: "agent.created", category: "agents", description: "Agent was created" },
       { event_type: "agent.updated", category: "agents", description: "Agent config was updated" },
       { event_type: "agent.deleted", category: "agents", description: "Agent was deleted" },

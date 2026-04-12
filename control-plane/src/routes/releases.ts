@@ -10,6 +10,7 @@ import { latestEvalGate, rolloutRecommendation } from "../logic/gate-pack";
 import { getThresholds } from "../logic/policies";
 import { applyDeployPolicyToConfigJson } from "../logic/deploy-policy-contract";
 import { parseJsonColumn } from "../lib/parse-json-column";
+import type { AuditAction } from "../telemetry/events";
 
 export const releaseRoutes = createOpenAPIRouter();
 
@@ -190,7 +191,7 @@ releaseRoutes.openapi(promoteRoute, async (c): Promise<any> => {
       try {
         await sql`
           INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
-          VALUES (${user.org_id}, ${user.user_id}, 'agent.promote_override', 'agent', ${agentName},
+          VALUES (${user.org_id}, ${user.user_id}, ${"agent.promote_override" satisfies AuditAction}, 'agent', ${agentName},
                   ${JSON.stringify({
                     from: fromChannel,
                     to: toChannel,
@@ -228,7 +229,7 @@ releaseRoutes.openapi(promoteRoute, async (c): Promise<any> => {
   try {
     await sql`
       INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
-      VALUES (${user.org_id}, ${user.user_id}, 'agent.promoted', 'agent', ${agentName},
+      VALUES (${user.org_id}, ${user.user_id}, ${"agent.promoted" satisfies AuditAction}, 'agent', ${agentName},
               ${JSON.stringify({ from: fromChannel, to: toChannel, version })}, ${now})
     `;
   } catch {}
@@ -564,7 +565,7 @@ releaseRoutes.openapi(rollbackCanaryRoute, async (c): Promise<any> => {
   try {
     await sql`
       INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
-      VALUES (${user.org_id}, ${user.user_id}, 'agent.canary_rollback', 'agent', ${agentName},
+      VALUES (${user.org_id}, ${user.user_id}, ${"agent.canary_rollback" satisfies AuditAction}, 'agent', ${agentName},
               ${JSON.stringify({
                 primary_version: primaryVersion,
                 canary_version: String(split.canary_version),
@@ -723,7 +724,7 @@ releaseRoutes.post("/:agent_name/auto-promote", requireScope("releases:write"), 
     try {
       await sql`
         INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
-        VALUES (${user.org_id}, ${user.user_id}, 'agent.canary_auto_promoted', 'agent', ${agentName},
+        VALUES (${user.org_id}, ${user.user_id}, ${"agent.canary_auto_promoted" satisfies AuditAction}, 'agent', ${agentName},
                 ${JSON.stringify({ primary_version: primaryVersion, canary_version: canaryVersion, metrics, slo_results: sloResults })}, ${now})
       `;
     } catch {}
@@ -755,7 +756,7 @@ releaseRoutes.post("/:agent_name/auto-promote", requireScope("releases:write"), 
     try {
       await sql`
         INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
-        VALUES (${user.org_id}, ${user.user_id}, 'agent.canary_auto_rollback', 'agent', ${agentName},
+        VALUES (${user.org_id}, ${user.user_id}, ${"agent.canary_auto_rollback" satisfies AuditAction}, 'agent', ${agentName},
                 ${JSON.stringify({ primary_version: primaryVersion, canary_version: canaryVersion, metrics, slo_results: sloResults })}, ${now})
       `;
     } catch {}
@@ -830,7 +831,7 @@ releaseRoutes.post("/:agent_name/auto-rollback", requireScope("releases:write"),
   try {
     await sql`
       INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
-      VALUES (${user.org_id}, ${user.user_id}, 'agent.explicit_auto_rollback', 'agent', ${agentName},
+      VALUES (${user.org_id}, ${user.user_id}, ${"agent.explicit_auto_rollback" satisfies AuditAction}, 'agent', ${agentName},
               ${JSON.stringify({ primary_version: primaryVersion, canary_version: canaryVersion, reason })}, ${now})
     `;
   } catch {}

@@ -26,6 +26,7 @@
  */
 
 import type { Sql } from "../db/client";
+import type { WebhookEventType } from "../telemetry/events";
 
 export interface AgentRunEvent {
   agent_name: string;
@@ -105,7 +106,7 @@ export async function dispatchRunCompletedWebhooks(
             secret: row.secret || "",
             body: payloadJson,
             org_id: orgId,
-            event_type: "agent.run.completed",
+            event_type: "agent.run.completed" satisfies WebhookEventType,
           },
         }).catch(() => {});
       } else {

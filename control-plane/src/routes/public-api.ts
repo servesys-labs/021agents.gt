@@ -727,7 +727,7 @@ publicAgentRoutes.openapi(agentRunUploadRoute, async (c): Promise<any> => {
         });
 
         await sql`
-          INSERT INTO file_uploads (file_id, org_id, agent_name, r2_key, original_name, content_type, size_bytes)
+          INSERT INTO file_uploads (id, org_id, uploaded_by, r2_key, filename, content_type, size_bytes)
           VALUES (${fileId}, ${orgId}, ${agentName}, ${r2Key}, ${file.name}, ${file.type || "application/octet-stream"}, ${file.size})
         `;
 
@@ -912,7 +912,7 @@ publicAgentRoutes.openapi(createConversationRoute, async (c): Promise<any> => {
 
   return await withOrgDb(c.env, orgId, async (sql) => {
     await sql`
-      INSERT INTO conversations (conversation_id, org_id, agent_name, external_user_id, title, metadata)
+      INSERT INTO conversations (id, org_id, agent_name, user_id, title, metadata)
       VALUES (${convId}, ${orgId}, ${agentName}, ${body.user_id || ""}, ${body.title || ""}, ${JSON.stringify(body.metadata || {})})
     `;
 

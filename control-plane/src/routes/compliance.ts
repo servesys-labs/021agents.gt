@@ -8,6 +8,7 @@ import { hasRole } from "../auth/types";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { withOrgDb, type OrgSql } from "../db/client";
+import type { AuditAction, SecurityEventType } from "../telemetry/events";
 import { requireScope } from "../middleware/auth";
 
 export const complianceRoutes = createOpenAPIRouter();
@@ -23,7 +24,7 @@ async function logSecurityEvent(
   sql: OrgSql,
   orgId: string,
   userId: string,
-  action: string,
+  action: SecurityEventType,
   details: Record<string, unknown>,
 ): Promise<void> {
   try {
@@ -39,7 +40,7 @@ async function auditLog(
   sql: OrgSql,
   orgId: string,
   userId: string,
-  action: string,
+  action: AuditAction,
   resourceType: string,
   resourceId: string,
   details: Record<string, unknown>,

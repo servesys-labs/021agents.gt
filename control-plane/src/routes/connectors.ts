@@ -7,6 +7,7 @@ import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { failSafe } from "../lib/error-response";
+import type { AuditAction } from "../telemetry/events";
 
 export const connectorRoutes = createOpenAPIRouter();
 
@@ -162,7 +163,7 @@ connectorRoutes.openapi(callToolRoute, async (c): Promise<any> => {
       await withOrgDb(c.env, user.org_id, async (sql) => {
         await sql`
           INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
-          VALUES (${user.org_id}, ${user.user_id}, 'connector.tool_call', 'connector', ${toolName},
+          VALUES (${user.org_id}, ${user.user_id}, ${"connector.tool_call" satisfies AuditAction}, 'connector', ${toolName},
                   ${JSON.stringify({ provider: "pipedream", app, duration_ms: durationMs })}, ${now})
         `;
       });
@@ -291,7 +292,7 @@ connectorRoutes.openapi(storeTokenRoute, async (c): Promise<any> => {
       const nowEpoch = new Date().toISOString();
       await sql`
         INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
-        VALUES (${user.org_id}, ${user.user_id}, 'connector.token_stored', 'connector', ${provider},
+        VALUES (${user.org_id}, ${user.user_id}, ${"connector.token_stored" satisfies AuditAction}, 'connector', ${provider},
                 ${JSON.stringify({ scopes })}, ${nowEpoch})
       `;
     } catch {}

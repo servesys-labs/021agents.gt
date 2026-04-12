@@ -8,6 +8,7 @@ import type { CurrentUser } from "../auth/types";
 import { withOrgDb } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { logSecurityEvent } from "../logic/security-events";
+import type { AuditAction, SecurityEventType } from "../telemetry/events";
 
 export const retentionRoutes = createOpenAPIRouter();
 
@@ -212,7 +213,7 @@ retentionRoutes.openapi(applyRetentionRoute, async (c): Promise<any> => {
 
                 logSecurityEvent(sql, {
                   org_id: orgId,
-                  event_type: "policy.audit_archived",
+                  event_type: "policy.audit_archived" satisfies SecurityEventType,
                   actor_id: "system",
                   actor_type: "system",
                   severity: "medium",
@@ -261,7 +262,7 @@ retentionRoutes.openapi(applyRetentionRoute, async (c): Promise<any> => {
   try {
     await sql`
       INSERT INTO audit_log (org_id, actor_id, action, resource_type, details, created_at)
-      VALUES (${user.org_id}, ${user.user_id}, 'retention.applied', 'retention', ${JSON.stringify(results)}, ${new Date().toISOString()})
+      VALUES (${user.org_id}, ${user.user_id}, ${"retention.applied" satisfies AuditAction}, 'retention', ${JSON.stringify(results)}, ${new Date().toISOString()})
     `;
   } catch {}
 
