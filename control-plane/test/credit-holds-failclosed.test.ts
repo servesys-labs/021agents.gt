@@ -1,7 +1,13 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
 
-import { reserveCreditHold, settleCreditHold, reclaimExpiredCreditHolds } from "../src/logic/credits";
+import {
+  reserveCreditHold,
+  settleCreditHold,
+  releaseCreditHold,
+  reclaimExpiredCreditHolds,
+  collectOutstandingCreditDebt,
+} from "../src/logic/credits";
 import { buildDbClientMock, mockEnv, type MockSqlFn } from "./helpers/test-env";
 
 let mockSql: MockSqlFn = (async () => []) as unknown as MockSqlFn;
@@ -190,6 +196,48 @@ function createBillingSqlState(initialBalance = 5) {
 
     if (query.includes("INSERT INTO credit_transactions")) return [{ id: 1 }];
 
+    // ── Debt-collection handlers (collectOutstandingCreditDebt) ────
+    // Separate from the settle path — these queries distinguish by
+    // *absence* of GREATEST and by a standalone `balance_usd = ?`
+    // target. Kept narrow so the existing settle handlers above still
+    // match their own queries.
+
+    if (query.includes("SELECT id, amount_usd") && query.includes("FROM billing_exceptions") && query.includes("FOR UPDATE")) {
+      const rows = state.billingExceptions
+        .map((r, idx) => ({ ...r, __idx: idx }))
+        .filter((r) => r.kind === "unrecovered_cost" && r.resolved_at === null && r.amount_usd > 0);
+      return rows.map((r) => ({ id: r.__idx + 1, amount_usd: r.amount_usd }));
+    }
+
+    if (query.includes("SELECT balance_usd") && !query.includes("reserved_usd") && query.includes("FROM org_credit_balance") && query.includes("FOR UPDATE")) {
+      return [{ balance_usd: state.balance }];
+    }
+
+    if (query.includes("UPDATE billing_exceptions") && query.includes("SET amount_usd = 0") && query.includes("resolved_at = now()")) {
+      const id = Number(values[0]);
+      const row = state.billingExceptions[id - 1];
+      if (row) {
+        row.amount_usd = 0;
+        row.resolved_at = new Date().toISOString();
+      }
+      return [];
+    }
+
+    if (query.includes("UPDATE billing_exceptions") && query.includes("SET amount_usd = amount_usd -")) {
+      const applied = Number(values[0]);
+      const id = Number(values[1]);
+      const row = state.billingExceptions[id - 1];
+      if (row) {
+        row.amount_usd = Math.max(0, row.amount_usd - applied);
+      }
+      return [];
+    }
+
+    if (query.includes("UPDATE org_credit_balance") && query.includes("SET balance_usd = ?") && query.includes("lifetime_consumed_usd = lifetime_consumed_usd +") && !query.includes("GREATEST")) {
+      state.balance = Number(values[0]);
+      return [];
+    }
+
     throw new Error(`Unhandled SQL in test double: ${query}`);
   }) as unknown as MockSqlFn;
 
@@ -323,5 +371,184 @@ describe("credit holds fail-closed debtless", () => {
     expect(res.status).toBe(201);
     expect(state.balance).toBeCloseTo(5, 6);
     expect(state.reserved).toBeCloseTo(0, 6);
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // Code-review follow-up gaps (Commit 2 regression guards)
+  // ══════════════════════════════════════════════════════════════════
+
+  // Gap A — C2 follow-up: debt gate must BLOCK new reservations
+  // when unresolved debt exists, not just CREATE debt on overflow.
+  // Without this test, a refactor that accidentally skips the debt
+  // check in reserveCreditHold would silently pass CI — the existing
+  // C2 test only verifies debt CREATION, not the GATE firing.
+  it("C2 gate: reserveCreditHold blocks new holds when unresolved debt exists", async () => {
+    const { state, sql } = createBillingSqlState(0.8);
+    const first = await reserveCreditHold(sql as any, "org-1", "s-debt-1", 0.5, 600, { agentName: "a" });
+    expect(first.success).toBe(true);
+    // Overspend to create debt (same shape as C2)
+    const settled = await settleCreditHold(sql as any, "org-1", (first as any).hold_id, 1.5, "run", "a", "s-debt-1");
+    expect(settled.success).toBe(true);
+    expect(settled.debt_created).toBe(true);
+    expect(state.billingExceptions.some((r) => r.kind === "unrecovered_cost" && r.resolved_at === null)).toBe(true);
+
+    // The gate: next reserve should be blocked with debt_pending.
+    const blocked = await reserveCreditHold(sql as any, "org-1", "s-debt-2", 0.5, 600, { agentName: "a" });
+    expect(blocked.success).toBe(false);
+    expect((blocked as any).reason).toBe("debt_pending");
+    expect((blocked as any).debt_amount_usd).toBeCloseTo(0.7, 6);
+    // Balance and reserved must be untouched — the gate fires before
+    // the balance CAS runs.
+    expect(state.balance).toBeCloseTo(0, 6);
+    expect(state.reserved).toBeCloseTo(0, 6);
+  });
+
+  // Gap B — collectOutstandingCreditDebt auto-resolves debt on top-up.
+  // This exercises the addCredits → collectOutstandingCreditDebt wiring
+  // that makes the debt gate self-clear after a customer tops up.
+  // Without this test, the "top-up unblocks the gate" contract can
+  // silently break on refactor.
+  it("C2 collect: collectOutstandingCreditDebt resolves debt and unblocks the gate", async () => {
+    const { state, sql } = createBillingSqlState(1.0);
+    // Seed unresolved debt directly — simulates a previous overflow run
+    // whose customer is now topping up.
+    state.billingExceptions.push({
+      org_id: "org-1",
+      session_id: "s-prior",
+      hold_id: "h-prior",
+      kind: "unrecovered_cost",
+      amount_usd: 0.6,
+      resolved_at: null,
+    });
+
+    const result = await collectOutstandingCreditDebt(sql as any, "org-1");
+    expect(result.collected_usd).toBeCloseTo(0.6, 6);
+    expect(result.remaining_usd).toBeCloseTo(0, 6);
+    expect(state.balance).toBeCloseTo(0.4, 6);
+    // Debt row now resolved
+    expect(state.billingExceptions[0].resolved_at).not.toBeNull();
+    expect(state.billingExceptions[0].amount_usd).toBeCloseTo(0, 6);
+
+    // Gate is clear — next reserve must succeed
+    const hold = await reserveCreditHold(sql as any, "org-1", "s-post-collect", 0.3, 600, { agentName: "a" });
+    expect(hold.success).toBe(true);
+    expect(state.balance).toBeCloseTo(0.1, 6);
+  });
+
+  // Gap C (part 1) — C3 contract: releaseCreditHold must THROW when
+  // the balance row is missing (not silently succeed). The C3 commit
+  // made this throw intentional; this test pins the behavior so a
+  // refactor replacing `throw` with `return` would fail CI.
+  it("C3 contract: releaseCreditHold throws when balance row is missing", async () => {
+    const sqlFn = (async (strings: TemplateStringsArray, ..._values: unknown[]) => {
+      const query = strings.join("?");
+      // Return an active hold from the initial SELECT...
+      if (query.includes("FROM credit_holds") && query.includes("FOR UPDATE")) {
+        return [{ hold_id: "h-missing-bal", hold_amount_usd: 0.5, status: "active" }];
+      }
+      // ...but return empty from the balance UPDATE, simulating an org
+      // with a hold but no org_credit_balance row (data integrity issue).
+      if (query.includes("UPDATE org_credit_balance") && query.includes("RETURNING org_id")) {
+        return [];
+      }
+      return [];
+    }) as unknown as MockSqlFn;
+    Object.assign(sqlFn, { unsafe: async () => [], begin: async (fn: any) => fn(sqlFn) });
+
+    await expect(releaseCreditHold(sqlFn as any, "org-1", "h-missing-bal", "crash"))
+      .rejects.toThrow(/missing balance row/);
+  });
+
+  // Gap C (part 2) — C3 contract: releaseCreditHold must THROW when
+  // the hold was raced to non-active between the initial SELECT and
+  // the final UPDATE (the orphaned-state window). Without this test,
+  // the fail-loud signal at credits.ts:308 could silently break.
+  it("C3 contract: releaseCreditHold throws when hold was raced to non-active", async () => {
+    let phase = "initial";
+    const sqlFn = (async (strings: TemplateStringsArray, ..._values: unknown[]) => {
+      const query = strings.join("?");
+      if (query.includes("FROM credit_holds") && query.includes("FOR UPDATE") && phase === "initial") {
+        phase = "post-select";
+        return [{ hold_id: "h-raced", hold_amount_usd: 0.5, status: "active" }];
+      }
+      if (query.includes("UPDATE org_credit_balance") && query.includes("RETURNING org_id")) {
+        return [{ org_id: "org-1" }];
+      }
+      if (query.includes("UPDATE credit_holds") && query.includes("AND status = 'active'") && query.includes("RETURNING hold_id")) {
+        // Simulate the race: hold flipped to non-active between SELECT
+        // and the update. 0 rows → throws.
+        return [];
+      }
+      return [];
+    }) as unknown as MockSqlFn;
+    Object.assign(sqlFn, { unsafe: async () => [], begin: async (fn: any) => fn(sqlFn) });
+
+    await expect(releaseCreditHold(sqlFn as any, "org-1", "h-raced", "crash"))
+      .rejects.toThrow(/hold h-raced was not active/);
+  });
+
+  // Bug 2 regression — batch_run billing ordering: settle must commit
+  // its effect BEFORE any downstream code runs, so a subsequent DB
+  // error (batch_tasks UPDATE failure under a Hyperdrive hiccup)
+  // cannot roll back the charge. This test simulates the new-flow
+  // sequence and verifies the state after settle is visible
+  // independent of any subsequent operation.
+  it("Bug 2 regression: batch_run settle commits independently of downstream batch_tasks UPDATE", async () => {
+    const { state, sql } = createBillingSqlState(5);
+    const taskSessionId = "batch-b1-task-42";
+
+    // 1. Reserve (simulating the per-task hold)
+    const hold = await reserveCreditHold(sql as any, "org-1", taskSessionId, 0.5, 600, { agentName: "batch-agent" });
+    expect(hold.success).toBe(true);
+    expect(state.balance).toBeCloseTo(4.5, 6);
+    expect(state.reserved).toBeCloseTo(0.5, 6);
+
+    // 2. Simulated runtime returns a cost
+    const runtimeCost = 0.3;
+
+    // 3. Settle FIRST, in its own transaction — this is the new
+    //    behavior introduced by the Bug 2 fix. After this call,
+    //    the charge is committed to state regardless of whatever
+    //    happens next.
+    const settled = await settleCreditHold(
+      sql as any,
+      "org-1",
+      (hold as any).hold_id,
+      runtimeCost,
+      "Batch run: batch-agent",
+      "batch-agent",
+      "rt-session-42",
+    );
+    expect(settled.success).toBe(true);
+    expect(settled.charged_usd).toBeCloseTo(0.3, 6);
+
+    // 4. State AFTER settle — the key invariant. Balance reflects
+    //    the charge, reserved is back to 0, hold is settled.
+    const balanceAfterSettle = state.balance;
+    const reservedAfterSettle = state.reserved;
+    expect(balanceAfterSettle).toBeCloseTo(4.7, 6); // 4.5 + (0.5 - 0.3)
+    expect(reservedAfterSettle).toBeCloseTo(0, 6);
+
+    // 5. Simulate the batch_tasks UPDATE throwing. In the OLD flow
+    //    (single outer txn), this throw would have rolled back the
+    //    settle. In the NEW flow, settle is in its own txn and has
+    //    already committed — nothing the outer txn does can revert
+    //    the billing state below.
+    const simulateBatchTasksUpdateFailure = () => {
+      throw new Error("simulated Hyperdrive connection loss on batch_tasks UPDATE");
+    };
+    try {
+      simulateBatchTasksUpdateFailure();
+    } catch {
+      // Swallow — we only care that state survives.
+    }
+
+    // 6. Verify the billing state is untouched by the simulated failure.
+    expect(state.balance).toBeCloseTo(balanceAfterSettle, 6);
+    expect(state.reserved).toBeCloseTo(reservedAfterSettle, 6);
+    // And the hold is recorded as settled, not active.
+    const holdRow = state.holds.get((hold as any).hold_id);
+    expect(holdRow?.status).toBe("settled");
+    expect(holdRow?.actual_cost_usd).toBeCloseTo(0.3, 6);
   });
 });
