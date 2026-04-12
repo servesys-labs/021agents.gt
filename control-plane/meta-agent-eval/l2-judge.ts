@@ -102,7 +102,11 @@ export async function judgeTrace(
       { role: "system", content: JUDGE_SYSTEM_PROMPT },
       { role: "user", content: buildJudgeUserMessage(userMessage, expectedBehavior, summary) },
     ],
-    max_tokens: 256,
+    // Gemma-4 emits reasoning_content that counts against max_tokens.
+    // A tight budget (256) leaves nothing for the final JSON object
+    // after the model's internal reasoning phase. 2048 gives room for
+    // both reasoning and the scorecard JSON without being wasteful.
+    max_tokens: 2048,
     temperature: 0,
     timeout_ms: 60_000,
     metadata: { agent: "meta-agent-eval-judge" },
