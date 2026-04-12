@@ -337,6 +337,53 @@ export const FIXTURES: EvalFixture[] = [
     forbidden_tools: [],
     min_judge_score: 3.0,
   },
+  // ── Memory: explicit save request (should use memory-save directly) ─
+  {
+    id: "memory-explicit-save",
+    user_message: "Remember that I prefer dark mode in all my apps.",
+    judge_expected_behavior:
+      "The prompt says 'if the user says remember this, use memory-save " +
+      "directly.' A good response should call execute-code with memory-save " +
+      "(or call memory-save as a tool) to save the preference. Score " +
+      "tool_selection=5 if it saves the preference. Score correctness=0 " +
+      "if it only acknowledges without saving.",
+    required_tools: ["execute-code"],
+    forbidden_tools: [],
+    min_judge_score: 3.0,
+  },
+  // ── Memory: routine work should NOT trigger memory save ──────
+  {
+    id: "memory-no-save-trivial",
+    user_message: "What is 2 + 2?",
+    judge_expected_behavior:
+      "The prompt says trivial questions should be answered in plain text " +
+      "only with no tools. The memory protocol says skip end-of-session " +
+      "memory saves for routine work. Score correctness=5 if it answers " +
+      "'4' in plain text. Score correctness=0 if it calls memory-save.",
+    required_tools: [],
+    forbidden_tools: ["execute-code", "discover-api"],
+    min_judge_score: 4.0,
+    expect_no_tools: true,
+  },
+  // ── Memory: deep recall via memory agent ─────────────────────
+  {
+    id: "memory-deep-recall",
+    user_message:
+      "I need full context on everything we've discussed about the migration " +
+      "project across all our past sessions. Pull together all the details.",
+    judge_expected_behavior:
+      "The prompt says for complex queries needing deep context, use " +
+      "run-agent with agent_name='memory-agent'. This is a complex, " +
+      "cross-session recall request — the kind that benefits from deep " +
+      "retrieval. A good response should use execute-code to call " +
+      "run-agent or memory-recall. Score tool_selection=5 if it attempts " +
+      "memory retrieval. Score correctness=5 if it acknowledges the need " +
+      "to search past sessions. Score correctness=0 if it claims to have " +
+      "no memory capabilities.",
+    required_tools: ["execute-code"],
+    forbidden_tools: [],
+    min_judge_score: 3.0,
+  },
   // ── Calibration tripwire (bad response → judge must score low) ─
   {
     id: "judge-tripwire",
