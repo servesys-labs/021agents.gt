@@ -3,9 +3,9 @@
   "_seed_instructions": "To regenerate: WRITE_LOC_BUDGET=1 pnpm vitest run test/refactor-phase0.test.ts",
   "ceilings": {
     "src/runtime/skills.ts": 180,
-    "src/runtime/tools.ts": 7740,
-    "src/runtime/reasoning-strategies.ts": 223,
-    "src/runtime/permission-classifier.ts": 62
+    "src/runtime/tools.ts": 7697,
+    "src/runtime/reasoning.ts": 164,
+    "src/runtime/permission-classifier.ts": 71
   },
   "phase_targets": {
     "_comment": "Target LoC after each phase completes. Not enforced; documentation of intent.",
@@ -23,6 +23,6 @@
       "phase_9": 2500
     }
   },
-  "_seeded_at": "2026-04-11T15:09:52.265Z",
+  "_seeded_at": "2026-04-12T14:35:36.655Z",
   "_post_merge_note": "Merged origin/main 4432d5d (feat(memory): curated memory rollout). Main re-inlined sessionSearch/memoryHealth into tools.ts with new response shapes, added sync-workspace-procedures, extended emitMemoryEvent with memory_hit/memory_miss, and improved memoryRecall/memorySave/memoryDelete telemetry. The hygiene-PR extraction to memory-tools.ts was dropped as part of the merge resolution to avoid perpetual conflicts with upstream memory work; memory-tools.ts is deleted and memory-tools.test.ts imports sessionSearch/memoryHealth directly from tools.ts (now exported). Fail-closed org_id fixes from the hygiene PR were re-applied to main's re-inlined versions of sessionSearch, memoryHealth, and the new sync-workspace-procedures. Net: tools.ts 7801 → 8080 (+279 lines, legitimate memory feature + 3 fail-closed rewrites). Phase 8/9 still targets further reduction via tool consolidation, not memory-feature rollbacks."
 }

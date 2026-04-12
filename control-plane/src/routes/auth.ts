@@ -334,14 +334,13 @@ authRoutes.openapi(signupRoute, async (c): Promise<any> => {
       tools: [
         "web-search", "browse",           // research
         "python-exec", "bash",            // code execution
-        "read-file", "write-file",        // workspace
+        "read-file", "write-file", "edit-file", // workspace
         "execute-code", "swarm",          // multi-step orchestration + parallel fan-out
         "memory-save", "memory-recall",   // persistence across sessions
         "create-schedule", "list-schedules", "delete-schedule", // automation
       ],
-      // Skills activated for the personal agent — tool docs, error recovery,
-      // app-building workflows, and delegation routing come from skills,
-      // not from the system prompt.
+      // Skills activated — tool docs, error recovery, app-building workflows,
+      // and delegation routing come from skills, not the system prompt.
       enabled_skills: [
         "research", "debug", "remember", "batch", "verify", "build-app",
       ],
@@ -770,7 +769,7 @@ authRoutes.openapi(cfAccessExchangeRoute, async (c): Promise<any> => {
         tools: [
           "web-search", "browse",
           "python-exec", "bash",
-          "read-file", "write-file",
+          "read-file", "write-file", "edit-file",
           "execute-code", "swarm",
           "memory-save", "memory-recall",
           "create-schedule", "list-schedules", "delete-schedule",
