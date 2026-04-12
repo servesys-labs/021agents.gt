@@ -17,6 +17,14 @@ export interface MemoryDigestParams {
   parent_depth: number;
 }
 
+export interface PassiveSignalWorkflowEvidence {
+  signalBriefing: string;
+  signalType: string;
+  signalTopic: string;
+  signalSessionIds: string[];
+  signalEntities: string[];
+}
+
 function quoteWorkflowArg(value: string): string {
   const text = String(value || "");
   return JSON.stringify(text);
@@ -74,13 +82,19 @@ export function buildPassiveMemoryWorkflowParams(
   orgId: string,
   parentDepth: number,
   hasWorkflowBinding: boolean,
-  signalBriefing: string,
+  evidence: PassiveSignalWorkflowEvidence,
 ): MemoryDigestParams | null {
   const command = workflowKind === "consolidate" ? "/memory-consolidate" : "/memory-digest";
+  const sessionIds = evidence.signalSessionIds.filter(Boolean);
+  const entities = evidence.signalEntities.filter(Boolean);
   const args = [
     `agent_name=${agentName}`,
     sessionId ? `session_id=${sessionId}` : "",
-    `signal_briefing=${quoteWorkflowArg(signalBriefing)}`,
+    `signal_briefing=${quoteWorkflowArg(evidence.signalBriefing)}`,
+    evidence.signalType ? `signal_type=${quoteWorkflowArg(evidence.signalType)}` : "",
+    evidence.signalTopic ? `signal_topic=${quoteWorkflowArg(evidence.signalTopic)}` : "",
+    sessionIds.length ? `signal_session_ids=${quoteWorkflowArg(sessionIds.join(","))}` : "",
+    entities.length ? `signal_entities=${quoteWorkflowArg(entities.join(","))}` : "",
   ].filter(Boolean).join(" ");
   return buildMemoryAgentWorkflowParams(
     `${command} ${args}`.trim(),

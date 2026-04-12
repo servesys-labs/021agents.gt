@@ -2,7 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 
 import { SignalCoordinatorDO } from "../src/runtime/signal-coordinator-do";
-import type { SignalEnvelope } from "../src/runtime/signals";
+import {
+  buildSignalCoordinatorKey,
+  deriveSignalEnvelopes,
+  signalEnvelopeMessage,
+  type SignalEnvelope,
+} from "../src/runtime/signals";
 
 const NOW = 1_700_000_000_000;
 
@@ -265,12 +270,36 @@ class FakeSqlStorage {
       return new FakeCursor<T>(rows, 0);
     }
 
+    if (q.includes("SELECT session_id, summary, entities_json FROM signal_events")) {
+      const [signature] = bindings;
+      const rows = [...this.events.values()]
+        .filter((row) => row.signature === String(signature))
+        .sort((a, b) => b.created_at_ms - a.created_at_ms)
+        .slice(0, 8)
+        .map((row) => ({
+          session_id: row.session_id,
+          summary: row.summary,
+          entities_json: row.entities_json,
+        })) as unknown as T[];
+      return new FakeCursor<T>(rows, 0);
+    }
+
     if (q.includes("SELECT session_id FROM signal_events")) {
       const [signature] = bindings;
       const row = [...this.events.values()]
         .filter((entry) => entry.signature === String(signature))
         .sort((a, b) => b.created_at_ms - a.created_at_ms)[0];
       return new FakeCursor<T>(row ? ([{ session_id: row.session_id }] as unknown as T[]) : [], 0);
+    }
+
+    if (q.includes("SELECT feature FROM signal_clusters")) {
+      const row = [...this.clusters.values()].sort((a, b) => b.last_seen_ms - a.last_seen_ms)[0];
+      return new FakeCursor<T>(row ? ([{ feature: row.feature }] as unknown as T[]) : [], 0);
+    }
+
+    if (q.includes("SELECT feature FROM signal_events")) {
+      const row = [...this.events.values()].sort((a, b) => b.created_at_ms - a.created_at_ms)[0];
+      return new FakeCursor<T>(row ? ([{ feature: row.feature }] as unknown as T[]) : [], 0);
     }
 
     if (q.includes("SELECT metadata_json FROM signal_events")) {
@@ -446,6 +475,8 @@ describe("SignalCoordinatorDO", () => {
     expect(create).toHaveBeenCalledTimes(1);
     expect(create.mock.calls[0][0].params.input).toContain("/memory-digest");
     expect(create.mock.calls[0][0].params.input).toContain("signal_briefing=");
+    expect(create.mock.calls[0][0].params.input).toContain('signal_session_ids="sess-3,sess-2,sess-1"');
+    expect(create.mock.calls[0][0].params.input).toContain('signal_entities="Stripe"');
     expect(snapshot.workflow_fire_count).toBe(1);
     expect(snapshot.cooldown_count).toBe(1);
     expect(snapshot.pending).toBe(false);
@@ -463,5 +494,108 @@ describe("SignalCoordinatorDO", () => {
 
     expect(second.suppressed).toBe(1);
     expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it("drives a passive digest end to end from raw runtime telemetry", async () => {
+    const { coordinator, env } = createCoordinator();
+    const rawEvents = [
+      {
+        type: "runtime_event",
+        payload: {
+          org_id: "org-1",
+          agent_name: "personal-agent",
+          session_id: "sess-a",
+          event_type: "tool_exec",
+          status: "error",
+          node_id: "browser-open",
+          details: { tool: "browser-open", url: "https://acme.dev/incidents/billing-bug" },
+          created_at: NOW,
+        },
+      },
+      {
+        type: "runtime_event",
+        payload: {
+          org_id: "org-1",
+          agent_name: "personal-agent",
+          session_id: "sess-b",
+          event_type: "tool_exec",
+          status: "error",
+          node_id: "browser-open",
+          details: { tool: "browser-open", url: "https://acme.dev/incidents/billing-bug" },
+          created_at: NOW + 1,
+        },
+      },
+      {
+        type: "runtime_event",
+        payload: {
+          org_id: "org-1",
+          agent_name: "personal-agent",
+          session_id: "sess-c",
+          event_type: "tool_exec",
+          status: "error",
+          node_id: "browser-open",
+          details: { tool: "browser-open", url: "https://acme.dev/incidents/billing-bug" },
+          created_at: NOW + 2,
+        },
+      },
+    ];
+
+    const queueMessages = rawEvents.flatMap((entry) =>
+      deriveSignalEnvelopes(entry.type, entry.payload).map(signalEnvelopeMessage),
+    );
+
+    expect(buildSignalCoordinatorKey("memory", "org-1", "personal-agent")).toBe("org-1:personal-agent:memory");
+    for (const message of queueMessages) {
+      await coordinator.ingest(message.payload);
+    }
+
+    const result = await coordinator.evaluateNow();
+    const create = env.AGENT_RUN_WORKFLOW.create as any;
+
+    expect(result.fired).toBe(1);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0][0].params.input).toContain("/memory-digest");
+    expect(create.mock.calls[0][0].params.input).toContain("signal_briefing=");
+    expect(create.mock.calls[0][0].params.input).toContain('signal_session_ids="sess-c,sess-b,sess-a"');
+    expect(create.mock.calls[0][0].params.input).toContain('signal_type="tool_failure"');
+    expect(create.mock.calls[0][0].params.input).toContain('signal_topic="acme dev /incidents/billing-bug');
+    expect(create.mock.calls[0][0].params.input).toContain("billing");
+  });
+
+  it("drives a passive consolidate trigger from repeated loop telemetry", async () => {
+    const { coordinator, env } = createCoordinator();
+    const loopSignals = [
+      {
+        org_id: "org-1",
+        agent_name: "personal-agent",
+        session_id: "sess-loop-1",
+        tool: "memory-recall",
+        repeat_count: 4,
+        turn: 6,
+        created_at: NOW,
+      },
+      {
+        org_id: "org-1",
+        agent_name: "personal-agent",
+        session_id: "sess-loop-2",
+        tool: "memory-recall",
+        repeat_count: 5,
+        turn: 7,
+        created_at: NOW + 1,
+      },
+    ].flatMap((payload) => deriveSignalEnvelopes("loop_detected", payload));
+
+    for (const envelope of loopSignals) {
+      await coordinator.ingest(envelope);
+    }
+
+    const result = await coordinator.evaluateNow();
+    const create = env.AGENT_RUN_WORKFLOW.create as any;
+
+    expect(result.fired).toBe(1);
+    expect(create.mock.calls[0][0].params.input).toContain("/memory-consolidate");
+    expect(create.mock.calls[0][0].params.input).toContain("signal_briefing=");
+    expect(create.mock.calls[0][0].params.input).toContain('signal_session_ids="sess-loop-2,sess-loop-1"');
+    expect(create.mock.calls[0][0].params.input).toContain('signal_type="loop_detected"');
   });
 });

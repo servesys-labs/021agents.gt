@@ -32,7 +32,10 @@ const SKILLS_ROOT = join(REPO_ROOT, "skills", "public");
 // improve (Phase 6): reads feedback and proposes rules via manage_skills
 //   append_rule. Also meta-only — invoked deliberately by owners/admins,
 //   never auto-triggered.
-const NON_BUILTIN_ALLOWLIST = new Set(["code-review", "deep-research", "diarize", "improve"]);
+const NON_BUILTIN_ALLOWLIST = new Set([
+  "code-review", "deep-research", "diarize", "improve",
+  "memory-digest", "memory-consolidate", "memory-recall-deep",
+]);
 
 describe("Phase 3 — SKILL.md directory invariants", () => {
   it("every SKILL.md on disk is wired into BUILTIN_SKILLS or explicitly allowlisted", () => {

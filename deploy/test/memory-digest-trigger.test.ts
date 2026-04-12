@@ -8,12 +8,12 @@ import {
 // Feature flag defaults are tested here because the flag gates the trigger in workflow.ts.
 // The flag itself lives in features.ts — we import DEFAULTS indirectly by checking the module.
 describe("memory agent feature flag", () => {
-  it("memory_agent_enabled defaults to false (opt-in rollout)", async () => {
+  it("memory_agent_enabled defaults to true", async () => {
     // Dynamic import to avoid pulling in RuntimeEnv types
     const mod = await import("../src/runtime/features");
-    // Without KV, isEnabled returns DEFAULTS[flag] which should be false
+    // Without KV, isEnabled returns DEFAULTS[flag].
     const result = await mod.isEnabled({} as any, "memory_agent_enabled", "any-org");
-    expect(result).toBe(false);
+    expect(result).toBe(true);
   });
 });
 
@@ -91,11 +91,21 @@ describe("passive memory signal workflow params", () => {
       "org-1",
       2,
       true,
-      "Recurring billing bug across 4 sessions",
+      {
+        signalBriefing: "Recurring billing bug across 4 sessions",
+        signalType: "tool_failure",
+        signalTopic: "billing bug",
+        signalSessionIds: ["sess-passive", "sess-older"],
+        signalEntities: ["Stripe", "Billing"],
+      },
     );
     expect(result).not.toBeNull();
     expect(result!.input).toContain("/memory-digest");
     expect(result!.input).toContain('signal_briefing="Recurring billing bug across 4 sessions"');
+    expect(result!.input).toContain('signal_type="tool_failure"');
+    expect(result!.input).toContain('signal_topic="billing bug"');
+    expect(result!.input).toContain('signal_session_ids="sess-passive,sess-older"');
+    expect(result!.input).toContain('signal_entities="Stripe,Billing"');
     expect(result!.progress_key).toBe("memory-signal-digest:sess-passive");
     expect(result!.parent_depth).toBe(3);
   });
@@ -108,12 +118,22 @@ describe("passive memory signal workflow params", () => {
       "org-1",
       0,
       true,
-      "Contradiction churn around refund policy",
+      {
+        signalBriefing: "Contradiction churn around refund policy",
+        signalType: "memory_contradiction",
+        signalTopic: "refund policy",
+        signalSessionIds: ["sess-passive"],
+        signalEntities: ["Policy"],
+      },
     );
     expect(result).not.toBeNull();
     expect(result!.input).toContain("/memory-consolidate");
-    expect(
-      buildPassiveMemoryWorkflowParams("digest", "memory-agent", "sess-passive", "org-1", 0, true, "x"),
-    ).toBeNull();
+    expect(buildPassiveMemoryWorkflowParams("digest", "memory-agent", "sess-passive", "org-1", 0, true, {
+      signalBriefing: "x",
+      signalType: "tool_failure",
+      signalTopic: "x",
+      signalSessionIds: [],
+      signalEntities: [],
+    })).toBeNull();
   });
 });
