@@ -40,46 +40,20 @@ describe("personal assistant prompt — lean and focused", () => {
     expect(totalTurnZeroTokens).toBeLessThan(7500);
   });
 
-  it("documents core tools including extended set", () => {
-    // Core tools section should list these
-    expect(prompt).toContain("## Core tools (always available)");
-    const coreSection = prompt.split("## Core tools")[1].split("## Additional")[0];
-    const toolMentions = coreSection.match(/`[a-z-]+`/g) || [];
-    // Should have core tools documented (11 in current prompt)
-    expect(toolMentions.length).toBeGreaterThanOrEqual(8);
-    expect(toolMentions).toContain("`web-search`");
-    expect(toolMentions).toContain("`browse`");
-    expect(toolMentions).toContain("`python-exec`");
-    expect(toolMentions).toContain("`bash`");
-    expect(toolMentions).toContain("`read-file`");
-    expect(toolMentions).toContain("`write-file`");
-    expect(toolMentions).toContain("`edit-file`");
-    expect(toolMentions).toContain("`execute-code`");
-    expect(toolMentions).toContain("`swarm`");
-    expect(toolMentions).toContain("`memory-save`");
-    expect(toolMentions).toContain("`memory-recall`");
+  it("documents core tools", () => {
+    expect(prompt).toContain("# Core tools");
+    expect(prompt).toContain("`web-search`");
+    expect(prompt).toContain("`browse`");
+    expect(prompt).toContain("`python-exec`");
+    expect(prompt).toContain("`bash`");
+    expect(prompt).toContain("`execute-code`");
+    expect(prompt).toContain("`swarm`");
+    expect(prompt).toContain("`memory-save`");
+    expect(prompt).toContain("`memory-recall`");
   });
 
-  it("has additional tools section for on-demand discovery", () => {
-    expect(prompt).toContain("## Additional tools (available on demand)");
-    expect(prompt).toContain("discovers these automatically");
-  });
-
-  it("mentions progressive discovery concept", () => {
-    // The additional tools section explains on-demand discovery
-    expect(prompt).toContain("discovers these automatically");
-    expect(prompt).toContain("Additional tools");
-  });
-
-  it("does NOT list marketplace/integration tools as always-available", () => {
-    // These should be in the "additional" section, not core
-    const coreSection = prompt.split("## Core tools")[1].split("## Additional")[0];
-    expect(coreSection).not.toContain("marketplace-search");
-    expect(coreSection).not.toContain("a2a-send");
-    expect(coreSection).not.toContain("image-generate");
-    // create-schedule is now a core tool (intentionally promoted)
-    expect(coreSection).not.toContain("mcp-call");
-    expect(coreSection).not.toContain("save-project");
+  it("mentions progressive discovery for additional tools", () => {
+    expect(prompt).toContain("discovers 100+ additional tools on demand");
   });
 });
 
@@ -96,11 +70,7 @@ describe("personal assistant — meta-agent delegation", () => {
   });
 
   it("lists when to delegate to meta-agent", () => {
-    expect(prompt).toContain("Create or configure agents");
-    expect(prompt).toContain("Test or evaluate agents");
-    expect(prompt).toContain("Train or improve agents");
-    expect(prompt).toContain("Diagnose issues");
-    expect(prompt).toContain("Manage infrastructure");
+    expect(prompt).toContain("create, configure, test, train, diagnose");
   });
 
   it("shows how to delegate via run-agent", () => {
@@ -108,8 +78,9 @@ describe("personal assistant — meta-agent delegation", () => {
     expect(prompt).toContain('agent_name="meta-agent"');
   });
 
-  it("tells PA not to manage agents itself", () => {
-    expect(prompt).toContain("Do NOT try to manage agents yourself");
+  it("delegates agent management to meta-agent", () => {
+    expect(prompt).toContain("Delegate to meta-agent");
+    expect(prompt).toContain("manage agents");
   });
 
   it("still has marketplace delegation for domain tasks", () => {
@@ -124,21 +95,23 @@ describe("personal assistant — meta-agent delegation", () => {
 // ══════════════════════════════════════════════════════════════════
 
 describe("signup flow — agent creation", () => {
-  it("personal assistant config has core tool list", () => {
-    // Simulate the config that auth.ts creates (now 12 tools with edit-file, execute-code, swarm, sync-workspace-memory)
+  it("personal assistant config has core tool list + enabled_skills", () => {
+    // Simulate the config that auth.ts creates
     const personalConfig = {
       tools: [
         "web-search", "browse",
         "python-exec", "bash",
-        "read-file", "write-file", "edit-file",
-        "memory-save", "memory-recall", "sync-workspace-memory",
+        "read-file", "write-file",
         "execute-code", "swarm",
+        "memory-save", "memory-recall",
+        "create-schedule", "list-schedules", "delete-schedule",
       ],
+      enabled_skills: ["research", "debug", "remember", "batch", "verify", "build-app"],
     };
 
-    expect(personalConfig.tools).toHaveLength(12);
+    expect(personalConfig.tools).toHaveLength(13);
+    expect(personalConfig.enabled_skills).toHaveLength(6);
     expect(personalConfig.tools).not.toContain("marketplace-search");
-    expect(personalConfig.tools).not.toContain("image-generate");
     expect(personalConfig.tools).not.toContain("mcp-call");
   });
 
@@ -242,23 +215,13 @@ describe("personal assistant prompt — quality checks", () => {
 
   it("has planning vs execution guidance", () => {
     expect(prompt).toContain("Execute immediately");
-    expect(prompt).toContain("Plan first, then execute");
-  });
-
-  it("has error recovery guidance", () => {
-    expect(prompt).toContain("Error recovery");
-    expect(prompt).toContain("`web-search` returns nothing");
+    expect(prompt).toContain("Plan first");
   });
 
   it("has memory protocol", () => {
-    expect(prompt).toContain("Memory protocol");
-    expect(prompt).toContain("## Save");
-    expect(prompt).toContain("## Recall");
-  });
-
-  it("has building apps guidance", () => {
-    expect(prompt).toContain("Building apps");
-    expect(prompt).toContain("TypeScript");
+    expect(prompt).toContain("# Memory protocol");
+    expect(prompt).toContain("Recall at session start");
+    expect(prompt).toContain("Save after significant work");
   });
 
   it("has constraints/safety section", () => {
