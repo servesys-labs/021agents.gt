@@ -144,6 +144,29 @@ Score the response on three dimensions, each 0-5:
 
 Return ONLY a JSON object: {"correctness": 0-5, "relevance": 0-5, "tool_selection": 0-5, "notes": "one sentence"}`;
 
+const JUDGE_MAX_ATTEMPTS = Math.max(1, Number(process.env.JUDGE_MAX_ATTEMPTS || 3));
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseJudgeJson(raw: string): { correctness: number; relevance: number; tool_selection: number; average: number; notes: string } | null {
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start === -1 || end === -1) return null;
+  const parsed = JSON.parse(raw.slice(start, end + 1));
+  const c = Number(parsed.correctness) || 0;
+  const r = Number(parsed.relevance) || 0;
+  const t = Number(parsed.tool_selection) || 0;
+  return {
+    correctness: c,
+    relevance: r,
+    tool_selection: t,
+    average: (c + r + t) / 3,
+    notes: parsed.notes || "",
+  };
+}
+
 async function judgeResponse(
   userMessage: string,
   expectedBehavior: string,
@@ -163,20 +186,29 @@ async function judgeResponse(
     `AGENT TEXT RESPONSE:\n${response || "(no text — tool calls only, not executed in this test)"}`,
   ].join("\n\n");
 
-  const result = await callLLM(gwConfig, [
-    { role: "system", content: JUDGE_SYSTEM },
-    { role: "user", content: judgeUserMsg },
-  ], [], JUDGE_MODEL);
+  const judgeModels = [JUDGE_MODEL, ...(JUDGE_MODEL !== EVAL_MODEL ? [EVAL_MODEL] : [])];
+  let lastError: Error | null = null;
+  for (const judgeModel of judgeModels) {
+    for (let attempt = 1; attempt <= JUDGE_MAX_ATTEMPTS; attempt++) {
+      try {
+        const result = await callLLM(gwConfig, [
+          { role: "system", content: JUDGE_SYSTEM },
+          { role: "user", content: judgeUserMsg },
+        ], [], judgeModel);
 
-  const raw = result.content;
-  const start = raw.indexOf("{");
-  const end = raw.lastIndexOf("}");
-  if (start === -1 || end === -1) throw new Error(`Judge returned no JSON: ${raw.slice(0, 200)}`);
-  const parsed = JSON.parse(raw.slice(start, end + 1));
-  const c = Number(parsed.correctness) || 0;
-  const r = Number(parsed.relevance) || 0;
-  const t = Number(parsed.tool_selection) || 0;
-  return { correctness: c, relevance: r, tool_selection: t, average: (c + r + t) / 3, notes: parsed.notes || "" };
+        const parsed = parseJudgeJson(result.content || "");
+        if (parsed) return parsed;
+        throw new Error(`Judge returned no JSON: ${(result.content || "").slice(0, 200)}`);
+      } catch (error: any) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        if (attempt >= JUDGE_MAX_ATTEMPTS) break;
+        console.warn(`[judge:${judgeModel}] retry ${attempt}/${JUDGE_MAX_ATTEMPTS - 1}: ${lastError.message}`);
+        await sleep(250 * attempt);
+      }
+    }
+  }
+
+  throw lastError || new Error("Judge failed without an error");
 }
 
 // ── Test suite ──────────────────────────────────────────────────────
