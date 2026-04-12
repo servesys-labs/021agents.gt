@@ -175,6 +175,12 @@ describe("personal agent eval harness", () => {
 
     const result = await callGemma(gwConfig, messages, CODE_MODE_TOOLS);
 
+    // Diagnostic: dump raw model output for all fixtures
+    console.log(
+      `[${fixture.id}] model: text=${result.content.length}chars tools=[${result.tool_calls.map(tc => tc.function.name).join(",")}] ` +
+      `tokens=${result.usage.prompt_tokens}+${result.usage.completion_tokens}`,
+    );
+
     // L1 checks
     const toolNames = result.tool_calls.map(tc => tc.function.name);
 
