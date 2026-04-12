@@ -7042,7 +7042,10 @@ const TOOL_CATALOG: ToolDefinition[] = [
         properties: {
           agent_name: { type: "string", description: "Agent to run" },
           task: { type: "string", description: "Task/message to send" },
+          context: { type: "string", description: "Delegation context — summarize what you've done so far and why you're delegating. The child agent sees this in its system prompt so it understands the broader goal." },
+          relevant_files: { type: "array", items: { type: "string" }, description: "File paths relevant to the task. Helps the child agent focus." },
           tools: { type: "array", items: { type: "string" }, description: "Optional: scope sub-agent to only these tools for this run (e.g. [\"web-search\", \"browse\"]). If omitted, agent uses its full configured tool set." },
+          skip_parent_prompt: { type: "boolean", description: "If true, child uses its own system prompt instead of inheriting the parent's. Use when delegating to a specialist with a different persona." },
           channel: { type: "string", description: "Channel (default internal)" },
           org_id: { type: "string", description: "Org id (optional if same as caller)" },
         },
