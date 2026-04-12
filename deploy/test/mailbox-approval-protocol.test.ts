@@ -385,6 +385,20 @@ describe("DO schema migration v6 — correlation_id column", () => {
   it("migration v6 records itself in schema_migrations", () => {
     expect(source).toContain("INSERT INTO _sql_schema_migrations (id) VALUES (6)");
   });
+
+  it("migration v6 is idempotent — checks column existence before ALTER (regression)", () => {
+    // Regression: createMailboxTable() (v4) now includes correlation_id in
+    // CREATE TABLE, so new DOs already have the column. v6 must NOT blindly
+    // ALTER TABLE ADD COLUMN — SQLite throws on duplicate columns.
+    const v6Start = source.indexOf("schemaVersion < 6");
+    const v6End = source.indexOf("INSERT INTO _sql_schema_migrations (id) VALUES (6)", v6Start);
+    const v6Block = source.slice(v6Start, v6End);
+    // Must use PRAGMA table_info to check column existence
+    expect(v6Block).toContain("PRAGMA table_info");
+    expect(v6Block).toContain("hasCorrelationId");
+    // ALTER is conditional, not unconditional
+    expect(v6Block).toContain("if (!hasCorrelationId)");
+  });
 });
 
 describe("event registry — approval events registered", () => {
