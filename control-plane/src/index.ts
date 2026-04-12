@@ -620,7 +620,12 @@ export default {
   // inside the admin callback using the job payload's org_id.
   async queue(batch: MessageBatch, env: Env): Promise<void> {
     const { withAdminDb } = await import("./db/client");
-    const { hasCredits: hasCreditsCheck, deductCredits: deductCreditsForOrg } = await import("./logic/credits");
+    const {
+      DEFAULT_CREDIT_HOLD_USD,
+      releaseCreditHold,
+      reserveCreditHold,
+      settleCreditHold,
+    } = await import("./logic/credits");
 
     await Promise.allSettled(batch.messages.map(async (msg) => {
       const job = msg.body as { type: string; payload: Record<string, unknown> };
@@ -631,6 +636,25 @@ export default {
         if (job.type === "agent_run") {
           // Dispatch agent run to runtime worker
           const { agent_name, task, org_id, project_id } = job.payload;
+          const orgId = String(org_id || "");
+          const agentName = String(agent_name || "");
+          const reservedSessionId = String(job.payload.session_id || job.payload.job_id || `agent-run-${orgId}-${agentName}`);
+          const hold = await reserveCreditHold(
+            sql,
+            orgId,
+            reservedSessionId,
+            DEFAULT_CREDIT_HOLD_USD,
+            undefined,
+            { agentName },
+          );
+          if (!hold.success) {
+            await sql`
+              UPDATE job_queue SET status = 'failed', error = 'insufficient_credits', completed_at = ${now}
+              WHERE job_id = ${String(job.payload.job_id || "")}
+            `.catch(() => {});
+            msg.ack();
+            return;
+          }
           const resp = await env.RUNTIME.fetch(
             new Request("https://runtime/run", {
               method: "POST",
@@ -638,10 +662,23 @@ export default {
                 "Content-Type": "application/json",
                 ...(env.SERVICE_TOKEN ? { Authorization: `Bearer ${env.SERVICE_TOKEN}` } : {}),
               },
-              body: JSON.stringify({ input: task, agent_name, org_id, project_id }),
+              body: JSON.stringify({ input: task, agent_name, org_id, project_id, session_id: reservedSessionId }),
             }),
           );
           const result = await resp.json() as Record<string, unknown>;
+          if (resp.status < 400) {
+            await settleCreditHold(
+              sql,
+              orgId,
+              hold.hold_id,
+              Number(result.cost_usd || 0),
+              `Agent run: ${agentName}`,
+              agentName,
+              String(result.session_id || reservedSessionId),
+            ).catch(() => {});
+          } else {
+            await releaseCreditHold(sql, orgId, hold.hold_id, "crash").catch(() => {});
+          }
 
           // Update job status in DB
           await sql`
@@ -679,29 +716,29 @@ export default {
           let failedCount = 0;
 
           for (const task of tasks) {
-            // Credit gate: check before each task. Reuses the admin sql
-            // — hasCredits internally reads org_credit_balance which is
-            // admin-connected via the trusted backend pattern.
-            try {
-              const hasEnough = await hasCreditsCheck(sql, orgId, 1);
-              if (!hasEnough) {
-                // Mark this and all remaining tasks as failed
-                await sql`
-                  UPDATE batch_tasks SET status = 'failed', error = 'insufficient_credits'
-                  WHERE batch_id = ${batchId} AND status = 'pending'
-                `.catch(() => {});
-                await sql`UPDATE batch_tasks SET status = 'failed', error = 'insufficient_credits' WHERE task_id = ${task.task_id}`.catch(() => {});
-                failedCount += tasks.length - completedCount - failedCount;
-                break;
-              }
-            } catch {
-              // If credit check fails, allow the run
+            const taskSessionId = `batch-${batchId}-${String(task.task_id)}`;
+            const hold = await reserveCreditHold(
+              sql,
+              orgId,
+              taskSessionId,
+              DEFAULT_CREDIT_HOLD_USD,
+              undefined,
+              { agentName },
+            );
+            if (!hold.success) {
+              await sql`
+                UPDATE batch_tasks SET status = 'failed', error = 'insufficient_credits'
+                WHERE batch_id = ${batchId} AND status = 'pending'
+              `.catch(() => {});
+              await sql`UPDATE batch_tasks SET status = 'failed', error = 'insufficient_credits' WHERE task_id = ${task.task_id}`.catch(() => {});
+              failedCount += tasks.length - completedCount - failedCount;
+              break;
             }
 
             try {
               await sql`UPDATE batch_tasks SET status = 'running' WHERE task_id = ${task.task_id}`;
               const runtimeBody: Record<string, unknown> = {
-                input: task.input, agent_name: agentName, org_id: orgId, project_id: "", channel: "batch_api",
+                input: task.input, agent_name: agentName, org_id: orgId, project_id: "", channel: "batch_api", session_id: taskSessionId,
               };
               if (task.system_prompt) runtimeBody.system_prompt = task.system_prompt;
               if (task.response_format) runtimeBody.response_format = task.response_format;
@@ -724,13 +761,17 @@ export default {
                 WHERE task_id = ${task.task_id}
               `;
               completedCount++;
-
-              // Fire-and-forget credit deduction based on actual cost
-              try {
-                const costUsd = Number(result.cost_usd || 0);
-                deductCreditsForOrg(sql, orgId, costUsd, `Batch run: ${agentName}`, agentName, String(result.session_id || "")).catch(() => {});
-              } catch {}
+              await settleCreditHold(
+                sql,
+                orgId,
+                hold.hold_id,
+                Number(result.cost_usd || 0),
+                `Batch run: ${agentName}`,
+                agentName,
+                String(result.session_id || taskSessionId),
+              ).catch(() => {});
             } catch (taskErr) {
+              await releaseCreditHold(sql, orgId, hold.hold_id, "crash").catch(() => {});
               await sql`UPDATE batch_tasks SET status = 'failed', error = ${String(taskErr)} WHERE task_id = ${task.task_id}`.catch(() => {});
               failedCount++;
             }
@@ -1302,6 +1343,17 @@ export default {
       await sql`DELETE FROM end_user_tokens WHERE expires_at < now() AND revoked = false`;
     } catch (err) {
       console.error("[cron] Idempotency/token cleanup failed:", err);
+    }
+
+    // 3d. Expire and release stale credit holds
+    try {
+      const { reclaimExpiredCreditHolds } = await import("./logic/credits");
+      const reclaimed = await reclaimExpiredCreditHolds(sql, 200);
+      if (reclaimed > 0) {
+        console.log(`[cron] Reclaimed ${reclaimed} expired credit holds`);
+      }
+    } catch (err) {
+      console.error("[cron] Credit hold reclamation failed:", err);
     }
 
     // 3c. Evaluate alert configs and fire webhooks for breaches

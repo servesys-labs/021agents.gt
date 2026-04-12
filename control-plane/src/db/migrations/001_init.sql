@@ -409,9 +409,10 @@ CREATE TABLE IF NOT EXISTS conversation_scores (
 
 CREATE TABLE IF NOT EXISTS org_credit_balance (
   org_id                TEXT PRIMARY KEY REFERENCES orgs(org_id) ON DELETE CASCADE,
-  balance_usd           NUMERIC(18,8) NOT NULL DEFAULT 0,
-  lifetime_purchased_usd NUMERIC(18,8) NOT NULL DEFAULT 0,
-  lifetime_consumed_usd NUMERIC(18,8) NOT NULL DEFAULT 0,
+  balance_usd           NUMERIC(18,8) NOT NULL DEFAULT 0 CHECK (balance_usd >= 0),
+  reserved_usd          NUMERIC(18,8) NOT NULL DEFAULT 0 CHECK (reserved_usd >= 0),
+  lifetime_purchased_usd NUMERIC(18,8) NOT NULL DEFAULT 0 CHECK (lifetime_purchased_usd >= 0),
+  lifetime_consumed_usd NUMERIC(18,8) NOT NULL DEFAULT 0 CHECK (lifetime_consumed_usd >= 0),
   updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -493,6 +494,50 @@ CREATE TABLE IF NOT EXISTS cost_ledger (
   breakdown      JSONB NOT NULL DEFAULT '{}',
   created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS credit_holds (
+  hold_id          TEXT PRIMARY KEY,
+  org_id           TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+  session_id       TEXT NOT NULL DEFAULT '',
+  parent_hold_id   TEXT REFERENCES credit_holds(hold_id) ON DELETE SET NULL,
+  agent_name       TEXT NOT NULL DEFAULT '',
+  hold_amount_usd  NUMERIC(18,8) NOT NULL DEFAULT 0 CHECK (hold_amount_usd >= 0),
+  status           TEXT NOT NULL CHECK (status IN ('active', 'settled', 'released', 'expired')),
+  expires_at       TIMESTAMPTZ NOT NULL,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  settled_at       TIMESTAMPTZ,
+  actual_cost_usd  NUMERIC(18,8) CHECK (actual_cost_usd IS NULL OR actual_cost_usd >= 0),
+  UNIQUE (org_id, session_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_credit_holds_expires_active
+  ON credit_holds(expires_at)
+  WHERE status = 'active';
+
+CREATE INDEX IF NOT EXISTS idx_credit_holds_org_status
+  ON credit_holds(org_id, status)
+  WHERE status = 'active';
+
+CREATE TABLE IF NOT EXISTS billing_exceptions (
+  id              BIGSERIAL PRIMARY KEY,
+  org_id          TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+  session_id      TEXT,
+  hold_id         TEXT REFERENCES credit_holds(hold_id) ON DELETE SET NULL,
+  kind            TEXT NOT NULL DEFAULT 'unknown',
+  amount_usd      NUMERIC(18,8) NOT NULL DEFAULT 0 CHECK (amount_usd >= 0),
+  resolved_at     TIMESTAMPTZ,
+  exception_type  TEXT NOT NULL,
+  expected_usd    NUMERIC(18,8) NOT NULL DEFAULT 0 CHECK (expected_usd >= 0),
+  actual_usd      NUMERIC(18,8) NOT NULL DEFAULT 0 CHECK (actual_usd >= 0),
+  charged_usd     NUMERIC(18,8) NOT NULL DEFAULT 0 CHECK (charged_usd >= 0),
+  error_message   TEXT NOT NULL DEFAULT '',
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_billing_exceptions_org_created_at
+  ON billing_exceptions(org_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS billing_events (
   id            BIGSERIAL PRIMARY KEY,
@@ -2410,6 +2455,10 @@ DROP TRIGGER IF EXISTS set_updated_at_conversations ON conversations;
 CREATE TRIGGER set_updated_at_conversations BEFORE UPDATE ON conversations FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 DROP TRIGGER IF EXISTS set_updated_at_org_credit_balance ON org_credit_balance;
 CREATE TRIGGER set_updated_at_org_credit_balance BEFORE UPDATE ON org_credit_balance FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+DROP TRIGGER IF EXISTS set_updated_at_credit_holds ON credit_holds;
+CREATE TRIGGER set_updated_at_credit_holds BEFORE UPDATE ON credit_holds FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+DROP TRIGGER IF EXISTS set_updated_at_billing_exceptions ON billing_exceptions;
+CREATE TRIGGER set_updated_at_billing_exceptions BEFORE UPDATE ON billing_exceptions FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 DROP TRIGGER IF EXISTS set_updated_at_training_jobs ON training_jobs;
 CREATE TRIGGER set_updated_at_training_jobs BEFORE UPDATE ON training_jobs FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 DROP TRIGGER IF EXISTS set_updated_at_marketplace_listings ON marketplace_listings;
@@ -2684,6 +2733,18 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 ALTER TABLE org_credit_balance ENABLE ROW LEVEL SECURITY;
 ALTER TABLE org_credit_balance FORCE ROW LEVEL SECURITY;
 DO $$ BEGIN CREATE POLICY org_credit_balance_org_isolation ON org_credit_balance
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE credit_holds ENABLE ROW LEVEL SECURITY;
+ALTER TABLE credit_holds FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY credit_holds_org_isolation ON credit_holds
+  FOR ALL USING (org_id = current_org_id());
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE billing_exceptions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE billing_exceptions FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN CREATE POLICY billing_exceptions_org_isolation ON billing_exceptions
   FOR ALL USING (org_id = current_org_id());
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
