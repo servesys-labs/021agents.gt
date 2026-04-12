@@ -343,8 +343,9 @@ function _assertOrgOwnsKey(orgId: string, key: string): Response | null {
   },
 };
 
-// Re-export Workflow so Cloudflare can discover it
+// Re-export Workflow and DOs so Cloudflare can discover them
 export { AgentRunWorkflow } from "./workflow";
+export { SessionCounterDO } from "./runtime/session-counter-do";
 import type { RunOutput } from "./workflow";
 
 // ---------------------------------------------------------------------------
