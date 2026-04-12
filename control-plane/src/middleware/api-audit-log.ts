@@ -135,9 +135,13 @@ export const apiAuditLogMiddleware = createMiddleware<{
     }
   };
 
-  if (c.executionCtx?.waitUntil) {
+  // Hono's `c.executionCtx` getter THROWS when no ExecutionContext is
+  // available (tests, non-Workers runtimes), so `?.` optional chaining does
+  // NOT short-circuit here — we must try/catch. In production Workers
+  // runtime, waitUntil keeps the isolate alive until the log lands.
+  try {
     c.executionCtx.waitUntil(insertLog());
-  } else {
+  } catch {
     insertLog().catch(() => {});
   }
 });

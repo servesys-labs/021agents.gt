@@ -26,7 +26,12 @@ import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { withOrgDb } from "../db/client";
 import { dispatchRunCompletedWebhooks, type AgentRunEvent } from "../logic/webhook-delivery";
 import { redactPii } from "../logic/pii-redactor";
-import { hasCredits, deductCredits } from "../logic/credits";
+import {
+  DEFAULT_CREDIT_HOLD_USD,
+  releaseCreditHold,
+  reserveCreditHold,
+  settleCreditHold,
+} from "../logic/credits";
 import { failSafe } from "../lib/error-response";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser; custom_domain?: string } };
@@ -74,6 +79,46 @@ async function checkAgentAccess(c: any, agentName: string, orgId: string): Promi
   }
 
   return null;
+}
+
+async function reservePublicRunHold(
+  c: any,
+  orgId: string,
+  sessionId: string,
+  agentName: string,
+  holdAmountUsd: number = DEFAULT_CREDIT_HOLD_USD,
+): Promise<{ ok: true; holdId: string } | { ok: false; response: Response }> {
+  let reservation:
+    | { success: true; hold_id: string; hold_amount_usd: number; expires_at: string }
+    | { success: false; reason: "insufficient" | "db_error" }
+    | { success: false; reason: "debt_pending"; debt_amount_usd: number };
+  try {
+    reservation = await withOrgDb(c.env, orgId, (sql) =>
+      reserveCreditHold(sql, orgId, sessionId, holdAmountUsd, undefined, { agentName }),
+    );
+  } catch {
+    reservation = { success: false, reason: "db_error" };
+  }
+
+  if (!reservation.success) {
+    if (reservation.reason === "insufficient" || reservation.reason === "debt_pending") {
+      return {
+        ok: false,
+        response: c.json({
+          error: reservation.reason === "debt_pending"
+            ? `Outstanding unrecovered cost debt: $${Number(reservation.debt_amount_usd || 0).toFixed(2)}. Please top up before starting new runs.`
+            : "Insufficient credits. Purchase credits at https://app.021agents.ai/settings?tab=billing",
+          code: reservation.reason === "debt_pending" ? "credit_debt_pending" : "insufficient_credits",
+          balance_cents: 0,
+        }, 402),
+      };
+    }
+    return {
+      ok: false,
+      response: c.json({ error: "Credit reservation unavailable. Please try again.", code: "credit_reservation_error" }, 503),
+    };
+  }
+  return { ok: true, holdId: reservation.hold_id };
 }
 
 // ── GET /health — Org-scoped health ──────────────────────────────────────
@@ -161,22 +206,6 @@ publicAgentRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
   const accessErr = await checkAgentAccess(c, agentName, orgId);
   if (accessErr) return accessErr;
 
-  // Credit gate: verify org has credits before running
-  try {
-    const hasEnough = await withOrgDb(c.env, orgId, async (creditSql) => {
-      return await hasCredits(creditSql, orgId, 1);
-    });
-    if (!hasEnough) {
-      return c.json({
-        error: "Insufficient credits. Purchase credits at https://app.021agents.ai/settings?tab=billing",
-        code: "insufficient_credits",
-        balance_cents: 0,
-      }, 402);
-    }
-  } catch {
-    // If credit check fails (e.g. table not yet migrated), allow the run
-  }
-
   const body = c.req.valid("json");
 
   if (!body.input || typeof body.input !== "string") {
@@ -229,6 +258,12 @@ publicAgentRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
   if (body.response_format) runtimeBody.response_format = body.response_format;
   if (body.response_schema) runtimeBody.response_schema = body.response_schema;
   if (body.model) runtimeBody.model = body.model;
+
+  const runSessionId = crypto.randomUUID();
+  const holdResult = await reservePublicRunHold(c, orgId, runSessionId, agentName);
+  if (!holdResult.ok) return holdResult.response;
+  const holdId = holdResult.holdId;
+  runtimeBody.session_id = runSessionId;
 
   try {
     const resp = await c.env.RUNTIME.fetch(
@@ -284,17 +319,27 @@ publicAgentRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
       conversation_id: body.conversation_id || null,
     };
 
-    // Deduct credits based on actual cost
-    try {
-      const costUsd = Number(result.cost_usd || 0);
-      const deductResult = await withOrgDb(c.env, orgId, async (deductSql) => {
-        return await deductCredits(deductSql, orgId, costUsd, `Agent run: ${agentName}`, agentName, String(result.session_id || ""));
-      });
-      if (!deductResult.success) {
-        console.error(`[public-api-billing] FAILED deduction $${costUsd} from org ${orgId} — insufficient credits`);
+    if (resp.status < 400) {
+      try {
+        const costUsd = Number(result.cost_usd || 0);
+        await withOrgDb(c.env, orgId, async (creditSql) => {
+          await settleCreditHold(
+            creditSql,
+            orgId,
+            holdId,
+            costUsd,
+            `Agent run: ${agentName}`,
+            agentName,
+            String(result.session_id || runSessionId),
+          );
+        });
+      } catch (err: any) {
+        console.error(`[public-api-billing] Credit settle error for org ${orgId}: ${err.message}`);
       }
-    } catch (err: any) {
-      console.error(`[public-api-billing] Credit deduction error for org ${orgId}: ${err.message}`);
+    } else {
+      await withOrgDb(c.env, orgId, async (creditSql) => {
+        await releaseCreditHold(creditSql, orgId, holdId, "crash");
+      }).catch(() => {});
     }
 
     // Store idempotency cache if key was provided
@@ -351,6 +396,9 @@ publicAgentRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
 
     return c.json(runResponse);
   } catch (err) {
+    await withOrgDb(c.env, orgId, async (creditSql) => {
+      await releaseCreditHold(creditSql, orgId, holdId, "crash");
+    }).catch(() => {});
     return c.json(failSafe(err, "public-api/agents/run", { userMessage: "Agent execution failed. Please try again in a moment." }), 500);
   }
 });
@@ -401,22 +449,6 @@ publicAgentRoutes.openapi(agentRunStreamRoute, async (c): Promise<any> => {
   const accessErr = await checkAgentAccess(c, agentName, orgId);
   if (accessErr) return accessErr;
 
-  // Credit gate: verify org has credits before streaming
-  try {
-    const hasEnough = await withOrgDb(c.env, orgId, async (creditSql) => {
-      return await hasCredits(creditSql, orgId, 1);
-    });
-    if (!hasEnough) {
-      return c.json({
-        error: "Insufficient credits. Purchase credits at https://app.021agents.ai/settings?tab=billing",
-        code: "insufficient_credits",
-        balance_cents: 0,
-      }, 402);
-    }
-  } catch {
-    // If credit check fails, allow the run
-  }
-
   const body = c.req.valid("json");
 
   if (!body.input || typeof body.input !== "string") {
@@ -438,6 +470,12 @@ publicAgentRoutes.openapi(agentRunStreamRoute, async (c): Promise<any> => {
   if (body.response_schema) runtimeBody.response_schema = body.response_schema;
   if (body.model) runtimeBody.model = body.model;
 
+  const streamSessionId = crypto.randomUUID();
+  const streamHold = await reservePublicRunHold(c, orgId, streamSessionId, agentName);
+  if (!streamHold.ok) return streamHold.response;
+  const streamHoldId = streamHold.holdId;
+  runtimeBody.session_id = streamSessionId;
+
   // Create a TransformStream for SSE
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
@@ -449,6 +487,7 @@ publicAgentRoutes.openapi(agentRunStreamRoute, async (c): Promise<any> => {
 
   // Run agent in background, stream results
   const runPromise = (async () => {
+    let holdClosed = false;
     try {
       sendSSE("start", { agent: agentName, timestamp: Date.now() });
 
@@ -464,6 +503,18 @@ publicAgentRoutes.openapi(agentRunStreamRoute, async (c): Promise<any> => {
       );
 
       const result = await resp.json() as Record<string, unknown>;
+      if (resp.status >= 400) {
+        await withOrgDb(c.env, orgId, async (creditSql) => {
+          await releaseCreditHold(creditSql, orgId, streamHoldId, "crash");
+        });
+        holdClosed = true;
+        sendSSE("error", {
+          message: String(result.error || `Runtime error (${resp.status})`),
+          code: "RUNTIME_ERROR",
+          status: resp.status,
+        });
+        return;
+      }
 
       // Stream the output in chunks for a responsive feel
       const output = String(result.output || "");
@@ -506,11 +557,22 @@ publicAgentRoutes.openapi(agentRunStreamRoute, async (c): Promise<any> => {
         conversation_id: body.conversation_id || null,
       });
 
-      // Fire-and-forget credit deduction
       try {
-        const costUsd = Number(result.cost_usd || 0);
-        await withOrgDb(c.env, orgId, async (deductSql) => {
-          await deductCredits(deductSql, orgId, costUsd, `Agent run: ${agentName}`, agentName, String(result.session_id || ""));
+        await withOrgDb(c.env, orgId, async (creditSql) => {
+          const settled = await settleCreditHold(
+            creditSql,
+            orgId,
+            streamHoldId,
+            Number(result.cost_usd || 0),
+            `Agent run: ${agentName}`,
+            agentName,
+            String(result.session_id || streamSessionId),
+          );
+          if (!settled.success) {
+            await releaseCreditHold(creditSql, orgId, streamHoldId, "crash");
+          } else {
+            holdClosed = true;
+          }
         });
       } catch {}
 
@@ -532,14 +594,34 @@ publicAgentRoutes.openapi(agentRunStreamRoute, async (c): Promise<any> => {
     } catch (err) {
       const ref = crypto.randomUUID().slice(0, 8);
       console.error(`[public-api/agents/run-stream] (ref=${ref})`, err);
+      if (!holdClosed) {
+        await withOrgDb(c.env, orgId, async (creditSql) => {
+          await releaseCreditHold(creditSql, orgId, streamHoldId, "crash");
+        }).catch(() => {});
+        holdClosed = true;
+      }
       sendSSE("error", { message: `Agent execution failed. Please try again in a moment. (ref: ${ref})`, ref });
     } finally {
+      if (!holdClosed) {
+        await withOrgDb(c.env, orgId, async (creditSql) => {
+          await releaseCreditHold(creditSql, orgId, streamHoldId, "crash");
+        }).catch(() => {});
+      }
       writer.close();
     }
   })();
 
-  // Don't await — let it stream
-  c.executionCtx?.waitUntil?.(runPromise) ?? runPromise;
+  // Don't await — let it stream. `c.executionCtx` is a getter that THROWS
+  // when no ExecutionContext is available (test harnesses, certain
+  // non-Workers runtimes), so optional chaining on `c.executionCtx?.` does
+  // NOT short-circuit — we have to try/catch. In production Workers runtime
+  // waitUntil keeps the isolate alive until runPromise settles; in tests
+  // the promise just runs as a floating async task.
+  try {
+    c.executionCtx.waitUntil(runPromise);
+  } catch {
+    runPromise.catch((err) => console.error("[public-api/run-stream] background error:", err));
+  }
 
   return new Response(readable, {
     headers: {
@@ -578,22 +660,6 @@ publicAgentRoutes.openapi(agentRunUploadRoute, async (c): Promise<any> => {
 
   const accessErr = await checkAgentAccess(c, agentName, orgId);
   if (accessErr) return accessErr;
-
-  // Credit gate: verify org has credits before upload+run
-  try {
-    const hasEnough = await withOrgDb(c.env, orgId, async (creditSql) => {
-      return await hasCredits(creditSql, orgId, 1);
-    });
-    if (!hasEnough) {
-      return c.json({
-        error: "Insufficient credits. Purchase credits at https://app.021agents.ai/settings?tab=billing",
-        code: "insufficient_credits",
-        balance_cents: 0,
-      }, 402);
-    }
-  } catch {
-    // If credit check fails, allow the run
-  }
 
   // Parse multipart form data
   const formData = await c.req.parseBody({ all: true });
@@ -713,6 +779,12 @@ publicAgentRoutes.openapi(agentRunUploadRoute, async (c): Promise<any> => {
   }
   if (model) runtimeBody.model = model;
 
+  const uploadSessionId = crypto.randomUUID();
+  const uploadHold = await reservePublicRunHold(c, orgId, uploadSessionId, agentName);
+  if (!uploadHold.ok) return uploadHold.response;
+  const uploadHoldId = uploadHold.holdId;
+  runtimeBody.session_id = uploadSessionId;
+
   try {
     const resp = await c.env.RUNTIME.fetch(
       new Request("https://runtime/run", {
@@ -746,7 +818,13 @@ publicAgentRoutes.openapi(agentRunUploadRoute, async (c): Promise<any> => {
             WHERE conversation_id = ${conversationId}
           `;
         });
-      } catch {}
+      } catch (convErr: any) {
+        // Conversation save is optional secondary work. The hold lifecycle
+        // for the upload route is handled at lines ~830 below based on
+        // resp.status — do NOT release here, the agent run already ran and
+        // should still settle normally.
+        console.error(`[public-api/run-upload] conversation save failed (non-fatal): ${convErr?.message || convErr}`);
+      }
     }
 
     const runResponse = {
@@ -762,17 +840,27 @@ publicAgentRoutes.openapi(agentRunUploadRoute, async (c): Promise<any> => {
       file_ids: fileIds,
     };
 
-    // Deduct credits based on actual cost
-    try {
-      const costUsd = Number(result.cost_usd || 0);
-      const deductResult = await withOrgDb(c.env, orgId, async (deductSql) => {
-        return await deductCredits(deductSql, orgId, costUsd, `Agent run: ${agentName}`, agentName, String(result.session_id || ""));
-      });
-      if (!deductResult.success) {
-        console.error(`[public-api-billing] FAILED deduction $${costUsd} from org ${orgId} — insufficient credits`);
+    if (resp.status < 400) {
+      try {
+        const costUsd = Number(result.cost_usd || 0);
+        await withOrgDb(c.env, orgId, async (creditSql) => {
+          await settleCreditHold(
+            creditSql,
+            orgId,
+            uploadHoldId,
+            costUsd,
+            `Agent run: ${agentName}`,
+            agentName,
+            String(result.session_id || uploadSessionId),
+          );
+        });
+      } catch (err: any) {
+        console.error(`[public-api-billing] Credit settle error for org ${orgId}: ${err.message}`);
       }
-    } catch (err: any) {
-      console.error(`[public-api-billing] Credit deduction error for org ${orgId}: ${err.message}`);
+    } else {
+      await withOrgDb(c.env, orgId, async (creditSql) => {
+        await releaseCreditHold(creditSql, orgId, uploadHoldId, "crash");
+      }).catch(() => {});
     }
 
     // Store idempotency cache if key was provided
@@ -790,6 +878,9 @@ publicAgentRoutes.openapi(agentRunUploadRoute, async (c): Promise<any> => {
 
     return c.json(runResponse);
   } catch (err) {
+    await withOrgDb(c.env, orgId, async (creditSql) => {
+      await releaseCreditHold(creditSql, orgId, uploadHoldId, "crash");
+    }).catch(() => {});
     return c.json(failSafe(err, "public-api/agents/run-upload", { userMessage: "Agent execution failed. Please try again in a moment." }), 500);
   }
 });
@@ -860,6 +951,19 @@ publicAgentRoutes.openapi(createConversationRoute, async (c): Promise<any> => {
 
     // If initial input provided, run the agent immediately
     if (body.input) {
+      const conversationRunSessionId = crypto.randomUUID();
+      const conversationHold = await reserveCreditHold(
+        sql,
+        orgId,
+        conversationRunSessionId,
+        DEFAULT_CREDIT_HOLD_USD,
+        undefined,
+        { agentName },
+      );
+      if (!conversationHold.success) {
+        result.error = "insufficient_credits";
+        return c.json(result, 201);
+      }
       try {
         const resp = await c.env.RUNTIME.fetch(
           new Request("https://runtime/run", {
@@ -872,6 +976,7 @@ publicAgentRoutes.openapi(createConversationRoute, async (c): Promise<any> => {
               input: body.input,
               agent_name: agentName,
               org_id: orgId,
+              session_id: conversationRunSessionId,
               project_id: "",
               channel: "public_api",
               channel_user_id: body.user_id || "",
@@ -902,7 +1007,30 @@ publicAgentRoutes.openapi(createConversationRoute, async (c): Promise<any> => {
         ];
         result.output = runResult.output;
         result.session_id = runResult.session_id;
-      } catch {}
+
+        if (resp.status < 400) {
+          await settleCreditHold(
+            sql,
+            orgId,
+            conversationHold.hold_id,
+            Number(runResult.cost_usd || 0),
+            `Agent run: ${agentName}`,
+            agentName,
+            String(runResult.session_id || conversationRunSessionId),
+          ).catch(() => {});
+        } else {
+          await releaseCreditHold(sql, orgId, conversationHold.hold_id, "crash").catch(() => {});
+        }
+      } catch (runErr: any) {
+        // Any throw between reserve and settle/release (runtime fetch
+        // error, JSON parse error, SQL insert error) must release the
+        // hold. Without this the hold sits until TTL-based reclaim,
+        // effectively holding the customer's credit for 10 minutes
+        // after a transient failure.
+        console.error(`[public-api/conversations] agent run failed after reserve: ${runErr?.message || runErr}`);
+        await releaseCreditHold(sql, orgId, conversationHold.hold_id, "crash").catch(() => {});
+        result.error = "runtime_unavailable";
+      }
     }
 
     return c.json(result, 201);
