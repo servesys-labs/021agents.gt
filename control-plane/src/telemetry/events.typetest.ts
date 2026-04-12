@@ -16,7 +16,7 @@ guardA("auth.signup");
 guardA("auth.login");
 guardA("auth.login_failed");
 guardA("auth.logout");
-guardA("auth.cf_access_exchange");
+
 guardA("auth.cli_login");
 guardA("auth.email_verified");
 guardA("auth.forgot_password");
@@ -56,7 +56,7 @@ guardA("skill_auto_activation");
 
 type AuditCovered =
   | "auth.signup" | "auth.login" | "auth.login_failed" | "auth.logout"
-  | "auth.cf_access_exchange" | "auth.cli_login" | "auth.email_verified"
+  | "auth.cli_login" | "auth.email_verified"
   | "auth.forgot_password" | "auth.password_change" | "auth.password_reset"
   | "config_change" | "delete" | "update_config"
   | "agent.promote_override" | "agent.promoted" | "agent.canary_rollback"

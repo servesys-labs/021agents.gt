@@ -2,7 +2,7 @@
  * Auth barrel export.
  */
 export { createToken, verifyToken } from "./jwt";
-export { verifyCfAccessToken, cfAccessEnabled, deriveDisplayName } from "./cf-access";
+
 export { hashPassword, verifyPassword } from "./password";
 export { generateApiKey, hashApiKey } from "./api-keys";
 export type { CurrentUser, TokenClaims } from "./types";

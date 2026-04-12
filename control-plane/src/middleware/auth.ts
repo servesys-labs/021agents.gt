@@ -5,7 +5,7 @@
  *   - cache.ts             — bounded in-memory cache + KV cross-isolate invalidation
  *   - public-routes.ts     — routes that skip auth entirely
  *   - session-timeout.ts   — portal-user idle + absolute-age checks
- *   - resolve-jwt.ts       — JWT (local + CF Access) resolver
+ *   - resolve-jwt.ts       — JWT (local) resolver
  *   - resolve-api-key.ts   — ak_* API key resolver
  *   - resolve-end-user.ts  — end-user JWT resolver (issued by parent API key)
  *
