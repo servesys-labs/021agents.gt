@@ -1,8 +1,10 @@
-import type { AdminSql } from "../db/client";
+import type { Sql } from "../db/client";
 import { buildPersonalAgentPrompt } from "../prompts/personal-agent";
+import { decorateAgentConfigIdentity, defaultDisplayNameFromHandle } from "./agent-identity";
 
 export interface SeededInternalAgent {
-  name: string;
+  handle: string;
+  displayName: string;
   description: string;
   version: string;
   agentRole: "personal_assistant" | "skill" | "custom";
@@ -10,14 +12,15 @@ export interface SeededInternalAgent {
 }
 
 export function buildPersonalAssistantAgent(displayName: string): SeededInternalAgent {
-  const personalName = "my-assistant";
+  const personalHandle = "my-assistant";
+  const personalDisplayName = defaultDisplayNameFromHandle(personalHandle);
   return {
-    name: personalName,
+    handle: personalHandle,
+    displayName: personalDisplayName,
     description: `${displayName}'s personal AI assistant`,
     version: "2.0.0",
     agentRole: "personal_assistant",
-    config: {
-      name: personalName,
+    config: decorateAgentConfigIdentity({
       description: `${displayName}'s personal AI assistant`,
       system_prompt: buildPersonalAgentPrompt(displayName),
       model: "",
@@ -42,18 +45,23 @@ export function buildPersonalAssistantAgent(displayName: string): SeededInternal
       use_code_mode: true,
       parallel_tool_calls: true,
       is_personal: true,
-    },
+    }, {
+      handle: personalHandle,
+      displayName: personalDisplayName,
+    }),
   };
 }
 
 export function buildMemoryAgent(): SeededInternalAgent {
+  const memoryHandle = "memory-agent";
+  const memoryDisplayName = "Memory Agent";
   return {
-    name: "memory-agent",
+    handle: memoryHandle,
+    displayName: memoryDisplayName,
     description: "Internal memory curation subagent",
     version: "1.0.0",
     agentRole: "skill",
-    config: {
-      name: "memory-agent",
+    config: decorateAgentConfigIdentity({
       description: "Internal memory curation subagent",
       system_prompt: "You are the memory curator. Execute memory skills only. Keep outputs structured and concise.",
       model: "",
@@ -81,19 +89,38 @@ export function buildMemoryAgent(): SeededInternalAgent {
       parallel_tool_calls: true,
       is_personal: true,
       internal: true,
-    },
+      hidden: true,
+      visibility: "hidden",
+    }, {
+      handle: memoryHandle,
+      displayName: memoryDisplayName,
+    }),
   };
 }
 
+function normalizeHandle(value: string): string {
+  return String(value || "").trim().toLowerCase();
+}
+
+export function buildAmbientInternalAgents(): SeededInternalAgent[] {
+  return [buildMemoryAgent()];
+}
+
+export function isAmbientAgentHandle(handle: string): boolean {
+  const normalized = normalizeHandle(handle);
+  return buildAmbientInternalAgents().some((agent) => normalizeHandle(agent.handle) === normalized);
+}
+
 export function buildDefaultInternalAgents(displayName: string): SeededInternalAgent[] {
+  // Persist only user-facing defaults. Platform-owned internal workers
+  // like memory-agent resolve ambiently at runtime.
   return [
     buildPersonalAssistantAgent(displayName),
-    buildMemoryAgent(),
   ];
 }
 
 export async function seedDefaultInternalAgents(
-  sql: AdminSql,
+  sql: Sql,
   input: {
     orgId: string;
     userId: string;
@@ -101,22 +128,28 @@ export async function seedDefaultInternalAgents(
     nowIso?: string;
   },
 ): Promise<string[]> {
-  const created: string[] = [];
+  const seeded: string[] = [];
   const nowIso = input.nowIso || new Date().toISOString();
 
   for (const agent of buildDefaultInternalAgents(input.displayName)) {
     const agentId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
     const rows = await sql`
       INSERT INTO agents (
-        agent_id, name, org_id, description, config, version,
+        agent_id, handle, display_name, name, org_id, description, config, version,
         is_active, agent_role, created_by, created_at, updated_at
       )
       VALUES (
         ${agentId},
-        ${agent.name},
+        ${agent.handle},
+        ${agent.displayName},
+        ${agent.handle},
         ${input.orgId},
         ${agent.description},
-        ${JSON.stringify(agent.config)},
+        ${JSON.stringify(decorateAgentConfigIdentity(agent.config, {
+          agentId,
+          handle: agent.handle,
+          displayName: agent.displayName,
+        }))}::jsonb,
         ${agent.version},
         ${true},
         ${agent.agentRole},
@@ -124,11 +157,19 @@ export async function seedDefaultInternalAgents(
         ${nowIso},
         ${nowIso}
       )
-      ON CONFLICT (name, org_id) DO NOTHING
-      RETURNING name
+      ON CONFLICT (handle, org_id) DO UPDATE SET
+        display_name = EXCLUDED.display_name,
+        name = EXCLUDED.name,
+        description = EXCLUDED.description,
+        config = EXCLUDED.config,
+        version = EXCLUDED.version,
+        is_active = EXCLUDED.is_active,
+        agent_role = EXCLUDED.agent_role,
+        updated_at = EXCLUDED.updated_at
+      RETURNING handle
     `;
-    if (rows.length > 0) created.push(agent.name);
+    if (rows.length > 0) seeded.push(agent.handle);
   }
 
-  return created;
+  return seeded;
 }
