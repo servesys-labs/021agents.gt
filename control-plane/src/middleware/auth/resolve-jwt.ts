@@ -1,9 +1,7 @@
 /**
  * Portal JWT resolver.
  *
- * Accepts either:
- *   - a locally-signed JWT (verified via AUTH_JWT_SECRET), or
- *   - a Cloudflare Access JWT (verified via the team domain's JWKS)
+ * Accepts a locally-signed JWT (verified via AUTH_JWT_SECRET).
  *
  * On success, enriches with org membership from org_members and
  * enforces the session idle timeout for portal users.
@@ -16,7 +14,6 @@
 import type { Env } from "../../env";
 import type { CurrentUser } from "../../auth/types";
 import { verifyToken } from "../../auth/jwt";
-import { verifyCfAccessToken, cfAccessEnabled } from "../../auth/cf-access";
 import { withAdminDb } from "../../db/client";
 import { logSecurityEvent } from "../../auth/security-events";
 import { cacheGet, cachePut, hashForCache } from "./cache";
@@ -28,13 +25,8 @@ export async function resolveJwt(token: string, env: Env): Promise<CurrentUser> 
   const cached = cacheGet(cacheKey);
   if (cached) return cached;
 
-  // Local JWT first, CF Access fallback
-  let claims = await verifyToken(env.AUTH_JWT_SECRET, token);
-  if (!claims && cfAccessEnabled(env.CF_ACCESS_TEAM_DOMAIN)) {
-    claims = await verifyCfAccessToken(token, env.CF_ACCESS_TEAM_DOMAIN!, {
-      aud: env.CF_ACCESS_AUD,
-    });
-  }
+  // Local JWT only
+  const claims = await verifyToken(env.AUTH_JWT_SECRET, token);
 
   if (!claims) {
     throw Object.assign(new Error("Invalid or expired token"), { status: 401 });

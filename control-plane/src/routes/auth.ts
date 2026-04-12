@@ -1,5 +1,5 @@
 /**
- * Auth routes — signup, login, providers, me, logout, password change, CF Access exchange.
+ * Auth routes — signup, login, providers, me, logout, password change.
  *
  * Note: The auth middleware skips all /api/v1/auth/* paths, so public routes
  * (signup, login, providers) work without tokens. Protected routes (me, logout,
@@ -10,7 +10,7 @@ import type { Env } from "../env";
 import type { CurrentUser, TokenClaims } from "../auth/types";
 import { createToken, verifyToken } from "../auth/jwt";
 import { hashPassword, verifyPassword } from "../auth/password";
-import { verifyCfAccessToken, cfAccessEnabled, deriveDisplayName } from "../auth/cf-access";
+
 import { withAdminDb, type AdminSql } from "../db/client";
 import { sendPasswordResetEmail, sendVerificationEmail, sendWelcomeEmail } from "../lib/email";
 import { bootstrapPersonalOrg } from "../logic/personal-org-bootstrap";
@@ -56,10 +56,6 @@ const LoginRequest = z.object({
 const ChangePasswordRequest = z.object({
   current_password: z.string().min(1),
   new_password: z.string().min(8).max(128),
-});
-
-const CfAccessExchangeRequest = z.object({
-  cf_access_token: z.string().min(1),
 });
 
 const TokenVerifyRequest = z.object({
@@ -130,16 +126,8 @@ async function resolveUser(c: { req: { header(name: string): string | undefined 
   const token = authHeader.slice(7);
   if (!token) return null;
 
-  // Try local JWT
-  let claims = await verifyToken(c.env.AUTH_JWT_SECRET, token);
-
-  // Fallback to CF Access
-  if (!claims && cfAccessEnabled(c.env.CF_ACCESS_TEAM_DOMAIN)) {
-    claims = await verifyCfAccessToken(token, c.env.CF_ACCESS_TEAM_DOMAIN!, {
-      aud: c.env.CF_ACCESS_AUD,
-    });
-  }
-
+  // Local JWT only
+  const claims = await verifyToken(c.env.AUTH_JWT_SECRET, token);
   if (!claims) return null;
 
   let orgId = claims.org_id || "";
@@ -505,8 +493,6 @@ const providersRoute = createRoute({
         "application/json": {
           schema: z.object({
             active_provider: z.string(),
-            cf_access_enabled: z.boolean(),
-            cf_access_team_domain: z.string().optional(),
             password_enabled: z.boolean(),
           }),
         },
@@ -516,146 +502,9 @@ const providersRoute = createRoute({
 });
 
 authRoutes.openapi(providersRoute, (c) => {
-  const cfAccessIsEnabled = cfAccessEnabled(c.env.CF_ACCESS_TEAM_DOMAIN);
   return c.json({
-    active_provider: cfAccessIsEnabled ? "cf_access" : "local",
-    cf_access_enabled: cfAccessIsEnabled,
-    cf_access_team_domain: cfAccessIsEnabled ? c.env.CF_ACCESS_TEAM_DOMAIN : undefined,
+    active_provider: "local",
     password_enabled: !passwordAuthDisabled(c.env),
-  });
-});
-
-// ── POST /cf-access/exchange ─────────────────────────────────────────────
-
-const cfAccessExchangeRoute = createRoute({
-  method: "post",
-  path: "/cf-access/exchange",
-  tags: ["Auth"],
-  summary: "Exchange CF Access token for JWT",
-  description: "Exchange a Cloudflare Access token for a OneShots JWT. Auto-provisions users on first login.",
-  security: [],
-  request: {
-    body: { content: { "application/json": { schema: CfAccessExchangeRequest } } },
-  },
-  responses: {
-    200: {
-      description: "Token exchange successful",
-      content: {
-        "application/json": {
-          schema: AuthTokenResponse.extend({ name: z.string().optional() }),
-        },
-      },
-    },
-    ...errorResponses(400, 401, 500),
-  },
-});
-
-authRoutes.openapi(cfAccessExchangeRoute, async (c): Promise<any> => {
-  if (!cfAccessEnabled(c.env.CF_ACCESS_TEAM_DOMAIN)) {
-    return c.json({ error: "Cloudflare Access auth is not enabled" }, 400);
-  }
-
-  const { cf_access_token } = c.req.valid("json");
-
-  const cfClaims = await verifyCfAccessToken(cf_access_token, c.env.CF_ACCESS_TEAM_DOMAIN!, {
-    aud: c.env.CF_ACCESS_AUD,
-  });
-
-  if (!cfClaims || !cfClaims.sub || !cfClaims.email) {
-    return c.json({ error: "Invalid CF Access token" }, 401);
-  }
-
-  return await withAdminDb(c.env, async (sql) => {
-  const nowEpoch = new Date().toISOString();
-
-  // Provision user from CF Access identity (upsert by email)
-  const cfAccessUserId = `cfaccess:${cfClaims.sub}`;
-  let userId: string;
-  let orgId: string = "";
-  let role: string = "member";
-  let userName = cfClaims.name || "";
-
-  // Check if user exists by cfaccess-prefixed ID first, then by email
-  const existingById = await sql`SELECT user_id, email, name FROM users WHERE user_id = ${cfAccessUserId}`;
-  const existingByEmail = existingById.length > 0
-    ? []
-    : await sql`SELECT user_id, email, name FROM users WHERE email = ${cfClaims.email}`;
-
-  if (existingById.length > 0) {
-    userId = existingById[0].user_id;
-    userName = userName || existingById[0].name || "";
-
-    if (userName) {
-      await sql`UPDATE users SET name = ${userName} WHERE user_id = ${userId}`;
-    }
-  } else if (existingByEmail.length > 0) {
-    userId = existingByEmail[0].user_id;
-    userName = userName || existingByEmail[0].name || "";
-
-    if (userName) {
-      await sql`UPDATE users SET name = ${userName} WHERE user_id = ${userId}`;
-    }
-  } else {
-    // Create new user with cfaccess-prefixed ID
-    userId = cfAccessUserId;
-    await sql`
-      INSERT INTO users (user_id, email, name, password_hash, provider, created_at)
-      VALUES (${userId}, ${cfClaims.email}, ${userName}, ${""}, ${"cf_access"}, ${nowEpoch})
-    `;
-  }
-
-  // CF Access JWTs have no org_id — always take personal-org path
-  const orgRows = await sql`
-    SELECT org_id, role FROM org_members WHERE user_id = ${userId} ORDER BY created_at ASC LIMIT 1
-  `;
-  if (orgRows.length > 0) {
-    orgId = orgRows[0].org_id;
-    role = orgRows[0].role;
-  } else {
-    orgId = generateId();
-    const orgSlug = cfClaims.email.split("@")[0].toLowerCase().replace(/\./g, "-");
-    try {
-      const displayName = userName || cfClaims.email.split("@")[0];
-      const bootstrap = await bootstrapPersonalOrg(sql, {
-        orgId,
-        userId,
-        email: cfClaims.email,
-        displayName,
-        orgName: `${displayName}'s Org`,
-        orgSlug,
-        nowIso: nowEpoch,
-        plan: "free",
-        starterCreditsUsd: 5,
-      });
-      if (bootstrap.seededAgents.length > 0) {
-        console.log(`[auth/cf-access] Seeded internal agents for ${cfClaims.email}: ${bootstrap.seededAgents.join(", ")}`);
-      }
-      if (bootstrap.creditsSeeded) {
-        console.log(`[auth/cf-access] Seeded $5 free credits for ${cfClaims.email}`);
-      }
-    } catch (e: any) { console.warn(`[auth/cf-access] Org bootstrap failed: ${e.message}`); }
-
-    role = "owner";
-  }
-
-  const token = await createToken(c.env.AUTH_JWT_SECRET, userId, {
-    email: cfClaims.email,
-    name: userName,
-    org_id: orgId,
-    provider: "cf_access",
-    extra: { role },
-  });
-
-  auditAuthEvent(sql, "auth.cf_access_exchange", userId, orgId, { email: cfClaims.email, provider: "cf_access" });
-
-  return c.json({
-    token,
-    user_id: userId,
-    email: cfClaims.email,
-    org_id: orgId,
-    provider: "cf_access",
-    name: userName,
-  });
   });
 });
 
@@ -680,15 +529,7 @@ const tokenVerifyRoute = createRoute({
 authRoutes.openapi(tokenVerifyRoute, async (c): Promise<any> => {
   const { token } = c.req.valid("json");
 
-  let claims = await verifyToken(c.env.AUTH_JWT_SECRET, token);
-
-  // Fallback to CF Access
-  if (!claims && cfAccessEnabled(c.env.CF_ACCESS_TEAM_DOMAIN)) {
-    claims = await verifyCfAccessToken(token, c.env.CF_ACCESS_TEAM_DOMAIN!, {
-      aud: c.env.CF_ACCESS_AUD,
-    });
-  }
-
+  const claims = await verifyToken(c.env.AUTH_JWT_SECRET, token);
   if (!claims) {
     return c.json({ valid: false }, 401);
   }

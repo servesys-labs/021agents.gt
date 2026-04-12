@@ -15,7 +15,7 @@ export type AuditAction =
   | "auth.login"
   | "auth.login_failed"
   | "auth.logout"
-  | "auth.cf_access_exchange"
+
   | "auth.cli_login"
   | "auth.email_verified"
   | "auth.forgot_password"

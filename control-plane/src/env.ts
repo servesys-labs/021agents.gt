@@ -82,9 +82,6 @@ export interface Env {
   FACEBOOK_VERIFY_TOKEN?: string;
   FACEBOOK_APP_SECRET?: string;
 
-  // Cloudflare Access (optional)
-  CF_ACCESS_TEAM_DOMAIN?: string; // e.g. "crucial-lemur-88.cloudflareaccess.com"
-  CF_ACCESS_AUD?: string;         // Application AUD tag
 
   // Pipedream MCP Connectors (optional)
   PIPEDREAM_CLIENT_ID?: string;
