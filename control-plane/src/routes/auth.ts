@@ -13,12 +13,12 @@ import { hashPassword, verifyPassword } from "../auth/password";
 import { verifyCfAccessToken, cfAccessEnabled, deriveDisplayName } from "../auth/cf-access";
 import { withAdminDb, type AdminSql } from "../db/client";
 import { sendPasswordResetEmail, sendVerificationEmail, sendWelcomeEmail } from "../lib/email";
+import { bootstrapPersonalOrg } from "../logic/personal-org-bootstrap";
 import { logSecurityEvent } from "../logic/security-events";
-import { seedDefaultInternalAgents } from "../logic/internal-agents";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { failSafe } from "../lib/error-response";
 import { ErrorSchema, RateLimitErrorSchema, AuthTokenResponse, UserProfile, TokenVerifyResponse, errorResponses } from "../schemas/openapi";
-import type { AuditAction, SecurityEventType, SeedEventType } from "../telemetry/events";
+import type { AuditAction, SecurityEventType } from "../telemetry/events";
 
 export const authRoutes = createOpenAPIRouter();
 
@@ -309,57 +309,23 @@ authRoutes.openapi(signupRoute, async (c): Promise<any> => {
       VALUES (${userId}, ${email}, ${name}, ${passwordHash}, ${"local"}, ${nowEpoch})
     `;
 
-    // Create personal org
-    await sql`
-      INSERT INTO orgs (org_id, name, slug, owner_user_id, plan, created_at)
-      VALUES (${orgId}, ${orgName}, ${orgSlug}, ${userId}, ${"free"}, ${nowEpoch})
-    `;
-
-    await sql`
-      INSERT INTO org_members (org_id, user_id, role, created_at)
-      VALUES (${orgId}, ${userId}, ${"owner"}, ${nowEpoch})
-    `;
-
-    const seeded = await seedDefaultInternalAgents(sql, {
+    const bootstrap = await bootstrapPersonalOrg(sql, {
       orgId,
       userId,
+      email,
       displayName: name || email.split("@")[0],
+      orgName,
+      orgSlug,
       nowIso: nowEpoch,
+      plan: "free",
+      starterCreditsUsd: 5,
     });
-    if (seeded.length > 0) {
-      console.log(`[auth/signup] Seeded internal agents for ${email}: ${seeded.join(", ")}`);
+    if (bootstrap.seededAgents.length > 0) {
+      console.log(`[auth/signup] Seeded internal agents for ${email}: ${bootstrap.seededAgents.join(", ")}`);
     }
-
-    // Meta-agent is ambient — no DB row needed. It uses its own system prompt
-    // from prompts/meta-agent-chat.ts and operates on any agent via /agents/:name/meta-chat.
-
-    // Create default org_settings
-    await sql`
-      INSERT INTO org_settings (org_id, plan_type, settings, limits, features, created_at, updated_at)
-      VALUES (
-        ${orgId},
-        ${"free"},
-        ${JSON.stringify({ onboarding_complete: false, default_connectors: [] })},
-        ${JSON.stringify({ max_agents: 50, max_runs_per_month: 1000, max_seats: 1 })},
-        ${JSON.stringify(["basic_agents", "basic_observability"])},
-        now(),
-        now()
-      )
-      ON CONFLICT (org_id) DO NOTHING
-    `;
-
-    // Seed free tier credits ($5.00 — enough for ~50-200 agent runs)
-    const FREE_TIER_USD = 5.00;
-    await sql`
-      INSERT INTO org_credit_balance (org_id, balance_usd, lifetime_purchased_usd, updated_at)
-      VALUES (${orgId}, ${FREE_TIER_USD}, ${FREE_TIER_USD}, now())
-      ON CONFLICT (org_id) DO NOTHING
-    `;
-    await sql`
-      INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
-      VALUES (${orgId}, 'bonus', ${FREE_TIER_USD}, ${FREE_TIER_USD}, 'Welcome bonus — free tier credits', 'signup', 'signup_bonus', now())
-    `;
-    console.log(`[auth/signup] Seeded $${FREE_TIER_USD} free credits for org ${orgId}`);
+    if (bootstrap.creditsSeeded) {
+      console.log(`[auth/signup] Seeded $5 free credits for org ${orgId}`);
+    }
 
     // Create referral relationship (code already validated + consumed above)
     if (validatedReferrerOrgId && validatedReferrerOrgId !== orgId) {
@@ -367,57 +333,6 @@ authRoutes.openapi(signupRoute, async (c): Promise<any> => {
         INSERT INTO referrals (referrer_org_id, referred_org_id, referral_code, status, created_at)
         VALUES (${validatedReferrerOrgId}, ${orgId}, ${referralCode || ''}, 'active', now())
         ON CONFLICT (referred_org_id) DO NOTHING
-      `;
-    }
-
-    // Auto-create default referral code for the new org (5 invites to start)
-    try {
-      const { createReferralCode } = await import("../logic/referrals");
-      await createReferralCode(sql, orgId, { label: "Your invite link", maxUses: 5 });
-    } catch {} // non-blocking within tx
-
-    // Seed default event_types for the org (best-effort, idempotent)
-    const defaultEventTypes: { event_type: SeedEventType; category: string; description: string }[] = [
-      { event_type: "agent.created", category: "agents", description: "Agent was created" },
-      { event_type: "agent.updated", category: "agents", description: "Agent config was updated" },
-      { event_type: "agent.deleted", category: "agents", description: "Agent was deleted" },
-      { event_type: "session.started", category: "sessions", description: "Agent session started" },
-      { event_type: "session.completed", category: "sessions", description: "Agent session completed" },
-      { event_type: "session.failed", category: "sessions", description: "Agent session failed" },
-      { event_type: "connector.token_stored", category: "connectors", description: "OAuth token stored" },
-      { event_type: "connector.tool_call", category: "connectors", description: "Connector tool invoked" },
-      { event_type: "retention.applied", category: "retention", description: "Retention policy applied" },
-      { event_type: "config.update", category: "config", description: "Configuration changed" },
-      { event_type: "member.invited", category: "orgs", description: "Member invited to org" },
-      { event_type: "member.removed", category: "orgs", description: "Member removed from org" },
-    ];
-    for (const et of defaultEventTypes) {
-      await sql`
-        INSERT INTO event_types (event_type, category, description)
-        VALUES (${et.event_type}, ${et.category}, ${et.description})
-        ON CONFLICT (event_type) DO NOTHING
-      `;
-    }
-
-    // Create default project for the new org
-    const projectId = generateId();
-    const projectSlug = email.split("@")[0].toLowerCase().replace(/\./g, "-").slice(0, 30) || "my-agents";
-
-    await sql`
-      INSERT INTO projects (project_id, org_id, name, slug, description, default_env, default_plan, created_at, updated_at)
-      VALUES (${projectId}, ${orgId}, ${`${projectSlug}'s project`}, ${projectSlug}, ${"Default project"}, ${"development"}, ${"standard"}, ${nowEpoch}, ${nowEpoch})
-    `;
-
-    // Create default environments.
-    // NOTE: environments.org_id is NOT NULL (required for the RLS
-    // policy org_id = current_org_id()). Historical signups that
-    // omitted org_id no longer work — include it here and in any
-    // other code path that inserts into environments.
-    for (const envName of ["development", "staging", "production"]) {
-      const envId = generateId();
-      await sql`
-        INSERT INTO environments (env_id, org_id, project_id, name, is_active, created_at)
-        VALUES (${envId}, ${orgId}, ${projectId}, ${envName}, ${true}, ${nowEpoch})
       `;
     }
   } catch (err) {
@@ -699,66 +614,26 @@ authRoutes.openapi(cfAccessExchangeRoute, async (c): Promise<any> => {
   } else {
     orgId = generateId();
     const orgSlug = cfClaims.email.split("@")[0].toLowerCase().replace(/\./g, "-");
-    await sql`
-      INSERT INTO orgs (org_id, name, slug, owner_user_id, plan, created_at)
-      VALUES (${orgId}, ${`${userName || orgSlug}'s Org`}, ${orgSlug}, ${userId}, ${"free"}, ${nowEpoch})
-    `;
-    await sql`
-      INSERT INTO org_members (org_id, user_id, role, created_at)
-      VALUES (${orgId}, ${userId}, ${"owner"}, ${nowEpoch})
-    `;
-    // Create default org_settings for CF Access provisioned org
-    try {
-      await sql`
-        INSERT INTO org_settings (org_id, plan_type, settings, limits, features, created_at, updated_at)
-        VALUES (
-          ${orgId},
-          ${"free"},
-          ${JSON.stringify({ onboarding_complete: false, default_connectors: [] })},
-          ${JSON.stringify({ max_agents: 50, max_runs_per_month: 1000, max_seats: 1 })},
-          ${JSON.stringify(["basic_agents", "basic_observability"])},
-          ${nowEpoch},
-          ${nowEpoch}
-        )
-      `;
-    } catch {}
-
-    // Auto-create default internal agents (same as email signup)
     try {
       const displayName = userName || cfClaims.email.split("@")[0];
-      const seeded = await seedDefaultInternalAgents(sql, {
+      const bootstrap = await bootstrapPersonalOrg(sql, {
         orgId,
         userId,
+        email: cfClaims.email,
         displayName,
+        orgName: `${displayName}'s Org`,
+        orgSlug,
         nowIso: nowEpoch,
+        plan: "free",
+        starterCreditsUsd: 5,
       });
-      if (seeded.length > 0) {
-        console.log(`[auth/cf-access] Seeded internal agents for ${cfClaims.email}: ${seeded.join(", ")}`);
+      if (bootstrap.seededAgents.length > 0) {
+        console.log(`[auth/cf-access] Seeded internal agents for ${cfClaims.email}: ${bootstrap.seededAgents.join(", ")}`);
       }
-    } catch (e: any) { console.warn(`[auth/cf-access] Internal agent creation failed: ${e.message}`); }
-
-    // Meta-agent is ambient — no DB row needed.
-
-    // Seed free tier credits
-    const FREE_TIER_USD = 5.00;
-    try {
-      await sql`
-        INSERT INTO org_credit_balance (org_id, balance_usd, lifetime_purchased_usd, updated_at)
-        VALUES (${orgId}, ${FREE_TIER_USD}, ${FREE_TIER_USD}, ${nowEpoch})
-        ON CONFLICT (org_id) DO NOTHING
-      `;
-      await sql`
-        INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
-        VALUES (${orgId}, 'bonus', ${FREE_TIER_USD}, ${FREE_TIER_USD}, 'Welcome bonus — free tier credits', 'signup', 'signup_bonus', ${nowEpoch})
-      `;
-      console.log(`[auth/cf-access] Seeded $${FREE_TIER_USD} free credits for ${cfClaims.email}`);
-    } catch (e: any) { console.warn(`[auth/cf-access] Credit seeding failed: ${e.message}`); }
-
-    // Auto-create default referral code (5 invites)
-    try {
-      const { createReferralCode } = await import("../logic/referrals");
-      await createReferralCode(sql, orgId, { label: "Your invite link", maxUses: 5 });
-    } catch {}
+      if (bootstrap.creditsSeeded) {
+        console.log(`[auth/cf-access] Seeded $5 free credits for ${cfClaims.email}`);
+      }
+    } catch (e: any) { console.warn(`[auth/cf-access] Org bootstrap failed: ${e.message}`); }
 
     role = "owner";
   }

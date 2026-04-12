@@ -104,13 +104,27 @@ async function seedUser(user: SeedUser): Promise<void> {
     `;
     console.log(`  ✓ user  ${userId}`);
 
+    // Reconcile org: check by slug first, then by user's existing membership.
+    // This prevents creating a second org if the user already signed up normally
+    // with a different auto-generated slug.
     const [existingOrg] = await scopedSql`
       SELECT org_id
       FROM orgs
-      WHERE slug = ${user.orgSlug}
+      WHERE slug = ${user.orgSlug} OR org_id = ${user.orgId}
       LIMIT 1
     `;
-    const orgId = existingOrg ? String(existingOrg.org_id) : user.orgId;
+    let orgId: string;
+    if (existingOrg) {
+      orgId = String(existingOrg.org_id);
+    } else {
+      // Check if user already has an org from a prior signup
+      const [existingMembership] = await scopedSql`
+        SELECT org_id FROM org_members
+        WHERE user_id = ${userId}
+        ORDER BY created_at ASC LIMIT 1
+      `;
+      orgId = existingMembership ? String(existingMembership.org_id) : user.orgId;
+    }
 
     const bootstrap = await bootstrapPersonalOrg(scopedSql as any, {
       orgId,
