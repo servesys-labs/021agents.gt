@@ -111,7 +111,7 @@ webhookRoutes.openapi(createWebhookRoute, async (c): Promise<any> => {
 
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     await sql`
-      INSERT INTO webhooks (webhook_id, org_id, url, secret, events, codemode_handler_id)
+      INSERT INTO webhooks (id, org_id, url, secret, events, codemode_handler_id)
       VALUES (${webhookId}, ${user.org_id}, ${url || ''}, ${secret}, ${eventsJson}, ${codemodeHandlerId})
     `;
 

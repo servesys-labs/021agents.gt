@@ -505,8 +505,8 @@ sessionRoutes.openapi(postSessionFeedbackRoute, async (c): Promise<any> => {
 
     const now = new Date().toISOString();
     await sql`
-      INSERT INTO session_feedback (session_id, rating, comment, tags, created_at)
-      VALUES (${sessionId}, ${rating}, ${comment}, ${tags}, ${now})
+      INSERT INTO session_feedback (session_id, org_id, agent_name, rating, feedback_text, comment, created_at)
+      VALUES (${sessionId}, ${user.org_id}, ${''}, ${rating}, ${comment}, ${comment}, ${now})
     `;
     return c.json({ submitted: true, session_id: sessionId });
   });

@@ -256,8 +256,8 @@ orgRoutes.openapi(addMemberRoute, async (c): Promise<any> => {
     }
 
     await sql`
-      INSERT INTO org_members (org_id, user_id, role, invited_by)
-      VALUES (${orgId}, ${targetUserId}, ${role}, ${user.user_id})
+      INSERT INTO org_members (org_id, user_id, role)
+      VALUES (${orgId}, ${targetUserId}, ${role})
       ON CONFLICT (org_id, user_id) DO NOTHING
     `;
 

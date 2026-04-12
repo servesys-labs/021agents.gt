@@ -1545,6 +1545,31 @@ CREATE INDEX IF NOT EXISTS idx_voice_clones_org_agent ON voice_clones(org_id, ag
 CREATE INDEX IF NOT EXISTS idx_voice_calls_org_agent ON voice_calls(org_id, agent_name);
 CREATE INDEX IF NOT EXISTS idx_voice_calls_created ON voice_calls(created_at DESC);
 
+CREATE TABLE IF NOT EXISTS voice_call_events (
+  id           BIGSERIAL PRIMARY KEY,
+  call_id      TEXT NOT NULL,
+  event_type   TEXT NOT NULL,
+  payload      JSONB NOT NULL DEFAULT '{}',
+  org_id       TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+  platform     TEXT NOT NULL DEFAULT 'vapi',
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_voice_call_events_call ON voice_call_events(call_id, created_at);
+
+-- ============================================================================
+-- SECTION 14b: Project Canvas
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS project_canvas_layouts (
+  project_id      TEXT PRIMARY KEY REFERENCES projects(project_id) ON DELETE CASCADE,
+  org_id          TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+  layout_json     JSONB NOT NULL DEFAULT '{}',
+  assignments_json JSONB NOT NULL DEFAULT '{}',
+  updated_by      TEXT,
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- ============================================================================
 -- SECTION 15: Evolution & Governance
 -- ============================================================================

@@ -67,23 +67,19 @@ dlpRoutes.openapi(listClassificationsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     const rows = await sql`
-      SELECT id, name, level, description, patterns, created_at, updated_at
+      SELECT id, content_hash, classification, confidence, policy_id, created_at
       FROM dlp_classifications
       ORDER BY created_at DESC
     `;
 
     const classifications = rows.map((r: Record<string, unknown>) => ({
       id: r.id,
-      name: r.name,
-      level: r.level,
-      description: r.description,
-      patterns:
-        typeof r.patterns === "string"
-          ? JSON.parse(r.patterns as string)
-          : r.patterns ?? [],
+      name: r.content_hash,
+      level: r.classification,
+      description: r.policy_id || "",
+      confidence: r.confidence,
       org_id: user.org_id,
       created_at: r.created_at,
-      updated_at: r.updated_at,
     }));
 
     return c.json({ classifications });
@@ -113,11 +109,11 @@ dlpRoutes.openapi(createClassificationRoute, async (c): Promise<any> => {
 
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     await sql`
-      INSERT INTO dlp_classifications (id, org_id, name, level, description, patterns, created_at, updated_at)
-      VALUES (${id}, ${user.org_id}, ${name}, ${level}, ${description}, ${JSON.stringify(patterns)}, ${now}, ${now})
+      INSERT INTO dlp_classifications (org_id, content_hash, classification, confidence, policy_id)
+      VALUES (${user.org_id}, ${name}, ${level}, ${1.0}, ${description})
     `;
 
-    return c.json({ id, name, level, description, patterns, created_at: now }, 201);
+    return c.json({ name, level, description, patterns, created_at: now }, 201);
   });
 });
 
@@ -231,12 +227,14 @@ dlpRoutes.openapi(updateAgentPolicyRoute, async (c): Promise<any> => {
 
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     // Upsert
+    // Deactivate existing policies for this agent, then insert new one
     await sql`
-      INSERT INTO dlp_agent_policies (id, org_id, agent_name, policy, created_at, updated_at)
-      VALUES (${genId()}, ${user.org_id}, ${agentName}, ${policyJson}, ${now}, ${now})
-      ON CONFLICT (org_id, agent_name) DO UPDATE SET
-        policy = EXCLUDED.policy,
-        updated_at = EXCLUDED.updated_at
+      UPDATE dlp_agent_policies SET is_active = false
+      WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND is_active = true
+    `;
+    await sql`
+      INSERT INTO dlp_agent_policies (org_id, agent_name, policy, is_active)
+      VALUES (${user.org_id}, ${agentName}, ${policyJson}, true)
     `;
 
     return c.json({ agent_name: agentName, ...data, updated_at: now });
@@ -269,7 +267,7 @@ dlpRoutes.openapi(exposureReportRoute, async (c): Promise<any> => {
     let rows;
     if (agentName) {
       rows = await sql`
-        SELECT id, agent_name, event_type, action, matches, created_at
+        SELECT id, agent_name, event_type, blocked, details, created_at
         FROM guardrail_events
         WHERE agent_name = ${agentName}
           AND created_at >= ${sinceMs}
@@ -277,7 +275,7 @@ dlpRoutes.openapi(exposureReportRoute, async (c): Promise<any> => {
       `;
     } else {
       rows = await sql`
-        SELECT id, agent_name, event_type, action, matches, created_at
+        SELECT id, agent_name, event_type, blocked, details, created_at
         FROM guardrail_events
         WHERE created_at >= ${sinceMs}
         ORDER BY created_at DESC LIMIT 500
@@ -293,9 +291,9 @@ dlpRoutes.openapi(exposureReportRoute, async (c): Promise<any> => {
       const r = row as Record<string, unknown>;
       try {
         const m =
-          typeof r.matches === "string"
-            ? JSON.parse(r.matches as string)
-            : r.matches ?? {};
+          typeof r.details === "string"
+            ? JSON.parse(r.details as string)
+            : r.details ?? {};
         const piiCount = Number(m.pii ?? 0);
         if (piiCount > 0) {
           totalExposures += piiCount;
@@ -307,7 +305,7 @@ dlpRoutes.openapi(exposureReportRoute, async (c): Promise<any> => {
               id: r.id,
               agent_name: agent,
               event_type: r.event_type,
-              action: r.action,
+              blocked: r.blocked,
               pii_count: piiCount,
               created_at: r.created_at,
             });
@@ -388,14 +386,17 @@ dlpRoutes.openapi(scanSessionRoute, async (c): Promise<any> => {
   try {
     await sql`
       INSERT INTO guardrail_events (
-        id, org_id, agent_name, event_type, action,
-        text_preview, matches, created_at
+        org_id, agent_name, session_id, event_type, blocked, details, created_at
       ) VALUES (
-        ${genId()}, ${user.org_id}, ${"session_scan"},
-        ${"retroactive_scan"}, ${totalPii > 0 ? "warn" : "allow"},
-        ${`Retroactive scan of session ${sessionId}: ${turns.length} turns`},
-        ${JSON.stringify({ pii: totalPii, session_id: sessionId })},
-        ${Date.now()}
+        ${user.org_id}, ${"session_scan"},
+        ${sessionId}, ${"retroactive_scan"}, ${totalPii > 0},
+        ${JSON.stringify({
+          action: totalPii > 0 ? "warn" : "allow",
+          text_preview: `Retroactive scan of session ${sessionId}: ${turns.length} turns`,
+          pii: totalPii,
+          session_id: sessionId,
+        })}::jsonb,
+        NOW()
       )
     `;
   } catch {

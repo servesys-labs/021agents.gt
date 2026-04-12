@@ -503,29 +503,14 @@ export async function addCredits(
   const now = new Date().toISOString();
 
   // Upsert balance row.
-  // Some older deployments may not yet have `last_purchase_at`.
-  try {
-    await sql`
-      INSERT INTO org_credit_balance (org_id, balance_usd, lifetime_purchased_usd, last_purchase_at, updated_at)
-      VALUES (${orgId}, ${amountUsd}, ${amountUsd}, ${now}, ${now})
-      ON CONFLICT (org_id) DO UPDATE SET
-        balance_usd = org_credit_balance.balance_usd + ${amountUsd},
-        lifetime_purchased_usd = org_credit_balance.lifetime_purchased_usd + ${amountUsd},
-        last_purchase_at = ${now},
-        updated_at = ${now}
-    `;
-  } catch (err: any) {
-    const msg = String(err?.message || err || "");
-    if (!msg.includes("last_purchase_at")) throw err;
-    await sql`
-      INSERT INTO org_credit_balance (org_id, balance_usd, lifetime_purchased_usd, updated_at)
-      VALUES (${orgId}, ${amountUsd}, ${amountUsd}, ${now})
-      ON CONFLICT (org_id) DO UPDATE SET
-        balance_usd = org_credit_balance.balance_usd + ${amountUsd},
-        lifetime_purchased_usd = org_credit_balance.lifetime_purchased_usd + ${amountUsd},
-        updated_at = ${now}
-    `;
-  }
+  await sql`
+    INSERT INTO org_credit_balance (org_id, balance_usd, lifetime_purchased_usd, updated_at)
+    VALUES (${orgId}, ${amountUsd}, ${amountUsd}, ${now})
+    ON CONFLICT (org_id) DO UPDATE SET
+      balance_usd = org_credit_balance.balance_usd + ${amountUsd},
+      lifetime_purchased_usd = org_credit_balance.lifetime_purchased_usd + ${amountUsd},
+      updated_at = ${now}
+  `;
 
   // Read updated balance for the transaction log snapshot
   const [bal] = await sql`

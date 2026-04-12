@@ -199,14 +199,14 @@ evolveRoutes.openapi(analyzeRoute, async (c): Promise<any> => {
   for (const proposal of proposals) {
     await sql`
       INSERT INTO evolution_proposals (
-        proposal_id, agent_name, org_id, title, rationale, category,
+        id, org_id, agent_name, title, rationale, category,
         priority, config_diff, evidence, status, created_at
       ) VALUES (
-        ${proposal.id}, ${agentName}, ${orgId}, ${proposal.title},
+        ${proposal.id}, ${orgId}, ${agentName}, ${proposal.title},
         ${proposal.rationale}, ${proposal.category}, ${proposal.priority},
         ${JSON.stringify(proposal.modification)}, ${JSON.stringify(proposal.evidence)},
         'pending', ${now}
-      ) ON CONFLICT (proposal_id) DO UPDATE SET
+      ) ON CONFLICT (id) DO UPDATE SET
         title = EXCLUDED.title,
         rationale = EXCLUDED.rationale,
         priority = EXCLUDED.priority,
@@ -305,7 +305,7 @@ evolveRoutes.openapi(applyRoute, async (c): Promise<any> => {
     // Fetch the proposal
     const proposalRows = await sql`
       SELECT * FROM evolution_proposals
-      WHERE proposal_id = ${proposalId} AND agent_name = ${agentName}
+      WHERE id = ${proposalId} AND agent_name = ${agentName}
     `;
     if (proposalRows.length === 0) return c.json({ error: "Proposal not found" }, 404);
     const proposal = proposalRows[0];
@@ -388,8 +388,8 @@ evolveRoutes.openapi(applyRoute, async (c): Promise<any> => {
 
   // Mark proposal as applied
   await sql`
-    UPDATE evolution_proposals SET status = 'applied', reviewed_at = ${now}
-    WHERE proposal_id = ${proposalId}
+    UPDATE evolution_proposals SET status = 'applied', apply_context = jsonb_set(COALESCE(apply_context, '{}'), '{reviewed_at}', ${JSON.stringify(now)}::jsonb)
+    WHERE id = ${proposalId}
   `;
 
   const applyContext = {
@@ -411,13 +411,14 @@ evolveRoutes.openapi(applyRoute, async (c): Promise<any> => {
   // Record in ledger with before/after configs and baseline metrics
   await sql`
     INSERT INTO evolution_ledger (
-      agent_name, org_id, proposal_id, action, note,
-      previous_config, new_config, metrics_before, created_at, apply_context
+      org_id, agent_name, proposal_id, action,
+      previous_config, new_config, metrics_before, metrics_after, created_at
     ) VALUES (
-      ${agentName}, ${orgId}, ${proposalId}, 'applied',
-      ${proposal.title || ""},
+      ${orgId}, ${agentName}, ${proposalId}, 'applied',
       ${JSON.stringify(currentConfig)}, ${JSON.stringify(newConfig)},
-      ${JSON.stringify(baselineMetrics)}, ${now}, ${JSON.stringify(applyContext)}
+      ${JSON.stringify(baselineMetrics)},
+      ${JSON.stringify({ note: proposal.title || "", apply_context: applyContext })},
+      ${now}
     )
   `;
 
@@ -466,7 +467,7 @@ evolveRoutes.openapi(measureImpactRoute, async (c): Promise<any> => {
     // Fetch proposal — must be applied
     const proposalRows = await sql`
       SELECT * FROM evolution_proposals
-      WHERE proposal_id = ${proposalId} AND agent_name = ${agentName}
+      WHERE id = ${proposalId} AND agent_name = ${agentName}
     `;
     if (proposalRows.length === 0) return c.json({ error: "Proposal not found" }, 404);
     const proposal = proposalRows[0];
@@ -536,7 +537,7 @@ evolveRoutes.openapi(measureImpactRoute, async (c): Promise<any> => {
     await sql`
       UPDATE evolution_proposals
       SET impact = ${JSON.stringify(impactData)}
-      WHERE proposal_id = ${proposalId}
+      WHERE id = ${proposalId}
     `;
 
     // Update ledger with metrics_after
@@ -586,7 +587,7 @@ evolveRoutes.openapi(autoRollbackRoute, async (c): Promise<any> => {
     // Fetch proposal
     const proposalRows = await sql`
       SELECT * FROM evolution_proposals
-      WHERE proposal_id = ${proposalId} AND agent_name = ${agentName}
+      WHERE id = ${proposalId} AND agent_name = ${agentName}
     `;
     if (proposalRows.length === 0) return c.json({ error: "Proposal not found" }, 404);
     const proposal = proposalRows[0];
@@ -657,18 +658,18 @@ evolveRoutes.openapi(autoRollbackRoute, async (c): Promise<any> => {
   await sql`
     UPDATE evolution_proposals
     SET status = 'rolled_back', rolled_back_at = ${now}, rollback_reason = ${reason}
-    WHERE proposal_id = ${proposalId}
+    WHERE id = ${proposalId}
   `;
 
   // Record rollback in ledger
   await sql`
     INSERT INTO evolution_ledger (
-      agent_name, org_id, proposal_id, action, note,
-      previous_config, new_config, created_at
+      org_id, agent_name, proposal_id, action,
+      previous_config, new_config, metrics_after, created_at
     ) VALUES (
-      ${agentName}, ${orgId}, ${proposalId}, 'rolled_back',
-      ${reason},
-      ${ledger.new_config || "{}"}, ${JSON.stringify(previousConfig)}, ${now}
+      ${orgId}, ${agentName}, ${proposalId}, 'rolled_back',
+      ${ledger.new_config || "{}"}, ${JSON.stringify(previousConfig)},
+      ${JSON.stringify({ note: reason })}, ${now}
     )
   `;
 
@@ -793,21 +794,21 @@ evolveRoutes.openapi(approveRoute, async (c): Promise<any> => {
 
     const rows = await sql`
       SELECT * FROM evolution_proposals
-      WHERE proposal_id = ${proposalId} AND agent_name = ${agentName}
+      WHERE id = ${proposalId} AND agent_name = ${agentName}
     `;
     if (rows.length === 0) return c.json({ error: "Proposal not found" }, 404);
 
     const now = new Date().toISOString();
     await sql`
       UPDATE evolution_proposals
-      SET status = 'approved', review_note = ${note}, reviewed_at = ${now}
-      WHERE proposal_id = ${proposalId}
+      SET status = 'approved', apply_context = jsonb_set(COALESCE(apply_context, '{}'), '{review}', ${JSON.stringify({ note, reviewed_at: now })}::jsonb)
+      WHERE id = ${proposalId}
     `;
 
     // Add ledger entry
     await sql`
-      INSERT INTO evolution_ledger (agent_name, org_id, proposal_id, action, note, created_at)
-      VALUES (${agentName}, ${orgId}, ${proposalId}, 'approved', ${note}, ${now})
+      INSERT INTO evolution_ledger (org_id, agent_name, proposal_id, action, metrics_after, created_at)
+      VALUES (${orgId}, ${agentName}, ${proposalId}, 'approved', ${JSON.stringify({ note })}, ${now})
     `;
 
     return c.json({ approved: proposalId, title: rows[0].title || "" });
@@ -846,20 +847,20 @@ evolveRoutes.openapi(rejectRoute, async (c): Promise<any> => {
 
     const rows = await sql`
       SELECT * FROM evolution_proposals
-      WHERE proposal_id = ${proposalId} AND agent_name = ${agentName}
+      WHERE id = ${proposalId} AND agent_name = ${agentName}
     `;
     if (rows.length === 0) return c.json({ error: "Proposal not found" }, 404);
 
     const now = new Date().toISOString();
     await sql`
       UPDATE evolution_proposals
-      SET status = 'rejected', review_note = ${note}, reviewed_at = ${now}
-      WHERE proposal_id = ${proposalId}
+      SET status = 'rejected', apply_context = jsonb_set(COALESCE(apply_context, '{}'), '{review}', ${JSON.stringify({ note, reviewed_at: now })}::jsonb)
+      WHERE id = ${proposalId}
     `;
 
     await sql`
-      INSERT INTO evolution_ledger (agent_name, org_id, proposal_id, action, note, created_at)
-      VALUES (${agentName}, ${orgId}, ${proposalId}, 'rejected', ${note}, ${now})
+      INSERT INTO evolution_ledger (org_id, agent_name, proposal_id, action, metrics_after, created_at)
+      VALUES (${orgId}, ${agentName}, ${proposalId}, 'rejected', ${JSON.stringify({ note })}, ${now})
     `;
 
     return c.json({ rejected: proposalId, title: rows[0].title || "" });

@@ -171,7 +171,7 @@ projectRoutes.openapi(createProjectRoute, async (c): Promise<any> => {
   // Audit
   try {
     await sql`
-      INSERT INTO audit_log (org_id, user_id, action, resource_type, resource_id, changes_json, created_at)
+      INSERT INTO audit_log (org_id, user_id, action, resource_type, resource_id, details, created_at)
       VALUES (${user.org_id}, ${user.user_id}, ${"project.create" satisfies AuditAction}, 'project', ${projectId}, ${JSON.stringify({ name })}, ${new Date().toISOString()})
     `;
   } catch {}

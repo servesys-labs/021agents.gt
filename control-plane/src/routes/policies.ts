@@ -95,8 +95,8 @@ policyRoutes.openapi(createPolicyRoute, async (c): Promise<any> => {
 
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     await sql`
-      INSERT INTO policy_templates (policy_id, org_id, name, policy)
-      VALUES (${policyId}, ${user.org_id}, ${name}, ${policyJson})
+      INSERT INTO policy_templates (id, name, description, category, template)
+      VALUES (${policyId}, ${name}, ${''}, ${''}, ${policyJson})
     `;
 
     // Audit

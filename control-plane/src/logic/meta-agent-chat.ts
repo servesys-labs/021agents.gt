@@ -1500,10 +1500,10 @@ async function executeTool(
         }
 
         await sql`
-          INSERT INTO training_jobs (id, agent_name, org_id, algorithm, max_iterations, auto_activate,
-            status, current_iteration, best_score, eval_tasks, created_at)
-          VALUES (${jobId}, ${ctx.agentName}, ${ctx.orgId}, ${algorithm}, ${maxIterations}, ${autoActivate},
-            'created', 0, NULL, ${JSON.stringify(evalTasks)}, ${now})
+          INSERT INTO training_jobs (id, org_id, agent_name, algorithm, max_iterations,
+            status, current_iteration, eval_tasks, config, created_at)
+          VALUES (${jobId}, ${ctx.orgId}, ${ctx.agentName}, ${algorithm}, ${maxIterations},
+            'created', 0, ${JSON.stringify(evalTasks)}, ${JSON.stringify({ auto_activate: autoActivate })}, ${now})
         `;
 
         // Snapshot current system prompt as initial resource
@@ -2108,8 +2108,8 @@ async function executeTool(
         const runId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
         try {
           await sql`
-            INSERT INTO eval_runs (id, agent_name, org_id, pass_rate, total_tasks, avg_latency_ms, total_cost_usd, created_at)
-            VALUES (${runId}, ${ctx.agentName}, ${ctx.orgId}, ${overallPassRate / 100}, ${results.length},
+            INSERT INTO eval_runs (eval_run_id, org_id, agent_name, pass_rate, total_tasks, avg_latency_ms, total_cost_usd, created_at)
+            VALUES (${runId}, ${ctx.orgId}, ${ctx.agentName}, ${overallPassRate / 100}, ${results.length},
               ${Math.round(results.reduce((s, r) => s + r.latency_ms, 0) / results.length)},
               ${totalCost}, now())
           `;
@@ -3278,7 +3278,7 @@ export async function runMetaChat(
         await sql`
           INSERT INTO turns (session_id, turn_number, model_used, llm_content,
             tool_calls, tool_results, errors,
-            input_tokens, output_tokens, cost_usd, latency_ms, execution_mode, started_at)
+            input_tokens, output_tokens, cost_usd, latency_ms, execution_mode, created_at)
           VALUES (
             ${sessionId}, ${t.turn}, ${t.model}, ${t.content.slice(0, 10000)},
             ${JSON.stringify(t.tool_calls)}, ${JSON.stringify(t.tool_results)}, '[]',

@@ -153,15 +153,10 @@ describe("RLS Policies", () => {
   // ── Tables that must NOT have RLS (global catalogs, per-user, FK-derived) ─
 
   const tablesExcludedFromRLS = [
-    // Per-user tables isolated by user_id FK, not org_id
-    "users",
+    // Per-user session tracking (no org_id column)
     "user_sessions",
-    // Global catalogs
+    // Global catalogs (not org-scoped)
     "credit_packages",
-    // Tables that derive isolation via parent FK (sessions → turns)
-    "turns",
-    "conversation_messages",
-    "eval_trials",
   ];
 
   it.each(tablesExcludedFromRLS)("does NOT enable RLS on the excluded table %s", (table) => {

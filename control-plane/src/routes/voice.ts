@@ -2242,17 +2242,17 @@ voiceRoutes.openapi(twilioBuyRoute, async (c): Promise<any> => {
   // Deduct credits for number cost ($1.00 flat)
   try {
     await sql`
-      INSERT INTO usage_events (org_id, event_type, description, credits, created_at)
+      INSERT INTO billing_events (org_id, event_type, amount_usd, metadata, created_at)
       VALUES (
         ${user.org_id},
         'voice_number_purchase',
-        ${'Phone number purchase: ' + buyData.phone_number},
-        -100,
+        -1.00,
+        ${JSON.stringify({ description: 'Phone number purchase: ' + buyData.phone_number, credits: -100 })},
         now()
       )
     `;
   } catch {
-    /* best-effort — usage_events table may not exist */
+    /* best-effort billing record */
   }
 
   return c.json({

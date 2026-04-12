@@ -55,7 +55,7 @@ mcpControlRoutes.openapi(listServersRoute, async (c): Promise<any> => {
   const user = c.get("user");
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     const rows = await sql`
-      SELECT server_id, name, url, transport, status, last_health_at, created_at
+      SELECT id, name, url, transport, is_active, created_at, updated_at
       FROM mcp_servers ORDER BY name
     `;
     return c.json({ servers: rows });
@@ -113,8 +113,9 @@ mcpControlRoutes.openapi(createServerRoute, async (c): Promise<any> => {
 
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     await sql`
-      INSERT INTO mcp_servers (server_id, org_id, name, url, transport, auth_token, metadata, status, created_at)
-      VALUES (${serverId}, ${user.org_id}, ${name}, ${url}, ${transport}, ${authToken}, ${JSON.stringify(metadata)}, 'registered', ${now})
+      INSERT INTO mcp_servers (org_id, name, url, transport, auth, tools, is_active, created_at, updated_at)
+      VALUES (${user.org_id}, ${name}, ${url}, ${transport}, ${JSON.stringify({ token: authToken })}, ${JSON.stringify(metadata)}, true, ${now}, ${now})
+      RETURNING id
     `;
 
     return c.json({ server_id: serverId, name, status: "registered" });
@@ -156,7 +157,7 @@ mcpControlRoutes.openapi(getServerStatusRoute, async (c): Promise<any> => {
 
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     const rows = await sql`
-      SELECT * FROM mcp_servers WHERE server_id = ${serverId}
+      SELECT * FROM mcp_servers WHERE id = ${serverId}
     `;
     if (rows.length === 0) return c.json({ error: "MCP server not found" }, 404);
     const server = rows[0] as any;
@@ -175,7 +176,7 @@ mcpControlRoutes.openapi(getServerStatusRoute, async (c): Promise<any> => {
 
     const status = healthy ? "healthy" : "unhealthy";
     const now = new Date().toISOString();
-    await sql`UPDATE mcp_servers SET status = ${status}, last_health_at = ${now} WHERE server_id = ${serverId}`;
+    await sql`UPDATE mcp_servers SET updated_at = ${now} WHERE id = ${serverId}`;
 
     return c.json({
       server_id: serverId,
@@ -222,7 +223,7 @@ mcpControlRoutes.openapi(syncServerRoute, async (c): Promise<any> => {
 
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     const rows = await sql`
-      SELECT * FROM mcp_servers WHERE server_id = ${serverId}
+      SELECT * FROM mcp_servers WHERE id = ${serverId}
     `;
     if (rows.length === 0) return c.json({ error: "MCP server not found" }, 404);
     const server = rows[0] as any;
@@ -243,7 +244,7 @@ mcpControlRoutes.openapi(syncServerRoute, async (c): Promise<any> => {
 
     const now = new Date().toISOString();
     const newStatus = error ? "sync_failed" : "synced";
-    await sql`UPDATE mcp_servers SET last_health_at = ${now}, status = ${newStatus} WHERE server_id = ${serverId}`;
+    await sql`UPDATE mcp_servers SET updated_at = ${now} WHERE id = ${serverId}`;
 
     return c.json({
       server_id: serverId,
@@ -280,7 +281,7 @@ mcpControlRoutes.openapi(deleteServerRoute, async (c): Promise<any> => {
 
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     const result = await sql`
-      DELETE FROM mcp_servers WHERE server_id = ${serverId}
+      DELETE FROM mcp_servers WHERE id = ${serverId}
     `;
     if (result.count === 0) return c.json({ error: "MCP server not found" }, 404);
     return c.json({ deleted: serverId });

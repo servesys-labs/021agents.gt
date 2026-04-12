@@ -69,45 +69,31 @@ secretsRotationRoutes.openapi(rotateKeysRoute, async (c): Promise<any> => {
   const rotationId = genId();
 
   return await withOrgDb(c.env, user.org_id, async (sql) => {
-    // 1. Create rotation tracking row (secrets_key_rotations is NOT RLS — keep org_id filter)
-    try {
-      await sql`
-        INSERT INTO secrets_key_rotations (id, org_id, status, initiated_by, started_at)
-        VALUES (${rotationId}, ${user.org_id}, 'in_progress', ${user.user_id}, now())
-      `;
-    } catch (err) {
-      // Table may not exist yet — create it inline
-      await sql`
-        CREATE TABLE IF NOT EXISTS secrets_key_rotations (
-          id TEXT PRIMARY KEY,
-          org_id TEXT NOT NULL,
-          status TEXT NOT NULL DEFAULT 'in_progress',
-          initiated_by TEXT NOT NULL,
-          secrets_re_encrypted INT DEFAULT 0,
-          errors INT DEFAULT 0,
-          started_at TIMESTAMPTZ DEFAULT now(),
-          completed_at TIMESTAMPTZ,
-          error_details JSONB
-        )
-      `;
-      await sql`
-        INSERT INTO secrets_key_rotations (id, org_id, status, initiated_by, started_at)
-        VALUES (${rotationId}, ${user.org_id}, 'in_progress', ${user.user_id}, now())
-      `;
-    }
+    // 1. The secrets_key_rotations table tracks per-secret rotations
+    //    (id BIGSERIAL, secret_id, status, created_at, completed_at).
+    //    We insert per-secret rows in step 3 below and track the bulk
+    //    rotation via the security_events log at the end.
 
     // 2. Fetch all secrets for this org (RLS filters by org_id)
     const secrets = await sql`
-      SELECT name, project_id, env, encrypted_value FROM secrets
+      SELECT id, name, project_id, env, encrypted_value FROM secrets
     `;
 
     let reEncrypted = 0;
     let errors = 0;
     const errorDetails: Array<{ name: string; error: string }> = [];
 
-    // 3. Re-encrypt each secret: decrypt with old key, encrypt with new key
+    // 3. Re-encrypt each secret: decrypt with old key, encrypt with new key.
+    //    Track each rotation in secrets_key_rotations (schema: id BIGSERIAL,
+    //    secret_id TEXT, status, created_at, completed_at).
     for (const secret of secrets) {
       try {
+        // Create a pending rotation row for this secret
+        await sql`
+          INSERT INTO secrets_key_rotations (secret_id, status, created_at)
+          VALUES (${secret.id}, 'in_progress', now())
+        `;
+
         const plaintext = await fernetDecrypt(
           String(secret.encrypted_value),
           oldKey,
@@ -121,8 +107,21 @@ secretsRotationRoutes.openapi(rotateKeysRoute, async (c): Promise<any> => {
             AND project_id = ${secret.project_id}
             AND env = ${secret.env}
         `;
+
+        // Mark rotation completed
+        await sql`
+          UPDATE secrets_key_rotations
+          SET status = 'completed', completed_at = now()
+          WHERE secret_id = ${secret.id} AND status = 'in_progress'
+        `;
         reEncrypted++;
       } catch (err) {
+        // Mark rotation failed
+        await sql`
+          UPDATE secrets_key_rotations
+          SET status = 'failed', completed_at = now()
+          WHERE secret_id = ${secret.id} AND status = 'in_progress'
+        `.catch(() => {});
         errors++;
         errorDetails.push({
           name: String(secret.name),
@@ -131,23 +130,13 @@ secretsRotationRoutes.openapi(rotateKeysRoute, async (c): Promise<any> => {
       }
     }
 
-    // 4. Update rotation row (secrets_key_rotations is NOT RLS — keep org_id filter)
     const finalStatus = errors === 0 ? "completed" : "completed_with_errors";
-    await sql`
-      UPDATE secrets_key_rotations
-      SET status = ${finalStatus},
-          secrets_re_encrypted = ${reEncrypted},
-          errors = ${errors},
-          completed_at = now(),
-          error_details = ${errors > 0 ? JSON.stringify(errorDetails) : null}
-      WHERE id = ${rotationId} AND org_id = ${user.org_id}
-    `;
 
-    // 5. Log security event (RLS-enforced)
+    // 4. Log security event (RLS-enforced)
     try {
       await sql`
-        INSERT INTO security_events (id, org_id, event_type, actor_id, metadata, created_at)
-        VALUES (${genId()}, ${user.org_id}, ${"secrets.rotated" satisfies SecurityEventType}, ${user.user_id},
+        INSERT INTO security_events (org_id, event_type, actor_type, actor_id, severity, details, created_at)
+        VALUES (${user.org_id}, ${"secrets.rotated" satisfies SecurityEventType}, ${"user"}, ${user.user_id}, ${"info"},
                 ${JSON.stringify({ rotation_id: rotationId, secrets_re_encrypted: reEncrypted, errors })},
                 now())
       `;
@@ -182,12 +171,13 @@ secretsRotationRoutes.openapi(listRotationsRoute, async (c): Promise<any> => {
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     let rows: Record<string, unknown>[] = [];
     try {
-      // secrets_key_rotations is NOT RLS — keep explicit org_id filter
+      // secrets_key_rotations tracks per-secret rotations. Join with secrets
+      // to filter by org (secrets table is RLS-enforced).
       rows = await sql`
-        SELECT id, status, initiated_by, secrets_re_encrypted, errors, started_at, completed_at
-        FROM secrets_key_rotations
-        WHERE org_id = ${user.org_id}
-        ORDER BY started_at DESC
+        SELECT r.id, r.secret_id, r.status, r.created_at, r.completed_at
+        FROM secrets_key_rotations r
+        JOIN secrets s ON r.secret_id = s.id
+        ORDER BY r.created_at DESC
         LIMIT 50
       `;
     } catch {

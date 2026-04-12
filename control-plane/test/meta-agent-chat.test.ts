@@ -1057,21 +1057,12 @@ describe("consolidated schema — feature_flags, agent_versions, skills", () => 
 // 15. PHASE 6 — skill_overlays + skill_audit (learning loop migration)
 // ══════════════════════════════════════════════════════════════════
 
-describe("002_skill_learning — overlays + audit migration", () => {
-  // Deploy pattern: 002_skill_learning.sql is the standalone rollback unit
-  // (revertable with git revert + DROP TABLE), and the same DDL is inlined
-  // into 001_init.sql so deploys that only apply the consolidated schema
-  // still provision the tables. Both files MUST declare the same shape —
-  // these assertions run against both to keep them in sync.
+describe("002_skill_learning — overlays + audit migration (consolidated into 001)", () => {
+  // All DDL consolidated into 001_init.sql. The standalone 002 file was
+  // deleted. These assertions verify the schema is present in 001.
   const paths = [
-    "src/db/migrations/002_skill_learning.sql",
     "src/db/migrations/001_init.sql",
   ];
-
-  it("standalone migration file exists", async () => {
-    const fs = await import("fs");
-    expect(fs.existsSync(paths[0])).toBe(true);
-  });
 
   it.each(paths)("%s declares skill_overlays with org FK and lookup index", async (path) => {
     const fs = await import("fs");

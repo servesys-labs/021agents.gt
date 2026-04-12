@@ -32,8 +32,8 @@ async function persistA2ATask(env: any, task: A2ATask, callerOrgId: string, call
       const input = String((firstUserMsg?.parts?.[0] as any)?.text || "");
       const output = String((task.artifacts?.[0]?.parts?.[0] as any)?.text || "");
       await sql`
-        INSERT INTO a2a_tasks (task_id, caller_org_id, callee_org_id, caller_agent_name, callee_agent_name, status, input_text, output_text, transfer_id, amount_usd, created_at, completed_at)
-        VALUES (${task.id}, ${callerOrgId}, ${calleeOrgId}, '', ${task.agentName || ''}, ${task.status.state.toLowerCase()}, ${input.slice(0, 5000)}, ${output.slice(0, 5000)}, ${transferId || ''}, ${amountUsd || 0}, ${task.status.timestamp || new Date().toISOString()}, ${task.status.state !== 'WORKING' ? task.status.timestamp : null})
+        INSERT INTO a2a_tasks (task_id, caller_org_id, callee_org_id, caller_agent_name, callee_agent_name, status, input_text, output_text, amount_usd, created_at, completed_at)
+        VALUES (${task.id}, ${callerOrgId}, ${calleeOrgId}, '', ${task.agentName || ''}, ${task.status.state.toLowerCase()}, ${input.slice(0, 5000)}, ${output.slice(0, 5000)}, ${amountUsd || 0}, ${task.status.timestamp || new Date().toISOString()}, ${task.status.state !== 'WORKING' ? task.status.timestamp : null})
         ON CONFLICT (task_id) DO UPDATE SET status = ${task.status.state.toLowerCase()}, output_text = ${output.slice(0, 5000)}, completed_at = ${task.status.state !== 'WORKING' ? task.status.timestamp : null}
       `;
     });

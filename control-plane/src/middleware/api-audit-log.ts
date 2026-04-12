@@ -105,22 +105,16 @@ export const apiAuditLogMiddleware = createMiddleware<{
     const writer = async (sql: any) => {
       await sql`
         INSERT INTO api_access_log (
-          request_id, org_id, api_key_id, end_user_id,
-          method, path, agent_name, status_code,
-          latency_ms, ip_address, user_agent, idempotency_key
+          org_id, key_id, method, path,
+          status_code, latency_ms, ip_address
         ) VALUES (
-          ${logEntry.request_id},
           ${logEntry.org_id},
           ${logEntry.api_key_id},
-          ${logEntry.end_user_id},
           ${logEntry.method},
           ${logEntry.path},
-          ${logEntry.agent_name},
           ${logEntry.status_code},
           ${logEntry.latency_ms},
-          ${logEntry.ip_address},
-          ${logEntry.user_agent},
-          ${logEntry.idempotency_key}
+          ${logEntry.ip_address}
         )
       `;
     };

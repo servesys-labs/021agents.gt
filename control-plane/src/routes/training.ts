@@ -147,15 +147,19 @@ trainingRoutes.openapi(createJobRoute, async (c): Promise<any> => {
   // on throw.
   await sql`
     INSERT INTO training_jobs (
-      job_id, org_id, agent_name, algorithm, status, config,
-      dataset_name, eval_tasks, max_iterations, auto_activate,
-      created_by, tags
+      id, org_id, agent_name, algorithm, status, config,
+      eval_tasks, max_iterations
     ) VALUES (
       ${jobId}, ${user.org_id}, ${body.agent_name}, ${body.algorithm}, 'created',
-      ${JSON.stringify(body.config)}, ${body.dataset_name ?? null},
-      ${body.eval_tasks ? JSON.stringify(body.eval_tasks) : null},
-      ${body.max_iterations}, ${body.auto_activate},
-      ${user.user_id}, ${body.tags && body.tags.length > 0 ? body.tags : sql`'{}'::text[]`}
+      ${JSON.stringify({
+        ...body.config,
+        dataset_name: body.dataset_name ?? null,
+        auto_activate: body.auto_activate,
+        created_by: user.user_id,
+        tags: body.tags && body.tags.length > 0 ? body.tags : [],
+      })},
+      ${body.eval_tasks ? JSON.stringify(body.eval_tasks) : '[]'},
+      ${body.max_iterations}
     )
   `;
 
@@ -311,15 +315,15 @@ trainingRoutes.openapi(getJobRoute, async (c): Promise<any> => {
     iterations: iterations.map((i: any) => ({
       iteration_id: i.iteration_id,
       iteration_number: i.iteration_number,
-      status: i.status,
+      status: parseJsonColumn(i.config)?.status ?? parseJsonColumn(i.config)?.completion?.status ?? null,
       pass_rate: i.pass_rate,
-      avg_score: i.avg_score,
+      avg_score: parseJsonColumn(i.config)?.eval_details?.avg_score ?? null,
       reward_score: i.reward_score,
-      reward_breakdown: parseJsonColumn(i.reward_breakdown),
-      resource_version: i.resource_version,
-      algorithm_output: parseJsonColumn(i.algorithm_output),
-      started_at: i.started_at,
-      completed_at: i.completed_at,
+      reward_breakdown: parseJsonColumn(i.config)?.eval_details?.reward_breakdown ?? null,
+      resource_version: parseJsonColumn(i.config)?.eval_details?.resource_version ?? parseJsonColumn(i.config)?.completion?.resource_snapshot?.version ?? 0,
+      algorithm_output: parseJsonColumn(i.config)?.completion?.algorithm_output ?? null,
+      started_at: parseJsonColumn(i.config)?.started_at ?? null,
+      completed_at: parseJsonColumn(i.config)?.completion?.completed_at ?? null,
     })),
     resources: resources.map((r: any) => ({
       resource_id: r.resource_id,
@@ -327,7 +331,7 @@ trainingRoutes.openapi(getJobRoute, async (c): Promise<any> => {
       resource_key: r.resource_key,
       version: r.version,
       source: r.source,
-      eval_score: r.eval_score,
+      eval_score: parseJsonColumn(r.content)?.eval_score ?? null,
       is_active: r.is_active,
       created_at: r.created_at,
     })),
@@ -381,7 +385,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
   const iterationId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
 
   const job: TrainingJob = {
-    job_id: jobRow.job_id,
+    job_id: jobRow.id,
     org_id: jobRow.org_id,
     agent_name: jobRow.agent_name,
     algorithm: jobRow.algorithm,
@@ -389,7 +393,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
     current_iteration: iterationNumber,
     max_iterations: jobRow.max_iterations,
     best_score: jobRow.best_score,
-    best_iteration: jobRow.best_iteration,
+    best_iteration: parseJsonColumn(jobRow.best_config)?.best_iteration ?? null,
   };
 
   // Mark job as running. A mass column-rename regex during the April
@@ -414,7 +418,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
       const preflight = await runPreflightChecks(sql, c.env, user.org_id, job.agent_name);
       if (!preflight.passed) {
         await sql`
-          UPDATE training_jobs SET status = 'failed', completed_at = now()
+          UPDATE training_jobs SET status = 'failed', updated_at = now()
           WHERE id = ${job_id}
         `;
         return c.json({
@@ -433,8 +437,8 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
 
   // Create iteration record
   await sql`
-    INSERT INTO training_iterations (iteration_id, job_id, org_id, iteration_number, status, started_at)
-    VALUES (${iterationId}, ${job_id}, ${user.org_id}, ${iterationNumber}, 'evaluating', now())
+    INSERT INTO training_iterations (iteration_id, job_id, iteration_number, config)
+    VALUES (${iterationId}, ${job_id}, ${iterationNumber}, ${JSON.stringify({ status: 'evaluating', started_at: new Date().toISOString() })})
   `;
 
   // ── Step 1: Get current resources ──────────────────────────────
@@ -492,8 +496,8 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
     if (evalTasks.length === 0) {
       // FAIL: No eval tasks configured. Training cannot optimize without evaluation signal.
       await sql`
-        UPDATE training_iterations SET status = 'failed', error = 'no_eval_tasks', completed_at = NOW()
-        WHERE id = ${job_id} AND iteration_number = ${iterationNumber}
+        UPDATE training_iterations SET config = jsonb_set(COALESCE(config, '{}'), '{completion}', ${JSON.stringify({ status: 'failed', error: 'no_eval_tasks', completed_at: new Date().toISOString() })}::jsonb)
+        WHERE job_id = ${job_id} AND iteration_number = ${iterationNumber}
       `.catch(() => {});
       await emitTrainingEvent(c.env, job_id, job.agent_name, {
         type: "eval_failed",
@@ -673,11 +677,11 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
       try {
         const evalRunId = crypto.randomUUID().replace(/-/g, "").slice(0, 12);
         await sql`
-          INSERT INTO eval_runs (org_id, agent_name, pass_rate, avg_score, avg_latency_ms, total_cost_usd, total_tasks, total_trials, created_at)
-          VALUES (${user.org_id}, ${job.agent_name}, ${passRate}, ${passRate}, ${avgLatency}, ${totalCost}, ${tasksRun}, ${1}, now())
-          RETURNING id
+          INSERT INTO eval_runs (eval_run_id, org_id, agent_name, pass_rate, avg_latency_ms, total_cost_usd, total_tasks, total_trials, results, created_at)
+          VALUES (${evalRunId}, ${user.org_id}, ${job.agent_name}, ${passRate}, ${avgLatency}, ${totalCost}, ${tasksRun}, ${1}, ${JSON.stringify({ avg_score: passRate })}, now())
+          RETURNING eval_run_id
         `.then((rows: any) => {
-          if (rows.length > 0) evalResult.eval_run_id = rows[0].id;
+          if (rows.length > 0) evalResult.eval_run_id = rows[0].eval_run_id;
         });
       } catch {
         // eval_runs table may not exist in test env
@@ -705,9 +709,13 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
         const scanResult = evaluateOutput(output, DEFAULT_GUARDRAIL_POLICY);
         // Write to guardrail_events so reward aggregator can read it
         await sql`
-          INSERT INTO guardrail_events (org_id, agent_name, event_type, action, text_preview, matches_json, created_at)
-          VALUES (${user.org_id}, ${job.agent_name}, ${"output" satisfies GuardrailEventType}, ${scanResult.action},
-                  ${output.slice(0, 200)}, ${JSON.stringify(scanResult.reasons)}, now())
+          INSERT INTO guardrail_events (org_id, agent_name, event_type, blocked, details, created_at)
+          VALUES (${user.org_id}, ${job.agent_name}, ${"output" satisfies GuardrailEventType}, ${scanResult.action === "block"},
+                  ${JSON.stringify({
+                    action: scanResult.action,
+                    text_preview: output.slice(0, 200),
+                    reasons: scanResult.reasons,
+                  })}::jsonb, NOW())
         `.catch(() => {}); // Non-critical — don't fail training if table doesn't exist
       }
     } catch {
@@ -734,11 +742,10 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
   // Fix #10: Write to training_rewards so GET /rewards/{agent_name} returns data
   try {
     await sql`
-      INSERT INTO training_rewards (org_id, agent_name, source, score, raw_value, metadata)
+      INSERT INTO training_rewards (job_id, iteration_number, metric_name, metric_value)
       VALUES (
-        ${user.org_id}, ${job.agent_name}, ${'training-iter-' + iterationNumber},
-        ${rewardScore}, ${String(rewardScore)},
-        ${JSON.stringify({ job_id, iteration: iterationNumber, breakdown: rewardBreakdown })}
+        ${job_id}, ${iterationNumber}, ${'reward_score'},
+        ${rewardScore}
       )
     `;
   } catch { /* Non-critical — training_rewards table may not exist */ }
@@ -746,15 +753,21 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
   // Update iteration with eval results
   await sql`
     UPDATE training_iterations SET
-      status = 'optimizing',
       eval_run_id = ${evalResult.eval_run_id},
       pass_rate = ${evalResult.pass_rate},
-      avg_score = ${evalResult.avg_score},
-      avg_latency_ms = ${evalResult.avg_latency_ms},
-      total_cost_usd = ${evalResult.total_cost_usd},
       reward_score = ${rewardScore},
-      reward_breakdown = ${JSON.stringify(rewardBreakdown)},
-      resource_version = ${promptResource?.version ?? 0}
+      config = jsonb_set(
+        COALESCE(config, '{}'),
+        '{eval_details}',
+        ${JSON.stringify({
+          status: 'optimizing',
+          avg_score: evalResult.avg_score,
+          avg_latency_ms: evalResult.avg_latency_ms,
+          total_cost_usd: evalResult.total_cost_usd,
+          reward_breakdown: rewardBreakdown,
+          resource_version: promptResource?.version ?? 0,
+        })}::jsonb
+      )
     WHERE iteration_id = ${iterationId}
   `;
 
@@ -768,17 +781,17 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
   });
 
   const historyRows = await sql`
-    SELECT iteration_number, reward_score, pass_rate, resource_version, algorithm_output
+    SELECT iteration_number, reward_score, pass_rate, config
     FROM training_iterations
-    WHERE id = ${job_id} AND org_id = ${user.org_id} AND status = 'completed'
+    WHERE job_id = ${job_id} AND config->>'status' = 'completed'
     ORDER BY iteration_number
   `;
   const history: IterationHistory[] = historyRows.map((h: any) => ({
     iteration_number: h.iteration_number,
     reward_score: h.reward_score,
     pass_rate: h.pass_rate,
-    resource_version: h.resource_version,
-    algorithm_output: parseJsonColumn(h.algorithm_output),
+    resource_version: parseJsonColumn(h.config)?.eval_details?.resource_version ?? parseJsonColumn(h.config)?.completion?.resource_snapshot?.version ?? 0,
+    algorithm_output: parseJsonColumn(h.config)?.completion?.algorithm_output ?? {},
   }));
 
   const algorithm = getAlgorithm(job.algorithm, job.config);
@@ -946,15 +959,18 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
       INSERT INTO training_resources (
         resource_id, org_id, agent_name, job_id,
         resource_type, resource_key, version,
-        content_text, content, source,
-        parent_version, iteration_id, eval_score, is_active
+        content_text, content, source, is_active
       ) VALUES (
         ${crypto.randomUUID().replace(/-/g, "").slice(0, 16)},
         ${user.org_id}, ${job.agent_name}, ${job_id},
         ${update.resourceType}, ${update.resourceKey}, ${newVersion},
-        ${update.contentText ?? null}, ${update.contentJson ? JSON.stringify(update.contentJson) : null},
-        ${update.source}, ${promptResource?.version ?? 0}, ${iterationId},
-        ${rewardScore}, true
+        ${update.contentText ?? null}, ${JSON.stringify({
+          ...(update.contentJson || {}),
+          parent_version: promptResource?.version ?? 0,
+          iteration_id: iterationId,
+          eval_score: rewardScore,
+        })},
+        ${update.source}, true
       )
     `;
   }
@@ -982,26 +998,32 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
 
   await sql`
     UPDATE training_iterations SET
-      status = 'completed',
-      algorithm_output = ${JSON.stringify(optimizationResult.metadata)},
-      resource_snapshot = ${JSON.stringify({ version: newVersion })},
-      completed_at = now()
+      config = jsonb_set(
+        COALESCE(config, '{}'),
+        '{completion}',
+        ${JSON.stringify({
+          status: 'completed',
+          algorithm_output: optimizationResult.metadata,
+          resource_snapshot: { version: newVersion },
+          completed_at: new Date().toISOString(),
+        })}::jsonb
+      )
     WHERE iteration_id = ${iterationId}
   `;
 
   // Fix #8: Re-fetch history INCLUDING the just-completed iteration before calling shouldContinue
   const freshHistoryRows = await sql`
-    SELECT iteration_number, reward_score, pass_rate, resource_version, algorithm_output
+    SELECT iteration_number, reward_score, pass_rate, config
     FROM training_iterations
-    WHERE id = ${job_id} AND org_id = ${user.org_id} AND status = 'completed'
+    WHERE job_id = ${job_id} AND config->>'status' = 'completed'
     ORDER BY iteration_number
   `;
   const freshHistory: IterationHistory[] = freshHistoryRows.map((h: any) => ({
     iteration_number: h.iteration_number,
     reward_score: h.reward_score,
     pass_rate: h.pass_rate,
-    resource_version: h.resource_version,
-    algorithm_output: parseJsonColumn(h.algorithm_output),
+    resource_version: parseJsonColumn(h.config)?.eval_details?.resource_version ?? parseJsonColumn(h.config)?.completion?.resource_snapshot?.version ?? 0,
+    algorithm_output: parseJsonColumn(h.config)?.completion?.algorithm_output ?? {},
   }));
 
   const freshCtx: OptimizationContext = {
@@ -1034,17 +1056,22 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
   await sql`
     UPDATE training_jobs SET
       best_score = ${isBest ? rewardScore : job.best_score},
-      best_iteration = ${isBest ? iterationNumber : job.best_iteration},
-      best_resource_version = ${isBest ? newVersion : jobRow.best_resource_version},
+      best_config = ${JSON.stringify({
+        ...parseJsonColumn(jobRow.best_config),
+        best_iteration: isBest ? iterationNumber : (parseJsonColumn(jobRow.best_config)?.best_iteration ?? null),
+        best_resource_version: isBest ? newVersion : (parseJsonColumn(jobRow.best_config)?.best_resource_version ?? null),
+        completed_at: newStatus === "completed" ? new Date().toISOString() : (parseJsonColumn(jobRow.best_config)?.completed_at ?? null),
+      })},
       status = ${newStatus},
-      completed_at = ${newStatus === "completed" ? sql`now()` : null}
+      updated_at = now()
     WHERE id = ${job_id}
   `;
 
   // Fix #2: Auto-activate the BEST resource version when training completes,
   // regardless of whether the final iteration was the best one.
-  if (newStatus === "completed" && jobRow.auto_activate) {
-    const bestVersion = isBest ? newVersion : jobRow.best_resource_version;
+  const jobConfig = parseJsonColumn(job.config);
+  if (newStatus === "completed" && jobConfig.auto_activate) {
+    const bestVersion = isBest ? newVersion : (parseJsonColumn(jobRow.best_config)?.best_resource_version ?? null);
     try {
       // Look up the best resource version's content and apply it to the agent
       if (bestVersion != null) {
@@ -1368,7 +1395,7 @@ trainingRoutes.openapi(cancelJobRoute, async (c): Promise<any> => {
   const { job_id } = c.req.valid("param");
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     const result = await sql`
-      UPDATE training_jobs SET status = 'cancelled', completed_at = now()
+      UPDATE training_jobs SET status = 'cancelled', updated_at = now()
       WHERE id = ${job_id} AND status IN ('created', 'running', 'paused')
     `;
     if (result.count === 0) return c.json({ error: "Job not found or already finished" }, 404);
@@ -1473,23 +1500,25 @@ trainingRoutes.openapi(listIterationsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { job_id } = c.req.valid("param");
   return await withOrgDb(c.env, user.org_id, async (sql) => {
-    // training_iterations is NOT RLS — keep org_id filter
     const rows = await sql`
       SELECT * FROM training_iterations
-      WHERE id = ${job_id} AND org_id = ${user.org_id}
+      WHERE job_id = ${job_id}
       ORDER BY iteration_number
     `;
 
-    return c.json(rows.map((r: any) => ({
-      iteration_id: r.iteration_id,
-      iteration_number: r.iteration_number,
-      status: r.status,
-      pass_rate: r.pass_rate,
-      reward_score: r.reward_score,
-      resource_version: r.resource_version,
-      started_at: r.started_at,
-      completed_at: r.completed_at,
-    })));
+    return c.json(rows.map((r: any) => {
+      const cfg = parseJsonColumn(r.config);
+      return {
+        iteration_id: r.iteration_id,
+        iteration_number: r.iteration_number,
+        status: cfg?.status ?? cfg?.completion?.status ?? null,
+        pass_rate: r.pass_rate,
+        reward_score: r.reward_score,
+        resource_version: cfg?.eval_details?.resource_version ?? cfg?.completion?.resource_snapshot?.version ?? 0,
+        started_at: cfg?.started_at ?? null,
+        completed_at: cfg?.completion?.completed_at ?? null,
+      };
+    }));
   });
 });
 
@@ -1536,7 +1565,7 @@ trainingRoutes.openapi(listResourcesRoute, async (c): Promise<any> => {
       resource_key: r.resource_key,
       version: r.version,
       source: r.source,
-      eval_score: r.eval_score,
+      eval_score: parseJsonColumn(r.content)?.eval_score ?? null,
       is_active: r.is_active,
       parent_version: r.parent_version,
       content_length: r.content_text?.length ?? 0,

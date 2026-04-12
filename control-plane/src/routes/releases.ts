@@ -554,10 +554,10 @@ releaseRoutes.openapi(rollbackCanaryRoute, async (c): Promise<any> => {
   // Record rollback in evolution_ledger
   await sql`
     INSERT INTO evolution_ledger (
-      agent_name, org_id, proposal_id, action, note, created_at
+      org_id, agent_name, proposal_id, action, metrics_after, created_at
     ) VALUES (
-      ${agentName}, ${user.org_id}, NULL, 'canary_rollback',
-      ${reason}, ${now}
+      ${user.org_id}, ${agentName}, NULL, 'canary_rollback',
+      ${JSON.stringify({ note: reason })}, ${now}
     )
   `;
 
@@ -747,9 +747,9 @@ releaseRoutes.post("/:agent_name/auto-promote", requireScope("releases:write"), 
 
     // Record rollback in evolution_ledger
     await sql`
-      INSERT INTO evolution_ledger (agent_name, org_id, proposal_id, action, note, created_at)
-      VALUES (${agentName}, ${user.org_id}, NULL, 'canary_auto_rollback',
-              ${"Auto-rollback: canary version failed SLO targets"}, ${now})
+      INSERT INTO evolution_ledger (org_id, agent_name, proposal_id, action, metrics_after, created_at)
+      VALUES (${user.org_id}, ${agentName}, NULL, 'canary_auto_rollback',
+              ${JSON.stringify({ note: "Auto-rollback: canary version failed SLO targets" })}, ${now})
     `.catch(() => {});
 
     // Audit
@@ -823,8 +823,8 @@ releaseRoutes.post("/:agent_name/auto-rollback", requireScope("releases:write"),
 
   // Record in evolution_ledger
   await sql`
-    INSERT INTO evolution_ledger (agent_name, org_id, proposal_id, action, note, created_at)
-    VALUES (${agentName}, ${user.org_id}, NULL, 'explicit_auto_rollback', ${reason}, ${now})
+    INSERT INTO evolution_ledger (org_id, agent_name, proposal_id, action, metrics_after, created_at)
+    VALUES (${user.org_id}, ${agentName}, NULL, 'explicit_auto_rollback', ${JSON.stringify({ note: reason })}, ${now})
   `.catch(() => {});
 
   // Audit

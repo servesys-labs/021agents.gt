@@ -198,8 +198,8 @@ feedRoutes.openapi(promotePostRoute, async (c): Promise<any> => {
 
     // Audit
     await sql`
-      INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, amount_cents, balance_after_cents, created_at)
-      VALUES (${user.org_id}, 'burn', ${-costUsd}, 0, ${'Feed promotion: ' + post_id}, ${post_id}, 'feed_promotion', 0, 0, now())
+      INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type)
+      VALUES (${user.org_id}, 'burn', ${-costUsd}, 0, ${'Feed promotion: ' + post_id}, ${post_id}, 'feed_promotion')
     `.catch(() => {});
 
     // Distribute promotion revenue through referral chain

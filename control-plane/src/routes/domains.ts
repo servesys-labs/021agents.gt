@@ -43,7 +43,7 @@ domainRoutes.openapi(listDomainsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     const rows = await sql`
-      SELECT id, hostname, type, status, ssl_status, verified_at, created_at, updated_at
+      SELECT id, domain, type, status, ssl_status, created_at, updated_at
       FROM custom_domains
       ORDER BY created_at DESC
     `;
@@ -137,7 +137,7 @@ domainRoutes.openapi(addDomainRoute, async (c): Promise<any> => {
     // Check for duplicate hostname GLOBALLY across all orgs — must bypass RLS.
     const dupCheck = await withAdminDb(c.env, async (adminSql) => {
       return await adminSql`
-        SELECT id FROM custom_domains WHERE hostname = ${hostname} LIMIT 1
+        SELECT id FROM custom_domains WHERE domain = ${hostname} LIMIT 1
       `;
     });
     if (dupCheck.length > 0) {
@@ -148,7 +148,7 @@ domainRoutes.openapi(addDomainRoute, async (c): Promise<any> => {
     const now = new Date().toISOString();
 
     await sql`
-      INSERT INTO custom_domains (id, org_id, hostname, type, status, ssl_status, created_at, updated_at)
+      INSERT INTO custom_domains (id, org_id, domain, type, status, ssl_status, created_at, updated_at)
       VALUES (${id}, ${user.org_id}, ${hostname}, ${type}, 'pending', 'pending', ${now}, ${now})
     `;
 
@@ -194,8 +194,7 @@ domainRoutes.openapi(getDomainRoute, async (c): Promise<any> => {
   const { domain_id: domainId } = c.req.valid("param");
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     const rows = await sql`
-      SELECT id, org_id, hostname, type, status, ssl_status,
-             cf_custom_hostname_id, verified_at, created_at, updated_at
+      SELECT id, org_id, domain, type, status, ssl_status, created_at, updated_at
       FROM custom_domains
       WHERE id = ${domainId}
       LIMIT 1
@@ -233,7 +232,7 @@ domainRoutes.openapi(deleteDomainRoute, async (c): Promise<any> => {
   const { domain_id: domainId } = c.req.valid("param");
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     const rows = await sql`
-      SELECT id, hostname, type FROM custom_domains
+      SELECT id, domain, type FROM custom_domains
       WHERE id = ${domainId}
       LIMIT 1
     `;
@@ -254,7 +253,7 @@ domainRoutes.openapi(deleteDomainRoute, async (c): Promise<any> => {
     if (rows[0].type === "subdomain") {
       await sql`
         UPDATE orgs SET subdomain = NULL, updated_at = ${now}
-        WHERE subdomain = ${rows[0].hostname}
+        WHERE subdomain = ${rows[0].domain}
       `;
     }
 
@@ -298,7 +297,7 @@ domainRoutes.openapi(verifyDomainRoute, async (c): Promise<any> => {
   const { domain_id: domainId } = c.req.valid("param");
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     const rows = await sql`
-      SELECT id, hostname, type, status, ssl_status, cf_custom_hostname_id
+      SELECT id, domain, type, status, ssl_status
       FROM custom_domains
       WHERE id = ${domainId}
       LIMIT 1
@@ -315,12 +314,12 @@ domainRoutes.openapi(verifyDomainRoute, async (c): Promise<any> => {
     if (domain.type === "subdomain") {
       await sql`
         UPDATE custom_domains
-        SET status = 'active', ssl_status = 'active', verified_at = ${now}, updated_at = ${now}
+        SET status = 'active', ssl_status = 'active', updated_at = ${now}
         WHERE id = ${domainId}
       `;
       return c.json({
         id: domainId,
-        hostname: domain.hostname,
+        hostname: domain.domain,
         status: "active",
         ssl_status: "active",
         verified_at: now,
@@ -331,7 +330,7 @@ domainRoutes.openapi(verifyDomainRoute, async (c): Promise<any> => {
     let dnsValid = false;
     try {
       const resp = await fetch(
-        `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(String(domain.hostname))}&type=CNAME`,
+        `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(String(domain.domain))}&type=CNAME`,
         { headers: { Accept: "application/dns-json" } },
       );
       if (resp.ok) {
@@ -352,13 +351,13 @@ domainRoutes.openapi(verifyDomainRoute, async (c): Promise<any> => {
     await sql`
       UPDATE custom_domains
       SET status = ${newStatus}, ssl_status = ${newSslStatus},
-          verified_at = ${verifiedAt}, updated_at = ${now}
+          updated_at = ${now}
       WHERE id = ${domainId}
     `;
 
     return c.json({
       id: domainId,
-      hostname: domain.hostname,
+      hostname: domain.domain,
       status: newStatus,
       ssl_status: newSslStatus,
       dns_valid: dnsValid,

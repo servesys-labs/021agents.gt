@@ -1059,10 +1059,10 @@ async function persistAgentPackage(
       const s = sn as Record<string, unknown>;
       const snippetId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
       await sql`
-        INSERT INTO codemode_snippets (id, org_id, name, description, code, scope, tags, version, is_template, created_at, updated_at)
+        INSERT INTO codemode_snippets (id, org_id, name, description, code, scope, language, is_template, created_at, updated_at)
         VALUES (${snippetId}, ${orgId}, ${String(s.name)}, ${String(s.description || "")},
                 ${String(s.code || "")}, ${String(s.scope || "agent")},
-                ${JSON.stringify([agentName])}, 1, false, ${now}, ${now})
+                ${'javascript'}, false, ${now}, ${now})
         ON CONFLICT DO NOTHING
       `;
     } catch (e) {
@@ -1078,8 +1078,8 @@ async function persistAgentPackage(
       const grId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
       const policyJson = JSON.stringify({ type: g.type, rule: g.rule, action: g.action });
       await sql`
-        INSERT INTO guardrail_policies (id, org_id, name, agent_name, policy, created_at, updated_at)
-        VALUES (${grId}, ${orgId}, ${String(g.name)}, ${agentName}, ${policyJson}, ${now}, ${now})
+        INSERT INTO guardrail_policies (id, org_id, agent_name, policy_type, config, created_at)
+        VALUES (${grId}, ${orgId}, ${agentName}, ${String(g.type || '')}, ${policyJson}, ${now})
         ON CONFLICT DO NOTHING
       `;
     } catch (e) {

@@ -29,8 +29,8 @@ async function logSecurityEvent(
 ): Promise<void> {
   try {
     await sql`
-      INSERT INTO security_events (org_id, user_id, event_type, details, created_at)
-      VALUES (${orgId}, ${userId}, ${action}, ${JSON.stringify(details)}, now())
+      INSERT INTO security_events (org_id, event_type, actor_type, actor_id, severity, details, created_at)
+      VALUES (${orgId}, ${action}, ${"user"}, ${userId}, ${"info"}, ${JSON.stringify(details)}, now())
     `;
   } catch { /* non-critical */ }
 }
@@ -96,8 +96,8 @@ complianceRoutes.openapi(deleteAccountRoute, async (c): Promise<any> => {
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     // Create deletion request record
     await sql`
-      INSERT INTO account_deletion_requests (request_id, org_id, user_id, requested_by, reason, status, created_at)
-      VALUES (${requestId}, ${orgId}, ${targetUserId}, ${user.user_id}, ${reason}, 'processing', now())
+      INSERT INTO account_deletion_requests (org_id, user_id, status, created_at)
+      VALUES (${orgId}, ${targetUserId}, 'processing', now())
     `;
 
     let rowsDeleted = 0;
@@ -206,16 +206,15 @@ complianceRoutes.openapi(deleteAccountRoute, async (c): Promise<any> => {
     `;
 
     await sql`
-      UPDATE security_events SET user_id = ${anonymizedId}
-      WHERE user_id = ${targetUserId} AND org_id = ${orgId}
+      UPDATE security_events SET actor_id = ${anonymizedId}
+      WHERE actor_id = ${targetUserId} AND org_id = ${orgId}
     `;
 
     // Mark deletion request as completed
     await sql`
       UPDATE account_deletion_requests
-      SET status = 'completed', rows_deleted = ${rowsDeleted},
-          tables_purged = ${JSON.stringify(tablesPurged)}, completed_at = now()
-      WHERE request_id = ${requestId}
+      SET status = 'completed', completed_at = now()
+      WHERE org_id = ${orgId} AND user_id = ${targetUserId} AND status = 'processing'
     `;
 
     await logSecurityEvent(sql, orgId, user.user_id, "account.deletion_completed", {
@@ -237,7 +236,7 @@ complianceRoutes.openapi(deleteAccountRoute, async (c): Promise<any> => {
     await sql`
       UPDATE account_deletion_requests
       SET status = 'failed', completed_at = now()
-      WHERE request_id = ${requestId}
+      WHERE org_id = ${orgId} AND user_id = ${targetUserId} AND status = 'processing'
     `.catch(() => {});
 
     await logSecurityEvent(sql, orgId, user.user_id, "account.deletion_failed", {
@@ -273,8 +272,8 @@ complianceRoutes.openapi(dataExportRoute, async (c): Promise<any> => {
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     // Create export request record
     await sql`
-      INSERT INTO data_export_requests (export_id, org_id, requested_by, status, created_at)
-      VALUES (${exportId}, ${orgId}, ${user.user_id}, 'pending', now())
+      INSERT INTO data_export_requests (org_id, user_id, status, created_at)
+      VALUES (${orgId}, ${user.user_id}, 'pending', now())
     `;
 
     try {
@@ -362,9 +361,9 @@ complianceRoutes.openapi(dataExportRoute, async (c): Promise<any> => {
 
     await sql`
       UPDATE data_export_requests
-      SET status = 'completed', r2_key = ${r2Key}, size_bytes = ${sizeBytes},
+      SET status = 'completed', export_url = ${r2Key},
           expires_at = ${expiresAt}, completed_at = now()
-      WHERE export_id = ${exportId}
+      WHERE org_id = ${orgId} AND user_id = ${user.user_id} AND status = 'pending'
     `;
 
     await auditLog(sql, orgId, user.user_id, "data_export.completed", "compliance", exportId, {
@@ -382,7 +381,7 @@ complianceRoutes.openapi(dataExportRoute, async (c): Promise<any> => {
       await sql`
         UPDATE data_export_requests
         SET status = 'failed', completed_at = now()
-        WHERE export_id = ${exportId}
+        WHERE org_id = ${orgId} AND user_id = ${user.user_id} AND status = 'pending'
       `.catch(() => {});
 
       return c.json({ error: "Data export failed", export_id: exportId }, 500);
@@ -414,7 +413,7 @@ complianceRoutes.openapi(downloadExportRoute, async (c): Promise<any> => {
   const exportReq = await withOrgDb(c.env, user.org_id, async (sql) => {
     const rows = await sql`
       SELECT * FROM data_export_requests
-      WHERE export_id = ${exportId}
+      WHERE id = ${exportId}
       LIMIT 1
     `;
     return rows.length > 0 ? (rows[0] as any) : null;
@@ -424,7 +423,7 @@ complianceRoutes.openapi(downloadExportRoute, async (c): Promise<any> => {
     return c.json({ error: "Export not found" }, 404);
   }
 
-  if (exportReq.status !== "completed" || !exportReq.r2_key) {
+  if (exportReq.status !== "completed" || !exportReq.export_url) {
     return c.json({ error: "Export not ready or failed", status: exportReq.status }, 400);
   }
 
@@ -433,7 +432,7 @@ complianceRoutes.openapi(downloadExportRoute, async (c): Promise<any> => {
     return c.json({ error: "Export has expired" }, 404);
   }
 
-  const obj = await c.env.STORAGE.get(exportReq.r2_key);
+  const obj = await c.env.STORAGE.get(exportReq.export_url);
   if (!obj) {
     return c.json({ error: "Export file not found in storage" }, 404);
   }
@@ -464,7 +463,7 @@ complianceRoutes.openapi(listExportsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     const rows = await sql`
-      SELECT export_id, org_id, requested_by, status, size_bytes, expires_at, created_at, completed_at
+      SELECT id, org_id, user_id, status, export_url, expires_at, created_at, completed_at
       FROM data_export_requests
       ORDER BY created_at DESC
       LIMIT 50
@@ -492,19 +491,12 @@ complianceRoutes.openapi(listDeletionRequestsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     const rows = await sql`
-      SELECT request_id, org_id, user_id, requested_by, reason, status,
-             rows_deleted, tables_purged, created_at, completed_at
+      SELECT id, org_id, user_id, status, created_at, completed_at
       FROM account_deletion_requests
       ORDER BY created_at DESC
       LIMIT 50
     `;
 
-    const result = rows.map((r: any) => {
-      const d = { ...r };
-      try { d.tables_purged = JSON.parse(d.tables_purged || "[]"); } catch { d.tables_purged = []; }
-      return d;
-    });
-
-    return c.json({ deletion_requests: result });
+    return c.json({ deletion_requests: rows });
   });
 });
