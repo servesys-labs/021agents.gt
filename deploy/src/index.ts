@@ -7810,9 +7810,10 @@ export default {
         return flags.passiveMemory;
       });
       if (!envelopes.length) return;
-      for (const envelope of envelopes) {
-        await env.SIGNAL_QUEUE.send(signalEnvelopeMessage(envelope));
-      }
+      // Send in parallel — avoids serial ~10ms/send penalty with 3-4 envelopes per turn
+      await Promise.all(envelopes.map((envelope) =>
+        env.SIGNAL_QUEUE!.send(signalEnvelopeMessage(envelope)),
+      ));
     }
 
     async function ingestSignalEnvelope(envelope: SignalEnvelope): Promise<void> {

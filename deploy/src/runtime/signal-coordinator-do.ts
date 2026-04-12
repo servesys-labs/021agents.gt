@@ -46,9 +46,25 @@ export interface SignalCoordinatorSnapshot {
   }>;
 }
 
+/** Max concurrent workflow fires per evaluation pass to prevent burst overload. */
+const MAX_WORKFLOW_FIRES_PER_EVAL = 3;
+
 export class SignalCoordinatorDO extends DurableObject<Env> {
+  /** Cached from the DO name (orgId:agentName:feature). Avoids repeated JSON parsing. */
+  private _cachedOrgId: string | null = null;
+  private _cachedAgentName: string | null = null;
+  private _cachedFeature: SignalFeature | null = null;
+
   constructor(ctx: DurableObjectState, env: any) {
     super(ctx, env);
+    // DO name is "orgId:agentName:feature" — extract once in constructor
+    const doName = String((ctx as any).id?.name || "");
+    const parts = doName.split(":");
+    if (parts.length >= 3) {
+      this._cachedOrgId = parts[0] === "global" ? "" : parts[0];
+      this._cachedAgentName = parts[1] === "agentos" ? "" : parts[1];
+      this._cachedFeature = parts[2] as SignalFeature;
+    }
     this.ctx.blockConcurrencyWhile(async () => {
       await this.ensureSchema();
     });
@@ -87,7 +103,7 @@ export class SignalCoordinatorDO extends DurableObject<Env> {
           max_severity, last_session_id, sample_summary, entities_json
         ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(signature) DO UPDATE SET
-          count = count + 1,
+          count = signal_clusters.count + 1,
           last_seen_ms = excluded.last_seen_ms,
           topic = CASE
             WHEN length(excluded.topic) > length(signal_clusters.topic) THEN excluded.topic
@@ -153,12 +169,16 @@ export class SignalCoordinatorDO extends DurableObject<Env> {
   async evaluateNow(): Promise<{ fired: number; suppressed: number; clusters: number }> {
     const sql = this.sql();
     const now = Date.now();
-    const feature = this.detectFeature(sql);
+    const feature = this.resolveFeature(sql);
     const pack = getSignalRulePack(feature);
     if (!pack) {
       await this.clearPending(sql, now);
       return { fired: 0, suppressed: 0, clusters: 0 };
     }
+
+    // Cache org/agent once per evaluation — avoids repeated JSON parsing
+    const orgId = this.resolveOrgId(sql);
+    const agentName = this.resolveAgentName(sql);
 
     const clusters = this.loadClustersForFeature(feature, sql, now);
     const cooldowns = new Set(this.loadActiveCooldowns(sql, now));
@@ -167,34 +187,45 @@ export class SignalCoordinatorDO extends DurableObject<Env> {
     let suppressed = 0;
 
     for (const action of actions) {
+      // Backpressure: cap concurrent workflow fires per evaluation pass
+      if (fired >= MAX_WORKFLOW_FIRES_PER_EVAL) {
+        suppressed += actions.length - (fired + suppressed);
+        break;
+      }
+
+      const clusterSignalType = clusters.find((c) => c.signature === action.signature)?.signal_type || "topic_recurrence";
       const lastSessionId = this.lookupLastSessionForSignature(sql, action.signature);
-      const evidence = this.loadWorkflowEvidence(sql, action.signature, {
-        signalBriefing: action.briefing,
-        signalType: clusters.find((cluster) => cluster.signature === action.signature)?.signal_type || "topic_recurrence",
-        signalTopic: action.topic,
+
+      const makeEnvelope = (severity: number): SignalEnvelopeRecord => ({
+        feature: "memory",
+        signal_type: clusterSignalType,
+        source_type: "runtime_event",
+        org_id: orgId,
+        agent_name: agentName,
+        session_id: lastSessionId,
+        created_at_ms: now,
+        signature: action.signature,
+        topic: action.topic,
+        summary: action.summary,
+        severity,
+        entities: [],
+        metadata: {},
       });
+
       if (cooldowns.has(action.dedupe_key)) {
         suppressed++;
-        this.emitSignalRuntimeEvent("signal_cooldown_suppressed", {
-          feature: "memory",
-          signal_type: "topic_recurrence",
-          source_type: "runtime_event",
-          org_id: this.extractOrgId(sql),
-          agent_name: this.extractAgentName(sql),
-          session_id: lastSessionId,
-          created_at_ms: now,
-          signature: action.signature,
-          topic: action.topic,
-          summary: action.summary,
-          severity: 0,
-          entities: [],
-          metadata: {},
-        }, {
+        this.emitSignalRuntimeEvent("signal_cooldown_suppressed", makeEnvelope(0), {
           workflow_kind: action.workflow_kind,
           dedupe_key: action.dedupe_key,
         });
         continue;
       }
+
+      const evidence = this.loadWorkflowEvidence(sql, action.signature, {
+        signalBriefing: action.briefing,
+        signalType: clusterSignalType,
+        signalTopic: action.topic,
+      });
 
       const fireId = buildWorkflowFireId(action.signature, action.workflow_kind, now, action.cooldown_ms);
       const inserted = this.exec(sql, `
@@ -202,28 +233,15 @@ export class SignalCoordinatorDO extends DurableObject<Env> {
           fire_id, feature, signature, workflow_kind, workflow_instance_id,
           fired_at_ms, org_id, agent_name, signal_briefing
         ) VALUES (?, 'memory', ?, ?, '', ?, ?, ?, ?)
-      `, [
-        fireId,
-        action.signature,
-        action.workflow_kind,
-        now,
-        this.extractOrgId(sql),
-        this.extractAgentName(sql),
-        action.briefing,
-      ]);
+      `, [fireId, action.signature, action.workflow_kind, now, orgId, agentName, action.briefing]);
       if (inserted.changes === 0) {
         suppressed++;
         continue;
       }
 
       const params = buildPassiveMemoryWorkflowParams(
-        action.workflow_kind,
-        this.extractAgentName(sql),
-        lastSessionId,
-        this.extractOrgId(sql),
-        0,
-        Boolean(this.env.AGENT_RUN_WORKFLOW),
-        evidence,
+        action.workflow_kind, agentName, lastSessionId, orgId, 0,
+        Boolean(this.env.AGENT_RUN_WORKFLOW), evidence,
       );
       if (!params) {
         this.exec(sql, `DELETE FROM workflow_fires WHERE fire_id = ?`, [fireId]);
@@ -236,82 +254,33 @@ export class SignalCoordinatorDO extends DurableObject<Env> {
         const instance = await this.env.AGENT_RUN_WORKFLOW.create({ params });
         workflowId = String((instance as any)?.id || (instance as any)?.workflowId || "");
       } catch (error: any) {
+        // Clean up the fire record but continue evaluating remaining actions
+        // instead of aborting the entire evaluation pass.
         this.exec(sql, `DELETE FROM workflow_fires WHERE fire_id = ?`, [fireId]);
-        throw error;
+        console.error(`[signal-coordinator] workflow create failed for ${action.workflow_kind}:${action.signature}:`, error?.message || error);
+        suppressed++;
+        continue;
       }
 
-      this.exec(sql, `
-        UPDATE workflow_fires
-        SET workflow_instance_id = ?
-        WHERE fire_id = ?
-      `, [workflowId, fireId]);
-
+      this.exec(sql, `UPDATE workflow_fires SET workflow_instance_id = ? WHERE fire_id = ?`, [workflowId, fireId]);
       this.exec(sql, `
         INSERT INTO signal_cooldowns(feature, dedupe_key, until_ms, last_fire_id, updated_at_ms)
         VALUES('memory', ?, ?, ?, ?)
         ON CONFLICT(dedupe_key) DO UPDATE SET
-          until_ms = excluded.until_ms,
-          last_fire_id = excluded.last_fire_id,
-          updated_at_ms = excluded.updated_at_ms
+          until_ms = excluded.until_ms, last_fire_id = excluded.last_fire_id, updated_at_ms = excluded.updated_at_ms
       `, [action.dedupe_key, now + action.cooldown_ms, fireId, now]);
 
       fired++;
-      this.emitSignalRuntimeEvent("signal_threshold_hit", {
-        feature: "memory",
-        signal_type: clusters.find((cluster) => cluster.signature === action.signature)?.signal_type || "topic_recurrence",
-        source_type: "runtime_event",
-        org_id: this.extractOrgId(sql),
-        agent_name: this.extractAgentName(sql),
-        session_id: lastSessionId,
-        created_at_ms: now,
-        signature: action.signature,
-        topic: action.topic,
-        summary: action.summary,
-        severity: 1,
-        entities: [],
-        metadata: {},
-      }, {
-        workflow_kind: action.workflow_kind,
-        briefing: action.briefing,
+      this.emitSignalRuntimeEvent("signal_threshold_hit", makeEnvelope(1), {
+        workflow_kind: action.workflow_kind, briefing: action.briefing,
       });
-      this.emitSignalRuntimeEvent("signal_workflow_fired", {
-        feature: "memory",
-        signal_type: clusters.find((cluster) => cluster.signature === action.signature)?.signal_type || "topic_recurrence",
-        source_type: "runtime_event",
-        org_id: this.extractOrgId(sql),
-        agent_name: this.extractAgentName(sql),
-        session_id: lastSessionId,
-        created_at_ms: now,
-        signature: action.signature,
-        topic: action.topic,
-        summary: action.summary,
-        severity: 1,
-        entities: [],
-        metadata: {},
-      }, {
-        workflow_kind: action.workflow_kind,
-        fire_id: fireId,
-        workflow_id: workflowId,
+      this.emitSignalRuntimeEvent("signal_workflow_fired", makeEnvelope(1), {
+        workflow_kind: action.workflow_kind, fire_id: fireId, workflow_id: workflowId,
       });
-      this.writeAnalytics("workflow_fired", {
-        feature: "memory",
-        signal_type: clusters.find((cluster) => cluster.signature === action.signature)?.signal_type || "topic_recurrence",
-        source_type: "runtime_event",
-        org_id: this.extractOrgId(sql),
-        agent_name: this.extractAgentName(sql),
-        session_id: lastSessionId,
-        created_at_ms: now,
-        signature: action.signature,
-        topic: action.topic,
-        summary: action.summary,
-        severity: 1,
-        entities: [],
-        metadata: { workflow_kind: action.workflow_kind },
-      }, 1);
+      this.writeAnalytics("workflow_fired", makeEnvelope(1), 1);
     }
 
     await this.clearPending(sql, now);
-
     await this.reconcile();
     const storage: any = this.ctx.storage;
     if (typeof storage.deleteAlarm === "function") await storage.deleteAlarm();
@@ -350,25 +319,42 @@ export class SignalCoordinatorDO extends DurableObject<Env> {
 
   async listClusters(): Promise<SignalCluster[]> {
     const sql = this.sql();
-    const feature = this.detectFeature(sql);
+    const feature = this.resolveFeature(sql);
     return this.loadClustersForFeature(feature, sql, Date.now());
   }
 
-  async reconcile(): Promise<{ pruned_events: number; pruned_fires: number; pruned_cooldowns: number }> {
+  async reconcile(): Promise<{ pruned_events: number; pruned_fires: number; pruned_cooldowns: number; pruned_clusters: number }> {
     const sql = this.sql();
     const now = Date.now();
     const prunedEvents = this.exec(sql, `DELETE FROM signal_events WHERE created_at_ms < ?`, [now - EVENT_RETENTION_MS]).changes;
     const prunedFires = this.exec(sql, `DELETE FROM workflow_fires WHERE fired_at_ms < ?`, [now - FIRE_RETENTION_MS]).changes;
     const prunedCooldowns = this.exec(sql, `DELETE FROM signal_cooldowns WHERE until_ms < ?`, [now]).changes;
+
+    // Recompute cluster counts from surviving events to prevent ghost inflation.
+    // Clusters with zero remaining events are deleted entirely.
+    this.exec(sql, `
+      UPDATE signal_clusters SET count = (
+        SELECT COUNT(*) FROM signal_events WHERE signal_events.signature = signal_clusters.signature
+      )
+    `);
+    const prunedClusters = this.exec(sql, `DELETE FROM signal_clusters WHERE count = 0`).changes;
+
     return {
       pruned_events: prunedEvents,
       pruned_fires: prunedFires,
       pruned_cooldowns: prunedCooldowns,
+      pruned_clusters: prunedClusters,
     };
   }
 
   async alarm(): Promise<void> {
-    await this.evaluateNow();
+    try {
+      await this.evaluateNow();
+    } catch (err) {
+      // Log but don't re-throw — prevents infinite alarm retries on persistent failures.
+      // The next ingest() will schedule a fresh alarm.
+      console.error("[signal-coordinator] alarm evaluation failed:", err);
+    }
   }
 
   private async ensureSchema(): Promise<void> {
@@ -436,40 +422,44 @@ export class SignalCoordinatorDO extends DurableObject<Env> {
   }
 
   private loadMemoryClusters(sql: any, now: number): MemorySignalCluster[] {
-    const rows = this.rows<ClusterRow>(sql, `
-      SELECT feature, signature, signal_type, topic, count, first_seen_ms, last_seen_ms,
-             max_severity, last_session_id, sample_summary, entities_json
-      FROM signal_clusters
-      WHERE feature = 'memory' AND last_seen_ms >= ?
-      ORDER BY last_seen_ms DESC
-    `, [now - EVENT_RETENTION_MS]);
-    return rows.map((row) => {
-      const sessionCount = this.scalar(sql, `
-        SELECT COUNT(DISTINCT session_id) AS value
-        FROM signal_events
-        WHERE signature = ? AND created_at_ms >= ?
-      `, [row.signature, now - EVENT_RETENTION_MS]);
-      const sampleRows = this.rows<{ summary: string }>(sql, `
-        SELECT summary
-        FROM signal_events
-        WHERE signature = ?
-        ORDER BY created_at_ms DESC
-        LIMIT 3
-      `, [row.signature]);
-      return {
-        feature: "memory",
-        signature: row.signature,
-        signal_type: row.signal_type,
-        topic: row.topic,
-        count: row.count,
-        distinct_sessions: sessionCount,
-        first_seen_ms: row.first_seen_ms,
-        last_seen_ms: row.last_seen_ms,
-        max_severity: row.max_severity,
-        sample_summaries: sampleRows.map((sample) => sample.summary),
-        entities: parseStringArray(row.entities_json),
-      };
-    });
+    const cutoff = now - EVENT_RETENTION_MS;
+    // Single query with correlated subqueries — replaces N+1 pattern (was 2 extra queries per cluster)
+    const rows = this.rows<ClusterRow & { distinct_sessions: number; recent_summaries: string }>(sql, `
+      SELECT
+        c.feature, c.signature, c.signal_type, c.topic, c.count,
+        c.first_seen_ms, c.last_seen_ms, c.max_severity,
+        c.last_session_id, c.sample_summary, c.entities_json,
+        COALESCE((
+          SELECT COUNT(DISTINCT e.session_id)
+          FROM signal_events e
+          WHERE e.signature = c.signature AND e.created_at_ms >= ?
+        ), 0) AS distinct_sessions,
+        COALESCE((
+          SELECT GROUP_CONCAT(sub.summary, '|||')
+          FROM (
+            SELECT summary FROM signal_events
+            WHERE signature = c.signature
+            ORDER BY created_at_ms DESC LIMIT 3
+          ) sub
+        ), '') AS recent_summaries
+      FROM signal_clusters c
+      WHERE c.feature = 'memory' AND c.last_seen_ms >= ?
+      ORDER BY c.last_seen_ms DESC
+    `, [cutoff, cutoff]);
+
+    return rows.map((row) => ({
+      feature: "memory" as const,
+      signature: row.signature,
+      signal_type: row.signal_type,
+      topic: row.topic,
+      count: row.count,
+      distinct_sessions: Number(row.distinct_sessions) || 0,
+      first_seen_ms: row.first_seen_ms,
+      last_seen_ms: row.last_seen_ms,
+      max_severity: row.max_severity,
+      sample_summaries: row.recent_summaries ? row.recent_summaries.split("|||").filter(Boolean) : [],
+      entities: parseStringArray(row.entities_json),
+    }));
   }
 
   private loadClustersForFeature(feature: SignalFeature | null, sql: any, now: number): SignalCluster[] {
@@ -518,18 +508,15 @@ export class SignalCoordinatorDO extends DurableObject<Env> {
     };
   }
 
-  private detectFeature(sql: any): SignalFeature | null {
+  /** Resolve feature — prefer cached from DO name, fall back to DB query. */
+  private resolveFeature(sql: any): SignalFeature | null {
+    if (this._cachedFeature) return this._cachedFeature;
     const row = this.first<{ feature: SignalFeature }>(sql, `
-      SELECT feature
-      FROM signal_clusters
-      ORDER BY last_seen_ms DESC
-      LIMIT 1
+      SELECT feature FROM signal_clusters ORDER BY last_seen_ms DESC LIMIT 1
     `) || this.first<{ feature: SignalFeature }>(sql, `
-      SELECT feature
-      FROM signal_events
-      ORDER BY created_at_ms DESC
-      LIMIT 1
+      SELECT feature FROM signal_events ORDER BY created_at_ms DESC LIMIT 1
     `);
+    if (row?.feature) this._cachedFeature = row.feature;
     return row?.feature || null;
   }
 
@@ -560,34 +547,28 @@ export class SignalCoordinatorDO extends DurableObject<Env> {
     return row?.session_id || "";
   }
 
-  private extractOrgId(sql: any): string {
+  /** Resolve org_id — prefer cached from DO name, fall back to DB query. */
+  private resolveOrgId(sql: any): string {
+    if (this._cachedOrgId !== null) return this._cachedOrgId;
     const row = this.first<{ metadata_json: string }>(sql, `
-      SELECT metadata_json
-      FROM signal_events
-      ORDER BY created_at_ms DESC
-      LIMIT 1
+      SELECT metadata_json FROM signal_events ORDER BY created_at_ms DESC LIMIT 1
     `);
-    if (!row?.metadata_json) return "";
     try {
-      return String(JSON.parse(row.metadata_json)?.org_id || "");
-    } catch {
-      return "";
-    }
+      this._cachedOrgId = String(JSON.parse(row?.metadata_json || "{}")?.org_id || "");
+    } catch { this._cachedOrgId = ""; }
+    return this._cachedOrgId;
   }
 
-  private extractAgentName(sql: any): string {
+  /** Resolve agent_name — prefer cached from DO name, fall back to DB query. */
+  private resolveAgentName(sql: any): string {
+    if (this._cachedAgentName !== null) return this._cachedAgentName;
     const row = this.first<{ metadata_json: string }>(sql, `
-      SELECT metadata_json
-      FROM signal_events
-      ORDER BY created_at_ms DESC
-      LIMIT 1
+      SELECT metadata_json FROM signal_events ORDER BY created_at_ms DESC LIMIT 1
     `);
-    if (!row?.metadata_json) return "";
     try {
-      return String(JSON.parse(row.metadata_json)?.agent_name || "");
-    } catch {
-      return "";
-    }
+      this._cachedAgentName = String(JSON.parse(row?.metadata_json || "{}")?.agent_name || "");
+    } catch { this._cachedAgentName = ""; }
+    return this._cachedAgentName;
   }
 
   private emitSignalRuntimeEvent(
