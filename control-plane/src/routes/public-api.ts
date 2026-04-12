@@ -222,24 +222,18 @@ publicAgentRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
     });
   } catch {}
 
-  // Idempotency: check cache before running
+  // Idempotency: check KV cache before running. Moved from Postgres
+  // (idempotency_cache table) to Cloudflare KV to save a DB roundtrip
+  // per request that carries an idempotency key. Sub-millisecond reads
+  // vs ~20ms for a withOrgDb SELECT. 24h TTL matches the old table's
+  // expires_at interval.
   const idempotencyKey = body.idempotency_key;
   if (idempotencyKey) {
     try {
-      const cachedResponse = await withOrgDb(c.env, orgId, async (sql) => {
-        const cached = await sql`
-          SELECT response_body FROM idempotency_cache
-          WHERE idempotency_key = ${idempotencyKey} AND org_id = ${orgId} AND expires_at > now()
-          LIMIT 1
-        `;
-        if (cached.length > 0) {
-          return typeof cached[0].response_body === "string"
-            ? JSON.parse(cached[0].response_body)
-            : cached[0].response_body;
-        }
-        return null;
-      });
-      if (cachedResponse !== null) {
+      const kvKey = `idem:${orgId}:${idempotencyKey}`;
+      const cached = await c.env.AGENT_PROGRESS_KV?.get(kvKey);
+      if (cached) {
+        const cachedResponse = JSON.parse(cached);
         return c.json(cachedResponse);
       }
     } catch {}
@@ -344,17 +338,10 @@ publicAgentRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
       });
     }
 
-    // Store idempotency cache if key was provided
+    // Store idempotency cache in KV (24h TTL, fire-and-forget)
     if (idempotencyKey) {
-      try {
-        await withOrgDb(c.env, orgId, async (sql) => {
-          await sql`
-            INSERT INTO idempotency_cache (idempotency_key, org_id, response_body, expires_at)
-            VALUES (${idempotencyKey}, ${orgId}, ${JSON.stringify(runResponse)}, now() + interval '24 hours')
-            ON CONFLICT (idempotency_key, org_id) DO NOTHING
-          `;
-        });
-      } catch {}
+      const kvKey = `idem:${orgId}:${idempotencyKey}`;
+      c.env.AGENT_PROGRESS_KV?.put(kvKey, JSON.stringify(runResponse), { expirationTtl: 86400 }).catch(() => {});
     }
 
     // Fire-and-forget webhook delivery for agent.run.completed
@@ -712,24 +699,13 @@ publicAgentRoutes.openapi(agentRunUploadRoute, async (c): Promise<any> => {
     }
   }
 
-  // Idempotency: check cache before running
+  // Idempotency: check KV cache before running (same pattern as sync /run)
   if (idempotencyKey) {
     try {
-      const cachedResponse = await withOrgDb(c.env, orgId, async (sql) => {
-        const cached = await sql`
-          SELECT response_body FROM idempotency_cache
-          WHERE idempotency_key = ${idempotencyKey} AND org_id = ${orgId} AND expires_at > now()
-          LIMIT 1
-        `;
-        if (cached.length > 0) {
-          return typeof cached[0].response_body === "string"
-            ? JSON.parse(cached[0].response_body)
-            : cached[0].response_body;
-        }
-        return null;
-      });
-      if (cachedResponse !== null) {
-        return c.json(cachedResponse);
+      const kvKey = `idem:${orgId}:${idempotencyKey}`;
+      const cached = await c.env.AGENT_PROGRESS_KV?.get(kvKey);
+      if (cached) {
+        return c.json(JSON.parse(cached));
       }
     } catch {}
   }
@@ -873,17 +849,10 @@ publicAgentRoutes.openapi(agentRunUploadRoute, async (c): Promise<any> => {
       });
     }
 
-    // Store idempotency cache if key was provided
+    // Store idempotency cache in KV (24h TTL, fire-and-forget)
     if (idempotencyKey) {
-      try {
-        await withOrgDb(c.env, orgId, async (sql) => {
-          await sql`
-            INSERT INTO idempotency_cache (idempotency_key, org_id, response_body, expires_at)
-            VALUES (${idempotencyKey}, ${orgId}, ${JSON.stringify(runResponse)}, now() + interval '24 hours')
-            ON CONFLICT (idempotency_key, org_id) DO NOTHING
-          `;
-        });
-      } catch {}
+      const kvKey = `idem:${orgId}:${idempotencyKey}`;
+      c.env.AGENT_PROGRESS_KV?.put(kvKey, JSON.stringify(runResponse), { expirationTtl: 86400 }).catch(() => {});
     }
 
     return c.json(runResponse);
