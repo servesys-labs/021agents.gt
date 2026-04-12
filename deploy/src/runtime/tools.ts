@@ -1040,22 +1040,25 @@ export async function executeTools(
       resultMap.set(r.tool_call_id, r);
     }
     return toolCalls.map(tc => resultMap.get(tc.id) || {
-      tool: tc.name, tool_call_id: tc.id, name: tc.name, result: "", error: "Result missing", latency_ms: 0, cost_usd: 0,
+      tool: tc.name, tool_call_id: tc.id, result: "", error: "Result missing", latency_ms: 0, cost_usd: 0,
     });
   }
   // Non-parallel path: execute all tools serially.
-  // Pass parent abort through so cancellation skips remaining tools.
+  // Create a local abort controller if caller didn't provide one, so each
+  // tool gets a signal and we can skip remaining tools on abort.
+  const serialAbort = parentAbort || new AbortController();
   const results: ToolResult[] = [];
   for (const tc of toolCalls) {
-    if (parentAbort?.signal.aborted) {
+    if (serialAbort.signal.aborted) {
       results.push({
         tool: tc.name, tool_call_id: tc.id, result: "",
-        error: `Tool execution skipped: ${parentAbort.signal.reason || "aborted"}`,
+        error: `Tool execution skipped: ${serialAbort.signal.reason || "aborted"}`,
         latency_ms: 0, cost_usd: 0,
       });
       continue;
     }
-    results.push(await executeSingleTool(env, tc, sessionId, effectiveEnabledTools, parentAbort?.signal));
+    const childAbort = createChildAbortController(serialAbort);
+    results.push(await executeSingleTool(env, tc, sessionId, effectiveEnabledTools, childAbort.signal));
   }
   return results;
 }

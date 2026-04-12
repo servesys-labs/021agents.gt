@@ -1067,13 +1067,15 @@ ALWAYS:
         const turnPct = turn / config.max_turns;
         const wallPct = elapsed / 270_000;
         const costPct = totalCost / config.budget_limit_usd;
-        const maxPct = Math.max(turnPct, wallPct, costPct);
+        const stepPct = workflowStepCount / WORKFLOW_STEP_LIMIT;
+        const maxPct = Math.max(turnPct, wallPct, costPct, stepPct);
         if (maxPct >= 0.8 && maxPct < 1.0 && !budgetPressureInjected) {
           budgetPressureInjected = true;
           const reasons: string[] = [];
           if (turnPct >= 0.8) reasons.push(`${config.max_turns - turn} turns remaining`);
           if (wallPct >= 0.8) reasons.push(`~${Math.round((270_000 - elapsed) / 1000)}s wall-clock remaining`);
           if (costPct >= 0.8) reasons.push(`$${(config.budget_limit_usd - totalCost).toFixed(4)} budget remaining`);
+          if (stepPct >= 0.8) reasons.push(`${WORKFLOW_STEP_LIMIT - workflowStepCount} workflow steps remaining`);
           messages.push({
             role: "system",
             content: `⚠️ Resources running low (${reasons.join(", ")}). Prioritize completing your current approach and provide a final answer soon.`,

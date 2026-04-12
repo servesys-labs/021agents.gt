@@ -35,6 +35,7 @@ import { loadSkills, formatSkillsPrompt } from "./skills";
 import { loadStartupContext } from "./progress";
 import { EventSequencer, BoundedUUIDSet } from "./ws-dedup";
 import { sanitizeDeep } from "./sanitize";
+import { repairConversation } from "./conversation-repair";
 
 type WsSend = (data: string) => void;
 
@@ -642,6 +643,8 @@ export async function streamRun(
 
     // Checkpointing handled by Workflow steps — no manual DO SQLite checkpoints needed.
 
+    let budgetPressureInjected = false;
+
     for (let turn = 1; turn <= config.max_turns; turn++) {
       lastTurnUsed = turn;
       const lineage = (env as any).__delegationLineage;
@@ -675,12 +678,37 @@ export async function streamRun(
           if (compressed.summarized) {
             messages.splice(0, messages.length, ...compressed.messages);
             cumulativeCost += compressed.cost_usd;
+            // Summarization can orphan tool_use/tool_result pairs at the keep boundary.
+            const { messages: repaired } = repairConversation(messages as any);
+            messages.splice(0, messages.length, ...(repaired as LLMMessage[]));
             send(serializeForWebSocket({
               type: "system",
               message: "Context compressed to fit token budget.",
             } as any));
           }
         } catch {}
+      }
+
+      // ── Budget pressure signaling — warn the model before hard cutoffs ──
+      {
+        const elapsed = Date.now() - started;
+        const turnPct = turn / config.max_turns;
+        const costPct = cumulativeCost / config.budget_limit_usd;
+        const maxPct = Math.max(turnPct, costPct);
+        if (maxPct >= 0.8 && maxPct < 1.0 && !budgetPressureInjected) {
+          budgetPressureInjected = true;
+          const reasons: string[] = [];
+          if (turnPct >= 0.8) reasons.push(`${config.max_turns - turn} turns remaining`);
+          if (costPct >= 0.8) reasons.push(`$${(config.budget_limit_usd - cumulativeCost).toFixed(4)} budget remaining`);
+          messages.push({
+            role: "system",
+            content: `⚠️ Resources running low (${reasons.join(", ")}). Prioritize completing your current approach and provide a final answer soon.`,
+          });
+          send(serializeForWebSocket({
+            type: "warning" as any,
+            message: `Budget pressure: ${reasons.join(", ")}. Agent notified to wrap up.`,
+          }));
+        }
       }
 
       // Budget check
