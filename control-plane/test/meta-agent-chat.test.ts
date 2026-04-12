@@ -38,6 +38,7 @@ vi.mock("../src/logic/meta-agent", () => ({
 // For direct tool testing, we import the module and call executeTool via the chat runner.
 
 import { buildMetaAgentChatPrompt, RUNTIME_INFRASTRUCTURE_DOCS } from "../src/prompts/meta-agent-chat";
+import { PER_TURN_TOOL_CAPS, TOOL_THROTTLED_PREFIX, RUN_QUERY_MAX_PLAN_COST } from "../src/logic/meta-agent-chat";
 
 // ── Test Helpers ─────────────────────────────────────────────────
 
@@ -546,6 +547,294 @@ describe("run_query — scoped tables include new tables", () => {
       const allowed = normalized.startsWith("SELECT") || normalized.startsWith("WITH") || normalized.startsWith("EXPLAIN");
       expect(allowed).toBe(true);
     }
+  });
+
+  it("rejects EXPLAIN ANALYZE — would execute the inner query and bypass the plan-cost pre-check", () => {
+    // Regression guard for a 2nd-pass audit finding on Item 3. EXPLAIN ANALYZE
+    // runs the inner query (not just plans it). Because isExplainQuery=true
+    // skips the 500K plan-cost pre-check, EXPLAIN ANALYZE would let a meta-
+    // agent burn the full 5s statement_timeout on expensive queries without
+    // ever hitting the cost gate. ANALYZE is in the forbidden keyword list
+    // to close this, word-boundary matched so it doesn't false-positive on
+    // column names like `analyzed_at`.
+    const forbidden = ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE", "CREATE", "GRANT", "REVOKE", "EXEC", "EXECUTE", "COPY", "ANALYZE"];
+    const bypasses = [
+      "EXPLAIN ANALYZE SELECT * FROM turns",
+      "EXPLAIN (ANALYZE) SELECT * FROM turns",
+      "EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM turns",
+      "ANALYZE turns",
+    ];
+    for (const q of bypasses) {
+      const normalized = q.replace(/--.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "").trim().toUpperCase();
+      const blocked = forbidden.some(kw => new RegExp(`\\b${kw}\\b`).test(normalized));
+      expect(blocked).toBe(true);
+    }
+  });
+
+  it("does not false-positive ANALYZE on column or function names containing 'analyze'", () => {
+    const forbidden = ["ANALYZE"];
+    // These should NOT be blocked because word-boundary regex requires
+    // the identifier to stand alone.
+    const legitimate = [
+      "SELECT analyzed_at FROM turns",
+      "SELECT analyze_result FROM sessions",
+      "SELECT * FROM turns WHERE analyzer_version = 'v1'",
+    ];
+    for (const q of legitimate) {
+      const normalized = q.replace(/--.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "").trim().toUpperCase();
+      const blocked = forbidden.some(kw => new RegExp(`\\b${kw}\\b`).test(normalized));
+      expect(blocked).toBe(false);
+    }
+  });
+
+  it("rejects set_config in the target list to prevent RLS GUC manipulation", () => {
+    // Regression guard for a 2nd-pass audit finding on Item 3. A crafted
+    // single-statement SELECT like:
+    //   SELECT set_config('app.current_org_id', 'victim_org', true), * FROM sessions LIMIT 1
+    // flips the RLS context mid-transaction. Blast radius is bounded by
+    // per-call transaction isolation, but the defense-in-depth block keeps
+    // us from having to prove that invariant holds everywhere.
+    const forbidden = ["SET_CONFIG"];
+    const attacks = [
+      "SELECT set_config('app.current_org_id', 'victim', true), * FROM sessions LIMIT 1",
+      "SELECT SET_CONFIG('app.current_org_id', 'victim', true)",
+      "SELECT pg_catalog.set_config('x', 'y', true)",
+      "WITH c AS (SELECT set_config('app.current_org_id', 'v', true)) SELECT * FROM c",
+    ];
+    for (const q of attacks) {
+      const normalized = q.replace(/--.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "").trim().toUpperCase();
+      const blocked = forbidden.some(kw => new RegExp(`\\b${kw}\\b`).test(normalized));
+      expect(blocked).toBe(true);
+    }
+  });
+});
+
+describe("run_query — plan cost pre-flight", () => {
+  // Mirrors the normalization done at the top of the run_query case
+  // handler in meta-agent-chat.ts. If the handler changes, update here too.
+  function preflightValidate(rawQuery: string): { ok: boolean; error?: string; query?: string; isExplain?: boolean } {
+    const trimmed = String(rawQuery || "").trim();
+    if (!trimmed) return { ok: false, error: "query is required" };
+    const query = trimmed.replace(/;\s*$/, "").trim();
+    if (!query) return { ok: false, error: "query is required" };
+    if (query.includes(";")) {
+      return { ok: false, error: "multi-statement" };
+    }
+    const isExplain = /^\s*EXPLAIN\b/i.test(query);
+    return { ok: true, query, isExplain };
+  }
+
+  it("pins the production plan-cost limit — change deliberately", () => {
+    // If this fails, someone bumped the cost limit. Cross-check the
+    // reference points in the source comment before merging.
+    expect(RUN_QUERY_MAX_PLAN_COST).toBe(500_000);
+  });
+
+  it("strips a single trailing semicolon", () => {
+    const result = preflightValidate("SELECT 1 FROM sessions;");
+    expect(result.ok).toBe(true);
+    expect(result.query).toBe("SELECT 1 FROM sessions");
+  });
+
+  it("strips trailing whitespace and semicolons together", () => {
+    const result = preflightValidate("SELECT 1 FROM sessions;   \n  ");
+    expect(result.ok).toBe(true);
+    expect(result.query).toBe("SELECT 1 FROM sessions");
+  });
+
+  it("rejects multi-statement queries (stacked SELECTs)", () => {
+    const result = preflightValidate("SELECT 1; SELECT pg_sleep(4)");
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("multi-statement");
+  });
+
+  it("rejects multi-statement queries hidden after a trailing semicolon", () => {
+    // Strip removes only the LAST trailing `;`. An internal `;` survives
+    // and triggers the multi-statement guard.
+    const result = preflightValidate("SELECT 1; SELECT 2;");
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("multi-statement");
+  });
+
+  it("rejects empty queries", () => {
+    expect(preflightValidate("").ok).toBe(false);
+    expect(preflightValidate("   ").ok).toBe(false);
+    expect(preflightValidate(";").ok).toBe(false);
+  });
+
+  it("detects EXPLAIN queries to bypass the pre-flight check", () => {
+    // If the user query is already an EXPLAIN, the pre-flight would be
+    // wrapping `EXPLAIN EXPLAIN ...` which is invalid syntax. Detect and
+    // skip the pre-check — the query itself is cost-free (no ANALYZE).
+    expect(preflightValidate("EXPLAIN SELECT * FROM sessions").isExplain).toBe(true);
+    expect(preflightValidate("explain select * from sessions").isExplain).toBe(true);
+    expect(preflightValidate("  EXPLAIN  SELECT 1").isExplain).toBe(true);
+    expect(preflightValidate("SELECT * FROM sessions").isExplain).toBe(false);
+    expect(preflightValidate("WITH cte AS (SELECT 1) SELECT * FROM cte").isExplain).toBe(false);
+  });
+
+  it("does not match 'EXPLAIN' as a substring of another identifier", () => {
+    // Word-boundary regex means a column called `explain_result` won't
+    // be misdetected as an EXPLAIN query.
+    const result = preflightValidate("SELECT explain_result FROM sessions");
+    expect(result.isExplain).toBe(false);
+  });
+
+  it("parses Postgres EXPLAIN (FORMAT JSON) output shape", () => {
+    // Both shapes the driver can return: parsed array vs JSON string.
+    // Pre-flight logic must handle both. Represents real postgres.js output.
+    const parsedShape = [{ "QUERY PLAN": [{ Plan: { "Total Cost": 123.45 } }] }];
+    const stringShape = [{ "QUERY PLAN": JSON.stringify([{ Plan: { "Total Cost": 999999.99 } }]) }];
+
+    function extractTotalCost(rows: unknown): number | undefined {
+      const firstRow = Array.isArray(rows) && rows.length > 0 ? (rows[0] as Record<string, unknown>) : null;
+      let planNode: unknown = firstRow?.["QUERY PLAN"] ?? firstRow;
+      if (typeof planNode === "string") {
+        try { planNode = JSON.parse(planNode); } catch { planNode = null; }
+      }
+      const topLevel = Array.isArray(planNode) ? planNode[0] : planNode;
+      const plan = (topLevel as { Plan?: { "Total Cost"?: number } } | null)?.Plan;
+      return plan?.["Total Cost"];
+    }
+
+    expect(extractTotalCost(parsedShape)).toBe(123.45);
+    expect(extractTotalCost(stringShape)).toBe(999999.99);
+    expect(extractTotalCost([])).toBeUndefined();
+    expect(extractTotalCost([{ "QUERY PLAN": "not json" }])).toBeUndefined();
+  });
+
+  it("catches the CTE footgun at the cost threshold", () => {
+    // Reference scenario that motivated this check: a 2-join Cartesian CTE
+    // on turns estimated at 600K cost (above our 500K limit).
+    const expensivePlan = [{ "QUERY PLAN": [{ Plan: { "Total Cost": 600000 } }] }];
+    const firstRow = expensivePlan[0] as Record<string, unknown>;
+    const planNode = firstRow["QUERY PLAN"] as Array<{ Plan: { "Total Cost": number } }>;
+    const totalCost = planNode[0].Plan["Total Cost"];
+
+    expect(totalCost).toBeGreaterThan(RUN_QUERY_MAX_PLAN_COST);
+  });
+
+  it("allows legitimate analytical queries below the threshold", () => {
+    // Indexed session lookup, small join — representative of what the
+    // meta-agent should be running most of the time.
+    const cheapPlan = [{ "QUERY PLAN": [{ Plan: { "Total Cost": 12_450 } }] }];
+    const firstRow = cheapPlan[0] as Record<string, unknown>;
+    const planNode = firstRow["QUERY PLAN"] as Array<{ Plan: { "Total Cost": number } }>;
+    const totalCost = planNode[0].Plan["Total Cost"];
+
+    expect(totalCost).toBeLessThan(RUN_QUERY_MAX_PLAN_COST);
+  });
+});
+
+describe("run_query — per-turn budget cap", () => {
+  // Mirrors the dispatch-loop short-circuit in meta-agent-chat.ts and pins
+  // the production constants so bumping the cap requires a deliberate test
+  // change. If `executeTool` is ever exported we should replace this with
+  // an end-to-end runMetaChat test mocking callLLMGateway.
+  function simulateTurnDispatch(toolCalls: Array<{ name: string }>) {
+    const counts: Record<string, number> = {};
+    let totalToolCalls = 0;
+    const executed: string[] = [];
+    const blocked: Array<{ name: string; error: string }> = [];
+
+    for (const tc of toolCalls) {
+      const cap = PER_TURN_TOOL_CAPS[tc.name];
+      const current = counts[tc.name] ?? 0;
+      let throttled = false;
+      if (cap !== undefined && current >= cap) {
+        throttled = true;
+        blocked.push({
+          name: tc.name,
+          error: `${TOOL_THROTTLED_PREFIX} per-turn budget exhausted for ${tc.name} (cap: ${cap})`,
+        });
+      } else {
+        counts[tc.name] = current + 1;
+        executed.push(tc.name);
+      }
+      if (!throttled) totalToolCalls++;
+    }
+
+    return { counts, executed, blocked, totalToolCalls };
+  }
+
+  it("pins the production cap — run_query is limited to 5/turn", () => {
+    // If this fails, someone bumped the cap deliberately and needs to update
+    // the tests below plus any ops docs that cite "5 run_query calls/turn".
+    expect(PER_TURN_TOOL_CAPS.run_query).toBe(5);
+  });
+
+  it("exposes a stable throttled-error prefix for telemetry to key on", () => {
+    expect(TOOL_THROTTLED_PREFIX).toBe("throttled:");
+  });
+
+  it("allows the first N run_query calls through where N = cap", () => {
+    const cap = PER_TURN_TOOL_CAPS.run_query;
+    const calls = Array.from({ length: cap }, () => ({ name: "run_query" }));
+    const { executed, blocked } = simulateTurnDispatch(calls);
+
+    expect(executed).toHaveLength(cap);
+    expect(blocked).toHaveLength(0);
+  });
+
+  it("blocks the (cap+1)th run_query call with a throttled-prefixed error", () => {
+    const cap = PER_TURN_TOOL_CAPS.run_query;
+    const calls = Array.from({ length: cap + 1 }, () => ({ name: "run_query" }));
+    const { executed, blocked } = simulateTurnDispatch(calls);
+
+    expect(executed).toHaveLength(cap);
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0].error.startsWith(TOOL_THROTTLED_PREFIX)).toBe(true);
+    expect(blocked[0].error).toContain("per-turn budget exhausted");
+    expect(blocked[0].error).toContain(`cap: ${cap}`);
+  });
+
+  it("blocks all calls beyond the cap in a runaway loop scenario", () => {
+    const cap = PER_TURN_TOOL_CAPS.run_query;
+    const attempts = 20;
+    const calls = Array.from({ length: attempts }, () => ({ name: "run_query" }));
+    const { executed, blocked } = simulateTurnDispatch(calls);
+
+    expect(executed).toHaveLength(cap);
+    expect(blocked).toHaveLength(attempts - cap);
+  });
+
+  it("does not cap tools that have no entry in PER_TURN_TOOL_CAPS", () => {
+    const calls = Array.from({ length: 10 }, () => ({ name: "read_agent_config" }));
+    const { executed, blocked } = simulateTurnDispatch(calls);
+
+    expect(PER_TURN_TOOL_CAPS.read_agent_config).toBeUndefined();
+    expect(executed).toHaveLength(10);
+    expect(blocked).toHaveLength(0);
+  });
+
+  it("tracks counts per tool-name independently", () => {
+    const cap = PER_TURN_TOOL_CAPS.run_query;
+    const calls = [
+      ...Array.from({ length: cap }, () => ({ name: "run_query" })),
+      ...Array.from({ length: 5 }, () => ({ name: "read_sessions" })),
+      { name: "run_query" }, // one over cap — should block
+    ];
+    const { executed, blocked } = simulateTurnDispatch(calls);
+
+    expect(executed.filter(n => n === "run_query")).toHaveLength(cap);
+    expect(executed.filter(n => n === "read_sessions")).toHaveLength(5);
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0].name).toBe("run_query");
+  });
+
+  it("throttled calls do NOT inflate totalToolCalls (the action_count input)", () => {
+    // Regression guard for a bug caught in 2nd-pass audit: if throttled calls
+    // are counted as real tool actions, evolution-analyzer.ts:477 falsely
+    // labels the session 'excessive tool calls' and observability aggregates
+    // over-report total_actions. Throttled calls are no-ops and must not
+    // contribute to action_count.
+    const cap = PER_TURN_TOOL_CAPS.run_query;
+    const attempts = 20;
+    const calls = Array.from({ length: attempts }, () => ({ name: "run_query" }));
+    const { totalToolCalls } = simulateTurnDispatch(calls);
+
+    expect(totalToolCalls).toBe(cap);
+    expect(totalToolCalls).not.toBe(attempts);
   });
 });
 
