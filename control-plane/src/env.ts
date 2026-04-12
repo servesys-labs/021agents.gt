@@ -30,8 +30,13 @@ export interface Env {
   // Queue — async job processing
   JOB_QUEUE: Queue;
 
-  // KV — runtime agent progress events (shared with deploy worker)
+  // KV — runtime agent progress events + idempotency cache
   AGENT_PROGRESS_KV?: KVNamespace;
+
+  // Durable Object — cross-isolate rate limiter. One DO per rate-limit
+  // key, globally consistent atomic counters. Replaces the per-isolate
+  // in-memory LRU that allowed N× overshoot.
+  RATE_LIMITER: DurableObjectNamespace;
 
   // Secrets (set via `wrangler secret put`)
   AUTH_JWT_SECRET: string;
