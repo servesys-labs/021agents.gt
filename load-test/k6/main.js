@@ -32,15 +32,16 @@ const BATCH_RPS = Math.round(TARGET_RPS * 0.1);
 // ── Ramp stages (shared shape for constant-arrival-rate) ───────────
 // Each scenario scales its own rate proportionally.
 function buildStages(peakRate) {
+  const min1 = (v) => Math.max(1, Math.round(v));
   return [
-    { duration: "5m", target: Math.round(peakRate * 0.1) },   // warm-up
-    { duration: "10m", target: Math.round(peakRate * 0.25) },  // step-25
-    { duration: "10m", target: Math.round(peakRate * 0.5) },   // step-50
-    { duration: "10m", target: peakRate },                      // step-100
-    { duration: "30m", target: peakRate },                      // sustained peak
-    { duration: "5m", target: Math.round(peakRate * 0.5) },    // step-down
-    { duration: "5m", target: Math.round(peakRate * 0.1) },    // cool-down
-    { duration: "5m", target: 0 },                              // drain
+    { duration: "5m", target: min1(peakRate * 0.1) },   // warm-up
+    { duration: "10m", target: min1(peakRate * 0.25) },  // step-25
+    { duration: "10m", target: min1(peakRate * 0.5) },   // step-50
+    { duration: "10m", target: peakRate },                // step-100
+    { duration: "30m", target: peakRate },                // sustained peak
+    { duration: "5m", target: min1(peakRate * 0.5) },    // step-down
+    { duration: "5m", target: min1(peakRate * 0.1) },    // cool-down
+    { duration: "5m", target: 0 },                        // drain
   ];
 }
 
