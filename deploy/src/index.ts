@@ -583,8 +583,15 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
 
     if (schemaVersion < 6) {
       // v6: Add correlation_id to mailbox for approval protocol (harness hardening Phase 1)
+      // Note: createMailboxTable() (v4) now includes correlation_id in CREATE TABLE,
+      // so new DOs already have the column. ALTER is only needed for DOs that ran
+      // v4 with the old schema. We check column existence to make this idempotent.
       this.ctx.storage.transactionSync(() => {
-        this.sql`ALTER TABLE mailbox ADD COLUMN correlation_id TEXT`;
+        const cols = this.sql`PRAGMA table_info(mailbox)`;
+        const hasCorrelationId = (cols as any[]).some((c: any) => c.name === "correlation_id");
+        if (!hasCorrelationId) {
+          this.sql`ALTER TABLE mailbox ADD COLUMN correlation_id TEXT`;
+        }
         this.sql`CREATE INDEX IF NOT EXISTS idx_mailbox_correlation ON mailbox(to_session, correlation_id, read_at)`;
         this.sql`INSERT INTO _sql_schema_migrations (id) VALUES (6)`;
       });
@@ -2993,6 +3000,10 @@ async function runViaAgent(
       ...(opts?.media_urls?.length ? { media_urls: opts.media_urls, media_types: opts.media_types } : {}),
     }),
   }));
+  if (!resp.ok) {
+    const text = await resp.text();
+    return { output: "", success: false, error: `Runtime DO error (${resp.status}): ${text.slice(0, 500)}`, turns: 0, tool_calls: 0, cost_usd: 0, latency_ms: 0, session_id: "", trace_id: "", stop_reason: "error" };
+  }
   return resp.json() as any;
 }
 
@@ -6004,26 +6015,39 @@ export default {
             // ── Agent queries ──────────────────────────────────────
             if (queryId === "agents.list_active_by_org") {
               return await tx`
-                SELECT name, description, config, is_active, created_at, updated_at
+                SELECT agent_id, handle, display_name, name, description, config, is_active, created_at, updated_at
                 FROM agents
-                WHERE org_id = ${orgId} AND is_active = true
+                WHERE org_id = ${orgId}
+                  AND is_active = true
+                  AND COALESCE(config->>'internal', 'false') <> 'true'
+                  AND COALESCE(config->>'hidden', 'false') <> 'true'
+                  AND COALESCE(config->>'parent_agent', '') = ''
                 ORDER BY created_at DESC
               `;
             }
             if (queryId === "agents.config") {
-              const agentName = String(body.params?.agent_name || "");
-              if (!agentName) throw new Error("params.agent_name required");
+              const agentIdentifier = String(body.params?.agent_id || body.params?.agent_handle || body.params?.agent_name || "");
+              if (!agentIdentifier) throw new Error("params.agent_id or params.agent_handle required");
               return await tx`
-                SELECT name, config, description FROM agents
-                WHERE name = ${agentName} AND org_id = ${orgId} AND is_active = true LIMIT 1
+                SELECT agent_id, handle, display_name, name, config, description
+                FROM agents
+                WHERE (
+                  agent_id = ${agentIdentifier}
+                  OR handle = ${agentIdentifier}
+                  OR name = ${agentIdentifier}
+                ) AND org_id = ${orgId} AND is_active = true LIMIT 1
               `;
             }
             if (queryId === "agents.versions") {
-              const agentName = String(body.params?.agent_name || "");
+              const agentId = String(body.params?.agent_id || "");
+              const agentName = String(body.params?.agent_handle || body.params?.agent_name || "");
               const limit = Math.min(Number(body.params?.limit) || 20, 100);
               return await tx`
                 SELECT version, created_by, created_at FROM agent_versions
-                WHERE agent_name = ${agentName}
+                WHERE (
+                  (${agentId} != '' AND agent_id = ${agentId})
+                  OR (${agentName} != '' AND (agent_handle = ${agentName} OR agent_name = ${agentName}))
+                )
                 ORDER BY created_at DESC LIMIT ${limit}
               `;
             }
