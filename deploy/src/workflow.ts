@@ -1518,9 +1518,10 @@ ALWAYS:
       // For tool calls: truncated JSON args cause silent failures → retry with continuation.
       // For text: inject a continuation prompt so the model finishes its response.
       if (llm.stop_reason === "length" || llm.stop_reason === "max_tokens") {
-        if (llm.tool_calls.length > 0) {
+        if (llm.tool_calls.length > 0 && maxTokensRecoveryCount < 2) {
           // Tool call JSON may be truncated — push the truncated content and ask to retry
-          logger.warn("max_tokens_truncated_tools", { turn, tool_count: llm.tool_calls.length, stop_reason: llm.stop_reason });
+          maxTokensRecoveryCount++;
+          logger.warn("max_tokens_truncated_tools", { turn, tool_count: llm.tool_calls.length, stop_reason: llm.stop_reason, recovery_count: maxTokensRecoveryCount });
           messages.push({ role: "assistant", content: llm.content || "" });
           messages.push({
             role: "system",
