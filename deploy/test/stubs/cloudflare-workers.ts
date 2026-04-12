@@ -11,11 +11,21 @@
 // merely walk through `tools.ts` for unrelated exports load cleanly.
 
 export class DurableObject<Env = unknown> {
-  constructor(_state?: unknown, _env?: Env) {}
+  readonly ctx: any;
+  readonly env: Env | undefined;
+  constructor(state?: unknown, env?: Env) {
+    this.ctx = state;
+    this.env = env;
+  }
 }
 
 export class WorkerEntrypoint<Env = unknown> {
-  constructor(_ctx?: unknown, _env?: Env) {}
+  readonly ctx: any;
+  readonly env: Env | undefined;
+  constructor(ctx?: unknown, env?: Env) {
+    this.ctx = ctx;
+    this.env = env;
+  }
 }
 
 export class RpcTarget {}
