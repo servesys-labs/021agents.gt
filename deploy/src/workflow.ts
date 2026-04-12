@@ -55,6 +55,8 @@ import { queueSessionEpisodicNote } from "./runtime/memory";
 import { buildMemoryConsolidateParams, buildMemoryDigestParams } from "./runtime/memory-digest";
 import { applyContentBudget, applyHistoryBudget, buildQueryIntentProfile } from "./runtime/query-profile";
 import type { RuntimeEventType } from "./runtime/events";
+import { summarizeImplementationComplexity } from "./runtime/implementation-complexity";
+import type { FileMutationTelemetry } from "./runtime/types";
 
 // ── Cloud C4.3: Memoized module imports ──────────────────────────
 // Workflow step functions run in isolated contexts. Dynamic imports are
@@ -228,7 +230,12 @@ function evaluateCompletionContract(input: string, output: string, opts: {
   const q = String(input || "").toLowerCase();
   const out = String(output || "");
   const outLen = out.trim().length;
-  if (outLen < 80) reasons.push("output_too_short");
+  // output_too_short: only flag truly degenerate outputs (empty/stub), not
+  // short-but-complete answers. If tools ran successfully, the agent had real
+  // context — a concise answer is valid, not a failure signal.
+  if (outLen < 20 || (outLen < 80 && opts.successfulToolCalls === 0)) {
+    reasons.push("output_too_short");
+  }
 
   const executionIntent = /\b(research|analy[sz]e|compare|investigate|build|implement|fix|write|create)\b/.test(q);
   if (!opts.planOnlyRequested && executionIntent && opts.totalToolCalls === 0) {
@@ -255,6 +262,8 @@ import { evaluateVerification } from "./runtime/verification";
 // ── Types ────────────────────────────────────────────────────
 
 export interface AgentRunParams {
+  agent_id?: string;
+  agent_handle?: string;
   agent_name: string;
   input: string;
   org_id: string;
@@ -292,6 +301,9 @@ export interface AgentRunParams {
   do_session_id?: string;
   /** Pre-loaded config from DO — skips the Supabase query in bootstrap (saves 200-800ms) */
   preloaded_config?: {
+    agent_id?: string;
+    agent_handle?: string;
+    display_name?: string;
     system_prompt: string;
     model: string;
     provider: string;
@@ -463,10 +475,14 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     const bootstrap = await (async () => {
       // ── Latency fix 1: Use pre-loaded config from DO when available (saves 200-800ms DB query) ──
       let config: Awaited<ReturnType<typeof import("./runtime/db").loadAgentConfig>>;
+      const agentLookup = p.agent_id || p.agent_handle || p.agent_name;
       if (p.preloaded_config && p.preloaded_config.system_prompt) {
         // DO already loaded this config — use it directly, skip Supabase round-trip
         config = {
-          agent_name: p.agent_name,
+          agent_id: p.agent_id || p.preloaded_config.agent_id || "",
+          agent_handle: p.agent_handle || p.preloaded_config.agent_handle || p.agent_name,
+          agent_name: p.agent_handle || p.agent_name,
+          display_name: p.preloaded_config.display_name || p.agent_handle || p.agent_name,
           system_prompt: p.preloaded_config.system_prompt,
           provider: p.preloaded_config.provider,
           model: p.preloaded_config.model,
@@ -490,7 +506,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       } else {
         // Fallback: load from Supabase (RPC/REST calls without DO context)
         const { loadAgentConfig } = await memo("db", () => import("./runtime/db"));
-        config = await loadAgentConfig(this.env.HYPERDRIVE, p.agent_name, {
+        config = await loadAgentConfig(this.env.HYPERDRIVE, agentLookup, {
           provider: this.env.DEFAULT_PROVIDER || "openrouter",
           model: this.env.DEFAULT_MODEL || "openai/gpt-5.4-mini",
           plan: this.env.DEFAULT_PLAN || "free",
@@ -1051,6 +1067,11 @@ ALWAYS:
       phase_pre_llm_ms?: number;
       phase_tool_exec_ms?: number;
       phase_total_turn_ms?: number;
+    }> = [];
+    const implementationComplexityInputs: Array<{
+      tool: string;
+      error?: string;
+      file_mutation?: FileMutationTelemetry;
     }> = [];
 
     // ── Phase 1.4: Loop detection state ──
@@ -1872,6 +1893,7 @@ ALWAYS:
               error: r?.error || undefined,
               latency_ms: r?.latency_ms || 0,
               cost_usd: r?.cost_usd || 0,
+              file_mutation: r?.file_mutation,
             };
 
             // Cloud C1.1: Cache result for idempotent retries
@@ -1882,7 +1904,7 @@ ALWAYS:
 
       // Feature-gated: concurrent tool execution vs serial
       const useConcurrent = bootstrap.featureFlags?.concurrent_tools !== false && config.parallel_tool_calls;
-      let toolResultEntries: Array<{ name: string; tool_call_id: string; result: string; error?: string; latency_ms: number; cost_usd: number }>;
+      let toolResultEntries: Array<{ name: string; tool_call_id: string; result: string; error?: string; latency_ms: number; cost_usd: number; file_mutation?: FileMutationTelemetry }>;
       if (useConcurrent) {
         toolResultEntries = await Promise.all(executableCalls.map((tc, i) => toolStepFn(tc, i)));
       } else {
@@ -1905,6 +1927,11 @@ ALWAYS:
         if (tr.error) failedToolCalls++;
         else successfulToolCalls++;
       }
+      implementationComplexityInputs.push(...toolResultEntries.map(tr => ({
+        tool: tr.name,
+        error: tr.error,
+        file_mutation: tr.file_mutation,
+      })));
 
       // Build first-class artifact manifest records from tool outputs.
       for (let i = 0; i < toolResultEntries.length; i++) {
@@ -2749,6 +2776,7 @@ ALWAYS:
     // The old streamRun path wrote turns via writeTurn() but was never
     // ported to Workflows. This step writes the session + all accumulated
     // turn data to the telemetry queue for async DB persistence.
+    const implementationComplexity = summarizeImplementationComplexity(implementationComplexityInputs);
 
     await step.do("write-telemetry", {
       retries: { limit: 2, delay: "2 seconds", backoff: "linear" },
@@ -2906,6 +2934,27 @@ ALWAYS:
             include_deferred_tool_index: queryProfile.include_deferred_tool_index,
             history_messages_dropped: historyBudgeted.dropped,
           },
+          created_at: Date.now(),
+        },
+      });
+
+      await queue.send({
+        type: "event",
+        payload: {
+          org_id: p.org_id || "",
+          agent_name: p.agent_name || "",
+          session_id: sessionId,
+          trace_id: traceId,
+          turn: lastWorkflowTurn || 0,
+          event_type: "implementation_complexity" satisfies RuntimeEventType,
+          action: "measured",
+          plan: config.plan || "",
+          provider: config.provider || "",
+          model: config.model || "",
+          tool_name: "",
+          status: "ok",
+          latency_ms: 0,
+          details: implementationComplexity,
           created_at: Date.now(),
         },
       });
