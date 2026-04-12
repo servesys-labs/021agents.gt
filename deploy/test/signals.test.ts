@@ -76,4 +76,26 @@ describe("signal envelope reduction", () => {
     expect(envelopes[0].signal_type).toBe("loop_detected");
     expect(buildSignalCoordinatorKey("memory", "org-1", "personal-agent")).toBe("org-1:personal-agent:memory");
   });
+
+  it("derives topic recurrence signals from artifact manifests", () => {
+    const envelopes = deriveSignalEnvelopes("artifact_manifest", {
+      org_id: "org-1",
+      agent_name: "personal-agent",
+      session_id: "sess-4",
+      artifact_name: "billing-bug-report",
+      artifact_kind: "report",
+      source_tool: "write-report",
+      source_event: "research_artifact",
+      metadata: {
+        title: "Billing bug investigation report",
+        entities: ["Stripe", "Billing"],
+      },
+      created_at: 1_700_000_300_000,
+    });
+
+    expect(envelopes).toHaveLength(1);
+    expect(envelopes[0].source_type).toBe("artifact_manifest");
+    expect(envelopes[0].signal_type).toBe("topic_recurrence");
+    expect(envelopes[0].topic).toContain("billing");
+  });
 });

@@ -249,7 +249,55 @@ function deriveLoopSignals(payload: JsonRecord): SignalEnvelope[] {
 }
 
 function deriveArtifactSignals(_payload: JsonRecord): SignalEnvelope[] {
-  return [];
+  const payload = _payload;
+  const orgId = String(payload.org_id || "");
+  const agentName = String(payload.agent_name || "");
+  const sessionId = String(payload.session_id || "");
+  const createdAtMs = coerceTimestamp(payload.created_at);
+  const metadata = parseStructured(payload.metadata);
+  const topic = normalizeTopic(
+    metadata.title
+      || metadata.topic
+      || payload.artifact_name
+      || payload.storage_key
+      || payload.source_tool
+      || payload.source_event,
+  );
+  if (!topic) return [];
+
+  const summary = `Artifact activity captured around ${topic} via ${String(payload.source_tool || "workflow")}`;
+  const severity = /bug|incident|error|outage|failure/i.test(summary) ? 0.75 : 0.45;
+  return [
+    createEnvelope({
+      feature: "memory",
+      signalType: "topic_recurrence",
+      sourceType: "artifact_manifest",
+      orgId,
+      agentName,
+      sessionId,
+      createdAtMs,
+      signatureParts: [
+        "artifact_manifest",
+        payload.artifact_kind || "",
+        payload.source_tool || "",
+        topic,
+      ],
+      topic,
+      summary,
+      severity,
+      entities: compactEntities([
+        payload.artifact_kind,
+        payload.source_tool,
+        ...(Array.isArray(metadata.entities) ? metadata.entities : []),
+      ]),
+      metadata: {
+        artifact_name: String(payload.artifact_name || ""),
+        artifact_kind: String(payload.artifact_kind || ""),
+        source_tool: String(payload.source_tool || ""),
+        source_event: String(payload.source_event || ""),
+      },
+    }),
+  ];
 }
 
 function deriveTopicFromTurn(toolCalls: unknown[], llmContent: string): string {

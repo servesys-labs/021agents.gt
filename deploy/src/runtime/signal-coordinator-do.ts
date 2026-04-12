@@ -3,11 +3,12 @@ import { createHash } from "node:crypto";
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../index";
 
-import { buildPassiveMemoryWorkflowParams } from "./memory-digest";
 import {
-  evaluateMemorySignalRules,
-  type MemorySignalCluster,
-} from "./signal-rules-memory";
+  buildPassiveMemoryWorkflowParams,
+  type PassiveSignalWorkflowEvidence,
+} from "./memory-digest";
+import type { MemorySignalCluster } from "./signal-rules-memory";
+import { getSignalRulePack, type SignalCluster } from "./signal-rule-packs";
 import type { SignalEnvelope, SignalFeature } from "./signals";
 
 const EVENT_RETENTION_MS = 7 * 24 * 3_600_000;
@@ -152,14 +153,26 @@ export class SignalCoordinatorDO extends DurableObject<Env> {
   async evaluateNow(): Promise<{ fired: number; suppressed: number; clusters: number }> {
     const sql = this.sql();
     const now = Date.now();
-    const clusters = this.loadMemoryClusters(sql, now);
+    const feature = this.detectFeature(sql);
+    const pack = getSignalRulePack(feature);
+    if (!pack) {
+      await this.clearPending(sql, now);
+      return { fired: 0, suppressed: 0, clusters: 0 };
+    }
+
+    const clusters = this.loadClustersForFeature(feature, sql, now);
     const cooldowns = new Set(this.loadActiveCooldowns(sql, now));
-    const actions = evaluateMemorySignalRules({ nowMs: now, clusters, activeCooldowns: cooldowns });
+    const actions = pack.evaluate({ nowMs: now, clusters, activeCooldowns: cooldowns });
     let fired = 0;
     let suppressed = 0;
 
     for (const action of actions) {
       const lastSessionId = this.lookupLastSessionForSignature(sql, action.signature);
+      const evidence = this.loadWorkflowEvidence(sql, action.signature, {
+        signalBriefing: action.briefing,
+        signalType: clusters.find((cluster) => cluster.signature === action.signature)?.signal_type || "topic_recurrence",
+        signalTopic: action.topic,
+      });
       if (cooldowns.has(action.dedupe_key)) {
         suppressed++;
         this.emitSignalRuntimeEvent("signal_cooldown_suppressed", {
@@ -210,7 +223,7 @@ export class SignalCoordinatorDO extends DurableObject<Env> {
         this.extractOrgId(sql),
         0,
         Boolean(this.env.AGENT_RUN_WORKFLOW),
-        action.briefing,
+        evidence,
       );
       if (!params) {
         this.exec(sql, `DELETE FROM workflow_fires WHERE fire_id = ?`, [fireId]);
@@ -297,11 +310,7 @@ export class SignalCoordinatorDO extends DurableObject<Env> {
       }, 1);
     }
 
-    this.exec(sql, `
-      INSERT INTO signal_state(key, value_text, updated_at_ms)
-      VALUES('pending', '0', ?)
-      ON CONFLICT(key) DO UPDATE SET value_text = '0', updated_at_ms = excluded.updated_at_ms
-    `, [now]);
+    await this.clearPending(sql, now);
 
     await this.reconcile();
     const storage: any = this.ctx.storage;
@@ -339,8 +348,10 @@ export class SignalCoordinatorDO extends DurableObject<Env> {
     };
   }
 
-  async listClusters(): Promise<MemorySignalCluster[]> {
-    return this.loadMemoryClusters(this.sql(), Date.now());
+  async listClusters(): Promise<SignalCluster[]> {
+    const sql = this.sql();
+    const feature = this.detectFeature(sql);
+    return this.loadClustersForFeature(feature, sql, Date.now());
   }
 
   async reconcile(): Promise<{ pruned_events: number; pruned_fires: number; pruned_cooldowns: number }> {
@@ -459,6 +470,75 @@ export class SignalCoordinatorDO extends DurableObject<Env> {
         entities: parseStringArray(row.entities_json),
       };
     });
+  }
+
+  private loadClustersForFeature(feature: SignalFeature | null, sql: any, now: number): SignalCluster[] {
+    if (feature === "memory") return this.loadMemoryClusters(sql, now);
+    return [];
+  }
+
+  private loadWorkflowEvidence(
+    sql: any,
+    signature: string,
+    base: { signalBriefing: string; signalType: string; signalTopic: string },
+  ): PassiveSignalWorkflowEvidence {
+    const rows = this.rows<{ session_id: string; summary: string; entities_json: string }>(sql, `
+      SELECT session_id, summary, entities_json
+      FROM signal_events
+      WHERE signature = ?
+      ORDER BY created_at_ms DESC
+      LIMIT 8
+    `, [signature]);
+
+    const sessionIds: string[] = [];
+    const sessionSeen = new Set<string>();
+    const entitySeen = new Set<string>();
+    const entities: string[] = [];
+
+    for (const row of rows) {
+      const sessionId = String(row.session_id || "");
+      if (sessionId && !sessionSeen.has(sessionId)) {
+        sessionSeen.add(sessionId);
+        sessionIds.push(sessionId);
+      }
+      for (const entity of parseStringArray(row.entities_json || "[]")) {
+        const normalized = entity.toLowerCase();
+        if (!normalized || entitySeen.has(normalized)) continue;
+        entitySeen.add(normalized);
+        entities.push(entity);
+      }
+    }
+
+    return {
+      signalBriefing: base.signalBriefing,
+      signalType: base.signalType,
+      signalTopic: base.signalTopic,
+      signalSessionIds: sessionIds,
+      signalEntities: entities,
+    };
+  }
+
+  private detectFeature(sql: any): SignalFeature | null {
+    const row = this.first<{ feature: SignalFeature }>(sql, `
+      SELECT feature
+      FROM signal_clusters
+      ORDER BY last_seen_ms DESC
+      LIMIT 1
+    `) || this.first<{ feature: SignalFeature }>(sql, `
+      SELECT feature
+      FROM signal_events
+      ORDER BY created_at_ms DESC
+      LIMIT 1
+    `);
+    return row?.feature || null;
+  }
+
+  private async clearPending(sql: any, now: number): Promise<void> {
+    this.exec(sql, `
+      INSERT INTO signal_state(key, value_text, updated_at_ms)
+      VALUES('pending', '0', ?)
+      ON CONFLICT(key) DO UPDATE SET value_text = '0', updated_at_ms = excluded.updated_at_ms
+    `, [now]);
   }
 
   private loadActiveCooldowns(sql: any, now: number): string[] {
