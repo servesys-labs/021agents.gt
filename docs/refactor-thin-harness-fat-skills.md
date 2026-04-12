@@ -4,7 +4,7 @@ A comprehensive phased refactor to invert this repo from "fat harness, thin skil
 
 ## ▶︎ Resume here (2026-04-11)
 
-**Status:** Phases 0, 1, 2, 3, 4, 5, 6, 7, **6.5 ✅ done**. **Resume at the meta-agent eval harness prerequisite** — a fixed-input grader that scores "did the meta-agent produce a better/worse agent configuration" against a canonical input set. Phase 8 (latent logic extraction — `reasoning-strategies.ts`, `intent-router.ts`, `permission-classifier.ts` → `skills/meta/`) is blocked on this prerequisite because unlike Phase 7, those extractions will not be byte-identical and byte-identity tests cannot catch semantic regressions. Phase 9 (`tools.ts` consolidation to ~10 verbs) is structurally unblocked but also wants the eval harness first so "we shrunk the tool catalog without regressing agent-creation quality" can be proven rather than asserted.
+**Status:** Phases 0, 1, 2, 3, 4, 5, 6, 7, **6.5 ✅**, **eval harness v1 ✅**, **Phase 8 ✅ done**. **Resume at Phase 9** — `tools.ts` consolidation (40 → ~10 verbs) + deferred deploy-side extractions (`intent-router.ts`, `permission-classifier.ts`). Phase 9 prerequisites: deploy-side test coverage for both files + `ALWAYS_REQUIRE_APPROVAL` deterministic backstop for permission-classifier.
 
 ### Phase 6.5 snapshot — complete
 
@@ -687,38 +687,51 @@ Phase 5 must teach **both** entry points about skills. That means updating `cont
 
 ---
 
-### Phase 8 — Move latent logic to skills
+### Phase 8 — Move latent logic to skills — complete
 
-**Goal:** `reasoning-strategies.ts`, `intent-router.ts`, `permission-classifier.ts`, and the `tools.ts:5706–5748` keyword classifier stop living in TS. The *policy* stays deterministic; the *classification* moves to the model reading a skill.
+**Goal (original):** Extract `reasoning-strategies.ts`, `intent-router.ts`, `permission-classifier.ts`, and `selectMetaTools` keyword router from TS into `skills/meta/` or model judgment.
 
-**Work items**
-- [ ] **`skills/meta/pick-reasoning/SKILL.md`** — content from `reasoning-strategies.ts`, reformatted as a decision guide: "When the task is X, use strategy Y because Z."
-- [ ] **`skills/meta/route-intent/SKILL.md`** — content from `intent-router.ts` + `tools.ts:5706–5748`, as "When user says X, activate skill Y."
-- [ ] **`skills/meta/classify-permission/SKILL.md`** — policy table from `permission-classifier.ts`. The rules stay deterministic; the *judgment* of "does this action match a rule" moves to the model.
-- [ ] Update call sites in `fast-agent.ts` and `tools.ts` to activate the meta skill instead of calling the TS function. The resolver loads the skill body, the model reads it, the model makes the call.
-- [ ] Delete the three TS files: `reasoning-strategies.ts`, `intent-router.ts`, `permission-classifier.ts`.
-- [ ] Delete the keyword table in `tools.ts:5706–5748`.
+**Goal (revised after coverage audit):** Extract what the eval harness can gate (meta-agent-chat.ts logic). Defer deploy-side extractions (`intent-router.ts`, `permission-classifier.ts`) to Phase 9 pending deploy-side test coverage.
 
-**Exit audit — "Latent Work Lives in Markdown"**
-- [ ] Three TS files gone (~606 LoC removed).
-- [ ] `tools.ts:5706–5748` block removed.
-- [ ] Eval pass-rate ≥ baseline on all reference agents. **This is the risky phase** — the model's classification must match or beat the keyword router. If it doesn't, the SKILL.md needs more examples, not a revert.
-- [ ] Smoke: 5 representative user prompts route to the same tool/skill as before.
+| # | Commit | Ref | Scope |
+|---|---|---|---|
+| 8.1 | Delete `selectMetaTools` — send all 27 tools every turn | `e912c70b` | Removed keyword regex router (`TOOL_GROUPS`, `CORE_TOOLS`, `selectMetaTools`), infra docs now unconditional. −84 lines from meta-agent-chat.ts (3417→3334). |
+| 8.2 | Extract reasoning strategies advisory to `skills/meta/pick-reasoning` | `cd3d75a5` | Advisory content (strategy definitions + when-to-use heuristics) → SKILL.md. Deploy-side execution code (`selectReasoningStrategy`, `autoSelectStrategy` in stream.ts) untouched. Meta skills 19→20. |
+| 8.3 | Deploy-side coverage audit (no code change) | — | `intent-router.ts`: zero test coverage across all functions + call site. `permission-classifier.ts`: 13 unit tests in `new-features.test.ts`, zero integration tests for `executeTools→classifyPermission→block/allow` path. |
 
-**Rollback:** `git revert` per file.
+**Deferred to Phase 9:**
+- `intent-router.ts` extraction — zero deploy-side test coverage. Extracting unguarded classification to model judgment is unsafe.
+- `permission-classifier.ts` extraction — deterministic security gates are strictly safer than model judgment. Prerequisite: `ALWAYS_REQUIRE_APPROVAL` backstop (hardcoded set of operations that always require human approval regardless of model judgment) + integration test for the full governance gate path.
+- `tools.ts:5706–5748` keyword table — part of the deploy-side intent routing, deferred with `intent-router.ts`.
+
+**Key finding:** `diag-session-breakdown` eval fixture improved from 4.00 to 5.00 after `selectMetaTools` deletion (commit 8.1). The keyword router was actively harming tool selection by hiding relevant tools. The eval harness proved "the old code was worse."
+
+**Eval harness scope boundary (discovered in Phase 8):** The harness gates meta-agent-chat.ts changes only (control-plane, Gemma-via-AI-Gateway). Deploy-side extractions (`intent-router.ts`, `permission-classifier.ts`) run in the Workers runtime and need their own coverage story — the eval harness cannot substitute.
+
+**Validation at Phase 8 close:**
+- control-plane: 834/834 tests green
+- Eval: 9/9 green, all 8 functional fixtures at 5.00, tripwire 0/0/0
+- `tsc --noEmit` clean on control-plane
+- `meta-agent-chat.ts`: 3334 lines (was 3417, −83)
+- `skills.ts`: 180/180 unchanged
+- `tools.ts`: 8092/8092 unchanged
+- Meta skills: 20 (was 19, +1 `pick-reasoning`)
 
 ---
 
-### Phase 9 — Tool consolidation (deferred)
+### Phase 9 — Tool consolidation + deploy-side extractions
 
-**Goal:** collapse 40 tools → ~10 verbs. Highest blast radius; runs last.
+**Goal:** collapse 40 tools → ~10 verbs + extract `intent-router.ts` and `permission-classifier.ts` to skills/model judgment. All three touch the same deploy-side call sites in `tools.ts`, so they land together.
 
 **Entry criteria**
-- All prior phases done.
+- All prior phases done (Phases 0-8 complete).
+- Deploy-side test coverage for `intent-router.ts`: unit tests for `classifyIntent`, `decomposeIntents`, `getAgentCapabilitiesCached` + integration test for `route-to-agent` tool case at tools.ts:2633.
+- Deploy-side test coverage for `permission-classifier.ts`: integration test for the full `executeTools → classifyPermission → block/allow` governance gate at tools.ts:1193-1215 (unit tests exist in `new-features.test.ts`, integration gap only).
+- `ALWAYS_REQUIRE_APPROVAL` deterministic backstop: hardcoded set of operations (e.g., `delete-agent`, `manage-secrets`, `dynamic-exec`) that always require human approval regardless of model judgment. Defense-in-depth for the permission-classifier extraction.
 - `orchestrator.json` and `personal-assistant.json` still pass eval.
 - A config-rewriter script exists that can migrate every `agents/*.json` atomically.
 
-**Work items**
+**Work items — tool consolidation**
 - [ ] Introduce new verbs: `platform { resource, action }` (subsumes `manage-releases`, `manage-workflows`, `manage-rag`, `manage-secrets`, `manage-policies`, `manage-retention`, `manage-voice`, `manage-gpu`, `manage-projects`, `manage-mcp`).
 - [ ] `codemode { mode }` subsumes the 6 `codemode-*` tools.
 - [ ] `sql { query, args }` subsumes `db-query`, `db-batch`, `db-report`.
@@ -726,6 +739,12 @@ Phase 5 must teach **both** entry points about skills. That means updating `cont
 - [ ] `agentos/builder.py` `TOOL_RECOMMENDATIONS` stops emitting deprecated names.
 - [ ] **Config-rewriter script:** reads every `agents/*.json` + every persisted DB config, rewrites tool names to new verbs in one atomic transaction.
 - [ ] After rewriter runs: delete the deprecated aliases and their handlers.
+
+**Work items — deferred deploy-side extractions (from Phase 8)**
+- [ ] Write deploy-side test coverage (prerequisite, not the extraction itself).
+- [ ] `intent-router.ts` → `skills/meta/route-intent/SKILL.md` or model judgment. Delete `classifyIntent`, `decomposeIntents`, `getAgentCapabilitiesCached`, `route-to-agent` tool case.
+- [ ] `permission-classifier.ts` → `skills/meta/classify-permission/SKILL.md` with `ALWAYS_REQUIRE_APPROVAL` backstop retained as deterministic TS. Delete `STATIC_CLASSIFICATION` table; keep irreducible safety floor.
+- [ ] `tools.ts:5706–5748` keyword table — part of deploy-side intent routing, deletes with `intent-router.ts`.
 
 **Exit audit — "Verbs Only"**
 - [ ] `tools.ts` ≤ 2,500 LoC.
