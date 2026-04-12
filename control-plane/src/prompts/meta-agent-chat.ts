@@ -61,6 +61,7 @@ const REQUIRED_META_SKILLS = [
   "wf-audit-log",
   "wf-feature-flags",
   "wf-cost-analysis",
+  "pick-reasoning",
 ] as const;
 for (const name of REQUIRED_META_SKILLS) {
   if (!META_SKILL_BODIES[name]) {
@@ -191,14 +192,7 @@ The routing is automatic — you don't need to configure models or plans. Everyt
 
 ## Reasoning strategies
 
-Available strategies (set via reasoning_strategy field):
-- **""** (empty/auto) — Let the system auto-select based on task type. Recommended default.
-- **chain-of-thought** — Think step by step. Good for analytical tasks.
-- **plan-then-execute** — Output a plan before acting. Good for complex builds.
-- **step-back** — Consider the general principle first. Good for debugging.
-- **decompose** — Break into sub-tasks. Good for large implementations.
-- **verify-then-respond** — Check answer before responding. Good for accuracy-critical tasks.
-
+${META_SKILL_BODIES["pick-reasoning"]}
 ## Common workflows
 
 ${workflowsBody}

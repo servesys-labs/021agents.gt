@@ -1142,10 +1142,10 @@ describe("Phase 7 — META_SKILL_BODIES shape", () => {
     expect(Array.isArray(META_SKILL_BODIES)).toBe(false);
   });
 
-  it("contains all 19 meta skills (2 modes + 2 sections + 15 workflows)", () => {
+  it("contains all 20 meta skills (2 modes + 3 sections + 15 workflows)", () => {
     const expectedKeys = [
       "mode-demo", "mode-live",
-      "diagnose-session", "infra-summary",
+      "diagnose-session", "infra-summary", "pick-reasoning",
       "wf-health-check", "wf-improve", "wf-bad-answers", "wf-start-training",
       "wf-marketplace-publish", "wf-test-suite", "wf-add-connector", "wf-delegate",
       "wf-mid-task-stop", "wf-forgot-context", "wf-truncated-results", "wf-tool-blocked",
