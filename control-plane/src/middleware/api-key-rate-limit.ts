@@ -4,40 +4,60 @@
  * Enforces rate_limit_rpm (requests per minute) and rate_limit_rpd
  * (requests per day) from the api_keys table. Returns 429 when exceeded.
  *
- * Uses a sliding-window counter stored in-memory (per-isolate).
- * This is approximate (not globally consistent across isolates) but
- * good enough for abuse prevention. For strict enforcement, use
- * Cloudflare Rate Limiting rules or Durable Objects.
+ * Uses a Durable Object (RateLimiterDO) for cross-isolate atomic counters.
+ * One DO instance per rate-limit key — all isolates in all colos route to
+ * the same instance, so the counter is globally consistent. No more N×
+ * overshoot from per-isolate counting.
+ *
+ * Fallback: if the DO binding is unavailable (dev mode, misconfigured
+ * deployment), falls back to the in-memory per-isolate LRU. This is
+ * deliberately fail-open — a missing binding loosens the limit rather
+ * than blocking all requests.
  */
 import { createMiddleware } from "hono/factory";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
 
-// Sliding window: key_id → { minute_bucket, minute_count, day_bucket, day_count }
+// ── In-memory fallback (kept for dev/test environments without DO) ──
 interface RateState {
   minuteBucket: number;
   minuteCount: number;
   dayBucket: number;
   dayCount: number;
 }
+const fallbackCounts = new Map<string, RateState>();
+const MAX_FALLBACK_ENTRIES = 4096;
 
-const rateCounts = new Map<string, RateState>();
-const MAX_ENTRIES = 4096;
+function checkFallback(rateKey: string, rpm: number, rpd: number): {
+  allowed: boolean;
+  minuteRemaining: number;
+  retryAfterSeconds: number;
+} {
+  const now = Date.now();
+  const minBucket = Math.floor(now / 60_000);
+  const dayBucket = Math.floor(now / 86_400_000);
 
-function getMinuteBucket(): number {
-  return Math.floor(Date.now() / 60_000);
-}
+  let state = fallbackCounts.get(rateKey);
+  if (!state) {
+    state = { minuteBucket: minBucket, minuteCount: 0, dayBucket, dayCount: 0 };
+    fallbackCounts.set(rateKey, state);
+    if (fallbackCounts.size > MAX_FALLBACK_ENTRIES) {
+      const entries = [...fallbackCounts.keys()];
+      for (let i = 0; i < Math.floor(entries.length / 4); i++) fallbackCounts.delete(entries[i]);
+    }
+  }
+  if (state.minuteBucket !== minBucket) { state.minuteBucket = minBucket; state.minuteCount = 0; }
+  if (state.dayBucket !== dayBucket) { state.dayBucket = dayBucket; state.dayCount = 0; }
+  state.minuteCount++;
+  state.dayCount++;
 
-function getDayBucket(): number {
-  return Math.floor(Date.now() / 86_400_000);
-}
-
-function evictIfNeeded(): void {
-  if (rateCounts.size <= MAX_ENTRIES) return;
-  // Evict oldest 25%
-  const entries = [...rateCounts.keys()];
-  const toRemove = Math.floor(entries.length / 4);
-  for (let i = 0; i < toRemove; i++) rateCounts.delete(entries[i]);
+  const minuteExceeded = state.minuteCount > rpm;
+  const dayExceeded = state.dayCount > rpd;
+  return {
+    allowed: !minuteExceeded && !dayExceeded,
+    minuteRemaining: Math.max(0, rpm - state.minuteCount),
+    retryAfterSeconds: minuteExceeded ? Math.ceil(60 - (now % 60_000) / 1000) : 0,
+  };
 }
 
 /**
@@ -48,69 +68,67 @@ export const apiKeyRateLimitMiddleware = createMiddleware<{
   Bindings: Env;
   Variables: { user: CurrentUser };
 }>(async (c, next) => {
-  // Only rate-limit public API routes
   if (!c.req.path.startsWith("/v1/") && !c.req.path.startsWith("/api/v1/")) return next();
 
   const user = c.get("user");
   if (!user || !user.user_id) return next();
-
-  // Rate limit API key and end-user token requests (both have rateLimitRpm/Rpd)
-  // Portal JWT users are rate-limited by the global middleware, not here
   if (user.auth_method !== "api_key" && user.auth_method !== "end_user_token") return next();
 
-  // Use key-anchored subjects so distinct API keys do not share limits.
-  // End-user tokens are bucketed by parent key + end-user id.
   const rateSubject = user.auth_method === "api_key"
     ? (user.apiKeyId || user.user_id)
     : `${user.endUserApiKeyId || "unknown-key"}:${user.user_id}`;
   const rateKey = `${user.org_id}:${rateSubject}:${user.auth_method}`;
 
-  const minBucket = getMinuteBucket();
-  const dayBucket = getDayBucket();
-
-  let state = rateCounts.get(rateKey);
-  if (!state) {
-    state = { minuteBucket: minBucket, minuteCount: 0, dayBucket: dayBucket, dayCount: 0 };
-    rateCounts.set(rateKey, state);
-    evictIfNeeded();
-  }
-
-  // Reset minute counter on new bucket
-  if (state.minuteBucket !== minBucket) {
-    state.minuteBucket = minBucket;
-    state.minuteCount = 0;
-  }
-  // Reset day counter on new bucket
-  if (state.dayBucket !== dayBucket) {
-    state.dayBucket = dayBucket;
-    state.dayCount = 0;
-  }
-
-  state.minuteCount++;
-  state.dayCount++;
-
-  // Default limits (overridden per-key if stored in DB)
   const rpm = (user as any).rateLimitRpm || 60;
   const rpd = (user as any).rateLimitRpd || 10000;
 
-  if (state.minuteCount > rpm) {
-    const retryAfter = 60 - (Date.now() % 60_000) / 1000;
-    return c.json(
-      { error: "Rate limit exceeded", limit: `${rpm} requests/minute`, retry_after_seconds: Math.ceil(retryAfter) },
-      { status: 429, headers: { "Retry-After": String(Math.ceil(retryAfter)), "X-RateLimit-Limit": String(rpm), "X-RateLimit-Remaining": "0" } },
-    );
+  let allowed: boolean;
+  let minuteRemaining: number;
+  let retryAfterSeconds: number;
+
+  // Try DO first, fall back to in-memory if binding is missing
+  if (c.env.RATE_LIMITER) {
+    try {
+      const id = c.env.RATE_LIMITER.idFromName(rateKey);
+      const stub = c.env.RATE_LIMITER.get(id);
+      const result = await (stub as any).check(rpm, rpd);
+      allowed = result.allowed;
+      minuteRemaining = result.minuteRemaining;
+      retryAfterSeconds = result.retryAfterSeconds;
+    } catch (err) {
+      // DO call failed — fall back to in-memory (fail-open)
+      console.error(`[rate-limiter] DO call failed, using fallback: ${(err as Error)?.message}`);
+      const fb = checkFallback(rateKey, rpm, rpd);
+      allowed = fb.allowed;
+      minuteRemaining = fb.minuteRemaining;
+      retryAfterSeconds = fb.retryAfterSeconds;
+    }
+  } else {
+    const fb = checkFallback(rateKey, rpm, rpd);
+    allowed = fb.allowed;
+    minuteRemaining = fb.minuteRemaining;
+    retryAfterSeconds = fb.retryAfterSeconds;
   }
 
-  if (state.dayCount > rpd) {
+  if (!allowed) {
+    const headers: Record<string, string> = {
+      "X-RateLimit-Limit": String(rpm),
+      "X-RateLimit-Remaining": "0",
+    };
+    if (retryAfterSeconds > 0) {
+      headers["Retry-After"] = String(retryAfterSeconds);
+      return c.json(
+        { error: "Rate limit exceeded", limit: `${rpm} requests/minute`, retry_after_seconds: retryAfterSeconds },
+        { status: 429, headers },
+      );
+    }
     return c.json(
       { error: "Daily rate limit exceeded", limit: `${rpd} requests/day` },
-      { status: 429, headers: { "X-RateLimit-Limit": String(rpd), "X-RateLimit-Remaining": "0" } },
+      { status: 429, headers },
     );
   }
 
-  // Add rate limit headers
   c.header("X-RateLimit-Limit", String(rpm));
-  c.header("X-RateLimit-Remaining", String(Math.max(0, rpm - state.minuteCount)));
-
+  c.header("X-RateLimit-Remaining", String(minuteRemaining));
   return next();
 });

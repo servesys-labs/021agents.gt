@@ -23,16 +23,18 @@
     "head_sampling_rate": 1
   },
 
-  // Same Hyperdrive bindings as production — load test targets
-  // the real Postgres via Hyperdrive to measure actual saturation.
+  // Railway Postgres for load testing — isolated from production Supabase.
+  // Both bindings point at the same Railway instance (admin bypass RLS is
+  // handled at the TypeScript level via withAdminDb, not at the DB role level,
+  // which is fine for load testing). 100 max_connections, no circuit breaker.
   "hyperdrive": [
     {
       "binding": "HYPERDRIVE",
-      "id": "6f8984ddd503489895a7c97e6970f634"
+      "id": "ad66492f26484f91b713865030aec96b"
     },
     {
       "binding": "HYPERDRIVE_ADMIN",
-      "id": "775f7e11ce8c479993855531f728770a"
+      "id": "ad66492f26484f91b713865030aec96b"
     }
   ],
 
@@ -56,6 +58,15 @@
       "binding": "RUNTIME",
       "service": "agentos-runtime-loadtest"
     }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "RATE_LIMITER", "class_name": "RateLimiterDO" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_classes": ["RateLimiterDO"] }
   ],
 
   "kv_namespaces": [

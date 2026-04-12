@@ -4,6 +4,9 @@
  * Hono HTTP framework + CF Queue consumer + Cron Triggers.
  * All portal API endpoints except agent runtime execution.
  */
+
+// Durable Object exports — must be named exports from the entry point.
+export { RateLimiterDO } from "./durable-objects/rate-limiter";
 import { cors } from "hono/cors";
 import type { Env } from "./env";
 import type { CurrentUser } from "./auth/types";
