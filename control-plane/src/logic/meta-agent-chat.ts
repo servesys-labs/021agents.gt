@@ -2257,10 +2257,10 @@ async function executeTool(
             description = ${description}, config = ${JSON.stringify(subConfig)}, updated_at = now()
         `;
 
-        // Also ensure parent agent has run-agent or route-to-agent tool
+        // Also ensure parent agent has run-agent tool
         try {
           const parentTools: string[] = Array.isArray(parentConfig.tools) ? parentConfig.tools : [];
-          if (!parentTools.includes("run-agent") && !parentTools.includes("route-to-agent")) {
+          if (!parentTools.includes("run-agent")) {
             parentTools.push("run-agent");
             parentConfig.tools = parentTools;
             await sql`

@@ -322,26 +322,15 @@ export const ORCHESTRATOR_TOOLS: string[] = [
   "save-project",
   "load-project",
   "list-project-versions",
-  // Platform operations
+  // Platform operations (consolidated verb — replaces 12 manage-* tools)
+  "platform",
   "security-scan",
   "conversation-intel",
-  "manage-issues",
   "compliance",
   "view-costs",
   "view-traces",
-  "manage-releases",
-  "manage-slos",
   "view-audit",
-  "manage-secrets",
   "compare-agents",
-  "manage-rag",
-  "manage-policies",
-  "manage-retention",
-  "manage-workflows",
-  "manage-projects",
-  "manage-mcp",
-  "manage-voice",
-  "manage-gpu",
   // Data pipelines
   "query-pipeline",
   "send-to-pipeline",
@@ -356,9 +345,8 @@ export const ORCHESTRATOR_TOOLS: string[] = [
   // Sandbox
   "sandbox_file_write",
   "sandbox_file_read",
-  // Feedback & routing
+  // Feedback
   "submit-feedback",
-  "route-to-agent",
   // Planning
   "todo",
 ];

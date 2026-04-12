@@ -42,7 +42,6 @@ const PLATFORM_TOOLS = {
   // Communication
   "send-email": "Send an email notification",
   "a2a-send": "Send a task to another agent via A2A protocol",
-  "route-to-agent": "Delegate a subtask to a specialist agent",
   "submit-feedback": "Submit user feedback on an agent session",
 
   // Data & APIs
@@ -400,7 +399,7 @@ You don't just create a config — you design the entire operational package: ag
 ${toolInventory}
 
 ## Platform Capabilities
-- **Sub-agents**: Agents can spawn specialist sub-agents via route-to-agent and create-agent tools. Each sub-agent gets its own config, tools, and prompt.
+- **Sub-agents**: Agents can spawn specialist sub-agents via run-agent and create-agent tools. Each sub-agent gets its own config, tools, and prompt.
 - **Codemode**: Custom JavaScript/TypeScript snippets that run in sandboxed V8 isolates. Use for: data transforms, scoring algorithms, template rendering, API field mapping, custom validation — anything the 64 built-in tools don't cover.
 - **Skills**: Reusable prompt templates (type: "prompt"), tool chains (type: "tool-chain"), or workflows (type: "workflow") stored in the Skills Library and attachable to any agent.
 - **Guardrails**: Safety rules enforced at runtime — rate limits, content policies, PII detection, compliance checks.
