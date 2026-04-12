@@ -62,28 +62,28 @@
     { "binding": "AGENT_PROGRESS_KV", "id": "30da23c287ee4f4c93d1a1f08cdd48a0" }
   ],
 
+  // Queue: producer only. Cloudflare allows only one consumer per queue,
+  // and the production control-plane already registers as consumer for
+  // agentos-jobs. Staging can enqueue but not consume. This means
+  // batch API submissions and autopilot ticks enqueued by staging are
+  // processed by the PRODUCTION consumer (which hits the real runtime,
+  // not the mock). For interactive workloads (sync/stream), staging
+  // handles the full request including RUNTIME.fetch to the mock.
+  //
+  // To test batch/autopilot with the mock runtime, create separate
+  // staging queues (agentos-jobs-staging, agentos-jobs-staging-dlq)
+  // and update this config.
   "queues": {
     "producers": [
       { "binding": "JOB_QUEUE", "queue": "agentos-jobs" }
-    ],
-    "consumers": [
-      {
-        "queue": "agentos-jobs",
-        "max_batch_size": 10,
-        "max_batch_timeout": 5,
-        "max_retries": 3,
-        "dead_letter_queue": "agentos-jobs-dlq"
-      },
-      {
-        "queue": "agentos-jobs-dlq",
-        "max_batch_size": 10,
-        "max_batch_timeout": 5,
-        "max_retries": 0
-      }
     ]
   },
 
-  "triggers": {
-    "crons": ["*/1 * * * *"]
-  }
+  // Cron disabled for staging. The production worker's cron handles
+  // autopilot ticks. Running cron on both workers would cause
+  // double-dispatch (harmless but wasteful) and confuse the timing
+  // metrics. Re-enable when staging has its own queue consumer.
+  // "triggers": { "crons": ["*/1 * * * *"] }
+  "triggers": {}
+
 }
