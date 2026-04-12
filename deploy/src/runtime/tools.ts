@@ -12,7 +12,7 @@ import type { ToolCall, ToolResult, ToolDefinition, RuntimeEnv } from "./types";
 import { validateUrl as ssrfValidateUrl } from "./ssrf";
 import { scratchWrite, scratchRead, scratchList } from "./scratch";
 import { retrieveToolResult, cleanupSessionResults } from "./result-storage";
-import { writeToMailbox } from "./mailbox";
+import { writeToMailbox, sendPermissionRequest, sendPermissionResponse, sendPlanApproval, type MessageType } from "./mailbox";
 import { ToolError, CircuitBreakerError, classifyFetchError } from "./errors";
 import { createChildAbortController, createSiblingGroup } from "./abort";
 import { parseJsonColumn } from "./parse-json-column";
@@ -3195,6 +3195,9 @@ async function dispatch(
           systemPromptOverride = contextBlock;
         }
 
+        // Thread parent's trace_id so child sessions link to the same trace hierarchy
+        const parentTraceId = lineage?.trace_id || "";
+
         const childWorkflowParams = {
             agent_name: agentName,
             input: task,
@@ -3206,6 +3209,7 @@ async function dispatch(
             progress_key: childProgressKey,
             parent_session_id: lineage?.session_id || sessionId,
             parent_depth: parentDepth + 1,
+            parent_trace_id: parentTraceId,
             ...(systemPromptOverride ? { system_prompt_override: systemPromptOverride } : {}),
             budget_limit_usd_override: childBudgetCap,
             ...(toolsOverride ? { tools_override: toolsOverride } : {}),
@@ -3233,6 +3237,17 @@ async function dispatch(
                 task_preview: task.slice(0, 200),
                 spawned_at: Date.now(),
               }), { expirationTtl: 600 }); // 10 min TTL
+            } catch {} // non-blocking
+          }
+          // Write async delegation event to DB (status=running, completed_at=null)
+          if ((env as any).HYPERDRIVE) {
+            try {
+              const { getDb } = await import("./db");
+              const sql = await getDb((env as any).HYPERDRIVE);
+              await sql`
+                INSERT INTO delegation_events (parent_session_id, child_session_id, parent_agent_name, child_agent_name, parent_trace_id, org_id, depth, correlation_id, status, input_preview, spawn_mode, created_at)
+                VALUES (${parentSessionId}, '', ${lineage?.agent_name || "unknown"}, ${agentName}, ${parentTraceId}, ${orgId}, ${parentDepth + 1}, ${correlationId}, 'running', ${task.slice(0, 500)}, 'async', now())
+              `;
             } catch {} // non-blocking
           }
           return JSON.stringify({
@@ -3291,8 +3306,8 @@ async function dispatch(
             const { getDb } = await import("./db");
             const sql = await getDb((env as any).HYPERDRIVE);
             await sql`
-              INSERT INTO delegation_events (parent_session_id, child_session_id, parent_agent_name, child_agent_name, org_id, depth, correlation_id, status, child_cost_usd, input_preview, output_preview, created_at, completed_at)
-              VALUES (${parentSessionId}, ${childSessionId}, ${parentAgentName}, ${agentName}, ${orgId}, ${parentDepth + 1}, ${correlationId}, ${status}, ${childCostUsd}, ${task.slice(0, 500)}, ${filteredOutput.slice(0, 500)}, now(), ${(status as string) !== "running" ? "now()" : null})
+              INSERT INTO delegation_events (parent_session_id, child_session_id, parent_agent_name, child_agent_name, parent_trace_id, org_id, depth, correlation_id, status, child_cost_usd, input_preview, output_preview, spawn_mode, created_at, completed_at)
+              VALUES (${parentSessionId}, ${childSessionId}, ${parentAgentName}, ${agentName}, ${parentTraceId}, ${orgId}, ${parentDepth + 1}, ${correlationId}, ${status}, ${childCostUsd}, ${task.slice(0, 500)}, ${filteredOutput.slice(0, 500)}, 'sync', now(), ${(status as string) !== "running" ? "now()" : null})
             `;
           } catch {} // non-blocking
         }
@@ -3318,8 +3333,8 @@ async function dispatch(
             const { getDb } = await import("./db");
             const sql = await getDb((env as any).HYPERDRIVE);
             await sql`
-              INSERT INTO delegation_events (parent_session_id, child_session_id, parent_agent_name, child_agent_name, org_id, depth, status, error, input_preview, created_at, completed_at)
-              VALUES (${lineage?.session_id || sessionId}, '', ${lineage?.agent_name || "unknown"}, ${agentName}, ${orgId}, ${parentDepth + 1}, 'failed', ${(err.message || String(err)).slice(0, 500)}, ${task.slice(0, 500)}, now(), now())
+              INSERT INTO delegation_events (parent_session_id, child_session_id, parent_agent_name, child_agent_name, parent_trace_id, org_id, depth, status, input_preview, output_preview, spawn_mode, created_at, completed_at)
+              VALUES (${lineage?.session_id || sessionId}, '', ${lineage?.agent_name || "unknown"}, ${agentName}, ${lineage?.trace_id || ""}, ${orgId}, ${parentDepth + 1}, 'failed', ${task.slice(0, 500)}, ${`Error: ${(err.message || String(err)).slice(0, 480)}`}, 'sync', now(), now())
             `;
           } catch {}
         }
@@ -3353,11 +3368,25 @@ async function dispatch(
         if (st.status === "complete") {
           const out = (st as any).output;
           let childOutput = out?.output || "";
-          // Apply same result filtering as sync path
           childOutput = childOutput.replace(/\[tool result pruned:[^\]]*\]/g, "");
           childOutput = childOutput.replace(/\{[^}]{200,}\}/g, "[JSON object omitted]");
           childOutput = childOutput.replace(/\n{3,}/g, "\n\n").trim();
-          // Clean up KV entry
+          // Update delegation_events with completion + persist to DB
+          if ((env as any).HYPERDRIVE) {
+            try {
+              const { getDb } = await import("./db");
+              const sql = await getDb((env as any).HYPERDRIVE);
+              await sql`
+                UPDATE delegation_events SET
+                  child_session_id = ${out?.session_id || ""},
+                  status = 'completed',
+                  child_cost_usd = ${out?.cost_usd || 0},
+                  output_preview = ${childOutput.slice(0, 500)},
+                  completed_at = now()
+                WHERE correlation_id = ${corrId}
+              `;
+            } catch {} // non-blocking
+          }
           await checkKv.delete(`delegation:${corrId}`).catch(() => {});
           return JSON.stringify({
             status: "completed",
@@ -3681,6 +3710,39 @@ async function dispatch(
         return JSON.stringify(rows);
       } catch (err: any) {
         return `view-traces failed: ${err.message || err}`;
+      }
+    }
+
+    case "view-delegations": {
+      // Query delegation history: see parent→child relationships, costs, and status.
+      // Essential for debugging multi-agent workflows and tracing cost attribution.
+      const hyperdrive = (env as any).HYPERDRIVE;
+      if (!hyperdrive) return "view-delegations requires database access";
+      const { getDb } = await import("./db");
+      const sql = await getDb(hyperdrive);
+      const delOrgId = args.org_id || (env as any).__agentConfig?.org_id || "";
+      const delLimit = Math.min(Number(args.limit) || 20, 100);
+      const parentFilter = args.parent_session_id ? String(args.parent_session_id) : null;
+      const traceFilter = args.trace_id ? String(args.trace_id) : null;
+      const corrFilter = args.correlation_id ? String(args.correlation_id) : null;
+      try {
+        let rows: any[];
+        if (corrFilter) {
+          rows = await sql`SELECT * FROM delegation_events WHERE correlation_id LIKE ${corrFilter + "%"} AND org_id = ${delOrgId} ORDER BY created_at DESC LIMIT ${delLimit}`;
+        } else if (parentFilter) {
+          rows = await sql`SELECT * FROM delegation_events WHERE parent_session_id = ${parentFilter} AND org_id = ${delOrgId} ORDER BY created_at DESC LIMIT ${delLimit}`;
+        } else if (traceFilter) {
+          rows = await sql`SELECT * FROM delegation_events WHERE parent_trace_id = ${traceFilter} AND org_id = ${delOrgId} ORDER BY created_at DESC LIMIT ${delLimit}`;
+        } else {
+          rows = await sql`SELECT * FROM delegation_events WHERE org_id = ${delOrgId} ORDER BY created_at DESC LIMIT ${delLimit}`;
+        }
+        return JSON.stringify({
+          delegations: rows,
+          total: rows.length,
+          filters: { parent_session_id: parentFilter, trace_id: traceFilter, correlation_id: corrFilter },
+        });
+      } catch (err: any) {
+        return `view-delegations failed: ${err.message || err}`;
       }
     }
 
@@ -4360,6 +4422,21 @@ return { mode: "codemode", total_tasks: tasks.length, results };
 
         const totalAgentCost = agentResults.reduce((s, r) => s + r.cost_usd, 0);
 
+        // Log delegation_events for each swarm child (non-blocking)
+        if ((env as any).HYPERDRIVE) {
+          try {
+            const { getDb } = await import("./db");
+            const sql = await getDb((env as any).HYPERDRIVE);
+            const swarmCorrelation = crypto.randomUUID().slice(0, 12);
+            for (const r of agentResults) {
+              await sql`
+                INSERT INTO delegation_events (parent_session_id, child_session_id, parent_agent_name, child_agent_name, parent_trace_id, org_id, depth, correlation_id, status, child_cost_usd, input_preview, output_preview, spawn_mode, created_at, completed_at)
+                VALUES (${lineage?.session_id || sessionId}, '', ${lineage?.agent_name || "unknown"}, ${agentTargetName}, ${lineage?.trace_id || ""}, ${swarmOrgId}, ${swarmDepth}, ${`swarm:${swarmCorrelation}:${r.index}`}, ${r.status === "pass" ? "completed" : "failed"}, ${r.cost_usd}, ${swarmTasks[r.index]?.input.slice(0, 500) || ""}, ${r.output.slice(0, 500)}, 'swarm', now(), now())
+              `;
+            }
+          } catch {} // non-blocking
+        }
+
         return JSON.stringify({
           mode: "agent",
           total_tasks: swarmTasks.length,
@@ -4440,12 +4517,45 @@ return { mode: "codemode", total_tasks: tasks.length, results };
     case "send-message": {
       const to = String(args.to || "");
       const message = String(args.message || "");
-      if (!to || !message) return "send-message requires 'to' (session ID) and 'message'";
+      const msgType = String(args.message_type || "text") as MessageType;
+      const correlationId = String(args.correlation_id || "");
+      if (!to) return "send-message requires 'to' (session ID)";
       const doSql = (env as any).DO_SQL;
       if (!doSql) return "Mailbox not available (not running in a Durable Object context)";
       try {
+        if (msgType === "permission_request") {
+          if (!message) return "permission_request requires 'message' describing the action needing approval";
+          const cid = sendPermissionRequest(doSql, sessionId, to, {
+            action: message,
+            reason: String(args.reason || ""),
+          });
+          return JSON.stringify({
+            sent: true, to, message_type: "permission_request",
+            correlation_id: cid, awaiting_approval: true,
+          });
+        }
+        if (msgType === "permission_response") {
+          if (!correlationId) return "permission_response requires 'correlation_id' from the original request";
+          const approved = args.approved !== false && args.approved !== "false";
+          sendPermissionResponse(doSql, sessionId, to, correlationId, {
+            approved,
+            reason: message || undefined,
+          });
+          return JSON.stringify({ sent: true, to, message_type: "permission_response", correlation_id: correlationId, approved });
+        }
+        if (msgType === "plan_approval") {
+          if (!correlationId) return "plan_approval requires 'correlation_id' from the original plan submission";
+          const approved = args.approved !== false && args.approved !== "false";
+          sendPlanApproval(doSql, sessionId, to, correlationId, {
+            approved,
+            feedback: message || undefined,
+          });
+          return JSON.stringify({ sent: true, to, message_type: "plan_approval", correlation_id: correlationId, approved });
+        }
+        // Default: plain text message (backward compatible)
+        if (!message) return "send-message requires 'message' content for text messages";
         writeToMailbox(doSql, sessionId, to, "text", message);
-        return `Message sent to ${to}`;
+        return JSON.stringify({ sent: true, to, message_type: "text" });
       } catch (e: any) {
         return `Failed to send message: ${e.message}`;
       }
@@ -7495,6 +7605,27 @@ const TOOL_CATALOG: ToolDefinition[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "view-delegations",
+      description:
+        "Query delegation history — see parent→child agent relationships, costs, status, and trace linkage. " +
+        "Use to debug multi-agent workflows, trace cost attribution, and inspect delegation chains. " +
+        "Filter by parent_session_id (all children of a session), trace_id (full delegation tree), " +
+        "or correlation_id (specific delegation).",
+      parameters: {
+        type: "object",
+        properties: {
+          parent_session_id: { type: "string", description: "Filter: show all delegations from this parent session" },
+          trace_id: { type: "string", description: "Filter: show all delegations linked to this trace" },
+          correlation_id: { type: "string", description: "Filter: show a specific delegation by correlation_id" },
+          limit: { type: "number", description: "Max results (default 20, max 100)" },
+        },
+        required: [],
+      },
+    },
+  },
   // manage-releases, manage-slos: consolidated into platform verb above
   {
     type: "function",
@@ -7892,14 +8023,18 @@ const TOOL_CATALOG: ToolDefinition[] = [
     type: "function" as const,
     function: {
       name: "send-message",
-      description: "Send a message to another agent session (parent or sibling). Only available during delegated runs.",
+      description: "Send a typed message to another agent session. For text messages, just provide 'to' and 'message'. For permission requests (asking parent for approval), set message_type to 'permission_request' — the workflow will block until the parent responds. For responding to a child's permission request or plan, use 'permission_response' or 'plan_approval' with the correlation_id from the request.",
       parameters: {
         type: "object",
         properties: {
-          to: { type: "string", description: "Target session ID (parent_session_id or sibling session)" },
-          message: { type: "string", description: "Message content to send" },
+          to: { type: "string", description: "Target session ID (parent_session_id or sibling/child session)" },
+          message: { type: "string", description: "Message content, action description (for permission_request), or reason/feedback" },
+          message_type: { type: "string", enum: ["text", "permission_request", "permission_response", "plan_approval"], description: "Message type. Default: 'text'" },
+          correlation_id: { type: "string", description: "Correlation ID from the original request (required for permission_response and plan_approval)" },
+          approved: { type: "boolean", description: "Whether to approve (for permission_response and plan_approval). Default: true" },
+          reason: { type: "string", description: "Additional reason or context for the request" },
         },
-        required: ["to", "message"],
+        required: ["to"],
       },
     },
   },
