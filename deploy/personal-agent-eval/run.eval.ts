@@ -1,12 +1,13 @@
 /**
- * Personal agent eval harness — tests the lean Phase 10 prompt on Gemma 4.
+ * Personal agent eval harness — tests prompt quality on any LLM.
  *
- * Sends the personal agent system prompt + user message to Gemma via
- * AI Gateway. No runtime needed — this tests prompt quality, not tool
- * execution. L1 checks verify tool call names. L2 Gemma judge scores
- * the response on correctness, relevance, and tool_selection.
+ * Sends the personal agent system prompt + user message via AI Gateway.
+ * No runtime needed — tests prompt quality, not tool execution.
+ * L1 checks verify tool call names. L2 judge scores response quality.
  *
- * Run: pnpm --filter agentos-deploy pa-eval
+ * Run (default Gemma):  pnpm --filter agentos-deploy pa-eval
+ * Run (Haiku):          EVAL_MODEL=claude-haiku-4-5-20251001 pnpm --filter agentos-deploy pa-eval
+ * Run (any model):      EVAL_MODEL=<model-id> pnpm --filter agentos-deploy pa-eval
  */
 
 import { describe, it, expect } from "vitest";
@@ -14,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { FIXTURES, type EvalFixture } from "./fixtures/inputs";
-import { callGemma, type GatewayConfig, type LLMMessage, type ToolDef, type ToolCall } from "./llm-client";
+import { callLLM, type GatewayConfig, type LLMMessage, type ToolDef, type ToolCall } from "./llm-client";
 
 // ── .env auto-loading ───────────────────────────────────────────────
 {
@@ -36,13 +37,23 @@ const ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID || "";
 const GATEWAY_ID = process.env.AI_GATEWAY_ID || "one-shots";
 const AI_GW_TOKEN = process.env.AI_GATEWAY_TOKEN || process.env.CLOUDFLARE_API_TOKEN || "";
 const GPU_KEY = process.env.GPU_SERVICE_KEY || process.env.SERVICE_TOKEN || "";
-const SKIP = !ACCOUNT_ID || !GPU_KEY;
+// ── Model selection ────────────────────────────────────────────────
+const EVAL_MODEL = process.env.EVAL_MODEL || "gemma-4-31b";
+const JUDGE_MODEL = process.env.JUDGE_MODEL || "gemma-4-31b";
+const IS_ANTHROPIC = EVAL_MODEL.includes("claude") || EVAL_MODEL.includes("haiku") || EVAL_MODEL.includes("sonnet");
+const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY || "";
+
+const SKIP = !ACCOUNT_ID || (!GPU_KEY && !IS_ANTHROPIC) || (IS_ANTHROPIC && !ANTHROPIC_KEY);
 
 if (SKIP) {
   console.warn(
-    "[personal-agent-eval] SKIP — missing CLOUDFLARE_ACCOUNT_ID or GPU_SERVICE_KEY. " +
-    "Set these in .env to run the eval suite.",
+    "[personal-agent-eval] SKIP — missing credentials. " +
+    (IS_ANTHROPIC
+      ? "Set CLOUDFLARE_ACCOUNT_ID + ANTHROPIC_API_KEY in .env for Claude models."
+      : "Set CLOUDFLARE_ACCOUNT_ID + GPU_SERVICE_KEY in .env for Gemma models."),
   );
+} else {
+  console.log(`[personal-agent-eval] model=${EVAL_MODEL} judge=${JUDGE_MODEL}`);
 }
 
 const gwConfig: GatewayConfig = {
@@ -145,10 +156,10 @@ async function judgeResponse(
     `AGENT TEXT RESPONSE:\n${response || "(no text — tool calls only, not executed in this test)"}`,
   ].join("\n\n");
 
-  const result = await callGemma(gwConfig, [
+  const result = await callLLM(gwConfig, [
     { role: "system", content: JUDGE_SYSTEM },
     { role: "user", content: judgeUserMsg },
-  ], [], "gemma-4-31b");
+  ], [], JUDGE_MODEL);
 
   const raw = result.content;
   const start = raw.indexOf("{");
@@ -167,13 +178,12 @@ describe("personal agent eval harness", () => {
   it.skipIf(SKIP).each(
     FIXTURES.filter(f => f.id !== "judge-tripwire"),
   )("fixture: $id", async (fixture: EvalFixture) => {
-    // Send to Gemma
     const messages: LLMMessage[] = [
       { role: "system", content: systemPrompt },
       { role: "user", content: fixture.user_message },
     ];
 
-    const result = await callGemma(gwConfig, messages, CODE_MODE_TOOLS);
+    const result = await callLLM(gwConfig, messages, CODE_MODE_TOOLS, EVAL_MODEL);
 
     // Diagnostic: dump raw model output for all fixtures
     console.log(
@@ -206,7 +216,7 @@ describe("personal agent eval harness", () => {
     );
 
     console.log(
-      `[${fixture.id}] judge (gemma-4-31b): avg=${judge.average.toFixed(2)} ` +
+      `[${fixture.id}] judge (${JUDGE_MODEL}): avg=${judge.average.toFixed(2)} ` +
       `correctness=${judge.correctness} relevance=${judge.relevance} ` +
       `tool_selection=${judge.tool_selection} — ${judge.notes}`,
     );
@@ -226,7 +236,7 @@ describe("personal agent eval harness", () => {
     );
 
     console.log(
-      `[judge-tripwire] judge (gemma-4-31b): avg=${judge.average.toFixed(2)} ` +
+      `[judge-tripwire] judge (${JUDGE_MODEL}): avg=${judge.average.toFixed(2)} ` +
       `correctness=${judge.correctness} relevance=${judge.relevance} ` +
       `tool_selection=${judge.tool_selection} — ${judge.notes}`,
     );
