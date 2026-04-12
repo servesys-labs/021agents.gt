@@ -6,7 +6,7 @@
     "src/runtime/tools.ts": 8092,
     "src/runtime/reasoning-strategies.ts": 223,
     "src/runtime/intent-router.ts": 246,
-    "src/runtime/permission-classifier.ts": 140
+    "src/runtime/permission-classifier.ts": 155
   },
   "phase_targets": {
     "_comment": "Target LoC after each phase completes. Not enforced; documentation of intent.",

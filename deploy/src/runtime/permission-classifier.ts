@@ -65,6 +65,17 @@ const STATIC_CLASSIFICATION: Record<string, PermissionLevel> = {
   "share-artifact": "dangerous",
 };
 
+// Irreducible safety floor — no model judgment or config can bypass these.
+// These operations always require human approval. This backstop survives
+// even if STATIC_CLASSIFICATION is deleted or moved to a skill.
+export const ALWAYS_REQUIRE_APPROVAL = new Set([
+  "delete-agent",
+  "manage-secrets",
+  "dynamic-exec",
+  "manage-retention",
+  "a2a-send",
+]);
+
 /**
  * Classify a tool call's risk level.
  * Returns permission level + whether auto-approval is recommended.
@@ -74,6 +85,10 @@ export function classifyPermission(
   args: Record<string, unknown>,
   context?: { agentConfig?: any; sessionHistory?: string },
 ): { level: PermissionLevel; autoApprove: boolean; reason: string } {
+  if (ALWAYS_REQUIRE_APPROVAL.has(toolName)) {
+    return { level: "dangerous", autoApprove: false, reason: "irreducible safety floor" };
+  }
+
   const staticLevel = STATIC_CLASSIFICATION[toolName];
 
   if (staticLevel === "safe") {
