@@ -13,6 +13,7 @@ import { generateEvolutionSuggestions } from "./meta-agent";
 import { parseJsonColumn } from "../lib/parse-json-column";
 import { SKILL_CATALOG, SKILL_CATALOG_NAMES } from "../lib/skill-catalog.generated";
 import { appendRule } from "./skill-mutation";
+import { buildMetaAgentChatPrompt as buildMetaAgentChatPromptImpl } from "../prompts/meta-agent-chat";
 
 /**
  * Normalize an enabled_skills input from the LLM: coerce to string[],
@@ -113,6 +114,69 @@ export const PER_TURN_TOOL_CAPS: Record<string, number> = {
 // analytics can key on this to distinguish "safety guard fired" from
 // "tool genuinely broke".
 export const TOOL_THROTTLED_PREFIX = "throttled:";
+
+/**
+ * Per-user-turn tool-call budget. Encapsulates both the per-tool counter
+ * state AND the throttle-check policy, so tests can import a single
+ * object rather than reimplementing the throttle logic in test doubles.
+ *
+ * Scope contract: one `ToolCallBudget` instance must be created per user
+ * turn at the top of the dispatch loop — NOT inside the per-round `while`
+ * body, which would reset the counter every round and effectively raise
+ * the cap from `N per turn` to `N per round`. The scope is verified by
+ * the integration test in `test/meta-agent-chat-budget-scope.test.ts`,
+ * which drives `runMetaChat` across multiple rounds. Do not delete that
+ * test — the unit tests here verify `check`/`recordSuccess` in isolation
+ * and cannot catch a scope regression at the call site.
+ *
+ * Check/record split rationale: `check()` is non-mutating so you can
+ * safely call it at the top of the dispatch inner loop, branch on the
+ * result, and only mutate state when the call actually proceeds. This
+ * prevents the "throttled calls increment the counter anyway" bug
+ * (which would mean a single throttled attempt permanently blocks a
+ * subsequent legitimate call).
+ */
+export class ToolCallBudget {
+  private counts: Record<string, number> = {};
+  private readonly caps: Record<string, number>;
+
+  constructor(caps: Record<string, number> = PER_TURN_TOOL_CAPS) {
+    this.caps = caps;
+  }
+
+  /**
+   * Non-mutating: returns whether the next call to `toolName` would be
+   * throttled. Call this BEFORE executing the tool. If it returns
+   * `{ throttled: false }`, call `recordSuccess(toolName)` after the
+   * tool runs — the count is NOT yet incremented.
+   */
+  check(toolName: string): { throttled: true; message: string } | { throttled: false } {
+    const cap = this.caps[toolName];
+    if (cap === undefined) return { throttled: false };
+    const currentCount = this.counts[toolName] ?? 0;
+    if (currentCount >= cap) {
+      return {
+        throttled: true,
+        message: `${TOOL_THROTTLED_PREFIX} per-turn budget exhausted for ${toolName} (cap: ${cap})`,
+      };
+    }
+    return { throttled: false };
+  }
+
+  /**
+   * Record that a non-throttled call actually ran. Call this AFTER
+   * `check()` returned `{ throttled: false }` and the tool dispatch
+   * proceeded. Throttled calls must not call this — they never ran.
+   */
+  recordSuccess(toolName: string): void {
+    this.counts[toolName] = (this.counts[toolName] ?? 0) + 1;
+  }
+
+  /** Returns the current count for a tool (observability / telemetry). */
+  getCount(toolName: string): number {
+    return this.counts[toolName] ?? 0;
+  }
+}
 
 // Max `EXPLAIN (FORMAT JSON, COSTS TRUE)` Total Cost for a run_query.
 // Postgres cost units are abstract (~1 per CPU op, 4 per disk page).
@@ -2826,9 +2890,9 @@ async function executeTool(
 /* ── System prompt ──────────────────────────────────────────────── */
 
 function buildSystemPrompt(agentName: string, mode: "demo" | "live" = "live"): string {
-  // Import the reusable prompt builder
-  const { buildMetaAgentChatPrompt } = require("../prompts/meta-agent-chat");
-  return buildMetaAgentChatPrompt(agentName, mode);
+  // Static import at module top — not `require`, so vi.mock interception
+  // works in test harnesses that need to stub the prompt out.
+  return buildMetaAgentChatPromptImpl(agentName, mode);
 }
 
 // Legacy prompt kept for reference — replaced by prompts/meta-agent-chat.ts
@@ -3059,7 +3123,13 @@ export async function runMetaChat(
     tool_results: Array<{ name: string; result: string; latency_ms: number; error?: string }>;
   }> = [];
   const sessionId = `meta_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
-  const toolCallCountsByName: Record<string, number> = {};
+
+  // Per-turn tool budget. MUST be instantiated OUTSIDE the while loop
+  // so counts persist across all rounds within a single user turn.
+  // The integration test in meta-agent-chat-budget-scope.test.ts is
+  // the regression guard for this scope — do not move this declaration
+  // inside the loop body.
+  const budget = new ToolCallBudget();
 
   while (round < MAX_TOOL_ROUNDS) {
     round++;
@@ -3174,26 +3244,34 @@ export async function runMetaChat(
       let result: string;
       let toolError: string | undefined;
 
-      const perTurnCap = PER_TURN_TOOL_CAPS[tc.function.name];
-      const currentCount = toolCallCountsByName[tc.function.name] ?? 0;
+      const check = budget.check(tc.function.name);
       let throttled = false;
-      if (perTurnCap !== undefined && currentCount >= perTurnCap) {
+      if (check.throttled) {
         throttled = true;
-        toolError = `${TOOL_THROTTLED_PREFIX} per-turn budget exhausted for ${tc.function.name} (cap: ${perTurnCap})`;
+        toolError = check.message;
+        const cap = PER_TURN_TOOL_CAPS[tc.function.name];
         result = JSON.stringify({
           error: toolError,
-          hint: `This tool is rate-limited to ${perTurnCap} calls per user turn to protect shared database capacity. Reason about the results you already have, or ask the user a clarifying question instead of issuing more ${tc.function.name} calls.`,
+          hint: `This tool is rate-limited to ${cap} calls per user turn to protect shared database capacity. Reason about the results you already have, or ask the user a clarifying question instead of issuing more ${tc.function.name} calls.`,
         });
         console.warn(
-          `[meta-agent-chat] tool throttled org=${ctx.orgId} agent=${ctx.agentName} tool=${tc.function.name} cap=${perTurnCap}`,
+          `[meta-agent-chat] tool throttled org=${ctx.orgId} agent=${ctx.agentName} tool=${tc.function.name} cap=${cap}`,
         );
       } else {
-        toolCallCountsByName[tc.function.name] = currentCount + 1;
         try {
           result = await executeTool(tc.function.name, args, ctx);
+          budget.recordSuccess(tc.function.name);
         } catch (err: any) {
           toolError = err.message || "Tool execution failed";
           result = JSON.stringify({ error: toolError });
+          // Deliberately NOT calling recordSuccess here — the tool threw,
+          // so it didn't actually complete. This is a small behavior
+          // change from the pre-class code (which incremented on every
+          // non-throttled call including failures). The new behavior is
+          // that a thrown tool does not consume budget, so the caller
+          // can retry. If we observe abusive retry-storms on throwing
+          // tools, revisit this — but the read-only nature of all
+          // capped tools today makes this safe.
         }
       }
       const toolLatencyMs = Date.now() - toolStart;

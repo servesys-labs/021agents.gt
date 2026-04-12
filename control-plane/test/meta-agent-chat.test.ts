@@ -38,7 +38,7 @@ vi.mock("../src/logic/meta-agent", () => ({
 // For direct tool testing, we import the module and call executeTool via the chat runner.
 
 import { buildMetaAgentChatPrompt, RUNTIME_INFRASTRUCTURE_DOCS } from "../src/prompts/meta-agent-chat";
-import { PER_TURN_TOOL_CAPS, TOOL_THROTTLED_PREFIX, RUN_QUERY_MAX_PLAN_COST } from "../src/logic/meta-agent-chat";
+import { PER_TURN_TOOL_CAPS, TOOL_THROTTLED_PREFIX, RUN_QUERY_MAX_PLAN_COST, ToolCallBudget } from "../src/logic/meta-agent-chat";
 
 // ── Test Helpers ─────────────────────────────────────────────────
 
@@ -726,36 +726,19 @@ describe("run_query — plan cost pre-flight", () => {
   });
 });
 
-describe("run_query — per-turn budget cap", () => {
-  // Mirrors the dispatch-loop short-circuit in meta-agent-chat.ts and pins
-  // the production constants so bumping the cap requires a deliberate test
-  // change. If `executeTool` is ever exported we should replace this with
-  // an end-to-end runMetaChat test mocking callLLMGateway.
-  function simulateTurnDispatch(toolCalls: Array<{ name: string }>) {
-    const counts: Record<string, number> = {};
-    let totalToolCalls = 0;
-    const executed: string[] = [];
-    const blocked: Array<{ name: string; error: string }> = [];
-
-    for (const tc of toolCalls) {
-      const cap = PER_TURN_TOOL_CAPS[tc.name];
-      const current = counts[tc.name] ?? 0;
-      let throttled = false;
-      if (cap !== undefined && current >= cap) {
-        throttled = true;
-        blocked.push({
-          name: tc.name,
-          error: `${TOOL_THROTTLED_PREFIX} per-turn budget exhausted for ${tc.name} (cap: ${cap})`,
-        });
-      } else {
-        counts[tc.name] = current + 1;
-        executed.push(tc.name);
-      }
-      if (!throttled) totalToolCalls++;
-    }
-
-    return { counts, executed, blocked, totalToolCalls };
-  }
+describe("ToolCallBudget — per-turn cap unit contract", () => {
+  // These tests exercise the real `ToolCallBudget` class imported from
+  // production code. They verify the check/recordSuccess contract in
+  // isolation but CANNOT catch a regression where the budget gets
+  // instantiated inside the dispatch while loop instead of outside it.
+  // The scope regression is covered by the end-to-end integration test
+  // in `test/meta-agent-chat-budget-scope.test.ts` — do not delete it.
+  //
+  // Previously this block used a local `simulateTurnDispatch` helper
+  // that reimplemented the production throttle logic, which meant a
+  // logic drift in production could silently pass CI here. The switch
+  // to direct `ToolCallBudget` imports eliminates that drift class —
+  // if someone changes the check/record semantics, these tests fail.
 
   it("pins the production cap — run_query is limited to 5/turn", () => {
     // If this fails, someone bumped the cap deliberately and needs to update
@@ -767,74 +750,103 @@ describe("run_query — per-turn budget cap", () => {
     expect(TOOL_THROTTLED_PREFIX).toBe("throttled:");
   });
 
-  it("allows the first N run_query calls through where N = cap", () => {
+  it("allows the first N check+recordSuccess calls through where N = cap", () => {
+    const budget = new ToolCallBudget();
     const cap = PER_TURN_TOOL_CAPS.run_query;
-    const calls = Array.from({ length: cap }, () => ({ name: "run_query" }));
-    const { executed, blocked } = simulateTurnDispatch(calls);
-
-    expect(executed).toHaveLength(cap);
-    expect(blocked).toHaveLength(0);
+    for (let i = 0; i < cap; i++) {
+      const check = budget.check("run_query");
+      expect(check.throttled).toBe(false);
+      budget.recordSuccess("run_query");
+    }
+    expect(budget.getCount("run_query")).toBe(cap);
   });
 
-  it("blocks the (cap+1)th run_query call with a throttled-prefixed error", () => {
+  it("blocks the (cap+1)th run_query call with a throttled-prefixed message", () => {
+    const budget = new ToolCallBudget();
     const cap = PER_TURN_TOOL_CAPS.run_query;
-    const calls = Array.from({ length: cap + 1 }, () => ({ name: "run_query" }));
-    const { executed, blocked } = simulateTurnDispatch(calls);
-
-    expect(executed).toHaveLength(cap);
-    expect(blocked).toHaveLength(1);
-    expect(blocked[0].error.startsWith(TOOL_THROTTLED_PREFIX)).toBe(true);
-    expect(blocked[0].error).toContain("per-turn budget exhausted");
-    expect(blocked[0].error).toContain(`cap: ${cap}`);
+    for (let i = 0; i < cap; i++) {
+      expect(budget.check("run_query").throttled).toBe(false);
+      budget.recordSuccess("run_query");
+    }
+    const blocked = budget.check("run_query");
+    expect(blocked.throttled).toBe(true);
+    if (blocked.throttled) {
+      expect(blocked.message.startsWith(TOOL_THROTTLED_PREFIX)).toBe(true);
+      expect(blocked.message).toContain("per-turn budget exhausted");
+      expect(blocked.message).toContain(`cap: ${cap}`);
+    }
   });
 
   it("blocks all calls beyond the cap in a runaway loop scenario", () => {
+    const budget = new ToolCallBudget();
     const cap = PER_TURN_TOOL_CAPS.run_query;
     const attempts = 20;
-    const calls = Array.from({ length: attempts }, () => ({ name: "run_query" }));
-    const { executed, blocked } = simulateTurnDispatch(calls);
-
-    expect(executed).toHaveLength(cap);
-    expect(blocked).toHaveLength(attempts - cap);
+    let executed = 0;
+    let blocked = 0;
+    for (let i = 0; i < attempts; i++) {
+      const check = budget.check("run_query");
+      if (check.throttled) {
+        blocked++;
+      } else {
+        budget.recordSuccess("run_query");
+        executed++;
+      }
+    }
+    expect(executed).toBe(cap);
+    expect(blocked).toBe(attempts - cap);
   });
 
   it("does not cap tools that have no entry in PER_TURN_TOOL_CAPS", () => {
-    const calls = Array.from({ length: 10 }, () => ({ name: "read_agent_config" }));
-    const { executed, blocked } = simulateTurnDispatch(calls);
-
+    const budget = new ToolCallBudget();
     expect(PER_TURN_TOOL_CAPS.read_agent_config).toBeUndefined();
-    expect(executed).toHaveLength(10);
-    expect(blocked).toHaveLength(0);
+    for (let i = 0; i < 10; i++) {
+      expect(budget.check("read_agent_config").throttled).toBe(false);
+      budget.recordSuccess("read_agent_config");
+    }
+    expect(budget.getCount("read_agent_config")).toBe(10);
   });
 
   it("tracks counts per tool-name independently", () => {
+    const budget = new ToolCallBudget();
     const cap = PER_TURN_TOOL_CAPS.run_query;
-    const calls = [
-      ...Array.from({ length: cap }, () => ({ name: "run_query" })),
-      ...Array.from({ length: 5 }, () => ({ name: "read_sessions" })),
-      { name: "run_query" }, // one over cap — should block
-    ];
-    const { executed, blocked } = simulateTurnDispatch(calls);
-
-    expect(executed.filter(n => n === "run_query")).toHaveLength(cap);
-    expect(executed.filter(n => n === "read_sessions")).toHaveLength(5);
-    expect(blocked).toHaveLength(1);
-    expect(blocked[0].name).toBe("run_query");
+    for (let i = 0; i < cap; i++) {
+      budget.check("run_query");
+      budget.recordSuccess("run_query");
+    }
+    for (let i = 0; i < 5; i++) {
+      budget.check("read_sessions");
+      budget.recordSuccess("read_sessions");
+    }
+    expect(budget.getCount("run_query")).toBe(cap);
+    expect(budget.getCount("read_sessions")).toBe(5);
+    expect(budget.check("run_query").throttled).toBe(true);
+    expect(budget.check("read_sessions").throttled).toBe(false);
   });
 
-  it("throttled calls do NOT inflate totalToolCalls (the action_count input)", () => {
-    // Regression guard for a bug caught in 2nd-pass audit: if throttled calls
-    // are counted as real tool actions, evolution-analyzer.ts:477 falsely
-    // labels the session 'excessive tool calls' and observability aggregates
-    // over-report total_actions. Throttled calls are no-ops and must not
-    // contribute to action_count.
-    const cap = PER_TURN_TOOL_CAPS.run_query;
-    const attempts = 20;
-    const calls = Array.from({ length: attempts }, () => ({ name: "run_query" }));
-    const { totalToolCalls } = simulateTurnDispatch(calls);
+  it("check() is non-mutating — calling it without recordSuccess does not advance the count", () => {
+    // This is the check/record split contract: check() must NEVER mutate
+    // state so callers can safely branch on the result before committing.
+    // If check() incremented on its own, a throttled call would permanently
+    // block the subsequent legitimate call.
+    const budget = new ToolCallBudget();
+    for (let i = 0; i < 100; i++) {
+      budget.check("run_query");
+    }
+    expect(budget.getCount("run_query")).toBe(0);
+    expect(budget.check("run_query").throttled).toBe(false);
+  });
 
-    expect(totalToolCalls).toBe(cap);
-    expect(totalToolCalls).not.toBe(attempts);
+  it("accepts a custom caps map for focused testing", () => {
+    const budget = new ToolCallBudget({ custom_tool: 2 });
+    expect(budget.check("custom_tool").throttled).toBe(false);
+    budget.recordSuccess("custom_tool");
+    expect(budget.check("custom_tool").throttled).toBe(false);
+    budget.recordSuccess("custom_tool");
+    expect(budget.check("custom_tool").throttled).toBe(true);
+    // Tools not in the custom map are unchecked even if they exist in the
+    // production PER_TURN_TOOL_CAPS — the constructor parameter takes
+    // precedence for test isolation.
+    expect(budget.check("run_query").throttled).toBe(false);
   });
 });
 
