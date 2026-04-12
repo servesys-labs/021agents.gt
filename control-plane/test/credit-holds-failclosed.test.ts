@@ -42,6 +42,9 @@ function createBillingSqlState(initialBalance = 5) {
   const sql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
     const query = strings.join("?");
 
+    if (query.includes("FROM agents") && query.includes("handle")) {
+      return [{ handle: String(values[0]) }];
+    }
     if (query.includes("SELECT name FROM agents WHERE name =")) {
       return [{ name: String(values[0]) }];
     }
