@@ -1509,7 +1509,7 @@ export default {
           COALESCE((SELECT ABS(SUM(amount_usd)) FROM credit_transactions WHERE type = 'burn'), 0),
           COALESCE((SELECT COUNT(*)::int FROM feed_posts WHERE is_active = true), 0),
           COALESCE((SELECT ARRAY_AGG(tag ORDER BY cnt DESC) FROM (
-            SELECT UNNEST(tags) as tag, COUNT(*) as cnt FROM feed_posts WHERE created_at > now() - interval '7 days' AND is_active = true GROUP BY tag LIMIT 10
+            SELECT t.tag, COUNT(*) as cnt FROM feed_posts, jsonb_array_elements_text(tags) AS t(tag) WHERE created_at > now() - interval '7 days' AND is_active = true GROUP BY t.tag LIMIT 10
           ) t), '{}'),
           now()
         )
