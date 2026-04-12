@@ -1109,7 +1109,7 @@ async function executeSingleTool(
   // ── Governance: org-scoped tool context enforcement ───────────
   // Connectors/MCP/internal DB tooling must never trust org_id from tool args.
   const identity = resolveToolIdentity(env);
-  const orgScopedTools = new Set(["connector", "mcp-call", "manage-mcp", "platform", "db-query", "db-batch", "db-report", "sql"]);
+  const orgScopedTools = new Set(["connector", "mcp-call", "platform", "sql"]);
   if (orgScopedTools.has(tc.name)) {
     const requestedOrg = String(args.org_id || "").trim();
     if (!identity.orgId) {
@@ -1311,23 +1311,6 @@ function isExternalServiceError(err: any): boolean {
 }
 
 // manage-* → platform aliases for backward compatibility with stored configs.
-// getToolDefinitions expands these so agents configured with manage-issues
-// also get the canonical platform tool definition.
-const TOOL_ALIASES: Record<string, string> = {
-  "manage-issues": "platform",
-  "manage-releases": "platform",
-  "manage-slos": "platform",
-  "manage-secrets": "platform",
-  "manage-rag": "platform",
-  "manage-policies": "platform",
-  "manage-retention": "platform",
-  "manage-workflows": "platform",
-  "manage-projects": "platform",
-  "manage-mcp": "platform",
-  "manage-voice": "platform",
-  "manage-gpu": "platform",
-};
-
 async function handlePlatformResource(
   env: RuntimeEnv,
   resource: string,
@@ -2539,10 +2522,6 @@ async function dispatch(
     }
 
     case "codemode-transform":
-    case "codemode-validate":
-    case "codemode-orchestrate":
-    case "codemode-test":
-    case "codemode-generate-mcp":
     case "codemode": {
       const codemodeAction = args.action || normalizedTool.replace("codemode-", "") || "transform";
       const allToolsForCm = effectiveToolDefs();
@@ -2883,11 +2862,8 @@ async function dispatch(
     // ── DB Query Tools (codemode-safe, templated) ─────────────────
     // These use the /cf/db/query allowlist — no raw SQL, always org-scoped.
 
-    case "db-query":
-    case "db-batch":
-    case "db-report":
     case "sql": {
-      const sqlMode = args.mode || normalizedTool.replace("db-", "") || "query";
+      const sqlMode = args.mode || "query";
       if (sqlMode === "batch") {
         const queries = args.queries;
         if (!Array.isArray(queries) || queries.length === 0) return "sql:batch requires queries array";
@@ -2960,11 +2936,11 @@ async function dispatch(
       // Default: query mode
       // Execute a single templated DB query
       const queryId = String(args.query_id || "");
-      if (!queryId) return "db-query requires query_id (e.g., 'sessions.list', 'issues.open', 'eval.runs')";
+      if (!queryId) return "sql:query requires query_id (e.g., 'sessions.list', 'issues.open', 'eval.runs')";
 
       const orgId = String(args.org_id || "");
       const userId = args.user_id || "";
-      if (!orgId) return JSON.stringify({ error: "db-query requires org context", code: "ORG_CONTEXT_REQUIRED" });
+      if (!orgId) return JSON.stringify({ error: "sql:query requires org context", code: "ORG_CONTEXT_REQUIRED" });
 
       // Call our own /cf/db/query endpoint (same worker, internal)
       try {
@@ -2976,7 +2952,7 @@ async function dispatch(
 
         // Self-call via internal fetch if HYPERDRIVE available, else error
         const hyperdrive = (env as any).HYPERDRIVE;
-        if (!hyperdrive) return "db-query requires database access";
+        if (!hyperdrive) return "sql:query requires database access";
 
         const { getDb } = await import("./db");
         const sql = await getDb(hyperdrive);
@@ -3025,11 +3001,11 @@ async function dispatch(
 
         return JSON.stringify({ query_id: queryId, rows, row_count: Array.isArray(rows) ? rows.length : 0 });
       } catch (err: any) {
-        return `db-query failed: ${err.message || err}`;
+        return `sql:query failed: ${err.message || err}`;
       }
     }
 
-    // db-batch, db-report: handled by sql verb aliases above
+
 
     // ── Agent Lifecycle Tools ──────────────────────────────────────
 
@@ -3466,19 +3442,6 @@ async function dispatch(
       }
     }
 
-    // ── Platform verb aliases (backward compat for stored configs) ──
-    case "manage-issues": return handlePlatformResource(env, "issues", args);
-    case "manage-releases": return handlePlatformResource(env, "releases", args);
-    case "manage-slos": return handlePlatformResource(env, "slos", args);
-    case "manage-secrets": return handlePlatformResource(env, "secrets", args);
-    case "manage-rag": return handlePlatformResource(env, "rag", args);
-    case "manage-policies": return handlePlatformResource(env, "policies", args);
-    case "manage-retention": return handlePlatformResource(env, "retention", args);
-    case "manage-workflows": return handlePlatformResource(env, "workflows", args);
-    case "manage-projects": return handlePlatformResource(env, "projects", args);
-    case "manage-mcp": return handlePlatformResource(env, "mcp", args);
-    case "manage-voice": return handlePlatformResource(env, "voice", args);
-    case "manage-gpu": return handlePlatformResource(env, "gpu", args);
     case "platform": {
       const resource = String(args.resource || "");
       if (!resource) return "platform requires a resource parameter (e.g., issues, releases, secrets)";
@@ -3579,7 +3542,7 @@ async function dispatch(
       }
     }
 
-    // manage-secrets: handled by alias above
+
 
     case "compare-agents": {
       const hyperdrive = (env as any).HYPERDRIVE;
@@ -3600,7 +3563,7 @@ async function dispatch(
       }
     }
 
-    // manage-rag through manage-voice: handled by aliases above
+
 
     case "make-voice-call": {
       const hyperdrive = (env as any).HYPERDRIVE;
@@ -5871,17 +5834,12 @@ export function getToolDefinitions(enabledTools: string[], blockedTools: string[
   // marketplace-search + a2a-send are always available so every agent can discover
   // and delegate to specialist skill agents in the marketplace.
   const blocked = new Set(blockedTools);
-  // Expand aliases: if config has manage-issues, also include the canonical platform tool
-  const expanded = new Set(enabledTools);
-  for (const t of enabledTools) {
-    const canonical = TOOL_ALIASES[t];
-    if (canonical) expanded.add(canonical);
-  }
+  const enabled = new Set(enabledTools);
   return TOOL_CATALOG.filter(
     (t) => {
       const name = t.function.name;
       if (blocked.has(name)) return false;
-      return expanded.has(name) || ALWAYS_AVAILABLE.has(name);
+      return enabled.has(name) || ALWAYS_AVAILABLE.has(name);
     },
   );
 }
@@ -7254,7 +7212,6 @@ const TOOL_CATALOG: ToolDefinition[] = [
       },
     },
   },
-  // manage-secrets: consolidated into platform verb above
   {
     type: "function",
     function: {
@@ -7271,7 +7228,7 @@ const TOOL_CATALOG: ToolDefinition[] = [
       },
     },
   },
-  // manage-rag through manage-mcp: consolidated into platform verb above
+
 
   // ── MCP Wrapper (v0.2.1 codemode/mcp integration) ──────────────
 

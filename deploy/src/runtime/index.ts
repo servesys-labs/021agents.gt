@@ -128,8 +128,8 @@ export { createChildAbortController, createSiblingGroup } from "./abort";
 export { syncFileToR2, hydrateWorkspace, loadManifest, listWorkspaceFiles, readFileFromR2 } from "./workspace";
 
 // Reasoning strategies
-export { REASONING_STRATEGIES, selectReasoningStrategy, autoSelectStrategy, REASONING_STRATEGY_SNIPPET_CODE } from "./reasoning-strategies";
-export type { ReasoningStrategy } from "./reasoning-strategies";
+export { REASONING_STRATEGIES, selectReasoningStrategy, autoSelectStrategy, REASONING_STRATEGY_SNIPPET_CODE } from "./reasoning";
+export type { ReasoningStrategy } from "./reasoning";
 
 // Progress
 export { buildProgressSummary, writeProgress, loadStartupContext } from "./progress";

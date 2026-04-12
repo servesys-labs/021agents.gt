@@ -495,7 +495,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       }
 
       // Reasoning strategy
-      const { selectReasoningStrategy, autoSelectStrategy } = await memo("reasoning", () => import("./runtime/reasoning-strategies"));
+      const { selectReasoningStrategy, autoSelectStrategy } = await memo("reasoning", () => import("./runtime/reasoning"));
       const { getToolDefinitions } = await memo("tools", () => import("./runtime/tools"));
       const allToolDefsForConfig = getToolDefinitions(config.tools, config.blocked_tools);
       const llmVisibleToolDefs = config.use_code_mode

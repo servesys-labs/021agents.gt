@@ -8,7 +8,7 @@
  * Design principles:
  * - Action-oriented: make changes when asked, don't just describe
  * - Context-aware: different starter prompts per tab
- * - Tool-comprehensive: document every tool the meta-agent has
+ * - Tool-selective: activate on demand via description match
  * - Workflow-driven: common tasks have step-by-step flows
  */
 

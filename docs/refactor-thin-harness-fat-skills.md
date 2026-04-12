@@ -827,7 +827,9 @@ Each resolver injects ~1 line per entry. Bodies load on activation.
 - [ ] `control-plane/src/prompts/meta-agent-chat.ts` ≤ 150 LoC; base prompt ≤ 2,000 tokens.
 - [ ] `deploy/src/runtime/tools.ts` ≤ 2,500 LoC, cost table ≤ 12 entries.
 - [ ] `agentos/tools/` directory does not exist.
-- [ ] `reasoning-strategies.ts`, `intent-router.ts`, `permission-classifier.ts` do not exist.
+- [ ] `reasoning-strategies.ts` does not exist (replaced by minimal `reasoning.ts`).
+- [ ] `intent-router.ts` does not exist (deleted in Phase 9).
+- [ ] `permission-classifier.ts` simplified to irreducible backstop (≤65 LoC, `ALWAYS_REQUIRE_APPROVAL` + `DESTRUCTIVE_PATTERN`).
 
 **Behavior-level:**
 - [ ] `agentos create "build a research agent"` → config with `enabled_skills` populated, ≤ 8 tools, ≤ 500-char system prompt.

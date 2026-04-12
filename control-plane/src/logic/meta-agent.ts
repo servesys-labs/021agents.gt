@@ -82,14 +82,8 @@ const PLATFORM_TOOLS = {
   // Scheduling & Workflows
   "create-schedule": "Create a cron schedule for recurring tasks",
   "list-schedules": "List active schedules",
-  "manage-workflows": "Create and run multi-step workflows",
   "todo": "Manage a task list within a session",
 
-  // Advanced
-  "run-codemode": "Execute a codemode snippet in a sandboxed V8 isolate",
-  "manage-rag": "Manage RAG indices and documents",
-  "manage-mcp": "Manage MCP server connections",
-  "manage-secrets": "Manage encrypted secrets",
   "discover-api": "Discover available API endpoints and their schemas",
 
   // Voice / Telephony
@@ -277,13 +271,11 @@ export function recommendTools(description: string): string[] {
     "read-file": ["file", "read", "csv", "json", "document", "parse"],
     "write-file": ["write", "save", "export", "generate report", "output", "create file"],
     "http-request": ["api", "http", "rest", "endpoint", "webhook", "fetch", "request", "integration"],
-    "db-query": ["database", "sql", "query", "data", "records", "table", "postgres"],
     "send-email": ["email", "mail", "send", "notification", "alert"],
     "a2a-send": ["delegate", "multi-agent", "collaborate", "hand off"],
     "knowledge-search": ["knowledge", "rag", "semantic", "vector", "context", "docs", "faq"],
     "store-knowledge": ["store", "index", "ingest", "upload", "knowledge base"],
     "image-generate": ["image", "picture", "visual", "design", "graphic"],
-    "manage-issues": ["ticket", "issue", "bug", "track", "triage"],
     "autoresearch": ["research", "study", "investigate", "literature", "survey"],
     "security-scan": ["security", "scan", "vulnerability", "audit"],
     "create-schedule": ["schedule", "cron", "recurring", "periodic", "automate"],
@@ -293,7 +285,9 @@ export function recommendTools(description: string): string[] {
     "todo": ["task", "checklist", "plan", "organize"],
     "conversation-intel": ["sentiment", "quality", "analytics", "conversation"],
     "make-voice-call": ["call", "phone", "dial", "ring", "outbound call", "voice call", "telephony"],
-    "manage-workflows": ["workflow", "pipeline", "orchestrate", "multi-step"],
+    "platform": ["workflow", "pipeline", "orchestrate", "multi-step", "rag", "mcp", "secrets", "policies", "ticket", "issue", "bug", "triage"],
+    "sql": ["database", "sql", "query", "report", "db", "data", "records", "table", "postgres"],
+    "codemode": ["codemode", "transform", "validate", "sandbox"],
   };
 
   for (const [tool, keywords] of Object.entries(KEYWORD_MAP)) {

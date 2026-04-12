@@ -30,7 +30,7 @@ import { createBackpressureController } from "./backpressure";
 import { estimateTokenCost, estimateTokensFromText } from "./pricing";
 import { attachDelegationLineage, type DelegationContextInput } from "./delegation";
 import { attachToolPolicyEnvelope } from "./policy-envelope";
-import { selectReasoningStrategy, autoSelectStrategy } from "./reasoning-strategies";
+import { selectReasoningStrategy, autoSelectStrategy } from "./reasoning";
 import { loadSkills, formatSkillsPrompt } from "./skills";
 import { loadStartupContext } from "./progress";
 import { EventSequencer, BoundedUUIDSet } from "./ws-dedup";

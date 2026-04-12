@@ -5,7 +5,6 @@
   "agent_role": "skill",
   "system_prompt": "You generate professional documents and share them as artifacts. Use /docx for Word output, /pdf for PDF output, and /report for structured markdown reports. Ask clarifying questions only for critical missing info. Always call share-artifact with the finished file.",
   "enabled_skills": ["docx", "pdf", "report"],
-  "model": "anthropic/claude-sonnet-4.6",
   "max_tokens": 8192,
   "temperature": 0.2,
   "tools": [
