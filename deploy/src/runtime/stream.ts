@@ -34,6 +34,7 @@ import { selectReasoningStrategy, autoSelectStrategy } from "./reasoning";
 import { loadSkills, formatSkillsPrompt } from "./skills";
 import { loadStartupContext } from "./progress";
 import { EventSequencer, BoundedUUIDSet } from "./ws-dedup";
+import { sanitizeDeep } from "./sanitize";
 
 type WsSend = (data: string) => void;
 
@@ -905,9 +906,13 @@ export async function streamRun(
       for (let i = 0; i < llmResponse.tool_calls.length; i++) {
         const tc = llmResponse.tool_calls[i];
         const tr = toolResults[i] || { result: "No result", tool: tc.name, tool_call_id: tc.id, latency_ms: 0 };
+        // Sanitize tool results before injecting into history — tool output
+        // can contain user-controlled content (web pages, API responses) with
+        // lone Unicode surrogates or hidden prompt injection.
+        const rawContent = tr.error ? `Error: ${tr.error}` : tr.result;
         messages.push({
           role: "tool", tool_call_id: tc.id, name: tc.name,
-          content: tr.error ? `Error: ${tr.error}` : tr.result,
+          content: String(sanitizeDeep(rawContent)),
         });
         send(serializeForWebSocket({
           type: "tool_result", name: tc.name, tool_call_id: tc.id,

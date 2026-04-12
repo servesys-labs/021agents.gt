@@ -3,7 +3,7 @@
   "_seed_instructions": "To regenerate: WRITE_LOC_BUDGET=1 pnpm vitest run test/refactor-phase0.test.ts",
   "ceilings": {
     "src/runtime/skills.ts": 180,
-    "src/runtime/tools.ts": 7697,
+    "src/runtime/tools.ts": 7715,
     "src/runtime/reasoning.ts": 164,
     "src/runtime/permission-classifier.ts": 71
   },
