@@ -38,10 +38,18 @@ export async function resolveApiKey(key: string, env: Env): Promise<CurrentUser>
       throw Object.assign(new Error("Invalid or expired API key"), { status: 401 });
     }
 
-    // last_used_at update — best-effort, matches Python backend behavior
-    try {
-      await sql`UPDATE api_keys SET last_used_at = ${new Date().toISOString()} WHERE key_id = ${row.key_id}`;
-    } catch {}
+    // last_used_at: fire-and-forget write to KV instead of a DB UPDATE
+    // on every request. At 30+ RPS, the DB write was consuming one
+    // Hyperdrive connection-slot per request for a non-critical timestamp.
+    // KV write is sub-millisecond and off the connection pool entirely.
+    // The cron can batch-flush KV→DB periodically for the admin UI.
+    if (env.AGENT_PROGRESS_KV) {
+      env.AGENT_PROGRESS_KV.put(
+        `key-seen:${row.key_id}`,
+        new Date().toISOString(),
+        { expirationTtl: 86400 },
+      ).catch(() => {});
+    }
 
     const userRows = await sql`SELECT email FROM users WHERE user_id = ${row.user_id}`;
 
