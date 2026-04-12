@@ -409,21 +409,36 @@ const GEMMA_EDGE = {
   ],
 };
 
+// Model strengths (from eval harness benchmarks, 23 fixtures):
+//
+//   Gemma 31B Dense:  best tool routing (execute-code), research, data analysis, file ops
+//   Gemma 26B MoE:    fast simple queries, tool calls, 166 t/s
+//   Kimi K2.5:        best plan-first compliance, complex builds, refactoring, delegation (free via Workers AI)
+//
+// Strategy: Kimi for tasks needing planning/reasoning, Gemma for tool-heavy execution.
 const PLAN_ROUTING: Record<string, Record<string, Record<string, { model: string; provider: string }>>> = {
   free: {
     general: { simple: GEMMA_FAST, moderate: GEMMA_FAST, complex: KIMI_COMPLEX, tool_call: GEMMA_FAST },
+    coding: { planner: KIMI_COMPLEX, implementer: KIMI_COMPLEX, reviewer: GEMMA_DEEP, debugger: GEMMA_DEEP, simple: GEMMA_FAST, moderate: GEMMA_FAST, complex: KIMI_COMPLEX },
+    research: { search: GEMMA_FAST, analyze: GEMMA_DEEP, synthesize: KIMI_COMPLEX, simple: GEMMA_FAST, moderate: GEMMA_FAST, complex: KIMI_COMPLEX },
     multimodal: { vision: GEMMA_DEEP },
   },
   basic: {
     general: { simple: GEMMA_FAST, moderate: GEMMA_FAST, complex: KIMI_COMPLEX, tool_call: GEMMA_FAST },
+    coding: { planner: KIMI_COMPLEX, implementer: KIMI_COMPLEX, reviewer: GEMMA_DEEP, debugger: GEMMA_DEEP, simple: GEMMA_FAST, moderate: GEMMA_FAST, complex: KIMI_COMPLEX },
+    research: { search: GEMMA_FAST, analyze: GEMMA_DEEP, synthesize: KIMI_COMPLEX, simple: GEMMA_FAST, moderate: GEMMA_FAST, complex: KIMI_COMPLEX },
     multimodal: { vision: GEMMA_DEEP },
   },
   standard: {
     general: { simple: GEMMA_FAST, moderate: GEMMA_DEEP, complex: KIMI_COMPLEX, tool_call: GEMMA_FAST },
+    coding: { planner: KIMI_COMPLEX, implementer: GEMMA_DEEP, reviewer: GEMMA_DEEP, debugger: GEMMA_DEEP, simple: GEMMA_FAST, moderate: GEMMA_DEEP, complex: KIMI_COMPLEX },
+    research: { search: GEMMA_FAST, analyze: GEMMA_DEEP, synthesize: KIMI_COMPLEX, simple: GEMMA_FAST, moderate: GEMMA_DEEP, complex: KIMI_COMPLEX },
     multimodal: { vision: GEMMA_DEEP },
   },
   premium: {
     general: { simple: GEMMA_FAST, moderate: GEMMA_DEEP, complex: KIMI_COMPLEX, tool_call: GEMMA_FAST },
+    coding: { planner: KIMI_COMPLEX, implementer: GEMMA_DEEP, reviewer: GEMMA_DEEP, debugger: GEMMA_DEEP, simple: GEMMA_FAST, moderate: GEMMA_DEEP, complex: KIMI_COMPLEX },
+    research: { search: GEMMA_FAST, analyze: GEMMA_DEEP, synthesize: KIMI_COMPLEX, simple: GEMMA_FAST, moderate: GEMMA_DEEP, complex: KIMI_COMPLEX },
     multimodal: { vision: GEMMA_DEEP },
   },
   // ── Paid plans (uncomment when ready to monetize) ──────────────────
