@@ -363,3 +363,52 @@ describe("Phase 6 merge gate — round-trip regression", () => {
     expect(merged).toContain("contains {{ARGS}}");
   });
 });
+
+describe("Phase 6.5 pre-requisite — org-wide overlay scope", () => {
+  it("rule written with agentName='' loads under ANY agent name via loadSkillOverlays", async () => {
+    // This invariant is the correctness load-bearer for the Phase 6.5
+    // auto-fire detector. The meta-agent runs /improve under its own
+    // agent name (not the target agent's), so target-scoped overlays
+    // would silently never load. Org-wide scope (agent_name="") loads
+    // for every agent's invocation and is the only shape that lets
+    // auto-fire rules reach the model.
+    //
+    // The test: appendRule under agentName="", loadSkillOverlays under
+    // a totally-different agent name, assert the rule is visible AND
+    // getSkillPrompt merges it into the effective skill prompt.
+    const orgId = "org-scope-test";
+    const writerAgent = ""; // org-wide write — the Phase 6.5 invariant
+    const readerAgent = "completely-different-agent";
+    const { sql, overlays } = buildStatefulSql(orgId, readerAgent);
+    currentMockSql = sql;
+
+    const writeResult = await appendRule(
+      sql,
+      { orgId, agentName: writerAgent, userRole: "owner" },
+      {
+        skillName: "improve",
+        ruleText: "ATTENTION: learned rule from auto-fire",
+        source: "auto-fire:evolve",
+        reason: "test pattern=foo count=5 severity=0.8 agent=some-bot",
+      },
+    );
+    expect(writeResult.appended).toBe(true);
+    expect(overlays).toHaveLength(1);
+    expect(overlays[0].agent_name).toBe(""); // org-wide stored
+
+    // loadSkillOverlays is called with a DIFFERENT agent name than the
+    // writer. The production query `WHERE agent_name = X OR agent_name = ''`
+    // must match the org-wide row and return it.
+    const loaded = await loadSkillOverlays({} as any, orgId, readerAgent);
+    expect(loaded.improve).toBeDefined();
+    expect(loaded.improve).toHaveLength(1);
+    expect(loaded.improve[0]).toBe("ATTENTION: learned rule from auto-fire");
+
+    // And the merged getSkillPrompt output includes the rule for the
+    // reader agent, proving the round trip closes end-to-end.
+    const improveSkill = BUNDLED_SKILLS_BY_NAME["improve"];
+    expect(improveSkill).toBeDefined();
+    const prompt = getSkillPrompt("improve", "", [improveSkill!], undefined, loaded);
+    expect(prompt).toContain("ATTENTION: learned rule from auto-fire");
+  });
+});
