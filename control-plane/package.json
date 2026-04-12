@@ -12,6 +12,8 @@
     "types": "wrangler types",
     "test": "vitest run",
     "test:watch": "vitest",
+    "preeval": "node scripts/bundle-skill-catalog.mjs",
+    "eval": "vitest run --config meta-agent-eval/vitest.config.ts",
     "migrate:eval:filesystem": "node scripts/migrate-eval-from-filesystem.mjs",
     "migrate:evolve:filesystem": "node scripts/migrate-evolve-from-filesystem.mjs"
   },
