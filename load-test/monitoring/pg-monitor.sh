@@ -9,7 +9,7 @@
 # Stop with Ctrl+C when the test completes.
 
 set -euo pipefail
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")/../../control-plane"
 
 if [ -f .env ]; then
   export $(grep -E '^DATABASE_URL=' .env | xargs)

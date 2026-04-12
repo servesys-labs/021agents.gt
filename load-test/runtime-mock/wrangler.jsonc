@@ -1,0 +1,18 @@
+{
+  "name": "agentos-runtime-loadtest",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-01-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Configurable mock behavior via environment variables.
+  // Override per-deployment or via wrangler dev --var.
+  "vars": {
+    // Latency range (uniform random between min and max, in ms)
+    "MOCK_LATENCY_MIN_MS": "50",
+    "MOCK_LATENCY_MAX_MS": "200",
+    // Cost per request (charged via the credit hold lifecycle)
+    "MOCK_COST_USD": "0.01",
+    // Set to "0" to disable latency (Scenario A variant: pure DB saturation)
+    "ZERO_LATENCY_MODE": "0"
+  }
+}
