@@ -135,10 +135,6 @@ export type { ReasoningStrategy } from "./reasoning-strategies";
 export { buildProgressSummary, writeProgress, loadStartupContext } from "./progress";
 export type { ProgressEntry, ProgressSummary, StartupContext } from "./progress";
 
-// Intent router
-export { classifyIntent, decomposeIntents } from "./intent-router";
-export type { IntentClassification, AgentCapability } from "./intent-router";
-
 // Backpressure (legacy streaming)
 export {
   createBackpressureController,
