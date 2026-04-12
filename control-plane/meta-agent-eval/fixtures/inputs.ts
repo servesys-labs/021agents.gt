@@ -86,10 +86,13 @@ export const FIXTURES: EvalFixture[] = [
       "create_sub_agent",
       "run_query",
       "start_training",
+      "activate_trained_config",
+      "rollback_training",
+      "manage_skills",
     ],
     max_rounds: 2,
     max_cost_usd: 0.01,
-    min_judge_score: 3.0,
+    min_judge_score: 4.0,
   },
   // ── Zero-tool capability questions ──────────────────────────────
   // Three fixtures that exercise the meta-agent's prose-only
@@ -124,7 +127,7 @@ export const FIXTURES: EvalFixture[] = [
     ],
     max_rounds: 2,
     max_cost_usd: 0.01,
-    min_judge_score: 3.0,
+    min_judge_score: 4.0,
   },
   {
     id: "explain-modes-zero-tools",
@@ -151,7 +154,7 @@ export const FIXTURES: EvalFixture[] = [
     ],
     max_rounds: 2,
     max_cost_usd: 0.01,
-    min_judge_score: 3.0,
+    min_judge_score: 4.0,
   },
   // Mode-variation canary. Identical user_message to the first fixture
   // (`explain-skills-zero-tools`) but `mode: "demo"`. Asserts that the
@@ -182,7 +185,7 @@ export const FIXTURES: EvalFixture[] = [
     ],
     max_rounds: 2,
     max_cost_usd: 0.01,
-    min_judge_score: 3.0,
+    min_judge_score: 4.0,
   },
   // ── Read-heavy diagnostic fixtures ──────────────────────────────
   // Fixtures that exercise real tool dispatch against the seeded
@@ -215,7 +218,7 @@ export const FIXTURES: EvalFixture[] = [
     ],
     max_rounds: 3,
     max_cost_usd: 0.02,
-    min_judge_score: 3.0,
+    min_judge_score: 4.0,
   },
   {
     id: "diag-health-check",
@@ -240,7 +243,7 @@ export const FIXTURES: EvalFixture[] = [
     ],
     max_rounds: 5,
     max_cost_usd: 0.03,
-    min_judge_score: 3.0,
+    min_judge_score: 4.0,
   },
   {
     id: "diag-audit-log",
@@ -265,7 +268,7 @@ export const FIXTURES: EvalFixture[] = [
     ],
     max_rounds: 3,
     max_cost_usd: 0.02,
-    min_judge_score: 3.0,
+    min_judge_score: 4.0,
   },
   {
     id: "diag-session-breakdown",
@@ -290,7 +293,7 @@ export const FIXTURES: EvalFixture[] = [
     ],
     max_rounds: 3,
     max_cost_usd: 0.02,
-    min_judge_score: 3.0,
+    min_judge_score: 4.0,
   },
   // Refusal fixture deferred: an earlier draft of this commit included a
   // `refuse-destructive-direct` fixture asserting the meta-agent should
