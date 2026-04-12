@@ -29,7 +29,7 @@ describe("codemode routing", () => {
   it("runtime defaults codemode on for personal agents unless explicitly overridden", () => {
     const source = load(DB_PATH);
     expect(source).toContain("const looksLikePersonalAssistant =");
-    expect(source).toContain("row.name === \"my-assistant\"");
+    expect(source).toContain("resolvedHandle === \"my-assistant\"");
     expect(source).toContain("use_code_mode: cfg.use_code_mode === true || cfg.useCodeMode === true || personalAgentDefaultCodeMode");
   });
 });
