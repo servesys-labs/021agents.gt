@@ -138,32 +138,25 @@ marketplaceRoutes.openapi(publishRoute, async (c): Promise<any> => {
     try {
       const [listing] = await sql`
       INSERT INTO marketplace_listings (
-        agent_name, org_id, display_name, short_description, long_description,
-        category, subcategory, tags, price_per_task_usd, price_per_1k_tokens_usd,
-        free_tier_tasks, pricing_model, cost_plus_margin_pct,
-        price_per_1k_input_tokens_usd, price_per_1k_output_tokens_usd,
-        agent_type, sla_response_time_ms, sla_uptime_pct,
+        agent_name, org_id, display_name, short_description, description,
+        category, tags, price_per_task_usd, pricing_model, cost_plus_margin_pct,
+        agent_type, sla_response_time_ms,
         agent_card_url, a2a_endpoint_url, is_published
       ) VALUES (
         ${body.agent_name}, ${user.org_id}, ${body.display_name}, ${body.short_description},
-        ${body.long_description || ''}, ${body.category}, ${body.subcategory || ''},
-        ${body.tags}, ${body.price_per_task_usd}, ${body.price_per_1k_tokens_usd},
-        ${body.free_tier_tasks}, ${body.pricing_model}, ${body.cost_plus_margin_pct},
-        ${body.price_per_1k_input_tokens_usd}, ${body.price_per_1k_output_tokens_usd},
-        ${body.agent_type}, ${body.sla_response_time_ms || null}, ${body.sla_uptime_pct || null},
+        ${body.long_description || ''}, ${body.category},
+        ${JSON.stringify(body.tags)}::jsonb, ${body.price_per_task_usd}, ${body.pricing_model}, ${body.cost_plus_margin_pct},
+        ${body.agent_type}, ${body.sla_response_time_ms || null},
         ${baseUrl + '/.well-known/agent.json?agent=' + body.agent_name},
         ${baseUrl + '/a2a?org=' + user.org_id + '&agent=' + body.agent_name},
         true
       )
       ON CONFLICT (agent_name, org_id) DO UPDATE SET
         display_name = ${body.display_name}, short_description = ${body.short_description},
-        long_description = ${body.long_description || ''}, category = ${body.category},
-        tags = ${body.tags}, price_per_task_usd = ${body.price_per_task_usd},
-        price_per_1k_tokens_usd = ${body.price_per_1k_tokens_usd},
-        free_tier_tasks = ${body.free_tier_tasks}, pricing_model = ${body.pricing_model},
+        description = ${body.long_description || ''}, category = ${body.category},
+        tags = ${JSON.stringify(body.tags)}::jsonb, price_per_task_usd = ${body.price_per_task_usd},
+        pricing_model = ${body.pricing_model},
         cost_plus_margin_pct = ${body.cost_plus_margin_pct},
-        price_per_1k_input_tokens_usd = ${body.price_per_1k_input_tokens_usd},
-        price_per_1k_output_tokens_usd = ${body.price_per_1k_output_tokens_usd},
         agent_type = ${body.agent_type}, is_published = true, updated_at = now()
       RETURNING id
     `;

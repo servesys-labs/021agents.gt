@@ -137,6 +137,61 @@ function fileStateCacheSet(key: string, value: string) {
   fileStateCache.set(key, value);
 }
 
+// ── Path ACL — task-scoped file access control ────────────────
+// Normalizes a file path and checks it against allowed glob patterns.
+// Returns null if allowed, or an error string if blocked.
+// Uses a simple glob matcher (** = any depth, * = single segment).
+
+/**
+ * Normalize a file path to an absolute /workspace/ or /tmp/ path,
+ * resolving relative segments and stripping traversal attempts.
+ */
+export function normalizeFilePath(raw: string): string {
+  let p = raw || "";
+  // Strip leading ./ or just resolve relative to /workspace
+  if (!p.startsWith("/")) p = `/workspace/${p}`;
+  // Resolve .. segments: split, filter, rejoin — prevents traversal
+  const parts = p.split("/").filter(Boolean);
+  const resolved: string[] = [];
+  for (const seg of parts) {
+    if (seg === "..") { resolved.pop(); }
+    else if (seg !== ".") resolved.push(seg);
+  }
+  return "/" + resolved.join("/");
+}
+
+/**
+ * Test whether a normalized path matches a single glob pattern.
+ * Supports: ** (any number of path segments), * (one segment).
+ */
+function globMatch(pattern: string, filePath: string): boolean {
+  // Normalize the pattern the same way
+  const normPattern = pattern.startsWith("/") ? pattern : `/workspace/${pattern}`;
+  // Convert glob to regex
+  const regexStr = normPattern
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")  // escape regex chars (not * or ?)
+    .replace(/\*\*/g, "\0")                  // placeholder for **
+    .replace(/\*/g, "[^/]*")                 // * = one segment
+    .replace(/\0/g, ".*")                    // ** = any depth
+    .replace(/\?/g, "[^/]");                 // ? = one char
+  return new RegExp(`^${regexStr}$`).test(filePath);
+}
+
+/**
+ * Check a file path against allowed_paths ACL.
+ * Returns null if the path is allowed, or an error string if blocked.
+ * When allowedPaths is undefined/empty, all paths are allowed (backward compat for top-level runs).
+ */
+export function checkPathACL(rawPath: string, allowedPaths: string[] | undefined): string | null {
+  if (!allowedPaths || allowedPaths.length === 0) return null;
+  const normalized = normalizeFilePath(rawPath);
+  for (const pattern of allowedPaths) {
+    if (globMatch(pattern, normalized)) return null;
+  }
+  return `Path "${normalized}" is outside the allowed paths for this task: [${allowedPaths.join(", ")}]. ` +
+    `This agent is scoped to specific directories. Use a path within the allowed set.`;
+}
+
 const DYNAMIC_WORKER_CACHE_LIMIT = 32;
 const DYNAMIC_WORKER_CACHE_TTL_MS = 5 * 60_000;
 type DynamicWorkerCacheEntry = { worker: any; expiresAt: number };
@@ -283,7 +338,7 @@ function bumpSandboxGeneration(baseId: string): number {
   return next;
 }
 
-function getSafeSandbox(env: RuntimeEnv, sandboxId: string) {
+export function getSafeSandbox(env: RuntimeEnv, sandboxId: string) {
   // getSandbox returns immediately — container only starts on first operation.
   // Same sandboxId = same container = warm after first call.
   // Per CF Containers docs: https://developers.cloudflare.com/containers/
@@ -399,7 +454,7 @@ function emitSandboxStartEvent(queue: any, sandboxId: string, cold: boolean, lat
  * container is reused across multiple Workflow runs for the same user/agent.
  * Falls back to session ID for non-DO contexts (e.g., eval runs).
  */
-function stableSandboxId(env: RuntimeEnv, sessionId: string): string {
+export function stableSandboxId(env: RuntimeEnv, sessionId: string): string {
   const baseId = baseSandboxId(env, sessionId);
   const gen = _sandboxGenerations.get(baseId) || 0;
   return gen > 0 ? `${baseId}-r${gen}` : baseId;
@@ -1413,7 +1468,7 @@ async function handlePlatformResource(
       }
       case "slos": {
         if (action === "list") {
-          const rows = await sql`SELECT slo_id, agent_name, metric, threshold, created_at FROM slo_definitions WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
+          const rows = await sql`SELECT id AS slo_id, agent_name, metric, threshold, created_at FROM slo_definitions WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
           return JSON.stringify(rows);
         }
         if (action === "create") {
@@ -1421,13 +1476,13 @@ async function handlePlatformResource(
           const metric = String(args.metric || "success_rate");
           const threshold = Number(args.threshold) || 0.95;
           const sloId = crypto.randomUUID().slice(0, 12);
-          await sql`INSERT INTO slo_definitions (slo_id, org_id, agent_name, metric, threshold, created_at)
-            VALUES (${sloId}, ${orgId}, ${agentName}, ${metric}, ${threshold}, ${new Date().toISOString()})`;
+          await sql`INSERT INTO slo_definitions (id, org_id, agent_name, metric, threshold, created_at)
+            Values (${sloId}, ${orgId}, ${agentName}, ${metric}, ${threshold}, ${new Date().toISOString()})`;
           return JSON.stringify({ created: true, slo_id: sloId, metric, threshold });
         }
         if (action === "check") {
           const agentName = String(args.agent_name || "");
-          const slos = await sql`SELECT slo_id, metric, threshold FROM slo_definitions WHERE org_id = ${orgId} AND agent_name = ${agentName}`;
+          const slos = await sql`SELECT id AS slo_id, metric, threshold FROM slo_definitions WHERE org_id = ${orgId} AND agent_name = ${agentName}`;
           return JSON.stringify({ agent_name: agentName, slos, message: "Compare thresholds against session stats from view-traces or db-query" });
         }
         return `Unknown action: ${action}. Use list, create, or check.`;
@@ -1467,7 +1522,7 @@ async function handlePlatformResource(
       }
       case "policies": {
         if (action === "list") {
-          const rows = await sql`SELECT policy_id, name, policy, created_at FROM policy_templates WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
+          const rows = await sql`SELECT id AS policy_id, name, template AS policy, created_at FROM policy_templates ORDER BY created_at DESC LIMIT 50`;
           return JSON.stringify(rows);
         }
         if (action === "create") {
@@ -1476,15 +1531,15 @@ async function handlePlatformResource(
           const blockedTools = Array.isArray(args.blocked_tools) ? args.blocked_tools : [];
           const policyJson = JSON.stringify({ budget_limit_usd: budgetLimit, blocked_tools: blockedTools });
           const policyId = crypto.randomUUID().slice(0, 12);
-          await sql`INSERT INTO policy_templates (policy_id, org_id, name, policy, created_at)
-            VALUES (${policyId}, ${orgId}, ${name}, ${policyJson}, ${new Date().toISOString()})`;
+          await sql`INSERT INTO policy_templates (id, name, template, created_at)
+            VALUES (${policyId}, ${name}, ${policyJson}::jsonb, ${new Date().toISOString()})`;
           return JSON.stringify({ created: true, policy_id: policyId, name, budget_limit_usd: budgetLimit });
         }
         return `Unknown action: ${action}. Use list or create.`;
       }
       case "retention": {
         if (action === "list") {
-          const rows = await sql`SELECT policy_id, resource_type, retention_days, created_at FROM retention_policies WHERE org_id = ${orgId} ORDER BY resource_type`;
+          const rows = await sql`SELECT id AS policy_id, resource_type, retention_days, created_at FROM retention_policies WHERE org_id = ${orgId} ORDER BY resource_type`;
           return JSON.stringify(rows);
         }
         if (action === "apply") {
@@ -1494,7 +1549,7 @@ async function handlePlatformResource(
       }
       case "workflows": {
         if (action === "list") {
-          const rows = await sql`SELECT workflow_id, name, status, steps, created_at FROM workflows WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
+          const rows = await sql`SELECT id AS workflow_id, name, is_active, definition AS steps, created_at FROM workflows WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
           return JSON.stringify(rows);
         }
         if (action === "create") {
@@ -1502,8 +1557,8 @@ async function handlePlatformResource(
           if (!name) return "create requires name";
           const steps = Array.isArray(args.steps) ? JSON.stringify(args.steps) : "[]";
           const wfId = crypto.randomUUID().slice(0, 12);
-          await sql`INSERT INTO workflows (workflow_id, org_id, name, steps, status, created_at)
-            VALUES (${wfId}, ${orgId}, ${name}, ${steps}, 'draft', ${new Date().toISOString()})`;
+          await sql`INSERT INTO workflows (id, org_id, name, definition, is_active, created_at)
+            VALUES (${wfId}, ${orgId}, ${name}, ${JSON.stringify({ steps: JSON.parse(steps) })}::jsonb, true, ${new Date().toISOString()})`;
           return JSON.stringify({ created: true, workflow_id: wfId, name });
         }
         if (action === "validate") {
@@ -1519,7 +1574,7 @@ async function handlePlatformResource(
       }
       case "mcp": {
         if (action === "list") {
-          const rows = await sql`SELECT server_id, name, url, status, created_at FROM mcp_servers WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
+          const rows = await sql`SELECT id AS server_id, name, url, is_active, created_at FROM mcp_servers WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
           return JSON.stringify(rows);
         }
         if (action === "register") {
@@ -1527,8 +1582,8 @@ async function handlePlatformResource(
           const url = String(args.url || "");
           if (!name || !url) return "register requires name and url";
           const mcpId = crypto.randomUUID().slice(0, 12);
-          await sql`INSERT INTO mcp_servers (server_id, org_id, name, url, status, created_at)
-            VALUES (${mcpId}, ${orgId}, ${name}, ${url}, 'active', ${new Date().toISOString()})`;
+          await sql`INSERT INTO mcp_servers (id, org_id, name, url, is_active, created_at)
+            VALUES (${mcpId}, ${orgId}, ${name}, ${url}, true, ${new Date().toISOString()})`;
           return JSON.stringify({ registered: true, mcp_id: mcpId, name, url });
         }
         return `Unknown action: ${action}. Use list or register.`;
@@ -1546,8 +1601,8 @@ async function handlePlatformResource(
           const gpuType = String(args.gpu_type || "h100");
           const modelId = String(args.model_id || "");
           const gpuId = crypto.randomUUID().slice(0, 12);
-          await sql`INSERT INTO gpu_endpoints (id, org_id, model_id, gpu_type, status, created_at)
-            VALUES (${gpuId}, ${orgId}, ${modelId}, ${gpuType}, 'provisioning', ${new Date().toISOString()})`;
+          await sql`INSERT INTO gpu_endpoints (id, org_id, model, status, config, created_at)
+            VALUES (${gpuId}, ${orgId}, ${modelId}, 'provisioning', ${JSON.stringify({ gpu_type: gpuType })}::jsonb, ${new Date().toISOString()})`;
           return JSON.stringify({ provisioned: true, gpu_id: gpuId, gpu_type: gpuType });
         }
         if (action === "terminate") {
@@ -1676,8 +1731,11 @@ async function dispatch(
 
     case "read-file": {
       const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
-      let readPath = args.path || "";
-      if (readPath && !readPath.startsWith("/")) readPath = `/workspace/${readPath}`;
+      const readPath = normalizeFilePath(args.path || "");
+
+      // Path ACL enforcement
+      const readAclErr = checkPathACL(readPath, (env as any).__allowedPaths);
+      if (readAclErr) return readAclErr;
 
       // Phase 9.5: Binary file detection — check for null bytes in first 8KB
       const binCheck = await sandbox.exec(
@@ -1714,8 +1772,9 @@ async function dispatch(
     case "view-file": {
       // Stateful file viewer (SWE-agent ACI pattern) — 100-line window with cursor
       const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
-      let viewPath = args.path || "";
-      if (viewPath && !viewPath.startsWith("/")) viewPath = `/workspace/${viewPath}`;
+      const viewPath = normalizeFilePath(args.path || "");
+      const viewAclErr = checkPathACL(viewPath, (env as any).__allowedPaths);
+      if (viewAclErr) return viewAclErr;
       const line = Math.max(1, Number(args.line) || 1);
       const window = Math.min(200, Math.max(10, Number(args.window) || 100));
       const half = Math.floor(window / 2);
@@ -1729,10 +1788,13 @@ async function dispatch(
 
     case "write-file": {
       const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
-      // Enforce safe default path — always resolve to /workspace/
-      let filePath = args.path || "output.txt";
-      if (!filePath.startsWith("/")) filePath = `/workspace/${filePath}`;
-      if (!filePath.startsWith("/workspace") && !filePath.startsWith("/tmp")) filePath = `/workspace/${filePath.replace(/^\/+/, "")}`;
+      // Normalize path — resolves relative, strips traversal, defaults to /workspace/
+      const filePath = normalizeFilePath(args.path || "output.txt");
+
+      // Path ACL enforcement (uses same normalized path as execution)
+      const writeAclErr = checkPathACL(filePath, (env as any).__allowedPaths);
+      if (writeAclErr) return writeAclErr;
+
       // Ensure parent dir exists
       const dir = filePath.substring(0, filePath.lastIndexOf("/"));
       if (dir) await sandbox.exec(`mkdir -p "${dir}"`, { timeout: 5 }).catch(() => {});
@@ -1785,7 +1847,12 @@ async function dispatch(
 
     case "edit-file": {
       const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
-      const editPath = args.path || "";
+      const editPath = normalizeFilePath(args.path || "");
+
+      // Path ACL enforcement (uses same normalized path as execution)
+      const editAclErr = checkPathACL(editPath, (env as any).__allowedPaths);
+      if (editAclErr) return editAclErr;
+
       const read = await sandbox.exec(`cat "${editPath}"`, { timeout: 10 });
       const content = read.stdout || "";
 
@@ -1882,7 +1949,9 @@ async function dispatch(
       const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
       const maxResults = Math.min(50, Number(args.max_results) || 20);
       const escapedPattern = (args.pattern || "").replace(/"/g, '\\"');
-      const searchPath = args.path || ".";
+      const searchPath = normalizeFilePath(args.path || ".");
+      const grepAclErr = checkPathACL(searchPath, (env as any).__allowedPaths);
+      if (grepAclErr) return grepAclErr;
       // First check total match count
       const countR = await sandbox.exec(
         `grep -rn "${escapedPattern}" "${searchPath}" 2>/dev/null | wc -l`,
@@ -1907,7 +1976,9 @@ async function dispatch(
     case "glob": {
       // Smart file search with capping (SWE-agent ACI pattern)
       const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
-      const searchPath = args.path || ".";
+      const searchPath = normalizeFilePath(args.path || ".");
+      const globAclErr = checkPathACL(searchPath, (env as any).__allowedPaths);
+      if (globAclErr) return globAclErr;
       const escapedPattern = (args.pattern || "*").replace(/"/g, '\\"');
       // Count total first
       const countR = await sandbox.exec(
@@ -1932,8 +2003,9 @@ async function dispatch(
     case "search-file": {
       // Search within a specific file (SWE-agent ACI pattern)
       const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
-      let filePath = args.path || "";
-      if (filePath && !filePath.startsWith("/")) filePath = `/workspace/${filePath}`;
+      const filePath = normalizeFilePath(args.path || "");
+      const sfAclErr = checkPathACL(filePath, (env as any).__allowedPaths);
+      if (sfAclErr) return sfAclErr;
       const term = (args.term || args.pattern || "").replace(/"/g, '\\"');
       const r = await sandbox.exec(
         `grep -n "${term}" "${filePath}" 2>/dev/null | head -50`,
@@ -1948,7 +2020,9 @@ async function dispatch(
       // Find a file by name (SWE-agent ACI pattern)
       const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
       const name = (args.name || args.filename || "").replace(/"/g, '\\"');
-      const searchPath = args.path || "/workspace";
+      const searchPath = normalizeFilePath(args.path || "/workspace");
+      const ffAclErr = checkPathACL(searchPath, (env as any).__allowedPaths);
+      if (ffAclErr) return ffAclErr;
       const r = await sandbox.exec(
         `find "${searchPath}" -name "*${name}*" -type f 2>/dev/null | head -30`,
         { timeout: 10 },
@@ -2080,10 +2154,10 @@ async function dispatch(
         const { getDb } = await import("./db");
         const sql = await getDb(hyperdrive);
         const rows = await sql`
-          SELECT server_id, name, url, auth_token, status
+          SELECT id AS server_id, name, url, auth, is_active
           FROM mcp_servers
           WHERE org_id = ${orgId}
-            AND (name = ${serverName} OR server_id = ${serverName})
+            AND (name = ${serverName} OR id = ${serverName})
           LIMIT 1
         `;
         const server = rows[0];
@@ -2152,15 +2226,21 @@ async function dispatch(
 
     case "sandbox_file_write":
     case "sandbox-file-write": {
+      const sbwPath = normalizeFilePath(args.path || "/tmp/file");
+      const sbwAclErr = checkPathACL(sbwPath, (env as any).__allowedPaths);
+      if (sbwAclErr) return sbwAclErr;
       const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
-      await sandbox.writeFile(args.path || "/tmp/file", args.content || "");
-      return `Written to ${args.path}`;
+      await sandbox.writeFile(sbwPath, args.content || "");
+      return `Written to ${sbwPath}`;
     }
 
     case "sandbox_file_read":
     case "sandbox-file-read": {
+      const sbrPath = normalizeFilePath(args.path || "/tmp/file");
+      const sbrAclErr = checkPathACL(sbrPath, (env as any).__allowedPaths);
+      if (sbrAclErr) return sbrAclErr;
       const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
-      const r = await sandbox.exec(`cat "${args.path || "/tmp/file"}"`, { timeout: 10 });
+      const r = await sandbox.exec(`cat "${sbrPath}"`, { timeout: 10 });
       return r.stdout || "";
     }
 
@@ -2242,10 +2322,10 @@ async function dispatch(
             const { getDb } = await import("./db");
             const sql = await getDb((env as any).HYPERDRIVE);
             await sql`
-              INSERT INTO a2a_artifacts (task_id, sender_org_id, sender_agent, receiver_org_id, receiver_agent,
-                name, mime_type, size_bytes, description, storage_key, status)
+              INSERT INTO a2a_artifacts (task_id, sender_org_id, sender_agent_name, receiver_org_id, receiver_agent_name,
+                artifact_type, mime_type, size_bytes, storage_key, status)
               VALUES (${taskId}, ${senderOrg}, ${senderAgent}, ${receiverOrg}, ${receiverAgent},
-                ${artifactName}, ${mimeType}, ${sizeBytes}, ${args.description || ''}, ${storageKey}, 'available')
+                ${artifactName}, ${mimeType}, ${sizeBytes}, ${storageKey}, 'available')
             `.catch(() => {}); // non-blocking — R2 upload is the source of truth
           } catch {}
         }
@@ -2438,13 +2518,12 @@ async function dispatch(
               const filePart = parts.find((p: any) => p.type === "file" || p.storage_key);
               if (filePart?.storage_key) {
                 await sqlArt`
-                  INSERT INTO a2a_artifacts (task_id, sender_org_id, sender_agent, receiver_org_id, receiver_agent,
-                    name, mime_type, description, storage_key, status)
+                  INSERT INTO a2a_artifacts (task_id, sender_org_id, sender_agent_name, receiver_org_id, receiver_agent_name,
+                    artifact_type, mime_type, storage_key, status)
                   VALUES (${taskIdForArt}, ${args.agent_name || 'unknown'}, ${args.agent_name || ''},
                     ${receiverOrg}, ${receiverAgent},
                     ${art.name || filePart.storage_key.split('/').pop() || 'artifact'},
                     ${filePart.mime_type || 'application/octet-stream'},
-                    ${textPart?.text || art.description || ''},
                     ${filePart.storage_key}, 'available')
                 `.catch(() => {});
               }
@@ -3213,6 +3292,11 @@ async function dispatch(
             ...(systemPromptOverride ? { system_prompt_override: systemPromptOverride } : {}),
             budget_limit_usd_override: childBudgetCap,
             ...(toolsOverride ? { tools_override: toolsOverride } : {}),
+            // Path ACL: child inherits parent's ACL, or caller can narrow further.
+            // If caller specifies allowed_paths, use that; otherwise inherit parent's.
+            ...(args.allowed_paths || (env as any).__allowedPaths
+              ? { allowed_paths: args.allowed_paths || (env as any).__allowedPaths }
+              : {}),
         };
 
         const instance = await workflow.create({ params: childWorkflowParams });
@@ -4001,7 +4085,7 @@ async function dispatch(
         // Helper: query SLO breach status
         const querySlos = async () => {
           const slos = await sql`
-            SELECT slo_id, metric, threshold FROM slo_definitions
+            SELECT id AS slo_id, metric, threshold FROM slo_definitions
             WHERE org_id = ${orgId} AND agent_name = ${agentName}
           `;
           if (slos.length === 0) return { slos: [], breaches: [] };
@@ -4141,14 +4225,22 @@ async function dispatch(
       }
 
       // Auto-detect mode based on task characteristics
+      const aclActive = !!((env as any).__allowedPaths?.length);
       const resolvedMode = (() => {
-        if (swarmMode !== "auto") return swarmMode;
-        const allBashLike = swarmTasks.every(t => {
-          const tools = t.tools || [];
-          return tools.includes("bash") || tools.includes("python-exec") ||
-            /^(run|exec|sh |bash |python |pip |npm |git |ls |cat |grep |find )/.test(t.input.trim().toLowerCase());
-        });
-        if (allBashLike) return "parallel-exec";
+        if (swarmMode !== "auto") {
+          // Explicit parallel-exec blocked under ACL — it calls sandbox.exec() directly
+          if (swarmMode === "parallel-exec" && aclActive) return "codemode";
+          return swarmMode;
+        }
+        // Under ACL, never auto-select parallel-exec — it bypasses file ACL
+        if (!aclActive) {
+          const allBashLike = swarmTasks.every(t => {
+            const tools = t.tools || [];
+            return tools.includes("bash") || tools.includes("python-exec") ||
+              /^(run|exec|sh |bash |python |pip |npm |git |ls |cat |grep |find )/.test(t.input.trim().toLowerCase());
+          });
+          if (allBashLike) return "parallel-exec";
+        }
         // Default to codemode — cheapest, fastest
         return "codemode";
       })();
@@ -4372,6 +4464,10 @@ return { mode: "codemode", total_tasks: tasks.length, results };
                   ...(parentPrompt ? { system_prompt_override: parentPrompt } : {}),
                   budget_limit_usd_override: perTaskBudget,
                   ...(toolsOv ? { tools_override: toolsOv } : {}),
+                  // Path ACL: inherit parent's ACL so swarm children can't widen scope
+                  ...((env as any).__allowedPaths
+                    ? { allowed_paths: (env as any).__allowedPaths }
+                    : {}),
                 },
               });
               // Adaptive polling (same as run-agent)
@@ -4830,15 +4926,14 @@ async function userProfileSave(env: RuntimeEnv, args: Record<string, any>): Prom
 
     // Upsert user profile with JSONB merge
     await sql`
-      INSERT INTO user_profiles (id, org_id, agent_name, end_user_id, profile_data, updated_at, created_at)
+      INSERT INTO user_profiles (org_id, agent_name, end_user_id, profile, updated_at, created_at)
       VALUES (
-        ${`${orgId}-${agentName}-${userId}`},
         ${orgId}, ${agentName}, ${userId},
         jsonb_build_object(${key}, ${value}),
         now(), now()
       )
       ON CONFLICT (org_id, agent_name, end_user_id) DO UPDATE
-      SET profile_data = user_profiles.profile_data || jsonb_build_object(${key}, ${value}),
+      SET profile = user_profiles.profile || jsonb_build_object(${key}, ${value}),
           updated_at = now()
     `;
 
@@ -7386,6 +7481,7 @@ const TOOL_CATALOG: ToolDefinition[] = [
           tools: { type: "array", items: { type: "string" }, description: "Optional: scope sub-agent to only these tools for this run (e.g. [\"web-search\", \"browse\"]). If omitted, agent uses its full configured tool set." },
           async: { type: "boolean", description: "If true, spawn the child and return immediately without waiting. Use check-agent with the returned correlation_id to get results later. Best for long-running tasks where you can do other work while waiting." },
           skip_parent_prompt: { type: "boolean", description: "If true, child uses its own system prompt instead of inheriting the parent's. Use when delegating to a specialist with a different persona." },
+          allowed_paths: { type: "array", items: { type: "string" }, description: "Glob patterns limiting the child's file operations (e.g. [\"/workspace/src/**\", \"/tmp/**\"]). Defaults to [\"/workspace/**\", \"/tmp/**\"] for delegated runs. Narrow this to restrict the child to specific directories." },
           channel: { type: "string", description: "Channel (default internal)" },
           org_id: { type: "string", description: "Org id (optional if same as caller)" },
         },

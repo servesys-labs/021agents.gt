@@ -152,8 +152,7 @@ interface Procedure {
   description: string;
   steps: Array<{ tool: string; args_summary?: string }>;
   success_rate: number;
-  success_count: number;
-  failure_count: number;
+  usage_count: number;
 }
 
 /**
@@ -172,11 +171,11 @@ export async function findBestProcedures(
   let rows: any[];
   try {
     rows = await sql`
-      SELECT name, description, steps, success_count, failure_count, last_used
+      SELECT name, description, steps, usage_count, success_rate, updated_at
       FROM procedures
-      WHERE success_count > 0
-      ORDER BY (success_count::float / GREATEST(success_count + failure_count, 1)) DESC,
-               last_used DESC
+      WHERE usage_count > 0
+      ORDER BY success_rate DESC,
+               updated_at DESC
       LIMIT ${limit * 3}
     `;
   } catch {
@@ -206,15 +205,12 @@ function mapProcedure(row: any): Procedure {
   try {
     steps = typeof row.steps === "string" ? JSON.parse(row.steps) : row.steps || [];
   } catch { steps = []; }
-  const sc = Number(row.success_count) || 0;
-  const fc = Number(row.failure_count) || 0;
   return {
     name: row.name || "",
     description: row.description || "",
     steps: Array.isArray(steps) ? steps : [],
-    success_rate: sc / Math.max(1, sc + fc),
-    success_count: sc,
-    failure_count: fc,
+    success_rate: Number(row.success_rate) || 0,
+    usage_count: Number(row.usage_count) || 0,
   };
 }
 
@@ -228,15 +224,22 @@ export async function recordProcedureOutcome(
 ): Promise<void> {
   const { getDb } = await import("./db");
   const sql = await getDb(hyperdrive);
+  const now = new Date().toISOString();
   try {
     if (success) {
       await sql`
-        UPDATE procedures SET success_count = success_count + 1, last_used = ${new Date().toISOString()}
+        UPDATE procedures SET
+          usage_count = usage_count + 1,
+          success_rate = (success_rate * usage_count + 1.0) / (usage_count + 1),
+          updated_at = ${now}
         WHERE name = ${name}
       `;
     } else {
       await sql`
-        UPDATE procedures SET failure_count = failure_count + 1, last_used = ${new Date().toISOString()}
+        UPDATE procedures SET
+          usage_count = usage_count + 1,
+          success_rate = (success_rate * usage_count) / (usage_count + 1),
+          updated_at = ${now}
         WHERE name = ${name}
       `;
     }
@@ -256,6 +259,7 @@ export async function storeProcedure(
     name: string;
     description: string;
     agent_name: string;
+    org_id: string;
     steps: Array<{ tool: string; args_summary?: string }>;
     source_session_id: string;
   },
@@ -264,14 +268,17 @@ export async function storeProcedure(
   const sql = await getDb(hyperdrive);
   try {
     const stepsJson = JSON.stringify(procedure.steps);
+    const toolSeq = JSON.stringify(procedure.steps.map(s => s.tool));
+    const now = new Date().toISOString();
     await sql`
-      INSERT INTO procedures (name, description, agent_name, steps, success_count, failure_count, last_used)
-      VALUES (${procedure.name}, ${procedure.description}, ${procedure.agent_name}, ${stepsJson}, 1, 0, ${new Date().toISOString()})
-      ON CONFLICT (name, agent_name) DO UPDATE SET
-        steps = ${stepsJson},
-        success_count = procedures.success_count + 1,
+      INSERT INTO procedures (org_id, agent_name, name, task_pattern, description, steps, tool_sequence, usage_count, success_rate, updated_at)
+      VALUES (${procedure.org_id}, ${procedure.agent_name}, ${procedure.name}, ${procedure.name}, ${procedure.description}, ${stepsJson}::jsonb, ${toolSeq}::jsonb, 1, 1.0, ${now})
+      ON CONFLICT (org_id, agent_name, task_pattern) DO UPDATE SET
+        steps = ${stepsJson}::jsonb,
+        tool_sequence = ${toolSeq}::jsonb,
+        usage_count = procedures.usage_count + 1,
         description = CASE WHEN LENGTH(${procedure.description}) > LENGTH(procedures.description) THEN ${procedure.description} ELSE procedures.description END,
-        last_used = ${new Date().toISOString()}
+        updated_at = ${now}
     `;
   } catch {
     // Table may not exist — best effort
@@ -314,10 +321,10 @@ export async function exportProceduresMarkdown(
     try {
       // Backward-compatible fallback query
       rows = await sql`
-        SELECT name, description, steps, success_count, failure_count, last_used
+        SELECT name, description, steps, usage_count, success_rate, updated_at
         FROM procedures
         WHERE agent_name = ${opts.agent_name}
-        ORDER BY last_used DESC
+        ORDER BY updated_at DESC
         LIMIT ${limit}
       `;
     } catch {
@@ -386,6 +393,26 @@ interface MemoryFact {
   source: string;
   /** Unix ms when known (DB / curated facts); Vectorize hits may omit */
   created_at?: number;
+  /** Unix ms — last time this fact was reinforced by a session. Defaults to created_at. */
+  last_reinforced_at?: number;
+  /** Session IDs that contributed to or reinforced this fact. */
+  source_session_ids?: string[];
+  /** Normalized entity names this fact relates to (people, projects, services). */
+  entities?: string[];
+}
+
+/**
+ * Compute effective confidence after time-based decay.
+ * Pure function — no DB writes. Used by buildMemoryContext for ranking
+ * and by the /memory-consolidate skill for archival decisions.
+ */
+export function effectiveConfidence(confidence: number, lastReinforcedAtMs: number): number {
+  const days = Math.max(0, (Date.now() - lastReinforcedAtMs) / 86_400_000);
+  if (days <= 7) return confidence;
+  if (days <= 30) return confidence * 0.9;
+  if (days <= 90) return confidence * 0.7;
+  if (days <= 180) return confidence * 0.5;
+  return 0; // archive threshold
 }
 
 /** Staleness hint for injected memories (>1 day old), Claude Code–style. */
@@ -421,7 +448,7 @@ async function fetchCuratedSemanticFacts(
     if (kw.length > 0) {
       const p0 = `%${kw[0]}%`;
       rows = await sql`
-        SELECT key, value, category, created_at
+        SELECT key, value, category, created_at, last_reinforced_at, source_session_ids, entities
         FROM facts
         WHERE agent_name = ${agent} AND org_id = ${org}
           AND (LOWER(key) LIKE ${p0} OR LOWER(value) LIKE ${p0})
@@ -431,7 +458,7 @@ async function fetchCuratedSemanticFacts(
     }
     if (rows.length === 0) {
       rows = await sql`
-        SELECT key, value, category, created_at
+        SELECT key, value, category, created_at, last_reinforced_at, source_session_ids, entities
         FROM facts
         WHERE agent_name = ${agent} AND org_id = ${org}
         ORDER BY created_at DESC
@@ -440,6 +467,7 @@ async function fetchCuratedSemanticFacts(
     }
     return rows.map((r: any) => {
       const ts = r.created_at ? new Date(r.created_at).getTime() : Date.now();
+      const reinforcedTs = r.last_reinforced_at ? new Date(r.last_reinforced_at).getTime() : ts;
       const line = `${r.key || "fact"}: ${r.value || ""}`.trim();
       return {
         id: `semantic-${r.key || ts}`,
@@ -448,6 +476,9 @@ async function fetchCuratedSemanticFacts(
         confidence: 0.95,
         source: "facts",
         created_at: ts,
+        last_reinforced_at: reinforcedTs,
+        source_session_ids: r.source_session_ids || [],
+        entities: r.entities || [],
       };
     });
   } catch {
@@ -576,14 +607,15 @@ export async function storeFact(
   // Store in Supabase for keyword search fallback
   const { getDb } = await import("./db");
   const sql = await getDb(hyperdrive);
-  const contentHash = await hashContent(fact.content);
+  const now = new Date().toISOString();
   try {
     await sql`
-      INSERT INTO facts (id, content, content_hash, category, confidence, source, created_at)
-      VALUES (${id}, ${fact.content}, ${contentHash}, ${fact.category}, ${fact.confidence}, ${fact.source}, ${new Date().toISOString()})
-      ON CONFLICT (content_hash) DO UPDATE SET
+      INSERT INTO facts (id, org_id, agent_name, content, category, confidence, source, created_at, updated_at)
+      VALUES (${id}, ${fact.org_id || ""}, ${fact.agent_name || ""}, ${fact.content}, ${fact.category}, ${fact.confidence}, ${fact.source}, ${now}, ${now})
+      ON CONFLICT (org_id, content) WHERE scope = 'team' DO UPDATE SET
         confidence = GREATEST(facts.confidence, EXCLUDED.confidence),
-        source = EXCLUDED.source
+        source = EXCLUDED.source,
+        updated_at = ${now}
     `;
   } catch {
     // Table may not exist yet — non-fatal
@@ -772,7 +804,14 @@ export async function buildMemoryContext(
     searchEpisodes(hyperdrive, query, { agent_name: opts.agent_name, limit: 3 }).catch(() => []),
     findBestProcedures(hyperdrive, query, { agent_name: opts.agent_name, limit: 3 }).catch(() => []),
   ]);
-  const facts = mergeMemoryFacts(rawFacts, curatedFacts).slice(0, 8);
+  const mergedFacts = mergeMemoryFacts(rawFacts, curatedFacts);
+
+  // Rank by effective confidence BEFORE truncation so high-quality facts aren't hidden
+  const facts = mergedFacts
+    .map(f => ({ ...f, effConf: effectiveConfidence(f.confidence, f.last_reinforced_at ?? f.created_at ?? Date.now()) }))
+    .filter(f => f.effConf > 0.1)
+    .sort((a, b) => b.effConf - a.effConf)
+    .slice(0, 8);
 
   // Redistribute remaining budget across non-empty sections
   const activeSections = [facts.length > 0, episodes.length > 0, procedures.length > 0].filter(Boolean).length;

@@ -85,12 +85,17 @@ autopilotRoutes.openapi(startRoute, async (c): Promise<any> => {
     const addendum = body.system_addendum || DEFAULT_SYSTEM_ADDENDUM;
     const now = new Date().toISOString();
 
+    const configJson = JSON.stringify({
+      ...(body.config || {}),
+      tick_interval_seconds: body.tick_interval_seconds,
+      system_addendum: addendum,
+    });
+
     const rows = await sql`
-      INSERT INTO autopilot_sessions (org_id, agent_name, channel, channel_user_id, tick_interval_seconds, system_addendum, config, created_at, updated_at)
-      VALUES (${user.org_id}, ${body.agent_name}, ${body.channel}, ${body.channel_user_id || ""}, ${body.tick_interval_seconds}, ${addendum}, ${JSON.stringify(body.config || {})}, ${now}, ${now})
+      INSERT INTO autopilot_sessions (org_id, agent_name, channel, channel_user_id, status, config, created_at, updated_at)
+      VALUES (${user.org_id}, ${body.agent_name}, ${body.channel}, ${body.channel_user_id || ""}, 'active', ${configJson}, ${now}, ${now})
       ON CONFLICT (org_id, agent_name, channel, channel_user_id) DO UPDATE SET
-        status = 'active', tick_interval_seconds = EXCLUDED.tick_interval_seconds,
-        system_addendum = EXCLUDED.system_addendum, config = EXCLUDED.config,
+        status = 'active', config = EXCLUDED.config,
         updated_at = EXCLUDED.updated_at
       RETURNING *
     `;
@@ -203,7 +208,7 @@ autopilotRoutes.openapi(eventsRoute, async (c): Promise<any> => {
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     // Get the session to verify ownership (RLS enforces org isolation)
     const sessions = await sql`
-      SELECT id, tick_count, total_cost_usd FROM autopilot_sessions
+      SELECT id, config FROM autopilot_sessions
       WHERE agent_name = ${agent_name}
         AND channel = ${channel} AND status = 'active'
       LIMIT 1
@@ -281,19 +286,17 @@ export async function tickAutopilotSessions(env: any): Promise<{ dispatched: num
       while (hasMore) {
         const sessions = lastId
           ? await sql`
-              SELECT id, org_id, agent_name, channel, channel_user_id, tick_interval_seconds, tick_count, system_addendum, config
+              SELECT id, org_id, agent_name, channel, channel_user_id, config, updated_at
               FROM autopilot_sessions
               WHERE status = 'active'
-                AND (last_tick_at IS NULL OR last_tick_at + make_interval(secs => tick_interval_seconds) < NOW())
                 AND id > ${lastId}
               ORDER BY id ASC
               LIMIT ${DISPATCH_PAGE_SIZE}
             `
           : await sql`
-              SELECT id, org_id, agent_name, channel, channel_user_id, tick_interval_seconds, tick_count, system_addendum, config
+              SELECT id, org_id, agent_name, channel, channel_user_id, config, updated_at
               FROM autopilot_sessions
               WHERE status = 'active'
-                AND (last_tick_at IS NULL OR last_tick_at + make_interval(secs => tick_interval_seconds) < NOW())
               ORDER BY id ASC
               LIMIT ${DISPATCH_PAGE_SIZE}
             `;
@@ -310,15 +313,16 @@ export async function tickAutopilotSessions(env: any): Promise<{ dispatched: num
         if (ids.length > 0) {
           await sql`
             UPDATE autopilot_sessions
-            SET last_tick_at = NOW(), tick_count = tick_count + 1, updated_at = NOW()
+            SET updated_at = NOW()
             WHERE id IN ${sql(ids)}
           `;
         }
 
         // Fan out to queue — batch send for efficiency
         // CF Queue.send() is fast (~1ms) so even 500 sends complete in <1s
-        await Promise.all(sessions.map((session: any) =>
-          queue.send({
+        await Promise.all(sessions.map((session: any) => {
+          const cfg = typeof session.config === "string" ? JSON.parse(session.config) : (session.config || {});
+          return queue.send({
             type: "autopilot_tick",
             payload: {
               session_id: session.id,
@@ -326,12 +330,12 @@ export async function tickAutopilotSessions(env: any): Promise<{ dispatched: num
               agent_name: session.agent_name,
               channel: session.channel,
               channel_user_id: session.channel_user_id || "",
-              tick_count: (session.tick_count || 0) + 1,
-              system_addendum: session.system_addendum || "",
+              tick_count: (cfg.tick_count || 0) + 1,
+              system_addendum: cfg.system_addendum || "",
               config: session.config,
             },
-          })
-        ));
+          });
+        }));
 
         localDispatched += sessions.length;
 
@@ -343,7 +347,7 @@ export async function tickAutopilotSessions(env: any): Promise<{ dispatched: num
       try {
         const idleSessions = await sql`
           SELECT DISTINCT org_id, agent_name FROM autopilot_sessions
-          WHERE status = 'active' AND last_tick_at < NOW() - INTERVAL '10 minutes'
+          WHERE status = 'active' AND updated_at < NOW() - INTERVAL '10 minutes'
           LIMIT 5
         `;
         for (const session of idleSessions) {
@@ -414,7 +418,7 @@ export async function processAutopilotTick(
     try {
       await withOrgDb(env, payload.org_id, async (sql) => {
         await sql`
-          UPDATE autopilot_sessions SET total_cost_usd = total_cost_usd + ${costUsd}, updated_at = NOW()
+          UPDATE autopilot_sessions SET updated_at = NOW()
           WHERE id = ${payload.session_id}
         `;
       });

@@ -19,18 +19,22 @@ export interface SecurityEvent {
 /**
  * Log a security event to the security_events table.
  * Fire-and-forget — errors are silently caught to avoid blocking auth flow.
+ *
+ * Schema columns: id (BIGSERIAL), org_id, event_type, actor_type, actor_id,
+ * severity, details (JSONB), ip_address, created_at.
  */
 export function logSecurityEvent(sql: Sql, event: SecurityEvent): void {
-  const meta = event.metadata ? JSON.stringify(event.metadata) : null;
+  const details = event.metadata ? JSON.stringify(event.metadata) : "{}";
   sql`
-    INSERT INTO security_events (event_type, user_id, org_id, ip_address, user_agent, metadata, created_at)
+    INSERT INTO security_events (org_id, event_type, actor_type, actor_id, severity, details, ip_address, created_at)
     VALUES (
-      ${event.event_type},
-      ${event.user_id},
       ${event.org_id ?? ""},
-      ${event.ip_address ?? ""},
-      ${event.user_agent ?? ""},
-      ${meta},
+      ${event.event_type},
+      ${"user"},
+      ${event.user_id},
+      ${"info"},
+      ${details},
+      ${event.ip_address ?? null},
       NOW()
     )
   `.catch(() => {

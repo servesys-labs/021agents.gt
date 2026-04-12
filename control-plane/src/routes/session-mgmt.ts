@@ -175,10 +175,7 @@ sessionMgmtRoutes.openapi(getSessionSettingsRoute, async (c): Promise<any> => {
 
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     const rows = await sql`
-      SELECT
-        idle_timeout_minutes,
-        max_session_hours,
-        mfa_enforcement
+      SELECT settings, mfa_enforcement
       FROM org_settings
       LIMIT 1
     `;
@@ -192,9 +189,13 @@ sessionMgmtRoutes.openapi(getSessionSettingsRoute, async (c): Promise<any> => {
       });
     }
 
+    const settings = typeof rows[0].settings === "string"
+      ? JSON.parse(rows[0].settings)
+      : (rows[0].settings ?? {});
+
     return c.json({
-      idle_timeout_minutes: rows[0].idle_timeout_minutes ?? 30,
-      max_session_hours: rows[0].max_session_hours ?? 24,
+      idle_timeout_minutes: settings.idle_timeout_minutes ?? 30,
+      max_session_hours: settings.max_session_hours ?? 24,
       mfa_enforcement: rows[0].mfa_enforcement ?? "optional",
     });
   });
@@ -251,19 +252,32 @@ sessionMgmtRoutes.openapi(updateSessionSettingsRoute, async (c): Promise<any> =>
   }
 
   return await withOrgDb(c.env, user.org_id, async (sql) => {
-    // Upsert org_settings
+    // Upsert org_settings — idle_timeout_minutes and max_session_hours live
+    // inside the `settings` JSONB column; mfa_enforcement is a real column.
+    // First read existing settings to merge.
+    const existingRows = await sql`
+      SELECT settings FROM org_settings WHERE org_id = ${user.org_id} LIMIT 1
+    `;
+    const existing = existingRows.length > 0
+      ? (typeof existingRows[0].settings === "string"
+          ? JSON.parse(existingRows[0].settings)
+          : (existingRows[0].settings ?? {}))
+      : {};
+
+    if (idleTimeout !== undefined) existing.idle_timeout_minutes = idleTimeout;
+    if (maxSession !== undefined) existing.max_session_hours = maxSession;
+    const settingsJson = JSON.stringify(existing);
+
     await sql`
-      INSERT INTO org_settings (org_id, idle_timeout_minutes, max_session_hours, mfa_enforcement, updated_at)
+      INSERT INTO org_settings (org_id, settings, mfa_enforcement, updated_at)
       VALUES (
         ${user.org_id},
-        ${idleTimeout ?? 30},
-        ${maxSession ?? 24},
+        ${settingsJson},
         ${mfaEnforcement ?? "optional"},
         NOW()
       )
       ON CONFLICT (org_id) DO UPDATE SET
-        idle_timeout_minutes = COALESCE(${idleTimeout ?? null}, org_settings.idle_timeout_minutes),
-        max_session_hours = COALESCE(${maxSession ?? null}, org_settings.max_session_hours),
+        settings = ${settingsJson},
         mfa_enforcement = COALESCE(${mfaEnforcement ?? null}, org_settings.mfa_enforcement),
         updated_at = NOW()
     `;

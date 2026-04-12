@@ -114,15 +114,20 @@ endUserTokenRoutes.openapi(mintTokenRoute, async (c): Promise<any> => {
   // Persist to DB
   const tokenId = generateId();
   return await withOrgDb(c.env, user.org_id, async (sql) => {
+    // Use a hash of the token for DB storage (the raw JWT is returned to the caller)
+    const tokenHashBytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+    const tokenHashHex = Array.from(new Uint8Array(tokenHashBytes)).map(b => b.toString(16).padStart(2, "0")).join("");
+
     await sql`
       INSERT INTO end_user_tokens (
-        token_id, org_id, end_user_id, api_key_id, allowed_agents,
-        rate_limit_rpm, rate_limit_rpd, expires_at, revoked, created_at
+        org_id, token_hash, end_user_id, api_key_id, scopes, allowed_agents,
+        rate_limit_rpm, rate_limit_rpd, is_active, is_revoked, expires_at
       ) VALUES (
-        ${tokenId}, ${user.org_id}, ${req.end_user_id}, ${parentApiKeyId},
-        ${req.allowed_agents ?? []},
+        ${user.org_id}, ${tokenHashHex}, ${req.end_user_id}, ${parentApiKeyId},
+        ${JSON.stringify(["agents:run"])},
+        ${JSON.stringify(req.allowed_agents ?? [])},
         ${req.rate_limit_rpm ?? 60}, ${req.rate_limit_rpd ?? 10000},
-        ${expiresAt}, ${false}, ${new Date().toISOString()}
+        ${true}, ${false}, ${expiresAt}
       )
     `;
 
@@ -176,20 +181,20 @@ endUserTokenRoutes.openapi(listTokensRoute, async (c): Promise<any> => {
     let rows;
     if (endUserId) {
       rows = await sql`
-        SELECT token_id, end_user_id, api_key_id, allowed_agents, rate_limit_rpm,
+        SELECT id, end_user_id, api_key_id, allowed_agents, rate_limit_rpm,
                rate_limit_rpd, expires_at, is_revoked, created_at
         FROM end_user_tokens
-        WHERE end_user_id = ${endUserId} AND revoked = false
+        WHERE end_user_id = ${endUserId} AND is_revoked = false
           AND expires_at > now()
         ORDER BY created_at DESC
         LIMIT ${limit} OFFSET ${offset}
       `;
     } else {
       rows = await sql`
-        SELECT token_id, end_user_id, api_key_id, allowed_agents, rate_limit_rpm,
+        SELECT id, end_user_id, api_key_id, allowed_agents, rate_limit_rpm,
                rate_limit_rpd, expires_at, is_revoked, created_at
         FROM end_user_tokens
-        WHERE revoked = false AND expires_at > now()
+        WHERE is_revoked = false AND expires_at > now()
         ORDER BY created_at DESC
         LIMIT ${limit} OFFSET ${offset}
       `;
@@ -204,7 +209,7 @@ endUserTokenRoutes.openapi(listTokensRoute, async (c): Promise<any> => {
       } catch {}
 
       return {
-        token_id: r.token_id,
+        token_id: r.id,
         end_user_id: r.end_user_id,
         api_key_id: r.api_key_id,
         allowed_agents: allowedAgents,
@@ -248,9 +253,9 @@ endUserTokenRoutes.openapi(revokeTokenRoute, async (c): Promise<any> => {
   const { token_id: tokenId } = c.req.valid("param");
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     const result = await sql`
-      UPDATE end_user_tokens SET revoked = true
-      WHERE token_id = ${tokenId}
-      RETURNING token_id
+      UPDATE end_user_tokens SET is_revoked = true
+      WHERE id = ${tokenId}
+      RETURNING id
     `;
 
     if (result.length === 0) {

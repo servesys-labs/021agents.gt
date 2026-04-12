@@ -631,7 +631,7 @@ issueRoutes.openapi(autoFixIssueRoute, async (c): Promise<any> => {
       const now = new Date().toISOString();
       await sql`
         INSERT INTO config_audit (
-          org_id, agent_name, action, field_changed, change_reason, changed_by, created_at
+          org_id, agent_name, action, field_changed, new_value, changed_by, created_at
         ) VALUES (
           ${user.org_id}, ${agentName}, ${"issue.auto_fix"},
           ${applied.join(",")},

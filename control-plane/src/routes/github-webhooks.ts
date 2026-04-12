@@ -70,10 +70,8 @@ githubWebhookRoutes.openapi(registerRoute, async (c): Promise<any> => {
     const now = new Date().toISOString();
 
     await sql`
-      INSERT INTO github_webhook_subscriptions (org_id, agent_name, repo_url, events, secret, created_at)
-      VALUES (${user.org_id}, ${body.agent_name}, ${body.repo_url}, ${JSON.stringify(body.events)}, ${secret}, ${now})
-      ON CONFLICT (org_id, repo_url) DO UPDATE SET
-        agent_name = EXCLUDED.agent_name, events = EXCLUDED.events, secret = EXCLUDED.secret, updated_at = NOW()
+      INSERT INTO github_webhook_subscriptions (org_id, repo_full_name, events, secret)
+      VALUES (${user.org_id}, ${body.repo_url}, ${JSON.stringify(body.events)}, ${secret})
     `;
 
     const webhookUrl = `https://api.oneshots.co/api/v1/github/webhooks/receive?org=${encodeURIComponent(user.org_id)}`;

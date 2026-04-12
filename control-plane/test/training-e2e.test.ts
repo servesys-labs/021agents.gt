@@ -126,7 +126,7 @@ function makeSql() {
     }
 
     if (query.includes("INSERT INTO training_rewards")) {
-      db_training_rewards.push({ org_id: values[0], agent_name: values[1], source: values[2], score: values[3] });
+      db_training_rewards.push({ job_id: values[0], iteration_number: values[1], metric_name: values[2], metric_value: values[3] });
       return { count: 1 };
     }
 
@@ -601,7 +601,8 @@ describe("training step execution", () => {
 
     await app.request(`/jobs/${job_id}/step`, { method: "POST" }, env);
     expect(db_training_rewards.length).toBeGreaterThanOrEqual(1);
-    expect(db_training_rewards[0].agent_name).toBe("test-agent");
+    expect(db_training_rewards[0].job_id).toBe(job_id);
+    expect(db_training_rewards[0].metric_name).toBe("reward_score");
   });
 });
 

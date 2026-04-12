@@ -135,8 +135,8 @@ export async function writeTeamObservation(
     const sql = pg((env as any).HYPERDRIVE?.connectionString || "", { max: 1, prepare: false });
 
     await sql`
-      INSERT INTO facts (org_id, author_agent, target_agent, content, created_at)
-      VALUES (${orgId}, ${authorAgent}, ${targetAgent || null}, ${content.slice(0, 1000)}, NOW())
+      INSERT INTO facts (org_id, agent_name, scope, content, author_agent, category, created_at)
+      VALUES (${orgId}, ${targetAgent || authorAgent}, 'team', ${content.slice(0, 1000)}, ${authorAgent}, ${targetAgent ? 'team_observation' : ''}, NOW())
     `.catch(() => {});
 
     await sql.end();

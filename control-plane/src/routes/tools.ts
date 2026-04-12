@@ -124,9 +124,9 @@ toolRoutes.openapi(listToolsRoute, async (c): Promise<any> => {
 
     try {
       const rows = await withOrgDb(c.env, user.org_id, (sql) => sql`
-        SELECT name, description, source, has_handler, schema, is_builtin
+        SELECT name, description, schema, handler_type, handler_config, is_active
         FROM tool_registry
-        WHERE org_id = ${user.org_id} OR is_builtin = true
+        WHERE is_active = true
         ORDER BY name
       `);
 
@@ -134,8 +134,8 @@ toolRoutes.openapi(listToolsRoute, async (c): Promise<any> => {
         name: r.name,
         description: r.description || "",
         input_schema: parseJsonColumn(r.schema, { type: "object" }),
-        handler: r.has_handler ? undefined : undefined, // Handlers are loaded separately
-        source_path: r.source,
+        handler: r.handler_type ? undefined : undefined, // Handlers are loaded separately
+        source_path: r.handler_type || "db",
       }));
     } catch {
       // Table may not exist, fall back to file-based registry
@@ -282,7 +282,7 @@ toolRoutes.openapi(statsRoute, async (c): Promise<any> => {
           SELECT
             tool_name,
             COUNT(*) as execution_count,
-            AVG(duration_ms) as avg_duration_ms,
+            AVG(latency_ms) as avg_duration_ms,
             MAX(created_at) as last_executed
           FROM tool_executions
           GROUP BY tool_name
@@ -461,14 +461,13 @@ toolRoutes.openapi(registerRoute, async (c): Promise<any> => {
   try {
     await withOrgDb(c.env, user.org_id, (sql) => sql`
       INSERT INTO tool_registry (
-        name, description, org_id, schema, has_handler,
-        handler_code, source, is_builtin, created_at
+        org_id, name, description, schema, handler_type, handler_config, is_active
       ) VALUES (
-        ${body.name}, ${body.description}, ${user.org_id},
+        ${user.org_id}, ${body.name}, ${body.description},
         ${JSON.stringify(body.input_schema)},
-        ${body.handler_code ? true : false},
-        ${body.handler_code || null},
-        'user-defined', false, ${new Date().toISOString()}
+        ${body.handler_code ? 'code' : ''},
+        ${JSON.stringify(body.handler_code ? { code: body.handler_code } : {})},
+        true
       )
     `);
   } catch (err) {
@@ -530,9 +529,9 @@ toolRoutes.openapi(getToolRoute, async (c): Promise<any> => {
   if (!tool) {
     try {
       const rows = await withOrgDb(c.env, user.org_id, (sql) => sql`
-        SELECT name, description, source, has_handler, schema, handler_code, is_builtin
+        SELECT name, description, schema, handler_type, handler_config, is_active
         FROM tool_registry
-        WHERE name = ${name} AND (org_id = ${user.org_id} OR is_builtin = true)
+        WHERE name = ${name} AND is_active = true
         LIMIT 1
       `);
 
@@ -542,7 +541,7 @@ toolRoutes.openapi(getToolRoute, async (c): Promise<any> => {
           name: r.name,
           description: r.description || "",
           input_schema: parseJsonColumn(r.schema, { type: "object" }),
-          source_path: r.source,
+          source_path: r.handler_type || "db",
         };
       }
     } catch {
@@ -710,13 +709,11 @@ toolRoutes.openapi(executeToolRoute, async (c): Promise<any> => {
     try {
       withOrgDb(c.env, user.org_id, (sql) => sql`
         INSERT INTO tool_executions (
-          tool_name, org_id, user_id, arguments_json, result,
-          duration_ms, trace_id, session_id, created_at
+          org_id, session_id, tool_name, input, output, latency_ms, error
         ) VALUES (
-          ${name}, ${user.org_id}, ${user.user_id},
-          ${JSON.stringify(body.arguments)}, ${JSON.stringify(result)},
-          ${duration}, ${body.trace_id || null}, ${body.session_id || null},
-          ${new Date().toISOString()}
+          ${user.org_id}, ${body.session_id || null},
+          ${name}, ${JSON.stringify(body.arguments)}, ${JSON.stringify(result)},
+          ${duration}, ${null}
         )
       `).catch(() => {});
     } catch {
@@ -836,8 +833,8 @@ toolRoutes.openapi(executionHistoryRoute, async (c): Promise<any> => {
     return await withOrgDb(c.env, user.org_id, async (sql) => {
       const rows = await sql`
         SELECT
-          execution_id, arguments_json, result, duration_ms,
-          trace_id, session_id, created_at, error
+          id, input, output, latency_ms,
+          session_id, created_at, error
         FROM tool_executions
         WHERE tool_name = ${name}
         ORDER BY created_at DESC
@@ -854,11 +851,10 @@ toolRoutes.openapi(executionHistoryRoute, async (c): Promise<any> => {
       return c.json({
         tool: name,
         executions: rows.map((r: any) => ({
-          id: r.execution_id,
-          arguments: parseJsonColumn(r.arguments_json),
-          result: parseJsonColumn(r.result, null),
-          duration_ms: r.duration_ms,
-          trace_id: r.trace_id,
+          id: r.id,
+          arguments: parseJsonColumn(r.input),
+          result: parseJsonColumn(r.output, null),
+          duration_ms: r.latency_ms,
           session_id: r.session_id,
           created_at: r.created_at,
           error: r.error,

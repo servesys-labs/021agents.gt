@@ -797,9 +797,10 @@ observabilityRoutes.openapi(postAnnotationsRoute, async (c): Promise<any> => {
   const now = new Date().toISOString();
 
   return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const valuePayload = JSON.stringify({ message, severity, span_id: spanId, node_id: nodeId, turn, metadata });
     await sql`
-      INSERT INTO trace_annotations (annotation_id, trace_id, org_id, user_id, annotation_type, message, severity, span_id, node_id, turn, metadata, created_at)
-      VALUES (${annotationId}, ${traceId}, ${user.org_id}, ${user.user_id}, ${annotationType}, ${message}, ${severity}, ${spanId}, ${nodeId}, ${turn}, ${JSON.stringify(metadata)}, ${now})
+      INSERT INTO trace_annotations (trace_id, org_id, key, value, annotator, created_at)
+      VALUES (${traceId}, ${user.org_id}, ${annotationType}, ${valuePayload}, ${user.user_id}, ${now})
     `;
 
     return c.json({ annotation_id: annotationId, created: true });
@@ -857,8 +858,8 @@ observabilityRoutes.openapi(postFeedbackRoute, async (c): Promise<any> => {
 
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     await sql`
-      INSERT INTO span_feedback (feedback_id, span_id, org_id, user_id, rating, score, comment, labels_json, session_id, turn, source, created_at)
-      VALUES (${feedbackId}, ${spanId}, ${user.org_id}, ${user.user_id}, ${rating}, ${score}, ${comment}, ${JSON.stringify(labels)}, ${sessionId}, ${turn}, ${source}, ${now})
+      INSERT INTO span_feedback (span_id, org_id, rating, comment, created_at)
+      VALUES (${spanId}, ${user.org_id}, ${rating}, ${comment}, ${now})
     `;
 
     return c.json({ feedback_id: feedbackId, created: true });
@@ -908,15 +909,21 @@ observabilityRoutes.openapi(postLineageRoute, async (c): Promise<any> => {
   const now = new Date().toISOString();
 
   return await withOrgDb(c.env, user.org_id, async (sql) => {
+    const relationshipPayload = JSON.stringify({
+      org_id: user.org_id,
+      session_id: body.session_id,
+      agent_version: body.agent_version,
+      model: body.model,
+      prompt_hash: body.prompt_hash,
+      eval_run_id: body.eval_run_id,
+      experiment_id: body.experiment_id,
+      dataset_id: body.dataset_id,
+      commit_sha: body.commit_sha,
+      metadata: body.metadata,
+    });
     await sql`
-      INSERT INTO trace_lineage (trace_id, org_id, session_id, agent_version, model, prompt_hash, eval_run_id, experiment_id, dataset_id, commit_sha, metadata, created_at)
-      VALUES (${traceId}, ${user.org_id}, ${body.session_id}, ${body.agent_version}, ${body.model}, ${body.prompt_hash}, ${body.eval_run_id}, ${body.experiment_id}, ${body.dataset_id}, ${body.commit_sha}, ${JSON.stringify(body.metadata)}, ${now})
-      ON CONFLICT (trace_id) DO UPDATE SET
-        session_id = EXCLUDED.session_id,
-        agent_version = EXCLUDED.agent_version,
-        model = EXCLUDED.model,
-        prompt_hash = EXCLUDED.prompt_hash,
-        metadata = EXCLUDED.metadata
+      INSERT INTO trace_lineage (parent_trace_id, child_trace_id, relationship, created_at)
+      VALUES (${traceId}, ${''}, ${relationshipPayload}, ${now})
     `;
 
     return c.json({ trace_id: traceId, updated: true });
@@ -1227,12 +1234,11 @@ observabilityRoutes.openapi(generateMetaProposalsRoute, async (c): Promise<any> 
   if (persist) {
     for (const p of proposals) {
       try {
+        const content = JSON.stringify({ title: p.title, rationale: p.rationale, priority: p.priority, modification: p.modification, evidence: p.evidence });
         await sql`
-          INSERT INTO meta_proposals (id, agent_name, org_id, title, rationale, category, priority, modification_json, evidence, status, created_at)
-          VALUES (${p.id}, ${agentName}, ${user.org_id}, ${p.title}, ${p.rationale},
-                  ${p.category}, ${p.priority}, ${JSON.stringify(p.modification)},
-                  ${JSON.stringify(p.evidence)}, 'pending', ${p.created_at})
-          ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, rationale = EXCLUDED.rationale, priority = EXCLUDED.priority
+          INSERT INTO meta_proposals (id, org_id, agent_name, proposal_type, content, status, created_at)
+          VALUES (${p.id}, ${user.org_id}, ${agentName}, ${p.category}, ${content}::jsonb, 'pending', ${p.created_at})
+          ON CONFLICT (id) DO UPDATE SET content = EXCLUDED.content, proposal_type = EXCLUDED.proposal_type
         `;
       } catch { /* best-effort */ }
     }
@@ -1649,15 +1655,13 @@ observabilityRoutes.openapi(autonomousMaintenanceRoute, async (c): Promise<any> 
   if (actuallyPersisted) {
     for (const proposal of proposals) {
       try {
+        const content = JSON.stringify({ title: proposal.title, rationale: proposal.rationale, priority: proposal.priority, modification: proposal.modification, evidence: proposal.evidence });
         await sql`
-          INSERT INTO meta_proposals (id, agent_name, org_id, title, rationale, category, priority, modification_json, evidence, status, created_at)
-          VALUES (${proposal.id}, ${agentName}, ${user.org_id}, ${proposal.title}, ${proposal.rationale},
-                  ${proposal.category}, ${proposal.priority}, ${JSON.stringify(proposal.modification)},
-                  ${JSON.stringify(proposal.evidence)}, 'pending', ${new Date().toISOString()})
+          INSERT INTO meta_proposals (id, org_id, agent_name, proposal_type, content, status, created_at)
+          VALUES (${proposal.id}, ${user.org_id}, ${agentName}, ${proposal.category}, ${content}::jsonb, 'pending', ${new Date().toISOString()})
           ON CONFLICT (id) DO UPDATE SET
-            title = EXCLUDED.title,
-            rationale = EXCLUDED.rationale,
-            priority = EXCLUDED.priority
+            content = EXCLUDED.content,
+            proposal_type = EXCLUDED.proposal_type
         `;
       } catch { /* best-effort */ }
     }

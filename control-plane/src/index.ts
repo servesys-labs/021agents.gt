@@ -1056,9 +1056,9 @@ export default {
 
             for (const proposal of proposals) {
               await sql`
-                INSERT INTO evolution_proposals (proposal_id, agent_name, org_id, title, rationale, category, priority, config_diff, evidence, status, created_at)
+                INSERT INTO evolution_proposals (id, agent_name, org_id, title, rationale, category, priority, config_diff, evidence, status, created_at)
                 VALUES (${proposal.id}, ${agentName}, ${orgId}, ${proposal.title}, ${proposal.rationale}, ${proposal.category}, ${proposal.priority}, ${JSON.stringify(proposal.modification)}, ${JSON.stringify(proposal.evidence)}, 'pending', ${nowTs})
-                ON CONFLICT (proposal_id) DO UPDATE SET title = EXCLUDED.title, priority = EXCLUDED.priority
+                ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, priority = EXCLUDED.priority
               `.catch(() => {});
             }
 
@@ -1370,14 +1370,14 @@ export default {
           for (const proposal of proposals) {
             await sql`
               INSERT INTO evolution_proposals (
-                proposal_id, agent_name, org_id, title, rationale, category,
+                id, agent_name, org_id, title, rationale, category,
                 priority, config_diff, evidence, status, created_at
               ) VALUES (
                 ${proposal.id}, ${agentName}, ${orgId}, ${proposal.title},
                 ${proposal.rationale}, ${proposal.category}, ${proposal.priority},
                 ${JSON.stringify(proposal.modification)}, ${JSON.stringify(proposal.evidence)},
                 'pending', ${now}
-              ) ON CONFLICT (proposal_id) DO UPDATE SET
+              ) ON CONFLICT (id) DO UPDATE SET
                 title = EXCLUDED.title,
                 rationale = EXCLUDED.rationale,
                 priority = EXCLUDED.priority,
@@ -1499,12 +1499,13 @@ export default {
     }
 
     // 3b. Update network_stats (materialized view for feed)
+    // DELETE + INSERT: keeps a single row without conflicting on BIGSERIAL PK
     try {
+      await sql`DELETE FROM network_stats`;
       await sql`
-        INSERT INTO network_stats (id, total_agents, total_orgs, total_transactions_24h, total_volume_24h_usd,
+        INSERT INTO network_stats (total_agents, total_orgs, total_transactions_24h, total_volume_24h_usd,
           total_transactions_all_time, total_volume_all_time_usd, total_feed_posts, trending_categories, updated_at)
         VALUES (
-          'current',
           COALESCE((SELECT COUNT(*)::int FROM agents WHERE is_active = true), 0),
           COALESCE((SELECT COUNT(*)::int FROM orgs), 0),
           COALESCE((SELECT COUNT(*)::int FROM credit_transactions WHERE created_at > now() - interval '24 hours'), 0),
@@ -1512,21 +1513,11 @@ export default {
           COALESCE((SELECT COUNT(*)::int FROM credit_transactions), 0),
           COALESCE((SELECT ABS(SUM(amount_usd)) FROM credit_transactions WHERE type = 'burn'), 0),
           COALESCE((SELECT COUNT(*)::int FROM feed_posts WHERE is_active = true), 0),
-          COALESCE((SELECT ARRAY_AGG(tag ORDER BY cnt DESC) FROM (
+          COALESCE((SELECT jsonb_agg(tag ORDER BY cnt DESC) FROM (
             SELECT t.tag, COUNT(*) as cnt FROM feed_posts, jsonb_array_elements_text(tags) AS t(tag) WHERE created_at > now() - interval '7 days' AND is_active = true GROUP BY t.tag LIMIT 10
-          ) t), '{}'),
+          ) t), '[]'),
           now()
         )
-        ON CONFLICT (id) DO UPDATE SET
-          total_agents = EXCLUDED.total_agents,
-          total_orgs = EXCLUDED.total_orgs,
-          total_transactions_24h = EXCLUDED.total_transactions_24h,
-          total_volume_24h_usd = EXCLUDED.total_volume_24h_usd,
-          total_transactions_all_time = EXCLUDED.total_transactions_all_time,
-          total_volume_all_time_usd = EXCLUDED.total_volume_all_time_usd,
-          total_feed_posts = EXCLUDED.total_feed_posts,
-          trending_categories = EXCLUDED.trending_categories,
-          updated_at = EXCLUDED.updated_at
       `;
     } catch (err) {
       console.error("[cron] Network stats update failed:", err);

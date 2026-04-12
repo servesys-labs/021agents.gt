@@ -199,16 +199,13 @@ export async function evaluateAlerts(sql: Sql, orgId: string): Promise<FiredAler
     // Insert alert_history row
     try {
       await sql`
-        INSERT INTO alert_history (org_id, alert_config_id, type, agent_name, metric_value, threshold, status, webhook_delivered)
+        INSERT INTO alert_history (org_id, alert_config_id, status, value, message)
         VALUES (
           ${orgId},
           ${config.id},
-          ${config.type},
-          ${config.agent_name || ""},
-          ${metricValue === Infinity ? -1 : metricValue},
-          ${Number(config.threshold)},
           'fired',
-          ${webhookDelivered}
+          ${metricValue === Infinity ? -1 : metricValue},
+          ${`${config.type} alert for ${config.agent_name || "unknown"}: value=${metricValue}, threshold=${config.threshold}`}
         )
       `;
     } catch (err) {

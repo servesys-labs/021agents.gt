@@ -21,33 +21,34 @@ export interface SecurityEvent {
 /**
  * Log a security event. Fire-and-forget — never throws.
  * Inserts into the `security_events` table with sensible defaults.
+ *
+ * Schema columns: id (BIGSERIAL), org_id, event_type, actor_type, actor_id,
+ * severity, details (JSONB), ip_address, created_at.
  */
 export async function logSecurityEvent(
   sql: Sql,
   event: SecurityEvent,
 ): Promise<void> {
   try {
-    const id = crypto.randomUUID().replace(/-/g, "").slice(0, 24);
-    const now = new Date().toISOString();
+    // Pack extra fields (target_id, target_type, user_agent) into the details JSONB
+    const details: Record<string, unknown> = { ...(event.details ?? {}) };
+    if (event.target_id) details.target_id = event.target_id;
+    if (event.target_type) details.target_type = event.target_type;
+    if (event.user_agent) details.user_agent = event.user_agent;
 
     await sql`
       INSERT INTO security_events (
-        id, org_id, event_type, actor_id, actor_type,
-        target_id, target_type, ip_address, user_agent,
-        details, severity, created_at
+        org_id, event_type, actor_type, actor_id,
+        severity, details, ip_address, created_at
       ) VALUES (
-        ${id},
         ${event.org_id},
         ${event.event_type},
-        ${event.actor_id},
         ${event.actor_type ?? "user"},
-        ${event.target_id ?? null},
-        ${event.target_type ?? null},
-        ${event.ip_address ?? null},
-        ${event.user_agent ?? null},
-        ${JSON.stringify(event.details ?? {})},
+        ${event.actor_id},
         ${event.severity ?? "info"},
-        ${now}
+        ${JSON.stringify(details)},
+        ${event.ip_address ?? null},
+        NOW()
       )
     `;
   } catch {

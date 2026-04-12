@@ -98,8 +98,8 @@ sloRoutes.openapi(createSloRoute, async (c): Promise<any> => {
 
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     await sql`
-      INSERT INTO slo_definitions (slo_id, org_id, agent_name, env, metric, threshold, operator, window_hours)
-      VALUES (${sloId}, ${user.org_id}, ${agentName}, ${env}, ${metric}, ${threshold}, ${operator}, ${windowHours})
+      INSERT INTO slo_definitions (id, org_id, agent_name, env, metric, threshold, operator, window_seconds)
+      VALUES (${sloId}, ${user.org_id}, ${agentName}, ${env}, ${metric}, ${threshold}, ${operator}, ${windowHours * 3600})
     `;
 
     return c.json({ slo_id: sloId, metric, threshold, operator });
@@ -218,8 +218,8 @@ sloRoutes.openapi(sloStatusRoute, async (c): Promise<any> => {
       const evalId = genId();
       try {
         await sql`
-          INSERT INTO slo_evaluations (eval_id, org_id, slo_id, metric, agent_name, threshold, actual_value, breached, window_hours)
-          VALUES (${evalId}, ${user.org_id}, ${s.slo_id}, ${s.metric}, ${s.agent_name}, ${s.threshold}, ${current}, ${breached}, ${s.window_hours})
+          INSERT INTO slo_evaluations (org_id, slo_id, metric, agent_name, threshold, actual_value, breached)
+          VALUES (${user.org_id}, ${s.id}, ${s.metric}, ${s.agent_name}, ${s.threshold}, ${current}, ${breached})
         `;
       } catch {}
 

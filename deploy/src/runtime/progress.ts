@@ -147,17 +147,13 @@ export async function writeProgress(
     const sql = await getDb(hyperdrive);
     await sql`
       INSERT INTO session_progress (
-        session_id, trace_id, agent_name, org_id,
-        summary, created_at
+        session_id, stage, message, created_at
       ) VALUES (
         ${entry.session_id},
-        ${entry.trace_id},
-        ${entry.agent_name},
-        ${entry.org_id},
-        ${JSON.stringify(entry.summary)},
-        ${entry.timestamp / 1000}
-      ) ON CONFLICT (session_id) DO UPDATE SET
-        summary = EXCLUDED.summary
+        ${entry.agent_name || ''},
+        ${JSON.stringify({ trace_id: entry.trace_id, org_id: entry.org_id, agent_name: entry.agent_name, ...entry.summary })},
+        NOW()
+      )
     `;
   } catch (err) {
     log.error(

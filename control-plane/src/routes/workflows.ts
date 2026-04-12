@@ -244,16 +244,11 @@ workflowRoutes.openapi(approvalStartRoute, async (c): Promise<any> => {
 
   await sql`
     INSERT INTO workflow_approvals (
-      approval_id, org_id, project_id, agent_name, run_id, gate_id, checkpoint_id,
-      status, decision, reviewer_id, review_comment, context_json,
-      workflow_instance_id, backend_mode, idempotency_key,
-      deadline_at, decided_at, created_at, updated_at
+      id, workflow_run_id, org_id, approver_user_id, status, created_at
     )
     VALUES (
-      ${approvalId}, ${user.org_id}, ${user.project_id || ""}, ${agentName}, ${runId}, ${gateId}, ${checkpointId},
-      ${"pending"}, ${""}, ${""}, ${""}, ${JSON.stringify(context)},
-      ${dispatch.workflowInstanceId}, ${dispatch.backendMode}, ${idempotencyKey},
-      ${deadlineAt}, ${0}, ${createdAt}, ${createdAt}
+      ${approvalId}, ${runId}, ${user.org_id}, ${null},
+      ${"pending"}, ${createdAt}
     )
   `;
 
@@ -516,8 +511,8 @@ workflowRoutes.openapi(createWorkflowRoute, async (c): Promise<any> => {
 
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     await sql`
-      INSERT INTO workflows (workflow_id, org_id, name, description, steps)
-      VALUES (${workflowId}, ${user.org_id}, ${name}, ${description}, ${stepsJson})
+      INSERT INTO workflows (id, org_id, name, definition)
+      VALUES (${workflowId}, ${user.org_id}, ${name}, ${stepsJson})
     `;
 
     return c.json({ workflow_id: workflowId, name, steps: normalizedSteps.length });

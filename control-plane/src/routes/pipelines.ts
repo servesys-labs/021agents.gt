@@ -78,12 +78,12 @@ pipelineRoutes.openapi(listStreamsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     const rows = await sql`
-      SELECT id, name, description, type, config, status, cf_resource_id, created_at, updated_at
+      SELECT id, name, definition, is_active, created_at, updated_at
       FROM pipelines
-      WHERE type = 'stream' AND status != 'deleted'
+      WHERE definition->>'type' = 'stream' AND definition->>'status' != 'deleted' AND is_active = true
       ORDER BY created_at DESC
     `;
-    return c.json({ streams: rows, total: rows.length });
+    return c.json({ streams: rows.map((r: any) => ({ id: r.id, name: r.name, ...(parseJsonColumn(r.definition) as Record<string, unknown>), created_at: r.created_at, updated_at: r.updated_at })), total: rows.length });
   });
 });
 
@@ -132,9 +132,10 @@ pipelineRoutes.openapi(createStreamRoute, async (c): Promise<any> => {
 
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     await sql`
-      INSERT INTO pipelines (id, org_id, name, description, type, config, status, created_at, updated_at)
-      VALUES (${id}, ${user.org_id}, ${name}, ${body.description || ""}, 'stream',
-              ${JSON.stringify(config)}, 'draft', ${now}, ${now})
+      INSERT INTO pipelines (id, org_id, name, definition, is_active, created_at, updated_at)
+      VALUES (${id}, ${user.org_id}, ${name},
+              ${JSON.stringify({ description: body.description || "", type: "stream", config, status: "draft" })},
+              true, ${now}, ${now})
     `;
 
     return c.json({ id, name, type: "stream", status: "draft", config }, 201);
@@ -163,13 +164,14 @@ pipelineRoutes.openapi(getStreamRoute, async (c): Promise<any> => {
   const { stream_id: streamId } = c.req.valid("param");
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     const rows = await sql`
-      SELECT id, name, description, type, config, status, cf_resource_id, created_at, updated_at
+      SELECT id, name, definition, is_active, created_at, updated_at
       FROM pipelines
-      WHERE id = ${streamId} AND type = 'stream' AND status != 'deleted'
+      WHERE id = ${streamId} AND definition->>'type' = 'stream' AND definition->>'status' != 'deleted'
       LIMIT 1
     `;
     if (rows.length === 0) return c.json({ error: "Stream not found" }, 404);
-    return c.json(rows[0] as any);
+    const row = rows[0] as any;
+    return c.json({ id: row.id, name: row.name, ...parseJsonColumn(row.definition), created_at: row.created_at, updated_at: row.updated_at });
   });
 });
 
@@ -194,8 +196,8 @@ pipelineRoutes.openapi(deleteStreamRoute, async (c): Promise<any> => {
   const { stream_id: streamId } = c.req.valid("param");
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     await sql`
-      UPDATE pipelines SET status = 'deleted', updated_at = ${nowEpoch()}
-      WHERE id = ${streamId} AND type = 'stream'
+      UPDATE pipelines SET definition = definition || '{"status":"deleted"}'::jsonb, is_active = false, updated_at = ${nowEpoch()}
+      WHERE id = ${streamId} AND definition->>'type' = 'stream'
     `;
     return c.json({ deleted: true, id: streamId });
   });
@@ -238,13 +240,14 @@ pipelineRoutes.openapi(sendToStreamRoute, async (c): Promise<any> => {
 
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     const rows = await sql`
-      SELECT cf_resource_id, config, status FROM pipelines
-      WHERE id = ${streamId} AND type = 'stream' AND status != 'deleted'
+      SELECT id, definition FROM pipelines
+      WHERE id = ${streamId} AND definition->>'type' = 'stream' AND definition->>'status' != 'deleted'
       LIMIT 1
     `;
     if (rows.length === 0) return c.json({ error: "Stream not found" }, 404);
 
-    const cfResourceId = String(rows[0].cf_resource_id || "");
+    const def = parseJsonColumn(rows[0].definition);
+    const cfResourceId = String(def.cf_resource_id || "");
 
     // If stream has a CF resource, post to the ingest endpoint
     if (cfResourceId) {
@@ -294,12 +297,12 @@ pipelineRoutes.openapi(listSinksRoute, async (c): Promise<any> => {
   const user = c.get("user");
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     const rows = await sql`
-      SELECT id, name, description, type, config, status, cf_resource_id, created_at, updated_at
+      SELECT id, name, definition, is_active, created_at, updated_at
       FROM pipelines
-      WHERE type = 'sink' AND status != 'deleted'
+      WHERE definition->>'type' = 'sink' AND definition->>'status' != 'deleted' AND is_active = true
       ORDER BY created_at DESC
     `;
-    return c.json({ sinks: rows, total: rows.length });
+    return c.json({ sinks: rows.map((r: any) => ({ id: r.id, name: r.name, ...(parseJsonColumn(r.definition) as Record<string, unknown>), created_at: r.created_at, updated_at: r.updated_at })), total: rows.length });
   });
 });
 
@@ -381,9 +384,10 @@ pipelineRoutes.openapi(createSinkRoute, async (c): Promise<any> => {
 
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     await sql`
-      INSERT INTO pipelines (id, org_id, name, description, type, config, status, created_at, updated_at)
-      VALUES (${id}, ${user.org_id}, ${name}, ${body.description || ""}, 'sink',
-              ${JSON.stringify(config)}, 'draft', ${now}, ${now})
+      INSERT INTO pipelines (id, org_id, name, definition, is_active, created_at, updated_at)
+      VALUES (${id}, ${user.org_id}, ${name},
+              ${JSON.stringify({ description: body.description || "", type: "sink", config, status: "draft" })},
+              true, ${now}, ${now})
     `;
 
     return c.json({ id, name, type: "sink", status: "draft", config }, 201);
@@ -412,13 +416,14 @@ pipelineRoutes.openapi(getSinkRoute, async (c): Promise<any> => {
   const { sink_id: sinkId } = c.req.valid("param");
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     const rows = await sql`
-      SELECT id, name, description, type, config, status, cf_resource_id, created_at, updated_at
+      SELECT id, name, definition, is_active, created_at, updated_at
       FROM pipelines
-      WHERE id = ${sinkId} AND type = 'sink' AND status != 'deleted'
+      WHERE id = ${sinkId} AND definition->>'type' = 'sink' AND definition->>'status' != 'deleted'
       LIMIT 1
     `;
     if (rows.length === 0) return c.json({ error: "Sink not found" }, 404);
-    return c.json(rows[0] as any);
+    const row = rows[0] as any;
+    return c.json({ id: row.id, name: row.name, ...parseJsonColumn(row.definition), created_at: row.created_at, updated_at: row.updated_at });
   });
 });
 
@@ -443,8 +448,8 @@ pipelineRoutes.openapi(deleteSinkRoute, async (c): Promise<any> => {
   const { sink_id: sinkId } = c.req.valid("param");
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     await sql`
-      UPDATE pipelines SET status = 'deleted', updated_at = ${nowEpoch()}
-      WHERE id = ${sinkId} AND type = 'sink'
+      UPDATE pipelines SET definition = definition || '{"status":"deleted"}'::jsonb, is_active = false, updated_at = ${nowEpoch()}
+      WHERE id = ${sinkId} AND definition->>'type' = 'sink'
     `;
     return c.json({ deleted: true, id: sinkId });
   });
@@ -469,12 +474,12 @@ pipelineRoutes.openapi(listPipelinesRoute, async (c): Promise<any> => {
   const user = c.get("user");
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     const rows = await sql`
-      SELECT id, name, description, type, config, status, cf_resource_id, created_at, updated_at
+      SELECT id, name, definition, is_active, created_at, updated_at
       FROM pipelines
-      WHERE type = 'pipeline' AND status != 'deleted'
+      WHERE definition->>'type' = 'pipeline' AND definition->>'status' != 'deleted' AND is_active = true
       ORDER BY created_at DESC
     `;
-    return c.json({ pipelines: rows, total: rows.length });
+    return c.json({ pipelines: rows.map((r: any) => ({ id: r.id, name: r.name, ...(parseJsonColumn(r.definition) as Record<string, unknown>), created_at: r.created_at, updated_at: r.updated_at })), total: rows.length });
   });
 });
 
@@ -529,22 +534,23 @@ pipelineRoutes.openapi(createPipelineRoute, async (c): Promise<any> => {
     // Validate stream and sink exist
     const streamRows = await sql`
       SELECT id, name FROM pipelines
-      WHERE id = ${body.stream_id} AND type = 'stream' AND status != 'deleted'
+      WHERE id = ${body.stream_id} AND definition->>'type' = 'stream' AND definition->>'status' != 'deleted'
       LIMIT 1
     `;
     if (streamRows.length === 0) return c.json({ error: "Stream not found" }, 404);
 
     const sinkRows = await sql`
       SELECT id, name FROM pipelines
-      WHERE id = ${body.sink_id} AND type = 'sink' AND status != 'deleted'
+      WHERE id = ${body.sink_id} AND definition->>'type' = 'sink' AND definition->>'status' != 'deleted'
       LIMIT 1
     `;
     if (sinkRows.length === 0) return c.json({ error: "Sink not found" }, 404);
 
     await sql`
-      INSERT INTO pipelines (id, org_id, name, description, type, config, status, created_at, updated_at)
-      VALUES (${id}, ${user.org_id}, ${name}, ${body.description || ""}, 'pipeline',
-              ${JSON.stringify(config)}, 'draft', ${now}, ${now})
+      INSERT INTO pipelines (id, org_id, name, definition, is_active, created_at, updated_at)
+      VALUES (${id}, ${user.org_id}, ${name},
+              ${JSON.stringify({ description: body.description || "", type: "pipeline", config, status: "draft" })},
+              true, ${now}, ${now})
     `;
 
     return c.json({
@@ -587,16 +593,16 @@ pipelineRoutes.openapi(getPipelineRoute, async (c): Promise<any> => {
 
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     const rows = await sql`
-      SELECT id, name, description, type, config, status, cf_resource_id, created_at, updated_at
+      SELECT id, name, definition, is_active, created_at, updated_at
       FROM pipelines
-      WHERE id = ${pipelineId} AND type = 'pipeline' AND status != 'deleted'
+      WHERE id = ${pipelineId} AND definition->>'type' = 'pipeline' AND definition->>'status' != 'deleted'
       LIMIT 1
     `;
     if (rows.length === 0) return c.json({ error: "Pipeline not found" }, 404);
 
-    const pipeline = rows[0];
-    let config: Record<string, unknown> = {};
-    config = parseJsonColumn(pipeline.config);
+    const pipeline = rows[0] as any;
+    const def = parseJsonColumn(pipeline.definition);
+    const config: Record<string, unknown> = def.config || {};
 
     // Resolve stream and sink names
     let streamName = "";
@@ -611,9 +617,10 @@ pipelineRoutes.openapi(getPipelineRoute, async (c): Promise<any> => {
     }
 
     return c.json({
-      ...pipeline,
+      id: pipeline.id, name: pipeline.name, ...def,
       stream_name: streamName,
       sink_name: sinkName,
+      created_at: pipeline.created_at, updated_at: pipeline.updated_at,
     } as any);
   });
 });
@@ -652,29 +659,23 @@ pipelineRoutes.openapi(updatePipelineRoute, async (c): Promise<any> => {
   return await withOrgDb(c.env, user.org_id, async (sql) => {
 
     const rows = await sql`
-      SELECT config FROM pipelines
-      WHERE id = ${pipelineId} AND type = 'pipeline' AND status != 'deleted'
+      SELECT definition FROM pipelines
+      WHERE id = ${pipelineId} AND definition->>'type' = 'pipeline' AND definition->>'status' != 'deleted'
       LIMIT 1
     `;
     if (rows.length === 0) return c.json({ error: "Pipeline not found" }, 404);
 
-    let config: Record<string, unknown> = {};
-    config = parseJsonColumn(rows[0].config);
+    const def = parseJsonColumn(rows[0].definition);
+    const config: Record<string, unknown> = def.config || {};
 
     if (body.sql) config.sql = body.sql;
-    const description = body.description !== undefined ? body.description : null;
+    if (body.description !== undefined) def.description = body.description;
+    def.config = config;
 
-    if (description !== null) {
-      await sql`
-        UPDATE pipelines SET config = ${JSON.stringify(config)}, description = ${description}, updated_at = ${nowEpoch()}
-        WHERE id = ${pipelineId}
-      `;
-    } else {
-      await sql`
-        UPDATE pipelines SET config = ${JSON.stringify(config)}, updated_at = ${nowEpoch()}
-        WHERE id = ${pipelineId}
-      `;
-    }
+    await sql`
+      UPDATE pipelines SET definition = ${JSON.stringify(def)}, updated_at = ${nowEpoch()}
+      WHERE id = ${pipelineId}
+    `;
 
     return c.json({ updated: true, id: pipelineId, config });
   });
@@ -701,8 +702,8 @@ pipelineRoutes.openapi(deletePipelineRoute, async (c): Promise<any> => {
   const { pipeline_id: pipelineId } = c.req.valid("param");
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     await sql`
-      UPDATE pipelines SET status = 'deleted', updated_at = ${nowEpoch()}
-      WHERE id = ${pipelineId} AND type = 'pipeline'
+      UPDATE pipelines SET definition = definition || '{"status":"deleted"}'::jsonb, is_active = false, updated_at = ${nowEpoch()}
+      WHERE id = ${pipelineId} AND definition->>'type' = 'pipeline'
     `;
     return c.json({ deleted: true, id: pipelineId });
   });
@@ -820,8 +821,8 @@ pipelineRoutes.openapi(queryPipelineRoute, async (c): Promise<any> => {
 
   return await withOrgDb(c.env, user.org_id, async (sql) => {
   const rows = await sql`
-    SELECT name, config, status FROM pipelines
-    WHERE id = ${pipelineId} AND type = 'pipeline' AND status != 'deleted'
+    SELECT name, definition FROM pipelines
+    WHERE id = ${pipelineId} AND definition->>'type' = 'pipeline' AND definition->>'status' != 'deleted'
     LIMIT 1
   `;
   if (rows.length === 0) return c.json({ error: "Pipeline not found" }, 404);
@@ -898,32 +899,33 @@ pipelineRoutes.openapi(deployPipelineRoute, async (c): Promise<any> => {
   return await withOrgDb(c.env, user.org_id, async (sql) => {
 
     const rows = await sql`
-      SELECT id, name, type, config, status FROM pipelines
-      WHERE id = ${pipelineId} AND status != 'deleted'
+      SELECT id, name, definition FROM pipelines
+      WHERE id = ${pipelineId} AND definition->>'status' != 'deleted'
       LIMIT 1
     `;
     if (rows.length === 0) return c.json({ error: "Resource not found" }, 404);
 
-    const resource = rows[0];
+    const resource = rows[0] as any;
+    const def = parseJsonColumn(resource.definition);
     const now = nowEpoch();
 
     // Mark as deploying
     await sql`
-      UPDATE pipelines SET status = 'deploying', updated_at = ${now}
+      UPDATE pipelines SET definition = definition || '{"status":"deploying"}'::jsonb, updated_at = ${now}
       WHERE id = ${pipelineId}
     `;
 
     // Attempt CF API call
     const result = await cfApi(c.env, "/pipelines", "POST", {
       name: resource.name,
-      type: resource.type,
-      config: parseJsonColumn(resource.config),
+      type: def.type,
+      config: def.config,
     });
 
     if (result.ok) {
       const cfId = (result.data as Record<string, unknown>)?.id || "";
       await sql`
-        UPDATE pipelines SET status = 'active', cf_resource_id = ${String(cfId)}, updated_at = ${nowEpoch()}
+        UPDATE pipelines SET definition = definition || ${JSON.stringify({ status: "active", cf_resource_id: String(cfId) })}::jsonb, updated_at = ${nowEpoch()}
         WHERE id = ${pipelineId}
       `;
       return c.json({ deployed: true, id: pipelineId, cf_resource_id: cfId });
@@ -931,7 +933,7 @@ pipelineRoutes.openapi(deployPipelineRoute, async (c): Promise<any> => {
 
     // CF API not available — mark as pending for manual deployment
     await sql`
-      UPDATE pipelines SET status = 'draft', updated_at = ${nowEpoch()}
+      UPDATE pipelines SET definition = definition || '{"status":"draft"}'::jsonb, updated_at = ${nowEpoch()}
       WHERE id = ${pipelineId}
     `;
     // Operators see the underlying reason in the logs; API consumers only

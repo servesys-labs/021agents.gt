@@ -115,13 +115,10 @@ codemodeRoutes.openapi(createSnippetRoute, async (c): Promise<any> => {
     await sql`
       INSERT INTO codemode_snippets (
         id, org_id, name, description, code, scope,
-        input_schema, output_schema, scope_config,
-        tags, version, is_template, created_at, updated_at
+        language, is_template, created_at, updated_at
       ) VALUES (
         ${id}, ${user.org_id}, ${req.name}, ${req.description}, ${req.code}, ${req.scope},
-        ${JSON.stringify(req.input_schema || null)}, ${JSON.stringify(req.output_schema || null)},
-        ${JSON.stringify(req.scope_config || null)},
-        ${JSON.stringify(req.tags)}, ${1}, ${false}, ${now}, ${now}
+        ${'javascript'}, ${false}, ${now}, ${now}
       )
     `;
 
@@ -279,11 +276,6 @@ codemodeRoutes.openapi(updateSnippetRoute, async (c): Promise<any> => {
         description = COALESCE(${req.description ?? null}, description),
         code = COALESCE(${req.code ?? null}, code),
         scope = COALESCE(${req.scope ?? null}, scope),
-        input_schema = COALESCE(${req.input_schema ? JSON.stringify(req.input_schema) : null}, input_schema),
-        output_schema = COALESCE(${req.output_schema ? JSON.stringify(req.output_schema) : null}, output_schema),
-        scope_config = COALESCE(${req.scope_config ? JSON.stringify(req.scope_config) : null}, scope_config),
-        tags = COALESCE(${req.tags ? JSON.stringify(req.tags) : null}, tags),
-        version = CASE WHEN ${bumpVersion} THEN version + 1 ELSE version END,
         updated_at = ${now}
       WHERE id = ${id}
     `;
@@ -629,14 +621,11 @@ codemodeRoutes.openapi(cloneSnippetRoute, async (c): Promise<any> => {
     await sql`
       INSERT INTO codemode_snippets (
         id, org_id, name, description, code, scope,
-        input_schema, output_schema, scope_config,
-        tags, version, is_template, created_at, updated_at
+        language, is_template, created_at, updated_at
       ) VALUES (
         ${newId}, ${user.org_id}, ${newName}, ${String(src.description || "")},
         ${String(src.code || "")}, ${String(src.scope || "agent")},
-        ${String(src.input_schema || "null")}, ${String(src.output_schema || "null")},
-        ${String(src.scope_config || "null")},
-        ${String(src.tags || "[]")}, ${1}, ${false}, ${now}, ${now}
+        ${String(src.language || "javascript")}, ${false}, ${now}, ${now}
       )
     `;
 

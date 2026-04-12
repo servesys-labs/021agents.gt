@@ -612,6 +612,9 @@ export async function writeEvent(
   hyperdrive: Hyperdrive,
   event: {
     session_id: string;
+    org_id?: string;
+    agent_name?: string;
+    trace_id?: string;
     turn: number;
     event_type: string;
     action: string;
@@ -634,19 +637,36 @@ export async function writeEvent(
   }
   try {
     const sql = await getDb(hyperdrive);
+    const eventData = JSON.stringify({
+      turn: event.turn,
+      action: event.action,
+      plan: event.plan,
+      provider: event.provider,
+      model: event.model,
+      tool_name: event.tool_name,
+      status: event.status,
+      latency_ms: event.latency_ms,
+      input_tokens: event.input_tokens,
+      output_tokens: event.output_tokens,
+      cost_usd: event.cost_usd,
+      details: event.details,
+    });
+    const ts = event.created_at
+      ? (typeof event.created_at === "string" && String(event.created_at).includes("T")
+          ? event.created_at
+          : new Date(Number(event.created_at) * 1000).toISOString())
+      : new Date().toISOString();
     await sql`
       INSERT INTO otel_events (
-        session_id, turn, event_type, action, plan, tier,
-        provider, model, tool_name, status, latency_ms,
-        input_tokens, output_tokens, cost_usd, details, created_at
+        org_id, agent_name, session_id, trace_id, event_type, event_data, created_at
       ) VALUES (
-        ${event.session_id}, ${event.turn}, ${event.event_type},
-        ${event.action}, ${event.plan}, '',
-        ${event.provider}, ${event.model}, ${event.tool_name},
-        ${event.status}, ${event.latency_ms},
-        ${event.input_tokens}, ${event.output_tokens}, ${event.cost_usd},
-        ${event.details},
-        ${event.created_at ? (typeof event.created_at === "string" && String(event.created_at).includes("T") ? event.created_at : new Date(Number(event.created_at) * 1000).toISOString()) : new Date().toISOString()}
+        ${event.org_id || ""},
+        ${event.agent_name || ""},
+        ${event.session_id},
+        ${event.trace_id || ""},
+        ${event.event_type},
+        ${eventData}::jsonb,
+        ${ts}
       )
     `;
     recordDbSuccess();

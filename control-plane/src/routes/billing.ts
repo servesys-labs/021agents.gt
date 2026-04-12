@@ -330,7 +330,7 @@ billingRoutes.openapi(getPricingRoute, async (c): Promise<any> => {
   // pricing_catalog is a global table (not RLS'd) — use admin connection.
   return await withAdminDb(c.env, async (sql) => {
     // Build query dynamically with filters
-    let query = "SELECT * FROM pricing_catalog WHERE is_active = true";
+    let query = "SELECT * FROM pricing_catalog WHERE effective_to IS NULL OR effective_to > NOW()";
     const params: (string | boolean)[] = [];
 
     if (resourceType) {
@@ -420,21 +420,19 @@ billingRoutes.openapi(upsertPricingRoute, async (c): Promise<any> => {
 
     // Deactivate existing active row for same key
     await sql`
-      UPDATE pricing_catalog SET is_active = false
+      UPDATE pricing_catalog SET effective_to = NOW()
       WHERE provider = ${provider} AND model = ${model}
         AND resource_type = ${resourceType} AND operation = ${operation}
-        AND unit = ${unit} AND is_active = true
+        AND unit = ${unit} AND (effective_to IS NULL OR effective_to > NOW())
     `;
 
     const [row] = await sql`
       INSERT INTO pricing_catalog (
         provider, model, resource_type, operation, unit, unit_price_usd,
-        currency, source, pricing_version, effective_from, effective_to,
-        is_active, metadata
+        effective_from, effective_to
       ) VALUES (
         ${provider}, ${model}, ${resourceType}, ${operation}, ${unit}, ${unitPriceUsd},
-        ${currency}, ${source}, ${pricingVersion}, ${effectiveFrom}, ${effectiveTo},
-        ${isActive}, ${metadataJson}
+        ${effectiveFrom || new Date().toISOString()}, ${effectiveTo}
       ) RETURNING id
     `;
 

@@ -298,35 +298,24 @@ conversationIntelRoutes.openapi(scoreSessionRoute, async (c): Promise<any> => {
   try {
     await sql`
       INSERT INTO conversation_analytics (
-        session_id, org_id, agent_name,
-        avg_sentiment_score, dominant_sentiment, sentiment_trend,
-        avg_quality, min_quality, max_quality,
-        topics, intents, failure_patterns,
-        total_turns, tool_failure_count, hallucination_risk_count,
-        created_at
+        org_id, agent_name, conversation_id, metrics
       ) VALUES (
-        ${sessionId}, ${user.org_id}, ${agentName},
-        ${result.avg_sentiment_score}, ${result.dominant_sentiment}, ${result.sentiment_trend},
-        ${result.avg_quality}, ${result.min_quality}, ${result.max_quality},
-        ${JSON.stringify(result.topics)}, ${JSON.stringify(result.intents)},
-        ${JSON.stringify(result.failure_patterns)},
-        ${result.total_turns}, ${result.tool_failure_count}, ${result.hallucination_risk_count},
-        ${now}
+        ${user.org_id}, ${agentName}, ${sessionId},
+        ${JSON.stringify({
+          avg_sentiment_score: result.avg_sentiment_score,
+          dominant_sentiment: result.dominant_sentiment,
+          sentiment_trend: result.sentiment_trend,
+          avg_quality: result.avg_quality,
+          min_quality: result.min_quality,
+          max_quality: result.max_quality,
+          topics: result.topics,
+          intents: result.intents,
+          failure_patterns: result.failure_patterns,
+          total_turns: result.total_turns,
+          tool_failure_count: result.tool_failure_count,
+          hallucination_risk_count: result.hallucination_risk_count,
+        })}
       )
-      ON CONFLICT (session_id) DO UPDATE SET
-        avg_sentiment_score = EXCLUDED.avg_sentiment_score,
-        dominant_sentiment = EXCLUDED.dominant_sentiment,
-        sentiment_trend = EXCLUDED.sentiment_trend,
-        avg_quality = EXCLUDED.avg_quality,
-        min_quality = EXCLUDED.min_quality,
-        max_quality = EXCLUDED.max_quality,
-        topics = EXCLUDED.topics,
-        intents = EXCLUDED.intents,
-        failure_patterns = EXCLUDED.failure_patterns,
-        total_turns = EXCLUDED.total_turns,
-        tool_failure_count = EXCLUDED.tool_failure_count,
-        hallucination_risk_count = EXCLUDED.hallucination_risk_count,
-        created_at = EXCLUDED.created_at
     `;
   } catch {
     // Best-effort persistence

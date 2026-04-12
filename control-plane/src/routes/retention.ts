@@ -98,7 +98,7 @@ retentionRoutes.openapi(createRetentionRoute, async (c): Promise<any> => {
 
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     await sql`
-      INSERT INTO retention_policies (policy_id, org_id, resource_type, retention_days, redact_pii, redact_fields, archive_before_delete)
+      INSERT INTO retention_policies (id, org_id, resource_type, retention_days, redact_pii, redact_fields, archive_before_delete)
       VALUES (${policyId}, ${user.org_id}, ${resourceType}, ${retentionDays}, ${redactPii}, ${JSON.stringify(redactFields)}, ${archiveBeforeDelete})
     `;
 
