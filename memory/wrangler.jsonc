@@ -1,0 +1,26 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "agentos-memory",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-03-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+
+  // Vectorize for semantic search
+  "vectorize": [
+    { "binding": "VECTORIZE", "index_name": "agentos-knowledge-v2" }
+  ],
+
+  // AI for embedding generation
+  "ai": { "binding": "AI" },
+
+  // Hyperdrive for fact/episode storage
+  "hyperdrive": [
+    { "binding": "HYPERDRIVE", "id": "775f7e11ce8c479993855531f728770a" }
+  ],
+
+  // R2 for document storage
+  "r2_buckets": [
+    { "binding": "STORAGE", "bucket_name": "agentos-storage" }
+  ]
+}

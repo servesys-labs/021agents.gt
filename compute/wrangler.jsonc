@@ -1,0 +1,47 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "agentos-compute",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-03-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "SANDBOX", "class_name": "AgentSandbox" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["AgentSandbox"] }
+  ],
+
+  // Containers for Python/Bash sandbox
+  "containers": [
+    {
+      "class_name": "AgentSandbox",
+      "image": "../deploy/sandbox.Dockerfile",
+      "instance_type": "basic",
+      "max_instances": 500,
+      "rollout_step_percentage": [10, 100],
+      "rollout_active_grace_period": 300
+    }
+  ],
+
+  // Dynamic Workers for V8 isolate execution
+  "worker_loaders": [{ "binding": "LOADER" }],
+
+  // Browser Rendering
+  "browser": { "binding": "BROWSER" },
+
+  // R2 for file operations within sandbox
+  "r2_buckets": [
+    { "binding": "STORAGE", "bucket_name": "agentos-storage" }
+  ],
+
+  // Telemetry
+  "queues": {
+    "producers": [
+      { "binding": "TELEMETRY_QUEUE", "queue": "agentos-telemetry" }
+    ]
+  }
+}
