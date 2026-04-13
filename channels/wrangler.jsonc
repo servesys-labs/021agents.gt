@@ -1,0 +1,29 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "agentos-channels",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-03-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+
+  // Service binding to the agent core worker for running agents
+  "services": [
+    { "binding": "AGENT_CORE", "service": "agentos" }
+  ],
+
+  // Hyperdrive for bot token + agent config lookup
+  "hyperdrive": [
+    { "binding": "HYPERDRIVE", "id": "775f7e11ce8c479993855531f728770a" }
+  ],
+
+  // KV for message deduplication
+  "kv_namespaces": [
+    { "binding": "DEDUP_KV", "id": "30da23c287ee4f4c93d1a1f08cdd48a0" }
+  ],
+
+  // AI for voice transcription (Whisper)
+  "ai": { "binding": "AI" },
+
+  // Platform secrets set via wrangler secret put
+  "vars": {}
+}
