@@ -2757,7 +2757,18 @@ function extractBearerToken(request: Request): string {
 }
 
 async function authorizeAgentIngress(request: Request, env: Env): Promise<Response | null> {
-  const token = extractBearerToken(request);
+  // Try Authorization header first (works for HTTP, SSE, MCP, service bindings)
+  let token = extractBearerToken(request);
+
+  // For WebSocket upgrades: browsers CANNOT set custom headers on WebSocket
+  // connections (the new WebSocket(url) API has no headers parameter).
+  // Accept the token as a query parameter instead: ?token=eyJ...
+  // Defense-in-depth: onMessage also validates auth post-connect.
+  if (!token && request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
+    const url = new URL(request.url);
+    token = url.searchParams.get("token") || null;
+  }
+
   if (!token) return Response.json({ error: "unauthorized" }, { status: 401 });
 
   const serviceToken = String(env.SERVICE_TOKEN || "").trim();
