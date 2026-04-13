@@ -12,10 +12,12 @@
  */
 
 import { useAgent, useAgentChat } from "agents/react";
+import { useVoiceAgent } from "@cloudflare/voice/react";
 import { useState, useRef, useEffect } from "react";
 
 export default function App() {
   const [input, setInput] = useState("");
+  const [voiceMode, setVoiceMode] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // SDK hook: connects to ModelAgent DO via WebSocket
@@ -26,7 +28,6 @@ export default function App() {
   });
 
   // SDK hook: wraps useAgent with AI SDK chat protocol
-  // Handles streaming, tool calls, message persistence
   const {
     messages,
     handleSubmit,
@@ -35,6 +36,12 @@ export default function App() {
     stop,
   } = useAgentChat({
     agent,
+  });
+
+  // SDK hook: voice agent (Workers AI STT + TTS, no external keys)
+  const voice = useVoiceAgent({
+    agent: "ModelAgent",
+    name: "default",
   });
 
   // Auto-scroll to bottom on new messages
@@ -52,7 +59,27 @@ export default function App() {
             Reference implementation — AIChatAgent + Workspace + CodeMode + MCP
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3">
+          {/* Voice toggle */}
+          <button
+            onClick={() => {
+              if (voiceMode) {
+                voice.endCall();
+                setVoiceMode(false);
+              } else {
+                voice.startCall();
+                setVoiceMode(true);
+              }
+            }}
+            className={`px-3 py-1 rounded text-xs ${
+              voiceMode
+                ? "bg-red-100 text-red-700 border border-red-300"
+                : "bg-gray-100 text-gray-600 border"
+            }`}
+          >
+            {voiceMode ? `Voice: ${voice.status}` : "Voice Off"}
+          </button>
+
           <span
             className={`w-2 h-2 rounded-full ${
               agent.ready ? "bg-green-500" : "bg-yellow-500"
