@@ -337,4 +337,70 @@ Zero-latency calls. No network hop. Same thread when co-located.
 
 - Don't split for "microservices purity" — Cloudflare's composable model is opinionated and different from AWS/GCP patterns
 - Don't split the Agent Core further — the DO + Workflow + LLM loop is a single transaction boundary, splitting it creates distributed consistency problems
+
+---
+
+## Update: Durable Object Facets (Agents Week 2026)
+
+Cloudflare announced **DO Facets** during Agents Week (April 2026). This changes our architecture:
+
+### What Facets Are
+
+Facets allow a single Durable Object to contain **multiple isolated SQLite databases** — one per "facet" plus one for the supervisor. Each facet runs isolated code with its own database, managed by a parent supervisor DO.
+
+```
+AgentOSAgent (supervisor DO)
+  ├── ctx.facets.get("memory")     → isolated SQLite for memory/RAG
+  ├── ctx.facets.get("signals")    → isolated SQLite for signal state
+  ├── ctx.facets.get("workspace")  → isolated SQLite for file state
+  └── supervisor SQLite            → conversation, config, billing
+```
+
+API: `ctx.facets.get(name, callback)` retrieves or initializes a facet. Each facet gets its own `.fetch()` and RPC methods. Data isolation is strict — facet code cannot access other facets' databases.
+
+### Impact on Our Architecture
+
+**What changes:**
+- The **Signals Worker** could become a **facet** of the Agent Core DO instead of a separate Worker. Signal clustering and rules would run inside the same DO with their own isolated database. This eliminates the service binding hop and the queue round-trip for signal ingestion.
+- The **Memory Worker** operations that are per-agent (fact storage, episodic notes) could be facets. But Vectorize search (cross-agent) still needs a separate Worker or shared binding.
+- **Dynamic Workers** (already used for code execution) now support exporting DO classes, meaning the Compute Worker's sandbox isolation can use facets + Dynamic Workers together.
+
+**What stays the same:**
+- **Channels Worker** stays separate — it's a different entry point (webhook receiver), not a facet of the agent.
+- **Compute Worker** stays separate — containers are resource-intensive and need independent scaling.
+- **Service bindings** remain the right pattern for cross-Worker communication.
+- The overall composable topology is still correct.
+
+### Revised Topology
+
+```
+                    ┌─────────────────────────────────┐
+                    │           Gateway Worker          │
+                    └──┬──────┬──────┬──────┬─────────┘
+                       │      │      │      │
+                 ┌─────▼──────▼──────▼──────▼─────────┐
+                 │        Agent Core Worker             │
+                 │                                      │
+                 │  AgentOSAgent (supervisor DO)         │
+                 │    ├── memory facet (per-agent RAG)   │
+                 │    ├── signals facet (per-agent)      │
+                 │    └── workspace facet (files)        │
+                 │                                      │
+                 │  AgentRunWorkflow (execution)         │
+                 └──┬──────────┬───────────────────────┘
+                    │          │
+              ┌─────▼────┐ ┌──▼──────────┐
+              │ Compute   │ │ Channels    │
+              │ Worker    │ │ Worker      │
+              │ (sandbox) │ │ (webhooks)  │
+              └───────────┘ └─────────────┘
+```
+
+### Migration Path
+
+1. Current: Service bindings between 4+ Workers (already scaffolded)
+2. Next: Evaluate facets for memory + signals (per-agent state)
+3. Keep: Compute + Channels as separate Workers (different scaling needs)
+
+Facets are especially powerful for our use case because each agent session already has its own DO instance — facets give each session isolated databases for memory, signals, and workspace without cross-instance coordination.
 - Don't split prematurely — extract the easy seams (Channels, Signals) first, prove the service binding pattern works, then proceed
