@@ -220,6 +220,65 @@ describe("turn queue payload", () => {
   });
 });
 
+describe("implementation complexity event payload", () => {
+  function buildImplementationComplexityEvent() {
+    return {
+      type: "event",
+      payload: {
+        org_id: "org-abc",
+        agent_name: "test-agent",
+        session_id: "sess-test-001",
+        trace_id: "trace-xyz",
+        turn: 3,
+        event_type: "implementation_complexity",
+        action: "measured",
+        plan: "standard",
+        provider: "openrouter",
+        model: "anthropic/claude-sonnet-4-5",
+        tool_name: "",
+        status: "ok",
+        latency_ms: 0,
+        details: {
+          files_touched: 2,
+          lines_added: 12,
+          lines_removed: 4,
+          new_files_created: 1,
+          measurement_scope: "tracked_file_tools_only",
+          tracked_tools: ["write-file", "edit-file"],
+          possible_untracked_mutations: false,
+        },
+        created_at: Date.now(),
+      },
+    };
+  }
+
+  it("uses the standard workflow event envelope", () => {
+    const msg = buildImplementationComplexityEvent();
+    const requiredFields = [
+      "org_id", "agent_name", "session_id", "trace_id", "turn",
+      "event_type", "action", "plan", "provider", "model",
+      "tool_name", "status", "latency_ms", "details", "created_at",
+    ];
+
+    for (const field of requiredFields) {
+      expect(msg.payload).toHaveProperty(field);
+    }
+  });
+
+  it("carries the Phase 5 spec metrics in details", () => {
+    const msg = buildImplementationComplexityEvent();
+    expect(msg.payload.details).toMatchObject({
+      files_touched: 2,
+      lines_added: 12,
+      lines_removed: 4,
+      new_files_created: 1,
+      measurement_scope: "tracked_file_tools_only",
+      tracked_tools: ["write-file", "edit-file"],
+      possible_untracked_mutations: false,
+    });
+  });
+});
+
 // ═══════════════════════════════════════════════════════════════════
 // C) Consumer INSERT column alignment with DB schema
 // ═══════════════════════════════════════════════════════════════════
@@ -289,23 +348,22 @@ describe("queue consumer → DB schema alignment", () => {
     }
   });
 
-  it("consumer turn INSERT uses plan column (not plan_json)", () => {
+  it("consumer turn INSERT uses the canonical plan_artifact column", () => {
     const fs = require("fs");
     const source = fs.readFileSync(
       require("path").resolve(__dirname, "../src/index.ts"),
       "utf-8",
     );
 
-    // The turns table column is `plan` (JSONB) in the consolidated schema.
     const turnInsertMatch = source.match(
       /else if \(type === "turn"\)[\s\S]*?\)`/,
     );
     expect(turnInsertMatch).not.toBeNull();
     const turnInsert = turnInsertMatch![0];
 
-    // Should contain the plan column (not plan_json)
+    // Structured plan artifacts persist to the canonical plan_artifact column.
     const columnsSection = turnInsert.split("VALUES")[0];
-    expect(columnsSection).toContain("plan");
+    expect(columnsSection).toContain("plan_artifact");
   });
 
   it("consumer handles all queue message types", () => {
@@ -506,6 +564,199 @@ describe("consolidated schema — observability columns", () => {
 
     // idx_turns_refusal was removed in the consolidated schema (refusal is rarely queried alone)
     expect(migration).toContain("idx_turns_model_latency");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// G-0) org_id persistence — blank org_id propagation guards
+// ═══════════════════════════════════════════════════════════════════
+
+describe("blank org_id propagation guards", () => {
+  function readSource() {
+    const fs = require("fs");
+    return fs.readFileSync(
+      require("path").resolve(__dirname, "../src/index.ts"),
+      "utf-8",
+    );
+  }
+
+  // Fix 1: REST /run must resolve or reject blank org_id before workflow creation
+  describe("REST /run org_id resolution", () => {
+    it("looks up org_id from agents table when not in request", () => {
+      const source = readSource();
+      // The resolve block sits between "Resolve org_id" comment and "Pre-run credit check"
+      const resolveSection = source.match(
+        /\/\/ Resolve org_id:[\s\S]*?\/\/ Pre-run credit check/,
+      );
+      expect(resolveSection).not.toBeNull();
+      const block = resolveSection![0];
+      expect(block).toContain("SELECT org_id FROM agents WHERE name =");
+      expect(block).toContain("is_active = true");
+    });
+
+    it("returns 400 missing_org_id when org_id cannot be resolved", () => {
+      const source = readSource();
+      const resolveSection = source.match(
+        /\/\/ Resolve org_id:[\s\S]*?\/\/ Pre-run credit check/,
+      );
+      expect(resolveSection).not.toBeNull();
+      const block = resolveSection![0];
+      expect(block).toContain('"missing_org_id"');
+      expect(block).toContain("status: 400");
+    });
+
+    it("org_id is guaranteed non-empty before credit check", () => {
+      const source = readSource();
+      const creditSection = source.match(
+        /\/\/ Pre-run credit check[\s\S]*?SELECT balance_usd/,
+      );
+      expect(creditSection).not.toBeNull();
+      const block = creditSection![0];
+      // Should NOT contain `if (runOrgId &&` — just `if (this.env.HYPERDRIVE)`
+      expect(block).not.toMatch(/if\s*\(\s*runOrgId\s*&&/);
+    });
+
+    it("workflow creation uses resolved runOrgId, not raw data.org_id", () => {
+      const source = readSource();
+      // Find the REST workflow creation — between "Workflow path" and the polling loop
+      const restWorkflow = source.match(
+        /\/\/ ── Workflow path \(durable[\s\S]*?org_id: runOrgId/,
+      );
+      expect(restWorkflow).not.toBeNull();
+    });
+  });
+
+  // Fix 2: Queue consumer must guard event + episode types the same as session
+  describe("queue consumer org_id guards", () => {
+    it("event type skips INSERT when org_id is blank", () => {
+      const source = readSource();
+      // Find the event handler block
+      const eventSection = source.match(
+        /else if \(type === "event"\)[\s\S]*?if \(otelUsesEventData\)/,
+      );
+      expect(eventSection).not.toBeNull();
+      const block = eventSection![0];
+      expect(block).toContain("!msgOrgId");
+      expect(block).toMatch(/skipping.*FK would fail/);
+      expect(block).toContain("msg.ack()");
+      expect(block).toContain("continue");
+    });
+
+    it("episode type skips INSERT when org_id is blank", () => {
+      const source = readSource();
+      const episodeSection = source.match(
+        /else if \(type === "episode"\)[\s\S]*?INSERT INTO episodes/,
+      );
+      expect(episodeSection).not.toBeNull();
+      const block = episodeSection![0];
+      expect(block).toContain("!msgOrgId");
+      expect(block).toMatch(/skipping.*FK would fail/);
+      expect(block).toContain("msg.ack()");
+      expect(block).toContain("continue");
+    });
+
+    it("session type already guards blank org_id", () => {
+      const source = readSource();
+      const sessionSection = source.match(
+        /if \(type === "session"\)[\s\S]*?INSERT INTO sessions/,
+      );
+      expect(sessionSection).not.toBeNull();
+      const block = sessionSection![0];
+      expect(block).toContain("!msgOrgId");
+      expect(block).toContain("msg.ack()");
+    });
+
+    it("all org-scoped queue branches guard blank org_id", () => {
+      const source = readSource();
+      // Count org_id skip guards — session, event, episode, runtime_event,
+      // middleware_event, skill_activation, loop_detected, do_eviction
+      const skipMatches = source.match(/skipping.*FK would fail/g);
+      expect(skipMatches).not.toBeNull();
+      // 8 branches: session, episode, event, runtime_event, middleware_event,
+      // skill_activation/skill_auto_activation, loop_detected, do_eviction
+      // (artifact_manifest uses combined guard with !p.session_id || !p.artifact_name || !msgOrgId)
+      expect(skipMatches!.length).toBeGreaterThanOrEqual(8);
+    });
+
+    it("queue INSERTs use normalized msgOrgId, not raw p.org_id", () => {
+      const source = readSource();
+      // Extract the queue consumer: from `async queue(batch` to the closing `finally`
+      const queueBlock = source.match(
+        /async queue\(batch[\s\S]*?finally[\s\S]*?}/,
+      );
+      expect(queueBlock).not.toBeNull();
+      const block = queueBlock![0];
+      // No raw p.org_id should appear in SQL INSERTs
+      expect(block).not.toMatch(/\$\{p\.org_id/);
+    });
+  });
+
+  // Fix 1b: /run/stream must also resolve-or-reject blank org_id
+  describe("/run/stream org_id resolution", () => {
+    it("looks up org_id from agents table when not in request", () => {
+      const source = readSource();
+      const sseSection = source.match(
+        /\/run\/stream[\s\S]*?\/\/ ── Workflow SSE path/,
+      );
+      expect(sseSection).not.toBeNull();
+      const block = sseSection![0];
+      expect(block).toContain("SELECT org_id FROM agents WHERE name =");
+      expect(block).toContain("is_active = true");
+    });
+
+    it("returns 400 missing_org_id when org_id cannot be resolved", () => {
+      const source = readSource();
+      const sseSection = source.match(
+        /\/run\/stream[\s\S]*?\/\/ ── Workflow SSE path/,
+      );
+      expect(sseSection).not.toBeNull();
+      const block = sseSection![0];
+      expect(block).toContain('"missing_org_id"');
+      expect(block).toContain("status: 400");
+    });
+
+    it("workflow creation uses resolved sseOrgId, not raw data.org_id", () => {
+      const source = readSource();
+      // Find the SSE workflow creation block
+      const sseWorkflow = source.match(
+        /\/\/ ── Workflow SSE path[\s\S]*?org_id: sseOrgId/,
+      );
+      expect(sseWorkflow).not.toBeNull();
+    });
+  });
+
+  // Fix 3: Permanent failures must log structured context
+  describe("permanent failure structured logging", () => {
+    it("logs org_id, session_id, agent_name, and event_type on permanent failure", () => {
+      const source = readSource();
+      const permanentBlock = source.match(
+        /if \(isPermanent\(err\)\)[\s\S]*?msg\.ack\(\)/,
+      );
+      expect(permanentBlock).not.toBeNull();
+      const block = permanentBlock![0];
+      expect(block).toContain("org_id:");
+      expect(block).toContain("session_id:");
+      expect(block).toContain("agent_name:");
+      expect(block).toContain("event_type:");
+    });
+  });
+
+  // Fix 4: Direct writes must not silently swallow errors
+  describe("direct write error observability", () => {
+    it("REST /run persistence catch handlers log errors, not swallow them", () => {
+      const source = readSource();
+      // Isolate the REST /run block: between "Resolve org_id" and "Credit deduction happens"
+      const restBlock = source.match(
+        /\/\/ Resolve org_id:[\s\S]*?\/\/ NOTE: Credit deduction happens/,
+      );
+      expect(restBlock).not.toBeNull();
+      const block = restBlock![0];
+      // Must not contain empty catch — `.catch(() => {})`
+      expect(block).not.toMatch(/\.catch\(\s*\(\s*\)\s*=>\s*\{\s*\}\s*\)/);
+      // Both writeBillingRecord and writeSession catch handlers must log
+      expect(block).toContain("[REST /run] writeBillingRecord failed");
+      expect(block).toContain("[REST /run] writeSession failed");
+    });
   });
 });
 

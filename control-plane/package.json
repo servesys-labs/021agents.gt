@@ -4,6 +4,8 @@
   "private": true,
   "scripts": {
     "bundle-skill-catalog": "node scripts/bundle-skill-catalog.mjs",
+    "db:reset:railway": "node scripts/reset-railway-db.mjs",
+    "db:seed:founders": "tsx scripts/seed-founder.ts",
     "predev": "node scripts/bundle-skill-catalog.mjs",
     "predeploy": "node scripts/bundle-skill-catalog.mjs",
     "pretest": "node scripts/bundle-skill-catalog.mjs",
@@ -28,6 +30,7 @@
     "@cloudflare/vitest-pool-workers": "^0.8.0",
     "@cloudflare/workers-types": "^4.20260301.0",
     "@types/node": "^25.5.2",
+    "tsx": "^4.21.0",
     "typescript": "^5.7",
     "vitest": "^3.0.0",
     "wrangler": "^4.77.0"

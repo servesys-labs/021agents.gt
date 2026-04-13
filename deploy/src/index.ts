@@ -619,6 +619,26 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       }
     }
 
+    // ── Resolve org_id from Supabase (cold start) ──────────────────
+    // The DO starts with orgId="" — memory, billing, and scoping all need it.
+    // Load it eagerly so the first run() doesn't operate with an empty org_id.
+    if (!this.state.config.orgId && this.env.HYPERDRIVE) {
+      try {
+        const { getDb } = await import("./runtime/db");
+        const sql = await getDb(this.env.HYPERDRIVE);
+        const agentName = this.name || "default";
+        const [row] = await Promise.race([
+          sql`SELECT org_id FROM agents WHERE name = ${agentName} AND is_active = true LIMIT 1`,
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("org_id lookup timeout")), 3000)),
+        ]);
+        if (row?.org_id) {
+          this.setState({ ...this.state, config: { ...this.state.config, orgId: row.org_id } });
+        }
+      } catch {
+        // Non-fatal — _syncCheckpointFlagFromDb will retry on first run()
+      }
+    }
+
     // Hydrate from Supabase if DO SQLite is empty (cold start / post-deploy)
     // MUST have a timeout — if Hyperdrive hangs, blockConcurrencyWhile blocks ALL messages
     const localCount = this.sql<{ cnt: number }>`SELECT COUNT(*) as cnt FROM conversation_messages`;
@@ -817,9 +837,15 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         plan: this.env.DEFAULT_PLAN || "free",
       }, orgId || this.state.config.orgId || undefined);
       const on = cfg.enable_workspace_checkpoints !== false;
+      const updates: Partial<AgentConfig> = { enableWorkspaceCheckpoints: on };
+      // Propagate org_id from DB if the DO doesn't have one yet.
+      // Without this, all memory/billing queries filter by org_id='' and miss.
+      if (cfg.org_id && !this.state.config.orgId) {
+        updates.orgId = cfg.org_id;
+      }
       this.setState({
         ...this.state,
-        config: { ...this.state.config, enableWorkspaceCheckpoints: on },
+        config: { ...this.state.config, ...updates },
       });
       this._checkpointFlagCachedAt = Date.now();
     } catch {
@@ -2067,9 +2093,27 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       const agentName = data.agent_name || this.state.config.agentName || "agentos";
       await this._syncCheckpointFlagFromDb(agentName);
 
+      // Resolve org_id: request > DO config > agents table lookup > reject
+      let runOrgId = data.org_id || this.state.config.orgId || "";
+      if (!runOrgId && this.env.HYPERDRIVE) {
+        try {
+          const { getDb } = await import("./runtime/db");
+          const sql = await getDb(this.env.HYPERDRIVE);
+          const [row] = await sql`SELECT org_id FROM agents WHERE name = ${agentName} AND is_active = true LIMIT 1`;
+          runOrgId = row?.org_id || "";
+        } catch (err) {
+          console.error(`[REST /run] org_id lookup for agent "${agentName}" failed:`, err instanceof Error ? err.message : err);
+        }
+      }
+      if (!runOrgId) {
+        return Response.json({
+          error: "Unable to determine org_id. Provide org_id in the request or ensure the agent exists.",
+          code: "missing_org_id",
+        }, { status: 400 });
+      }
+
       // Pre-run credit check — reject early if org has no credits
-      const runOrgId = data.org_id || this.state.config.orgId || "";
-      if (runOrgId && this.env.HYPERDRIVE) {
+      if (this.env.HYPERDRIVE) {
         try {
           const { getDb } = await import("./runtime/db");
           const sql = await getDb(this.env.HYPERDRIVE);
@@ -2100,7 +2144,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
             params: {
               agent_name: agentName,
               input: inputText,
-              org_id: data.org_id || restConfig.orgId || "",
+              org_id: runOrgId,
               project_id: data.project_id || restConfig.projectId || "",
               channel: data.channel || "rest",
               channel_user_id: data.channel_user_id || "",
@@ -2173,7 +2217,9 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                 trace_id: result.trace_id || "",
                 billing_user_id: data.channel_user_id,
                 api_key_id: data.api_key_id,
-              }, this.env.AGENT_PROGRESS_KV).catch(() => {});
+              }, this.env.AGENT_PROGRESS_KV).catch((err: any) => {
+                console.error(`[REST /run] writeBillingRecord failed for session=${result.session_id || "?"} org=${runOrgId}:`, err instanceof Error ? err.message : err);
+              });
               writeSession(this.env.HYPERDRIVE, {
                 session_id: result.session_id || "", org_id: runOrgId,
                 project_id: data.project_id || "", agent_name: agentName,
@@ -2182,7 +2228,9 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                 trace_id: result.trace_id || "",
                 step_count: result.turns || 1, action_count: result.tool_calls || 0,
                 wall_clock_seconds: 0, cost_total_usd: result.cost_usd || 0,
-              }).catch(() => {});
+              }).catch((err: any) => {
+                console.error(`[REST /run] writeSession failed for session=${result.session_id || "?"} org=${runOrgId}:`, err instanceof Error ? err.message : err);
+              });
 
               // NOTE: Credit deduction happens in control-plane (runtime-proxy.ts / public-api.ts)
               // DO only writes billing_records + sessions for analytics. Single deduction point
@@ -2237,6 +2285,25 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
 
       const agentName = data.agent_name || this.state.config.agentName || "agentos";
 
+      // Resolve org_id: request > JWT > DO config > agents table lookup > reject
+      let sseOrgId = data.org_id || this.state.config.orgId || "";
+      if (!sseOrgId && this.env.HYPERDRIVE) {
+        try {
+          const { getDb } = await import("./runtime/db");
+          const sql = await getDb(this.env.HYPERDRIVE);
+          const [row] = await sql`SELECT org_id FROM agents WHERE name = ${agentName} AND is_active = true LIMIT 1`;
+          sseOrgId = row?.org_id || "";
+        } catch (err) {
+          console.error(`[SSE /run/stream] org_id lookup for agent "${agentName}" failed:`, err instanceof Error ? err.message : err);
+        }
+      }
+      if (!sseOrgId) {
+        return Response.json({
+          error: "Unable to determine org_id. Provide org_id in the request or ensure the agent exists.",
+          code: "missing_org_id",
+        }, { status: 400 });
+      }
+
       // ── Workflow SSE path — trigger Workflow, stream progress from KV ──
       if (this.env.AGENT_RUN_WORKFLOW && this.env.AGENT_PROGRESS_KV) {
         const history = this._loadConversationHistory(24);
@@ -2248,7 +2315,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
             params: {
               agent_name: agentName,
               input: inputText,
-              org_id: data.org_id || "",
+              org_id: sseOrgId,
               project_id: data.project_id || "",
               channel: data.channel || "sse",
               channel_user_id: data.channel_user_id || "",
@@ -7866,13 +7933,15 @@ export default {
     async function emitSignalDrop(
       eventType: "signal_envelope_dropped",
       p: Record<string, any>,
+      resolvedOrgId: string,
       details: Record<string, unknown>,
     ): Promise<void> {
+      if (!resolvedOrgId) return; // No point enqueuing — runtime_event guard will skip it
       await env.TELEMETRY_QUEUE?.send?.({
         type: "runtime_event",
         payload: {
           event_type: eventType,
-          org_id: p.org_id || "",
+          org_id: resolvedOrgId,
           agent_name: p.agent_name || "",
           session_id: p.session_id || "",
           node_id: "signal-ingestion",
@@ -7881,7 +7950,9 @@ export default {
           created_at: Date.now(),
           details,
         },
-      }).catch(() => {});
+      }).catch((err: any) => {
+        console.warn(`[queue] emitSignalDrop enqueue failed: ${err instanceof Error ? err.message : err}`);
+      });
     }
 
     async function fanOutSignals(type: string, p: Record<string, any>): Promise<void> {
@@ -7971,10 +8042,10 @@ export default {
           }
 
           if (type === "session") {
-            // sessions.org_id has FK → orgs(org_id). Empty string violates it.
+            // sessions.org_id has FK → orgs(org_id). Empty/whitespace string violates it.
             // If org_id is missing/empty, skip the insert — the direct write path (DO) handles it.
             if (!p.session_id) { msg.ack(); continue; }
-            if (!p.org_id) {
+            if (!msgOrgId) {
               console.warn(`[queue] session ${p.session_id} has no org_id — skipping (FK would fail)`);
               msg.ack();
               continue;
@@ -7990,7 +8061,7 @@ export default {
               termination_reason,
               created_at
             ) VALUES (
-              ${p.session_id}, ${p.org_id}, ${p.project_id || ""},
+              ${p.session_id}, ${msgOrgId}, ${p.project_id || ""},
               ${p.agent_name || "agentos"}, ${p.status || "success"},
               ${p.input_text || ""}, ${p.output_text || ""},
               ${p.model || ""}, ${p.trace_id || ""}, ${p.parent_session_id || ""},
@@ -8031,7 +8102,7 @@ export default {
               compaction_triggered, messages_dropped,
               output_text, cost_usd,
               tool_calls, tool_results, errors,
-              execution_mode, plan, reflection,
+              execution_mode, plan_artifact, reflection,
               stop_reason, refusal, cache_read_tokens, cache_write_tokens,
               gateway_log_id
             ) VALUES (
@@ -8072,12 +8143,22 @@ export default {
               tool_results = EXCLUDED.tool_results`;
 
           } else if (type === "episode") {
+            if (!msgOrgId) {
+              console.warn(`[queue] episode for session=${p.session_id || "?"} has no org_id — skipping (FK would fail)`);
+              msg.ack();
+              continue;
+            }
             await sql`INSERT INTO episodes (org_id, agent_name, session_id, title, summary, content, source, created_at)
-              VALUES (${p.org_id || ""}, ${p.agent_name || ""}, ${p.session_id || ""},
+              VALUES (${msgOrgId}, ${p.agent_name || ""}, ${p.session_id || ""},
                       ${p.title || "Session episode"}, ${p.summary || p.input || ""},
                       ${p.content || p.output || ""}, ${"queue"}, ${ts(p.created_at)})`;
 
           } else if (type === "event") {
+            if (!msgOrgId) {
+              console.warn(`[queue] event ${p.event_type || "?"} for session=${p.session_id || "?"} has no org_id — skipping (FK would fail)`);
+              msg.ack();
+              continue;
+            }
             if (otelUsesEventData) {
               const eventData = {
                 ...(jp(p.details, {}) || {}),
@@ -8097,7 +8178,7 @@ export default {
               await sql`INSERT INTO otel_events (
                 org_id, agent_name, session_id, trace_id, event_type, event_data, created_at
               ) VALUES (
-                ${p.org_id || ""}, ${p.agent_name || ""}, ${p.session_id || ""},
+                ${msgOrgId}, ${p.agent_name || ""}, ${p.session_id || ""},
                 ${p.trace_id || ""}, ${p.event_type || ""}, ${jp(eventData, {})},
                 ${ts(p.created_at)}
               )`;
@@ -8105,7 +8186,7 @@ export default {
               await sql`INSERT INTO otel_events (
                 org_id, agent_name, session_id, trace_id, event_type, event_data, created_at
               ) VALUES (
-                ${p.org_id || ""}, ${p.agent_name || ""}, ${p.session_id || ""},
+                ${msgOrgId}, ${p.agent_name || ""}, ${p.session_id || ""},
                 ${p.trace_id || ""}, ${p.event_type || ""},
                 ${jp({
                   turn: p.turn || 0, action: p.action || "", plan: p.plan || "",
@@ -8118,6 +8199,11 @@ export default {
             }
 
           } else if (type === "runtime_event") {
+            if (!msgOrgId) {
+              console.warn(`[queue] runtime_event ${p.event_type || "?"} for session=${p.session_id || "?"} has no org_id — skipping (FK would fail)`);
+              msg.ack();
+              continue;
+            }
             if (runtimeUsesEventData) {
               const eventData = {
                 ...(jp(p.details, {}) || {}),
@@ -8131,14 +8217,14 @@ export default {
               await sql`INSERT INTO runtime_events (
                 org_id, agent_name, event_type, event_data, created_at
               ) VALUES (
-                ${p.org_id || ""}, ${p.agent_name || ""}, ${p.event_type || ""},
+                ${msgOrgId}, ${p.agent_name || ""}, ${p.event_type || ""},
                 ${jp(eventData, {})}, ${ts(p.created_at)}
               )`;
             } else {
               await sql`INSERT INTO runtime_events (
                 org_id, agent_name, event_type, event_data, created_at
               ) VALUES (
-                ${p.org_id || ""}, ${p.agent_name || ""}, ${p.event_type || ""},
+                ${msgOrgId}, ${p.agent_name || ""}, ${p.event_type || ""},
                 ${jp({
                   trace_id: p.trace_id || "", session_id: p.session_id || "",
                   node_id: p.node_id || "", status: p.status || "",
@@ -8149,11 +8235,16 @@ export default {
             }
 
           } else if (type === "middleware_event") {
+            if (!msgOrgId) {
+              console.warn(`[queue] middleware_event ${p.event_type || p.action || "?"} for session=${p.session_id || "?"} has no org_id — skipping (FK would fail)`);
+              msg.ack();
+              continue;
+            }
             await sql`INSERT INTO middleware_events (
               org_id, agent_name, middleware_name, event_type,
               payload, created_at
             ) VALUES (
-              ${p.org_id || ""}, ${p.agent_name || ""},
+              ${msgOrgId}, ${p.agent_name || ""},
               ${p.middleware_name || ""},
               ${p.event_type || p.action || ""},
               ${jp({ session_id: p.session_id, turn_number: p.turn_number || p.turn, ...jp(p.details, {}) }, {})},
@@ -8168,24 +8259,39 @@ export default {
             }
 
           } else if (type === "skill_activation" || type === "skill_auto_activation") {
+            if (!msgOrgId) {
+              console.warn(`[queue] ${type} for skill=${p.skill || "?"} has no org_id — skipping (FK would fail)`);
+              msg.ack();
+              continue;
+            }
             await sql`INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
-              VALUES (${p.org_id || ""}, 'system', ${type}, 'skill', ${p.skill || ""},
+              Values (${msgOrgId}, 'system', ${type}, 'skill', ${p.skill || ""},
                 ${JSON.stringify({ session_id: p.session_id, agent_name: p.agent_name, trigger: p.trigger || (type === "skill_auto_activation" ? "auto" : "user") })}::jsonb, now())
             `;
 
           } else if (type === "loop_detected") {
+            if (!msgOrgId) {
+              console.warn(`[queue] loop_detected for session=${p.session_id || "?"} has no org_id — skipping (FK would fail)`);
+              msg.ack();
+              continue;
+            }
             await sql`INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
-              VALUES (${p.org_id || ""}, 'system', 'loop_detected', 'session', ${p.session_id || ""},
+              VALUES (${msgOrgId}, 'system', 'loop_detected', 'session', ${p.session_id || ""},
                 ${JSON.stringify({ tool: p.tool, repeat_count: p.repeat_count, turn: p.turn, agent_name: p.agent_name })}::jsonb, now())
             `;
 
           } else if (type === "do_eviction") {
-            console.log(`[telemetry] DO eviction: session=${p.session_id} org=${p.org_id}`);
+            if (!msgOrgId) {
+              console.warn(`[queue] do_eviction for session=${p.session_id || "?"} has no org_id — skipping (FK would fail)`);
+              msg.ack();
+              continue;
+            }
+            console.log(`[telemetry] DO eviction: session=${p.session_id} org=${msgOrgId}`);
             if (runtimeUsesEventData) {
               await sql`INSERT INTO runtime_events (
                 org_id, agent_name, event_type, event_data, created_at
               ) VALUES (
-                ${p.org_id || ""}, ${p.agent_name || ""}, ${"do_eviction" satisfies RuntimeEventType},
+                ${msgOrgId}, ${p.agent_name || ""}, ${"do_eviction" satisfies RuntimeEventType},
                 ${jp({
                   trace_id: p.trace_id || "",
                   session_id: p.session_id || "",
@@ -8202,7 +8308,7 @@ export default {
               await sql`INSERT INTO runtime_events (
                 org_id, agent_name, event_type, event_data, created_at
               ) VALUES (
-                ${p.org_id || ""}, ${p.agent_name || ""}, 'do_eviction',
+                ${msgOrgId}, ${p.agent_name || ""}, 'do_eviction',
                 ${jp({
                   trace_id: p.trace_id || "", session_id: p.session_id || "",
                   status: "evicted", duration_ms: Number(p.uptime_ms || 0),
@@ -8213,14 +8319,14 @@ export default {
               )`;
             }
           } else if (type === "artifact_manifest") {
-            if (!p.session_id || !p.artifact_name) { msg.ack(); continue; }
+            if (!p.session_id || !p.artifact_name || !msgOrgId) { msg.ack(); continue; }
             await sql`INSERT INTO run_artifacts (
               session_id, org_id, agent_name, turn_number,
               artifact_name, artifact_kind, mime_type, size_bytes,
               storage_key, source_tool, source_event, schema_version,
               status, metadata, created_at
             ) VALUES (
-              ${p.session_id || ""}, ${p.org_id || ""}, ${p.agent_name || ""},
+              ${p.session_id || ""}, ${msgOrgId}, ${p.agent_name || ""},
               ${Number(p.turn_number || 0)},
               ${p.artifact_name || "artifact"}, ${p.artifact_kind || "generic"},
               ${p.mime_type || "application/octet-stream"}, ${Number(p.size_bytes || 0)},
@@ -8237,7 +8343,7 @@ export default {
             try {
               await fanOutSignals(type, p);
             } catch (signalErr: any) {
-              await emitSignalDrop("signal_envelope_dropped", p, {
+              await emitSignalDrop("signal_envelope_dropped", p, msgOrgId, {
                 source_type: type,
                 reason: signalErr?.message || String(signalErr),
               });
@@ -8248,7 +8354,14 @@ export default {
           const errMsg = err?.message || String(err);
           if (isPermanent(err)) {
             // Schema/constraint errors will never self-heal — ack to prevent poison loop
-            console.error(`[queue] PERMANENT FAILURE type=${type} session=${p?.session_id || '?'}: ${errMsg.slice(0, 300)}`);
+            console.error(`[queue] PERMANENT FAILURE`, {
+              type,
+              session_id: p?.session_id || "?",
+              org_id: p?.org_id || "?",
+              agent_name: p?.agent_name || "?",
+              event_type: p?.event_type || undefined,
+              error: errMsg.slice(0, 300),
+            });
             msg.ack();
           } else {
             // Transient errors (connection, timeout) — retry with backoff

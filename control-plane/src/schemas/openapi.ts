@@ -106,7 +106,10 @@ export const ChannelOverrideSchema = z.object({
 }).openapi("ChannelOverride");
 
 export const AgentCreateBody = z.object({
-  name: z.string().min(1).max(128).openapi({ example: "support-agent" }),
+  handle: z.string().min(1).max(128).openapi({ example: "support-agent" }),
+  display_name: z.string().min(1).max(160).optional().openapi({ example: "Support Agent" }),
+  // Deprecated create alias. New callers should send `handle`.
+  name: z.string().min(1).max(128).optional().openapi({ example: "support-agent" }),
   description: z.string().max(2000).default("").openapi({ example: "Customer support agent" }),
   system_prompt: z.string().max(50000).default("You are a helpful AI assistant."),
   personality: z.string().max(2000).default(""),
@@ -151,7 +154,10 @@ export const AgentCreateBody = z.object({
 }).openapi("AgentCreateBody");
 
 export const AgentSummary = z.object({
-  name: z.string(),
+  agent_id: z.string(),
+  handle: z.string(),
+  display_name: z.string(),
+  name: z.string().optional(),
   description: z.string(),
   model: z.string(),
   tools: z.array(z.string()),
@@ -172,6 +178,8 @@ export const AgentTemplate = z.object({
 
 export const SessionSummary = z.object({
   session_id: z.string(),
+  agent_id: z.string().optional(),
+  agent_handle: z.string(),
   agent_name: z.string(),
   status: z.string().openapi({ example: "completed" }),
   input_text: z.string().nullable(),

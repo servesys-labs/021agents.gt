@@ -5,6 +5,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import {
   syncFileToR2,
+  syncBinaryFileToR2,
   loadManifest,
   listWorkspaceFiles,
   readFileFromR2,
@@ -15,18 +16,25 @@ import {
 // ── Mock R2Bucket ──────────────────────────────────────────────────
 
 class MockR2Bucket {
-  private store = new Map<string, { body: string; customMetadata?: Record<string, string> }>();
+  private store = new Map<string, { body: string | ArrayBuffer | Uint8Array; customMetadata?: Record<string, string>; httpMetadata?: Record<string, string> }>();
 
-  async put(key: string, body: string | ReadableStream | ArrayBuffer | null, opts?: { customMetadata?: Record<string, string> }) {
-    this.store.set(key, { body: typeof body === "string" ? body : "", customMetadata: opts?.customMetadata });
+  async put(key: string, body: string | ReadableStream | ArrayBuffer | Uint8Array | null, opts?: { customMetadata?: Record<string, string>; httpMetadata?: Record<string, string> }) {
+    this.store.set(key, {
+      body: body instanceof Uint8Array ? body : (body instanceof ArrayBuffer ? body : (typeof body === "string" ? body : "")),
+      customMetadata: opts?.customMetadata,
+      httpMetadata: opts?.httpMetadata,
+    });
   }
 
-  async get(key: string): Promise<{ text: () => Promise<string>; body: ReadableStream } | null> {
+  async get(key: string): Promise<{ text: () => Promise<string>; arrayBuffer: () => Promise<ArrayBuffer>; body: ReadableStream; customMetadata?: Record<string, string>; httpMetadata?: Record<string, string> } | null> {
     const entry = this.store.get(key);
     if (!entry) return null;
     return {
-      text: async () => entry.body,
+      text: async () => typeof entry.body === "string" ? entry.body : new TextDecoder().decode(entry.body),
+      arrayBuffer: async () => entry.body instanceof ArrayBuffer ? entry.body : (entry.body instanceof Uint8Array ? entry.body.buffer.slice(entry.body.byteOffset, entry.body.byteOffset + entry.body.byteLength) : new TextEncoder().encode(entry.body as string).buffer),
       body: new ReadableStream(),
+      customMetadata: entry.customMetadata,
+      httpMetadata: entry.httpMetadata,
     };
   }
 
@@ -45,7 +53,8 @@ class MockR2Bucket {
     const objects: Array<{ key: string; size: number }> = [];
     for (const [k, v] of this.store) {
       if (k.startsWith(prefix)) {
-        objects.push({ key: k, size: v.body.length });
+        const size = typeof v.body === "string" ? v.body.length : (v.body instanceof Uint8Array ? v.body.byteLength : (v.body as ArrayBuffer).byteLength);
+        objects.push({ key: k, size });
       }
     }
     return { objects, delimitedPrefixes: [] };
@@ -56,7 +65,7 @@ class MockR2Bucket {
     return this.store.has(key);
   }
 
-  _getBody(key: string): string | undefined {
+  _getBody(key: string): string | ArrayBuffer | Uint8Array | undefined {
     return this.store.get(key)?.body;
   }
 
@@ -248,5 +257,129 @@ describe("Workspace R2 persistence", () => {
     await expect(
       deleteFileFromR2(bucket as any, "org1", "agent1", "nonexistent.txt")
     ).resolves.not.toThrow();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// Binary file support — PDFs, images, archives stored as raw bytes
+// ═══════════════════════════════════════════════════════════════════
+
+describe("Workspace R2 binary file support", () => {
+  let bucket: MockR2Bucket;
+
+  beforeEach(() => {
+    bucket = new MockR2Bucket();
+  });
+
+  it("syncBinaryFileToR2 stores binary content from base64", async () => {
+    // A minimal PDF-like binary: "%PDF-1.4" in base64
+    const pdfContent = "JVBERi0xLjQ="; // btoa("%PDF-1.4")
+    await syncBinaryFileToR2(bucket as any, "org1", "agent1", "/workspace/report.pdf", pdfContent, "sess1");
+    expect(bucket._has("workspaces/org1/agent1/u/shared/files/report.pdf")).toBe(true);
+  });
+
+  it("syncBinaryFileToR2 stores raw bytes, not base64 text", async () => {
+    const original = "Hello PDF";
+    const b64 = btoa(original);
+    await syncBinaryFileToR2(bucket as any, "org1", "agent1", "/workspace/test.pdf", b64, "sess1");
+
+    const raw = bucket._getBody("workspaces/org1/agent1/u/shared/files/test.pdf");
+    // Must be a Uint8Array, not a string
+    expect(raw).toBeInstanceOf(Uint8Array);
+    // Decoded bytes must match the original
+    const decoded = new TextDecoder().decode(raw as Uint8Array);
+    expect(decoded).toBe(original);
+  });
+
+  it("syncBinaryFileToR2 sets correct MIME type for PDFs", async () => {
+    await syncBinaryFileToR2(bucket as any, "org1", "agent1", "/workspace/doc.pdf", btoa("fake-pdf"), "sess1");
+    const obj = await bucket.get("workspaces/org1/agent1/u/shared/files/doc.pdf");
+    expect(obj?.httpMetadata?.contentType).toBe("application/pdf");
+  });
+
+  it("syncBinaryFileToR2 sets correct MIME type for images", async () => {
+    await syncBinaryFileToR2(bucket as any, "org1", "agent1", "/workspace/photo.png", btoa("fake-png"), "sess1");
+    const obj = await bucket.get("workspaces/org1/agent1/u/shared/files/photo.png");
+    expect(obj?.httpMetadata?.contentType).toBe("image/png");
+  });
+
+  it("syncBinaryFileToR2 marks encoding=binary in metadata", async () => {
+    await syncBinaryFileToR2(bucket as any, "org1", "agent1", "/workspace/data.xlsx", btoa("fake-xlsx"), "sess1");
+    const obj = await bucket.get("workspaces/org1/agent1/u/shared/files/data.xlsx");
+    expect(obj?.customMetadata?.encoding).toBe("binary");
+  });
+
+  it("syncBinaryFileToR2 updates the manifest with correct byte size", async () => {
+    const content = "0123456789"; // 10 bytes
+    await syncBinaryFileToR2(bucket as any, "org1", "agent1", "/workspace/file.zip", btoa(content), "sess1");
+    const manifest = await loadManifest(bucket as any, "org1", "agent1");
+    expect(manifest).not.toBeNull();
+    expect(manifest!.files.length).toBe(1);
+    expect(manifest!.files[0].path).toBe("file.zip");
+    expect(manifest!.files[0].size).toBe(10); // byte count, not base64 length
+  });
+
+  it("readFileFromR2 returns data URI for binary files", async () => {
+    const original = "PDF binary content here";
+    await syncBinaryFileToR2(bucket as any, "org1", "agent1", "/workspace/report.pdf", btoa(original), "sess1");
+    const result = await readFileFromR2(bucket as any, "org1", "agent1", "report.pdf");
+    expect(result).not.toBeNull();
+    expect(result).toMatch(/^data:application\/pdf;base64,/);
+    // Extract and decode the base64 payload
+    const b64 = result!.split(",")[1];
+    expect(atob(b64)).toBe(original);
+  });
+
+  it("readFileFromR2 returns plain text for text files (no data URI)", async () => {
+    await syncFileToR2(bucket as any, "org1", "agent1", "readme.md", "# Hello", "sess1");
+    const result = await readFileFromR2(bucket as any, "org1", "agent1", "readme.md");
+    expect(result).toBe("# Hello");
+    expect(result).not.toMatch(/^data:/);
+  });
+
+  it("binary files respect org isolation", async () => {
+    await syncBinaryFileToR2(bucket as any, "orgA", "agent1", "/workspace/secret.pdf", btoa("secret"), "sess1");
+    const fromA = await readFileFromR2(bucket as any, "orgA", "agent1", "secret.pdf");
+    expect(fromA).not.toBeNull();
+    const fromB = await readFileFromR2(bucket as any, "orgB", "agent1", "secret.pdf");
+    expect(fromB).toBeNull();
+  });
+
+  it("binary files respect user isolation with shared fallback", async () => {
+    await syncBinaryFileToR2(bucket as any, "org1", "agent1", "/workspace/chart.png", btoa("shared-chart"), "sess1");
+    // User-scoped read falls back to shared
+    const result = await readFileFromR2(bucket as any, "org1", "agent1", "chart.png", "portal-user");
+    expect(result).not.toBeNull();
+    expect(result).toMatch(/^data:image\/png;base64,/);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// Source-inspection: binary sync pipeline wiring
+// ═══════════════════════════════════════════════════════════════════
+
+describe("Workspace binary sync pipeline invariants", () => {
+  const fs = require("fs");
+  const path = require("path");
+  const toolsSource = fs.readFileSync(path.resolve(__dirname, "../src/runtime/tools.ts"), "utf-8");
+
+  it("syncRecentWorkspaceFilesToR2 uses base64 for binary extensions", () => {
+    const syncBlock = toolsSource.match(
+      /syncRecentWorkspaceFilesToR2[\s\S]*?^}/m,
+    );
+    expect(syncBlock).not.toBeNull();
+    const block = syncBlock![0];
+    expect(block).toContain("BINARY_EXTS");
+    expect(block).toContain(".pdf");
+    expect(block).toContain(".png");
+    expect(block).toContain("base64");
+    expect(block).toContain("syncBinaryFileToR2");
+  });
+
+  it("binary size cap is at least 5MB", () => {
+    const capMatch = toolsSource.match(/if \(size > ([\d_]+)\) continue;.*cap/);
+    expect(capMatch).not.toBeNull();
+    const cap = Number(capMatch![1].replace(/_/g, ""));
+    expect(cap).toBeGreaterThanOrEqual(5_000_000);
   });
 });

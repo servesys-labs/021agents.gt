@@ -16,6 +16,7 @@ export type RuntimeEventType =
   | "query_profile"
   | "completion_contract"
   | "completion_gate"
+  | "implementation_complexity"
   | "research_artifact"
   // ── LLM (→ runtime_events) ───────────────────────────────────
   | "llm_fallback"

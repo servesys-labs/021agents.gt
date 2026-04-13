@@ -1097,15 +1097,34 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
       }
       // Fix #4: Use direct VALUES insert with ON CONFLICT, matching agents.ts pattern
       const agentRows = await sql`
-        SELECT config FROM agents WHERE name = ${job.agent_name} AND org_id = ${user.org_id}
+        SELECT agent_id, handle, display_name, config
+        FROM agents
+        WHERE name = ${job.agent_name} AND org_id = ${user.org_id}
       `;
       if (agentRows.length > 0) {
         const versionTag = 'training-' + job_id;
         await sql`
-          INSERT INTO agent_versions (agent_name, org_id, version, config, created_by, created_at)
-          VALUES (${job.agent_name}, ${user.org_id}, ${versionTag}, ${String(agentRows[0].config)}, ${user.user_id}, now())
-          ON CONFLICT (agent_name, org_id, version) DO UPDATE
-          SET config = ${String(agentRows[0].config)}, created_by = ${user.user_id}
+          INSERT INTO agent_versions (
+            agent_id, agent_handle, display_name, agent_name, org_id, version, config, created_by, created_at
+          )
+          VALUES (
+            ${String(agentRows[0].agent_id || "")},
+            ${String(agentRows[0].handle || job.agent_name)},
+            ${String(agentRows[0].display_name || job.agent_name)},
+            ${String(agentRows[0].handle || job.agent_name)},
+            ${user.org_id},
+            ${versionTag},
+            ${String(agentRows[0].config)},
+            ${user.user_id},
+            now()
+          )
+          ON CONFLICT (org_id, agent_id, version) DO UPDATE
+          SET
+            agent_handle = EXCLUDED.agent_handle,
+            display_name = EXCLUDED.display_name,
+            agent_name = EXCLUDED.agent_name,
+            config = EXCLUDED.config,
+            created_by = EXCLUDED.created_by
         `;
       }
     } catch { /* Non-critical */ }

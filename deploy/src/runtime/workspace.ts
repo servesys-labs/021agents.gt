@@ -111,6 +111,64 @@ export async function syncFileToR2(
 }
 
 /**
+ * Sync a binary file (PDF, image, archive) to R2 from base64 content.
+ * Stored as raw bytes so downloads serve correctly.
+ */
+export async function syncBinaryFileToR2(
+  storage: R2Bucket,
+  org: string,
+  agent: string,
+  filePath: string,
+  base64Content: string,
+  sessionId: string,
+  userId?: string,
+): Promise<void> {
+  const key = fileKey(org, agent, filePath, userId);
+  const buffer = Uint8Array.from(atob(base64Content), c => c.charCodeAt(0));
+  const now = new Date().toISOString();
+
+  // Detect MIME type from extension
+  const ext = filePath.substring(filePath.lastIndexOf(".")).toLowerCase();
+  const MIME_MAP: Record<string, string> = {
+    ".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".gif": "image/gif", ".webp": "image/webp", ".zip": "application/zip",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".mp3": "audio/mpeg", ".wav": "audio/wav", ".mp4": "video/mp4",
+  };
+  const mimeType = MIME_MAP[ext] || "application/octet-stream";
+
+  await storage.put(key, buffer, {
+    httpMetadata: { contentType: mimeType },
+    customMetadata: {
+      original_path: filePath,
+      encoding: "binary",
+      session_id: sessionId,
+      updated_at: now,
+    },
+  });
+
+  // Update manifest
+  const mKey = manifestKey(org, agent, userId);
+  let manifest = await loadManifest(storage, org, agent, userId);
+  if (!manifest) {
+    manifest = { org_id: org, agent_name: agent, user_id: userId || "shared", files: [], last_sync: now, session_id: sessionId };
+  }
+  const relative = filePath.replace(/^\/workspace\//, "").replace(/^\/+/, "");
+  const idx = manifest.files.findIndex((f) => f.path === relative);
+  const entry: FileEntry = { path: relative, size: buffer.byteLength, hash: `b64-${buffer.byteLength}`, updated_at: now };
+  if (idx >= 0) manifest.files[idx] = entry;
+  else manifest.files.push(entry);
+  manifest.last_sync = now;
+  manifest.session_id = sessionId;
+
+  await storage.put(mKey, JSON.stringify(manifest, null, 2), {
+    customMetadata: { updated_at: now },
+  });
+}
+
+/**
  * Load the workspace manifest from R2.
  */
 export async function loadManifest(
@@ -265,12 +323,29 @@ export async function readFileFromR2(
   if (userId && userId !== "shared") {
     const userKey = fileKey(org, agent, filePath, userId);
     const obj = await storage.get(userKey);
-    if (obj) return obj.text();
+    if (obj) {
+      // Binary files stored with encoding=binary metadata → return base64
+      if (obj.customMetadata?.encoding === "binary") {
+        const buf = await obj.arrayBuffer();
+        const bytes = new Uint8Array(buf);
+        let binary = "";
+        for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+        return `data:${obj.httpMetadata?.contentType || "application/octet-stream"};base64,${btoa(binary)}`;
+      }
+      return obj.text();
+    }
   }
   // Fall back to shared scope (where canvas/SSE-channel agent runs land)
   const sharedKey = fileKey(org, agent, filePath, undefined);
   const sharedObj = await storage.get(sharedKey);
   if (!sharedObj) return null;
+  if (sharedObj.customMetadata?.encoding === "binary") {
+    const buf = await sharedObj.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return `data:${sharedObj.httpMetadata?.contentType || "application/octet-stream"};base64,${btoa(binary)}`;
+  }
   return sharedObj.text();
 }
 

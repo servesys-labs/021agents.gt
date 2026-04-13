@@ -554,16 +554,24 @@ async function syncRecentWorkspaceFilesToR2(
     .filter((p: string) => p.startsWith("/workspace/"));
   if (paths.length === 0) return;
 
-  const { syncFileToR2 } = await import("./workspace");
+  const { syncFileToR2, syncBinaryFileToR2 } = await import("./workspace");
+  const BINARY_EXTS = new Set([".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".zip", ".tar", ".gz", ".xlsx", ".docx", ".pptx", ".woff", ".woff2", ".ttf", ".mp3", ".wav", ".mp4"]);
   for (const path of paths) {
-    // Skip very large files; use project snapshot tools for bulk artifacts.
     const sizeR = await sandbox.exec(`stat -c%s "${path}" 2>/dev/null || stat -f%z "${path}" 2>/dev/null`, { timeout: 4 }).catch(() => ({ stdout: "0" } as any));
     const size = Number((sizeR.stdout || "0").trim()) || 0;
-    if (size > 1_000_000) continue; // 1MB cap for background durability sync
+    if (size > 5_000_000) continue; // 5MB cap for background durability sync
 
-    const read = await sandbox.exec(`cat "${path}" 2>/dev/null`, { timeout: 8 }).catch(() => ({ stdout: "" } as any));
-    if (typeof read.stdout !== "string") continue;
-    await syncFileToR2(env.STORAGE, org, agent, path, read.stdout, sessionId, userId).catch(() => {});
+    const ext = path.substring(path.lastIndexOf(".")).toLowerCase();
+    if (BINARY_EXTS.has(ext)) {
+      // Binary files: read as base64 to avoid corruption
+      const b64 = await sandbox.exec(`base64 -w0 "${path}" 2>/dev/null || base64 "${path}" 2>/dev/null`, { timeout: 15 }).catch(() => ({ stdout: "" } as any));
+      if (!b64.stdout?.trim()) continue;
+      await syncBinaryFileToR2(env.STORAGE, org, agent, path, b64.stdout.trim(), sessionId, userId).catch(() => {});
+    } else {
+      const read = await sandbox.exec(`cat "${path}" 2>/dev/null`, { timeout: 8 }).catch(() => ({ stdout: "" } as any));
+      if (typeof read.stdout !== "string") continue;
+      await syncFileToR2(env.STORAGE, org, agent, path, read.stdout, sessionId, userId).catch(() => {});
+    }
   }
 }
 
@@ -5565,6 +5573,13 @@ function normalizeMemoryCategory(raw: unknown): string {
   return legacy[c] || "reference";
 }
 
+/** Format a JS string array as a Postgres TEXT[] literal: {"a","b with \"quotes\""} */
+function pgTextArray(arr: string[]): string {
+  if (arr.length === 0) return "{}";
+  const escaped = arr.map(s => `"${String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`);
+  return `{${escaped.join(",")}}`;
+}
+
 async function memorySave(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
   const content = String(args.content || args.value || "").trim();
   const memoryType = String(args.type || "semantic").trim();
@@ -5576,7 +5591,8 @@ async function memorySave(env: RuntimeEnv, args: Record<string, any>): Promise<s
   const agentName = String(args.agent_name || "").trim()
     || (env as any).__agentConfig?.name || "my-assistant";
   let orgId = String(args.org_id || "").trim()
-    || (env as any).__agentConfig?.org_id || (env as any).__delegationLineage?.org_id || "";
+    || (env as any).__agentConfig?.org_id || (env as any).__orgId
+    || (env as any).__delegationLineage?.org_id || "";
   const hyperdrive = (env as any).HYPERDRIVE;
 
   if (!hyperdrive) return JSON.stringify({ success: false, tool: "memory-save", error: "Memory not available (no database)" });
@@ -5623,15 +5639,15 @@ async function memorySave(env: RuntimeEnv, args: Record<string, any>): Promise<s
       let factId = id;
       if (existing.length > 0) {
         factId = String(existing[0].id || id);
-        const updateEntitiesJson = entities.length > 0 ? JSON.stringify(entities) : null;
+        const updateEntitiesLiteral = entities.length > 0 ? pgTextArray(entities) : null;
         await sql`UPDATE facts SET value = ${content}, category = ${category}, updated_at = ${now}, last_reinforced_at = ${now},
           source_session_ids = CASE WHEN ${sid} = '' THEN source_session_ids ELSE array_append(COALESCE(source_session_ids, '{}'), ${sid}) END,
-          entities = CASE WHEN ${updateEntitiesJson} IS NULL THEN entities ELSE ${updateEntitiesJson}::jsonb END WHERE id = ${existing[0].id}`;
+          entities = CASE WHEN ${updateEntitiesLiteral} IS NULL THEN entities ELSE ${updateEntitiesLiteral}::text[] END WHERE id = ${existing[0].id}`;
       } else {
         const sessionIds = sid ? `{${sid}}` : "{}";
-        const entitiesJson = JSON.stringify(entities);
+        const entitiesLiteral = pgTextArray(entities);
         await sql`INSERT INTO facts (id, agent_name, org_id, scope, key, value, category, created_at, last_reinforced_at, source_session_ids, entities)
-          VALUES (${id}, ${agentName}, ${orgId}, 'agent', ${factKey}, ${content}, ${category}, ${now}, ${now}, ${sessionIds}::text[], ${entitiesJson}::jsonb)`;
+          VALUES (${id}, ${agentName}, ${orgId}, 'agent', ${factKey}, ${content}, ${category}, ${now}, ${now}, ${sessionIds}::text[], ${entitiesLiteral}::text[])`;
       }
       // Best-effort: also maintain semantic index row for deep retrieval.
       // DB write above is the source of truth; vector failures are non-fatal.
@@ -5798,7 +5814,8 @@ async function memoryRecall(env: RuntimeEnv, args: Record<string, any>): Promise
   const agentName = String(args.agent_name || "").trim()
     || (env as any).__agentConfig?.name || "my-assistant";
   const orgId = String(args.org_id || "").trim()
-    || (env as any).__agentConfig?.org_id || "";
+    || (env as any).__agentConfig?.org_id
+    || (env as any).__orgId || "";
   const hyperdrive = (env as any).HYPERDRIVE;
   if (!hyperdrive) return JSON.stringify({ success: false, tool: "memory-recall", error: "Memory not available" });
 
@@ -5809,12 +5826,14 @@ async function memoryRecall(env: RuntimeEnv, args: Record<string, any>): Promise
 
     // Session-ID lookup: fetch a specific session's input/output directly.
     // This is the primary path for memory-digest to retrieve session evidence.
-    if (sessionId) {
+    // SECURITY: always scope by org_id to prevent cross-tenant data leaks.
+    // If org_id is blank, skip the session lookup entirely rather than fail-open.
+    if (sessionId && orgId) {
       const sessionRows = await sql`
         SELECT session_id, agent_name, input_text, output_text, status, cost_total_usd, created_at
         FROM sessions
         WHERE session_id = ${sessionId}
-          AND (${orgId} = '' OR org_id = ${orgId})
+          AND org_id = ${orgId}
         LIMIT 1
       `;
       if (sessionRows.length > 0) {
@@ -5875,6 +5894,7 @@ async function memoryRecall(env: RuntimeEnv, args: Record<string, any>): Promise
       query: query || undefined,
       session_id: sessionId || undefined,
       agent_name: agentName,
+      org_id: orgId,
       usage: `${results.length} entries`,
       entry_count: results.length,
       count: results.length,
@@ -5890,7 +5910,8 @@ async function memoryDelete(env: RuntimeEnv, args: Record<string, any>): Promise
   // Target-agent override: consistent with memory-recall and memory-save.
   const agentName = String(args.agent_name || "").trim()
     || (env as any).__agentConfig?.name || "my-assistant";
-  const orgId = (env as any).__agentConfig?.org_id || "";
+  const orgId = String(args.org_id || "").trim()
+    || (env as any).__agentConfig?.org_id || (env as any).__orgId || "";
   const hyperdrive = (env as any).HYPERDRIVE;
   if (!hyperdrive) return JSON.stringify({ success: false, tool: "memory-delete", error: "Memory not available" });
 

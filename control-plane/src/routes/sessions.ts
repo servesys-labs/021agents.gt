@@ -65,6 +65,7 @@ const getStatsSummaryRoute = createRoute({
   middleware: [requireScope("sessions:read")],
   request: {
     query: z.object({
+      agent_handle: z.string().default(""),
       agent_name: z.string().default(""),
       since_days: z.coerce.number().int().min(1).max(90).default(30),
     }),
@@ -77,14 +78,15 @@ const getStatsSummaryRoute = createRoute({
 
 sessionRoutes.openapi(getStatsSummaryRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const { agent_name: agentName, since_days: sinceDays } = c.req.valid("query");
+  const { agent_handle: agentHandle, agent_name: agentName, since_days: sinceDays } = c.req.valid("query");
+  const agentFilter = agentHandle || agentName;
   const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     let summaryRows;
-    if (agentName) {
+    if (agentFilter) {
       summaryRows = await sql`
         SELECT COUNT(*) as total, COALESCE(SUM(cost_total_usd), 0) as cost, COALESCE(AVG(wall_clock_seconds), 0) as avg_duration
-        FROM sessions WHERE created_at >= ${since} AND agent_name = ${agentName}
+        FROM sessions WHERE created_at >= ${since} AND agent_name = ${agentFilter}
       `;
     } else {
       summaryRows = await sql`
@@ -95,10 +97,10 @@ sessionRoutes.openapi(getStatsSummaryRoute, async (c): Promise<any> => {
     const r = summaryRows[0] as any;
 
     let statusRows;
-    if (agentName) {
+    if (agentFilter) {
       statusRows = await sql`
         SELECT status, COUNT(*) as cnt FROM sessions
-        WHERE created_at >= ${since} AND agent_name = ${agentName}
+        WHERE created_at >= ${since} AND agent_name = ${agentFilter}
         GROUP BY status
       `;
     } else {
@@ -129,6 +131,7 @@ const listSessionsRoute = createRoute({
   middleware: [requireScope("sessions:read")],
   request: {
     query: z.object({
+      agent_handle: z.string().default(""),
       agent_name: z.string().default(""),
       status: z.string().default(""),
       limit: z.coerce.number().int().min(1).max(200).default(50),
@@ -143,17 +146,18 @@ const listSessionsRoute = createRoute({
 
 sessionRoutes.openapi(listSessionsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const { agent_name: agentName, status, limit, offset } = c.req.valid("query");
+  const { agent_handle: agentHandle, agent_name: agentName, status, limit, offset } = c.req.valid("query");
+  const agentFilter = agentHandle || agentName;
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     let rows;
-    if (agentName && status) {
+    if (agentFilter && status) {
       rows = await sql`
-        SELECT * FROM sessions WHERE agent_name = ${agentName} AND status = ${status}
+        SELECT * FROM sessions WHERE agent_name = ${agentFilter} AND status = ${status}
         ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}
       `;
-    } else if (agentName) {
+    } else if (agentFilter) {
       rows = await sql`
-        SELECT * FROM sessions WHERE agent_name = ${agentName}
+        SELECT * FROM sessions WHERE agent_name = ${agentFilter}
         ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}
       `;
     } else if (status) {
@@ -171,6 +175,8 @@ sessionRoutes.openapi(listSessionsRoute, async (c): Promise<any> => {
     return c.json(
       rows.map((r: any) => ({
         session_id: r.session_id || "",
+        agent_id: r.agent_id || "",
+        agent_handle: r.agent_name || "",
         agent_name: r.agent_name || "",
         status: r.status || "",
         input_text: (r.input_text || "").slice(0, 200),

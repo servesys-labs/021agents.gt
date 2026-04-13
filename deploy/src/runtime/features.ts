@@ -34,9 +34,9 @@ const DEFAULTS: Record<string, boolean> = {
   mailbox_ipc: true,
   idle_watchdog: true,
   prompt_caching: true,
-  // Gradual rollout gate for routing complex tasks to Kimi.
-  // Keep off by default; enable per-org as part of canary.
-  kimi_complex_canary: false,
+  // Kimi K2.5 routing for complex tasks. Enabled by default — Kimi is free
+  // via Workers AI and has better tool compliance than Gemma for complex tasks.
+  kimi_complex_canary: true,
   // Memory agent is now part of the default personal-agent substrate.
   memory_agent_enabled: true,
   // Shared signal substrate underpins passive, clustered memory digestion.

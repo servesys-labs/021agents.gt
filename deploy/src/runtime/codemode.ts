@@ -464,11 +464,12 @@ export async function executeScopedCode(
     let toolCallCount = 0;
     let toolCostUsd = 0;
 
-    // Build tool RPC bridges
+    // Build tool RPC bridges — register both kebab-case and camelCase aliases
+    // so LLMs can call `codemode["web-search"]()` or `codemode.webSearch()`.
     const toolFns: Record<string, (args: any) => Promise<unknown>> = {};
     for (const def of filteredTools) {
       const toolName = def.function.name;
-      toolFns[toolName] = async (args: any) => {
+      const handler = async (args: any) => {
         toolCallCount++;
         if (toolCallCount > scopeConfig.maxToolCalls) {
           throw new Error(`Tool call limit exceeded (max ${scopeConfig.maxToolCalls} for scope "${options.scope}")`);
@@ -484,6 +485,13 @@ export async function executeScopedCode(
         if (result?.error) throw new Error(result.error);
         try { return JSON.parse(result?.result || "null"); } catch { return result?.result || null; }
       };
+      toolFns[toolName] = handler;
+      // Aliases so LLMs and generated code can use any naming convention:
+      //   web-search → webSearch (camelCase) + web_search (snake_case)
+      const camel = toolName.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
+      if (camel !== toolName) toolFns[camel] = handler;
+      const snake = toolName.replace(/-/g, "_");
+      if (snake !== toolName) toolFns[snake] = handler;
     }
 
     // Code size guard — prevent memory exhaustion in V8 isolate
