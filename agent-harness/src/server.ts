@@ -136,7 +136,211 @@ type TenantConfig = {
   model: string;
   systemPrompt: string;
   enableSandbox?: boolean;
+  // Skill-heavy architecture: skills are context blocks loaded on demand.
+  // Each skill is a markdown file that expands the system prompt when activated.
+  // The system prompt stays small; skills are loaded via Think context blocks.
+  skills?: SkillDefinition[];
 };
+
+// ── Skill System ──────────────────────────────────────────────────────────────
+//
+// Instead of cramming everything into one giant system prompt, skills are
+// modular markdown blocks that get loaded as Think context blocks on demand.
+//
+// How it works:
+// 1. Each tenant has a list of SkillDefinitions (name + content)
+// 2. configureSession() registers each skill as a context block with a SkillProvider
+// 3. The LLM sees a "skills" context block listing available skills
+// 4. When a skill is relevant, the LLM calls load_context to activate it
+// 5. The skill's markdown content gets injected into the system prompt
+// 6. This survives compaction — context blocks are never summarized away
+//
+// This is the CF-native equivalent of the monolith's skill-manifest.generated.ts
+// but dynamic, per-conversation, and expandable to infinity.
+
+interface SkillDefinition {
+  name: string;
+  description: string;
+  content: string; // markdown content — the "skill.md" body
+}
+
+// ── Built-in Skills Library ────────────────────────────────────────
+
+const SKILL_LIBRARY: SkillDefinition[] = [
+  {
+    name: "deep-research",
+    description: "Multi-source research with structured output and source citations",
+    content: `## Deep Research Protocol
+
+When conducting deep research:
+
+1. **Scope**: Identify 3-5 key questions that need answering
+2. **Search**: Use webSearch for each question independently
+3. **Verify**: Cross-reference claims across 2+ sources
+4. **Extract**: Use fetchUrl or browserGetContent for full articles
+5. **Synthesize**: Combine findings into a structured report
+
+### Output Format
+- Executive summary (2-3 sentences)
+- Key findings (bulleted, with source URLs)
+- Confidence assessment (high/medium/low per finding)
+- Knowledge gaps (what couldn't be verified)
+
+### Citation Rules
+- Every factual claim must have a [source](url)
+- Prefer primary sources over aggregators
+- Note when information is dated`,
+  },
+  {
+    name: "code-review",
+    description: "Systematic code review with security, performance, and maintainability checks",
+    content: `## Code Review Checklist
+
+Review code systematically:
+
+### Security
+- [ ] No hardcoded secrets or credentials
+- [ ] Input validation on all user data
+- [ ] SQL injection prevention (parameterized queries)
+- [ ] XSS prevention (output encoding)
+- [ ] Auth checks on protected endpoints
+
+### Performance
+- [ ] No N+1 queries
+- [ ] Appropriate caching strategy
+- [ ] No blocking operations in hot path
+- [ ] Resource cleanup (connections, file handles)
+
+### Maintainability
+- [ ] Functions under 50 lines
+- [ ] Clear naming (no abbreviations)
+- [ ] Error handling with context
+- [ ] No dead code or commented-out blocks
+
+### Output
+For each issue found:
+- **Severity**: Critical / High / Medium / Low
+- **Line**: exact location
+- **Problem**: what's wrong
+- **Fix**: how to fix it`,
+  },
+  {
+    name: "data-analysis",
+    description: "Structured data analysis with Python in sandbox",
+    content: `## Data Analysis Protocol
+
+When analyzing data:
+
+1. **Ingest**: Load data via sandbox (CSV, JSON, API)
+2. **Explore**: Use pandas for shape, dtypes, describe(), head()
+3. **Clean**: Handle nulls, types, outliers
+4. **Analyze**: Apply statistical methods appropriate to the question
+5. **Visualize**: Create matplotlib/seaborn charts, save to workspace
+6. **Report**: Summarize findings with charts and key metrics
+
+### Python Libraries Available
+\`\`\`
+pandas, numpy, matplotlib, seaborn, scipy, scikit-learn
+Install others: uv pip install <package>
+\`\`\`
+
+### Chart Requirements
+- Always label axes and add titles
+- Use colorblind-friendly palettes
+- Save to /workspace/charts/
+- Include data source annotation`,
+  },
+  {
+    name: "debug",
+    description: "Systematic debugging with hypothesis-driven investigation",
+    content: `## Debug Protocol
+
+1. **Reproduce**: Confirm the error with minimal steps
+2. **Hypothesize**: List 3 most likely causes
+3. **Investigate**: Test each hypothesis with targeted tool calls
+4. **Root cause**: Identify the actual cause with evidence
+5. **Fix**: Implement and verify the fix
+6. **Prevent**: Suggest how to prevent recurrence
+
+### Investigation Tools
+- Read error logs and stack traces
+- Add diagnostic logging
+- Inspect state at failure point
+- Check edge cases and boundary conditions
+- Bisect recent changes if regression
+
+### Output
+- **Symptom**: what the user sees
+- **Root cause**: why it happens
+- **Fix**: what was changed
+- **Verification**: how we confirmed it works`,
+  },
+  {
+    name: "report",
+    description: "Generate structured reports with executive summary and detailed findings",
+    content: `## Report Generation
+
+### Structure
+1. **Title & Date**
+2. **Executive Summary** (3-5 sentences, key takeaways)
+3. **Methodology** (how data was gathered)
+4. **Findings** (organized by theme)
+5. **Recommendations** (prioritized, actionable)
+6. **Appendix** (raw data, sources)
+
+### Style Rules
+- Lead with conclusions, not process
+- Use tables for comparisons
+- Include confidence levels
+- Quantify everything possible
+- Link to sources`,
+  },
+  {
+    name: "planning",
+    description: "Break down complex tasks into actionable implementation plans",
+    content: `## Implementation Planning
+
+When breaking down a complex task:
+
+### Phase 1: Scope
+- Define clear success criteria
+- Identify constraints (time, resources, dependencies)
+- List assumptions
+
+### Phase 2: Decompose
+- Break into independent work streams
+- Identify critical path
+- Flag parallelizable tasks
+
+### Phase 3: Estimate
+- Size each task (small/medium/large)
+- Identify risks per task
+- Note dependencies between tasks
+
+### Phase 4: Sequence
+- Order by dependencies, then priority
+- Group related tasks into sprints
+- Identify milestones and checkpoints
+
+### Output Format
+| # | Task | Size | Depends On | Risk | Sprint |
+|---|------|------|-----------|------|--------|`,
+  },
+];
+
+// ── Skill Provider (Think context block provider) ──────────────────
+// This creates a SkillProvider-compatible object for each skill.
+// Think's context block system calls get() to render the content
+// and load() to activate it on demand.
+
+function createSkillProvider(skill: SkillDefinition) {
+  return {
+    get: async () => skill.content,
+    load: async () => skill.content,
+  };
+}
+
+// ── Skill-aware Tenant Config ──────────────────────────────────────
 
 const TENANTS: TenantConfig[] = [
   {
@@ -146,7 +350,12 @@ const TENANTS: TenantConfig[] = [
     description: "General purpose AI assistant",
     model: "@cf/moonshotai/kimi-k2.5",
     systemPrompt:
-      "You are a helpful, concise assistant. Answer clearly and directly. Only use tools when the user specifically asks for weather, calculations, or web content. For general questions, respond with your own knowledge without calling any tools.",
+      "You are a helpful, concise assistant. You have skills available as context blocks — activate them when relevant. For general questions, respond with your own knowledge without calling any tools.",
+    skills: [
+      SKILL_LIBRARY.find(s => s.name === "deep-research")!,
+      SKILL_LIBRARY.find(s => s.name === "report")!,
+      SKILL_LIBRARY.find(s => s.name === "planning")!,
+    ],
   },
   {
     id: "coding",
@@ -154,12 +363,16 @@ const TENANTS: TenantConfig[] = [
     icon: "⌨",
     description: "Code execution, review & architecture",
     model: "@cf/moonshotai/kimi-k2.5",
-    systemPrompt: `You are an expert software engineer with access to a live sandbox environment and web tools.
-You can execute code, install packages, clone repos, and run commands in an isolated container.
-You also have webSearch, fetchUrl, browserScreenshot, and browserGetContent tools to research docs and APIs.
-Use the codemode tool to write JavaScript that orchestrates multiple tool calls when complex workflows are needed.
-When the user asks you to write or run code, use the sandbox tools to execute it and show the results.`,
+    systemPrompt: `You are an expert software engineer with a live sandbox and web tools.
+Execute code, install packages, clone repos, run commands. Use codemode for complex workflows.
+You have specialized skills available as context blocks — activate them when relevant.`,
     enableSandbox: true,
+    skills: [
+      SKILL_LIBRARY.find(s => s.name === "code-review")!,
+      SKILL_LIBRARY.find(s => s.name === "debug")!,
+      SKILL_LIBRARY.find(s => s.name === "data-analysis")!,
+      SKILL_LIBRARY.find(s => s.name === "planning")!,
+    ],
   },
   {
     id: "support",
@@ -169,6 +382,9 @@ When the user asks you to write or run code, use the sandbox tools to execute it
     model: "@cf/moonshotai/kimi-k2.5",
     systemPrompt:
       "You are a friendly, empathetic customer support agent. Help troubleshoot issues, explain things clearly, and ensure the customer feels heard.",
+    skills: [
+      SKILL_LIBRARY.find(s => s.name === "debug")!,
+    ],
   },
   {
     id: "research",
@@ -176,14 +392,14 @@ When the user asks you to write or run code, use the sandbox tools to execute it
     icon: "◈",
     description: "Analysis, synthesis & insights",
     model: "@cf/moonshotai/kimi-k2.5",
-    systemPrompt: `You are a research analyst with full web access. Provide thorough analysis, cite reasoning, consider multiple perspectives, and synthesize information clearly.
-You have these research tools:
-- webSearch: Search the web for current information, news, and data
-- fetchUrl: Fetch and read any web page or API
-- browserScreenshot: Capture screenshots for visual analysis
-- browserGetContent: Render JS-heavy pages (SPAs, dashboards) and extract text
-- codemode: Write JavaScript to orchestrate multi-step research workflows (search → fetch → analyze)
-Always cite your sources with URLs when providing research findings.`,
+    systemPrompt: `You are a research analyst with full web access. Always cite sources with URLs.
+You have specialized skills available as context blocks — activate them when the task requires structured methodology.`,
+    skills: [
+      SKILL_LIBRARY.find(s => s.name === "deep-research")!,
+      SKILL_LIBRARY.find(s => s.name === "report")!,
+      SKILL_LIBRARY.find(s => s.name === "data-analysis")!,
+      SKILL_LIBRARY.find(s => s.name === "planning")!,
+    ],
   },
 ];
 
@@ -741,24 +957,66 @@ export class ChatAgent extends Think<Env> {
   // ── Session: context blocks + compaction ──
 
   configureSession(session: any) {
-    return session
-      // Soul: persistent identity context block (survives compaction)
+    const config = getTenantConfig(this.name);
+
+    let s = session
+      // ── Soul: persistent identity (survives compaction) ──
       .withContext("soul", {
         provider: { get: async () => this.getSystemPrompt() },
       })
-      // Memory: persistent facts learned during conversation
+      // ── Memory: facts learned during conversation ──
+      // The LLM has a set_context tool to write to this block.
+      // Contents persist across turns and survive compaction.
       .withContext("memory", {
-        description: "Important facts, preferences, and decisions. Update proactively.",
+        description: "Important facts, preferences, and decisions learned during this conversation. Update proactively when you learn something new about the user, their project, or their preferences.",
         maxTokens: 2000,
       })
-      // Prompt caching for efficiency
-      .withCachedPrompt()
-      // Auto-compact when conversation exceeds 8000 tokens
+      // ── Skills catalog: tells the LLM what skills are available ──
+      // This is a readonly block that lists available skills.
+      // The LLM uses load_context to activate a skill when needed.
+      .withContext("available-skills", {
+        provider: {
+          get: async () => {
+            const skills = config.skills || [];
+            if (skills.length === 0) return "No specialized skills available.";
+            return [
+              "## Available Skills",
+              "Activate a skill with load_context when the task requires structured methodology.",
+              "",
+              ...skills.map(sk => `- **${sk.name}**: ${sk.description}`),
+              "",
+              "Skills expand into detailed protocols. Only load what you need for the current task.",
+            ].join("\n");
+          },
+        },
+      });
+
+    // ── Register each skill as a loadable context block ──
+    // These use SkillProvider pattern: get() returns content, load() activates.
+    // The LLM sees them listed in available-skills and calls load_context("skill-name")
+    // to inject the full skill markdown into the prompt.
+    // This keeps the base prompt small but expandable to infinity.
+    for (const skill of (config.skills || [])) {
+      s = s.withContext(`skill-${skill.name}`, {
+        description: skill.description,
+        provider: createSkillProvider(skill),
+      });
+    }
+
+    // ── Prompt caching ──
+    s = s.withCachedPrompt();
+
+    // ── Auto-compaction ──
+    // When the conversation exceeds 8000 tokens, the middle section is
+    // summarized by the LLM. Context blocks (soul, memory, skills) survive.
+    s = s
       .onCompaction(createCompactFunction({
         summarize: (prompt: string) =>
           generateText({ model: this.getModel(), prompt }).then(r => r.text),
       }))
       .compactAfter(8000);
+
+    return s;
   }
 
   // ── Lifecycle hooks ──
@@ -801,6 +1059,17 @@ export class ChatAgent extends Think<Env> {
     return TENANTS.map(({ id, name, icon, description }) => ({
       id, name, icon, description,
     }));
+  }
+
+  @callable({ description: "List all available skills for this agent" })
+  getAvailableSkills() {
+    const config = getTenantConfig(this.name);
+    return (config.skills || []).map(s => ({ name: s.name, description: s.description }));
+  }
+
+  @callable({ description: "Get the full skill library (all skills across all tenants)" })
+  getSkillLibrary() {
+    return SKILL_LIBRARY.map(s => ({ name: s.name, description: s.description }));
   }
 
   @callable({ description: "Get CodeMode tool type definitions for the current agent" })
