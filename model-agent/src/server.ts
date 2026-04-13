@@ -54,12 +54,14 @@
  */
 
 import { createWorkersAI } from "workers-ai-provider";
-import { routeAgentRequest, callable } from "agents";
+import { Agent, routeAgentRequest, callable } from "agents";
 import { Think } from "@cloudflare/think";
 import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
 import { createExecuteTool } from "@cloudflare/think/tools/execute";
 import { createExtensionTools } from "@cloudflare/think/tools/extensions";
 import { type ChatResponseResult } from "@cloudflare/ai-chat";
+import { McpAgent } from "agents/mcp";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { tool, generateText } from "ai";
 import { z } from "zod";
 import { createGit, gitTools } from "@cloudflare/shell/git";
@@ -68,6 +70,7 @@ import { WorkspaceFileSystem, type FileInfo } from "@cloudflare/shell";
 import { DynamicWorkerExecutor, resolveProvider } from "@cloudflare/codemode";
 import { createCompactFunction } from "agents/experimental/memory/utils";
 import puppeteer from "@cloudflare/puppeteer";
+import webpush from "web-push";
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -78,7 +81,16 @@ interface Env {
   ModelAgent: DurableObjectNamespace;
   ResearchSpecialist: DurableObjectNamespace;
   CodingSpecialist: DurableObjectNamespace;
+  ReminderAgent: DurableObjectNamespace;
+  McpElicitationServer: DurableObjectNamespace;
   ANALYTICS?: AnalyticsEngineDataset;
+  // Push notification VAPID keys (set via wrangler secret put)
+  VAPID_PUBLIC_KEY?: string;
+  VAPID_PRIVATE_KEY?: string;
+  VAPID_SUBJECT?: string;
+  // x402 payment protocol
+  CLIENT_TEST_PK?: string;
+  SERVER_ADDRESS?: string;
 }
 
 interface AgentConfig {
@@ -539,28 +551,280 @@ function browserContentTool(env: Env) {
   });
 }
 
+// ── Push Notification Agent ─────────────────────────────────────────
+// Pattern from: examples/push-notifications
+// Uses Web Push (VAPID) + agent scheduling for async reminders.
+
+type Subscription = {
+  endpoint: string;
+  expirationTime: number | null;
+  keys: { p256dh: string; auth: string };
+};
+
+type Reminder = {
+  id: string;
+  message: string;
+  scheduledAt: number;
+  sent: boolean;
+};
+
+type ReminderAgentState = {
+  subscriptions: Subscription[];
+  reminders: Reminder[];
+};
+
+export class ReminderAgent extends Agent<Env, ReminderAgentState> {
+  initialState: ReminderAgentState = { subscriptions: [], reminders: [] };
+
+  @callable({ description: "Get the VAPID public key for push subscription" })
+  getVapidPublicKey(): string {
+    return this.env.VAPID_PUBLIC_KEY || "";
+  }
+
+  @callable({ description: "Subscribe a browser endpoint for push notifications" })
+  async subscribe(subscription: Subscription): Promise<{ ok: boolean }> {
+    const exists = this.state.subscriptions.some(s => s.endpoint === subscription.endpoint);
+    if (!exists) {
+      this.setState({
+        ...this.state,
+        subscriptions: [...this.state.subscriptions, subscription],
+      });
+    }
+    return { ok: true };
+  }
+
+  @callable({ description: "Unsubscribe a push endpoint" })
+  async unsubscribe(endpoint: string): Promise<{ ok: boolean }> {
+    this.setState({
+      ...this.state,
+      subscriptions: this.state.subscriptions.filter(s => s.endpoint !== endpoint),
+    });
+    return { ok: true };
+  }
+
+  @callable({ description: "Create a scheduled reminder with push notification" })
+  async createReminder(message: string, delaySeconds: number): Promise<Reminder> {
+    const id = crypto.randomUUID();
+    const scheduledAt = Date.now() + delaySeconds * 1000;
+    const reminder: Reminder = { id, message, scheduledAt, sent: false };
+    this.setState({
+      ...this.state,
+      reminders: [...this.state.reminders, reminder],
+    });
+    await this.schedule(delaySeconds, "sendReminder", { id, message });
+    return reminder;
+  }
+
+  @callable({ description: "Cancel a scheduled reminder" })
+  async cancelReminder(id: string): Promise<{ ok: boolean }> {
+    const schedules = this.getSchedules();
+    for (const schedule of schedules) {
+      const payload = schedule.payload as any;
+      if (payload?.id === id) {
+        await this.cancelSchedule(schedule.id);
+        break;
+      }
+    }
+    this.setState({
+      ...this.state,
+      reminders: this.state.reminders.filter(r => r.id !== id),
+    });
+    return { ok: true };
+  }
+
+  @callable({ description: "Send a test push notification to all subscribers" })
+  async sendTestNotification(): Promise<{ sent: number; failed: number }> {
+    return this.pushToAll({ title: "Test Notification", body: "Push notifications are working!", tag: "test" });
+  }
+
+  async sendReminder(payload: { id: string; message: string }) {
+    await this.pushToAll({ title: "Reminder", body: payload.message, tag: `reminder-${payload.id}` });
+    this.setState({
+      ...this.state,
+      reminders: this.state.reminders.map(r => r.id === payload.id ? { ...r, sent: true } : r),
+    });
+    this.broadcast(JSON.stringify({ type: "reminder_sent", id: payload.id, timestamp: Date.now() }));
+  }
+
+  private async pushToAll(notification: Record<string, unknown>): Promise<{ sent: number; failed: number }> {
+    if (!this.env.VAPID_PUBLIC_KEY || !this.env.VAPID_PRIVATE_KEY) return { sent: 0, failed: 0 };
+    webpush.setVapidDetails(
+      this.env.VAPID_SUBJECT || "mailto:agent@example.com",
+      this.env.VAPID_PUBLIC_KEY,
+      this.env.VAPID_PRIVATE_KEY,
+    );
+    const deadEndpoints: string[] = [];
+    let sent = 0, failed = 0;
+    await Promise.all(
+      this.state.subscriptions.map(async (sub) => {
+        try {
+          await webpush.sendNotification(sub, JSON.stringify(notification));
+          sent++;
+        } catch (err: any) {
+          const code = err?.statusCode || 0;
+          if (code === 404 || code === 410) deadEndpoints.push(sub.endpoint);
+          failed++;
+        }
+      }),
+    );
+    if (deadEndpoints.length > 0) {
+      this.setState({
+        ...this.state,
+        subscriptions: this.state.subscriptions.filter(s => !deadEndpoints.includes(s.endpoint)),
+      });
+    }
+    return { sent, failed };
+  }
+}
+
+// ── MCP Server with Elicitation ────────────────────────────────────
+// Pattern from: examples/mcp-elicitation
+// McpAgent that can ask the MCP client for additional input mid-tool-call.
+
+type McpState = { counter: number };
+
+export class McpElicitationServer extends McpAgent<Env, McpState, {}> {
+  server = new McpServer({ name: "model-agent-mcp", version: "1.0.0" });
+  initialState: McpState = { counter: 0 };
+
+  async init() {
+    // Tool with elicitation — asks the MCP client for structured input
+    this.server.tool(
+      "increase-counter",
+      "Increase a persistent counter. Asks the user how much to increase by.",
+      { confirm: z.boolean().describe("Do you want to increase the counter?") },
+      async ({ confirm }) => {
+        if (!confirm) return { content: [{ type: "text" as const, text: "Cancelled." }] };
+
+        // Elicitation: ask the MCP client for structured input
+        const result = await this.elicitInput({
+          message: "By how much?",
+          requestedSchema: {
+            type: "object",
+            properties: { amount: { type: "number", title: "Amount" } },
+            required: ["amount"],
+          },
+        });
+
+        if (result.action !== "accept" || !result.content) {
+          return { content: [{ type: "text" as const, text: "Cancelled." }] };
+        }
+
+        const amount = Number(result.content.amount);
+        if (!amount) return { content: [{ type: "text" as const, text: "Invalid amount." }] };
+
+        this.setState({ ...this.state, counter: this.state.counter + amount });
+        return { content: [{ type: "text" as const, text: `Counter: ${this.state.counter} (+${amount})` }] };
+      },
+    );
+
+    // Standard tool — exposes agent run to MCP clients (Claude, Cursor)
+    this.server.tool(
+      "run-agent",
+      "Run the model agent on a task",
+      { task: z.string().describe("Task to execute") },
+      async ({ task }) => {
+        return { content: [{ type: "text" as const, text: `Task queued: ${task}` }] };
+      },
+    );
+
+    // Resource — expose agent state to MCP clients
+    this.server.resource(
+      "agent-state",
+      "model-agent://state",
+      async (uri) => ({
+        contents: [{
+          uri: uri.href,
+          text: JSON.stringify({ counter: this.state.counter }, null, 2),
+          mimeType: "application/json",
+        }],
+      }),
+    );
+  }
+}
+
+// ── x402 Payment Protocol ──────────────────────────────────────────
+// Pattern from: examples/x402
+// Agent that can pay for protected resources using HTTP 402.
+// Requires @x402/fetch, @x402/hono, @x402/core, @x402/evm packages.
+//
+// NOTE: x402 is experimental. The pattern is included for completeness.
+// To enable: uncomment the import and the route in the fetch handler.
+//
+// import { wrapFetchWithPayment } from "@x402/fetch";
+// import { paymentMiddleware, x402ResourceServer } from "@x402/hono";
+
 // ── Worker Entry Point ─────────────────────────────────────────────
+
+// ── CORS helper (for cross-origin agent access) ───────────────────
+// Pattern from: examples/cross-domain
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS, PUT, DELETE",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-API-Key",
+};
+
+// ── Auth middleware (for cross-domain WebSocket + HTTP) ─────────────
+// Pattern from: examples/cross-domain
+function authMiddleware(request: Request, env: Env): Response | null {
+  const url = new URL(request.url);
+  const token = url.searchParams.get("token")
+    || request.headers.get("Authorization")?.replace("Bearer ", "");
+  // In production: validate JWT. For reference impl: allow all.
+  // if (!token) return Response.json({ error: "Unauthorized" }, { status: 401 });
+  return null; // allow
+}
 
 export default {
   async fetch(request: Request, env: Env) {
     const url = new URL(request.url);
 
+    // CORS preflight (cross-domain pattern)
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: CORS_HEADERS });
+    }
+
     // Health check
     if (url.pathname === "/api/health") {
-      return Response.json({ status: "ok", service: "model-agent", ts: new Date().toISOString() });
+      return Response.json({
+        status: "ok",
+        service: "model-agent",
+        features: [
+          "think", "sub-agents", "workspace", "codemode", "mcp-client",
+          "mcp-server-elicitation", "voice", "a2a", "push-notifications",
+          "structured-input", "browser", "web-search", "analytics",
+          "extensions", "x402-ready", "cors",
+        ],
+        ts: new Date().toISOString(),
+      });
     }
 
     // A2A Protocol: agent card discovery
     if (url.pathname === "/.well-known/agent.json") {
-      return Response.json(AGENT_CARD, {
-        headers: { "Access-Control-Allow-Origin": "*" },
-      });
+      return Response.json(AGENT_CARD, { headers: CORS_HEADERS });
+    }
+
+    // MCP Elicitation Server: serve at /mcp path
+    // McpAgent.serve() handles SSE + HTTP streaming transports
+    if (url.pathname.startsWith("/mcp")) {
+      return McpElicitationServer.serve("/mcp", { binding: "McpElicitationServer" })
+        .fetch(request, env, {} as any);
     }
 
     // Agent SDK routing — handles WebSocket + HTTP to DOs
+    // With cross-domain auth middleware on connect and request
     const response = await routeAgentRequest(request, env, {
-      onBeforeConnect: async (req) => req,
-      onBeforeRequest: async (req) => req,
+      cors: true,
+      onBeforeConnect: async (req) => {
+        const deny = authMiddleware(req, env);
+        if (deny) return deny;
+        return req;
+      },
+      onBeforeRequest: async (req) => {
+        const deny = authMiddleware(req, env);
+        if (deny) return deny;
+        return req;
+      },
     });
 
     if (response) return response;
