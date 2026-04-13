@@ -1,0 +1,50 @@
+// wrangler.jsonc — Model Agent: reference implementation using all CF Agents SDK features
+//
+// This is the canonical pattern for building agents on Cloudflare.
+// Uses: Agent class, @callable, scheduleEvery, keepAliveWhile, broadcast,
+//       onStateChanged, McpAgent, DO Facets, Dynamic Workers, Workflows,
+//       WebSocket + SSE, email, and the full Agents SDK surface.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "model-agent",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-04-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+
+  // ── Durable Objects ──
+  "durable_objects": {
+    "bindings": [
+      { "name": "AGENT", "class_name": "ModelAgent" },
+      { "name": "MCP_SERVER", "class_name": "ModelMcpServer" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ModelAgent", "ModelMcpServer"] }
+  ],
+
+  // ── Dynamic Workers (for facets + code execution) ──
+  "worker_loaders": [{ "binding": "LOADER" }],
+
+  // ── Workers AI ──
+  "ai": { "binding": "AI" },
+
+  // ── Vectorize for memory facet ──
+  "vectorize": [
+    { "binding": "VECTORIZE", "index_name": "agentos-knowledge-v2" }
+  ],
+
+  // ── KV for progress events ──
+  "kv_namespaces": [
+    { "binding": "PROGRESS_KV", "id": "30da23c287ee4f4c93d1a1f08cdd48a0" }
+  ],
+
+  // ── Cron for periodic tasks ──
+  "triggers": {
+    "crons": ["*/15 * * * *"]
+  },
+
+  "vars": {
+    "DEFAULT_MODEL": "gemma-4-26b-moe"
+  }
+}
