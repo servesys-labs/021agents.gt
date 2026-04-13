@@ -16,6 +16,7 @@ import {
   callable,
   routeAgentRequest,
 } from "agents";
+import { isAutoReplyEmail, createAddressBasedEmailResolver } from "agents/email";
 import { getSandbox, Sandbox } from "@cloudflare/sandbox";
 // @ts-expect-error — ContainerProxy exists at runtime but may not be in type defs
 import { ContainerProxy } from "@cloudflare/containers";
@@ -1755,6 +1756,12 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   // and replies to the sender with the agent's response.
 
   async onEmail(email: ForwardableEmailMessage) {
+    // SDK safety: reject auto-reply emails (OOO, vacation, mailing-list) to prevent infinite loops
+    if (isAutoReplyEmail(email.headers)) {
+      console.log(`[onEmail] Skipping auto-reply from ${email.from}`);
+      return;
+    }
+
     await this._syncCheckpointFlagFromDb(this.name);
     const from = email.from;
     const to = email.to;
@@ -8207,31 +8214,35 @@ export default {
   },
 
   // ── Email handler — route inbound emails to the target agent DO ──
+  // Uses SDK auto-reply detection to prevent infinite loops, then resolves
+  // agent via address-based sub-addressing (e.g. support-bot.d8ec4cf7@oneshots.co).
   async email(message: ForwardableEmailMessage, env: Env, ctx: ExecutionContext): Promise<void> {
-    // Email addresses are: {agent_name}.{org_short}@oneshots.co
-    // e.g., support-bot.d8ec4cf7@oneshots.co
-    // Fallback: {agent_name}@oneshots.co (looks up first matching agent)
+    // SDK safety: reject auto-reply emails (OOO, vacation, mailing-list bounces)
+    if (isAutoReplyEmail(message.headers)) {
+      console.log(`[email] Skipping auto-reply from ${message.from}`);
+      return;
+    }
+
+    // Parse agent name from email address: {agent_name}.{org_short}@oneshots.co
+    // SDK's createAddressBasedEmailResolver uses sub-addressing, but we need
+    // the dot-based org hint pattern, so we keep custom parsing here.
     const toAddress = message.to;
     const localPart = toAddress.split("@")[0].toLowerCase().replace(/[^a-z0-9.-]/g, "");
 
-    // Parse org hint from email: "name.orgshort" format
     const dotIdx = localPart.lastIndexOf(".");
-    const hasOrgHint = dotIdx > 0 && localPart.length - dotIdx <= 9; // org suffix is 8 chars max
+    const hasOrgHint = dotIdx > 0 && localPart.length - dotIdx <= 9;
     const agentName = hasOrgHint ? localPart.slice(0, dotIdx) : localPart;
     const orgHint = hasOrgHint ? localPart.slice(dotIdx + 1) : "";
 
-    // Look up agent — use org hint for disambiguation if available
     let orgId = "";
     try {
       const { getDb } = await import("./runtime/db");
       const sql = await getDb(env.HYPERDRIVE);
       let rows: any[] = [];
       if (orgHint) {
-        // Match agent by name AND org_id ending with the hint
         rows = await sql`SELECT org_id FROM agents WHERE name = ${agentName} AND org_id LIKE ${"%" + orgHint} AND is_active = true LIMIT 1`;
       }
       if (!rows.length) {
-        // Fallback: match by name only (backward compat for simple addresses)
         rows = await sql`SELECT org_id FROM agents WHERE name = ${agentName} AND is_active = true LIMIT 1`;
       }
       orgId = rows[0]?.org_id || "";
