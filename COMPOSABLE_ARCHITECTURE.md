@@ -403,4 +403,370 @@ API: `ctx.facets.get(name, callback)` retrieves or initializes a facet. Each fac
 3. Keep: Compute + Channels as separate Workers (different scaling needs)
 
 Facets are especially powerful for our use case because each agent session already has its own DO instance — facets give each session isolated databases for memory, signals, and workspace without cross-instance coordination.
-- Don't split prematurely — extract the easy seams (Channels, Signals) first, prove the service binding pattern works, then proceed
+
+---
+
+## Update: What Think Eliminates (Post-Model-Agent Analysis)
+
+Migrating from raw `Agent` to `Think` as the base class eliminates ~3,100 lines of hand-rolled code from the monolith. Here's the precise mapping:
+
+### Eliminated by Think + SDK
+
+| Monolith Component | Lines | Replaced By |
+|---|---|---|
+| Conversation persistence (INSERT/DELETE, hydration from Supabase) | ~300 | Think Session — auto-persists to DO SQLite |
+| Streaming + KV polling (Workflow → KV → DO polls → WS push) | ~500 | `streamText().toUIMessageStreamResponse()` — direct WebSocket |
+| Custom compaction (shouldCompact, compactMessages, pruneToolResults) | ~200 | `configureSession().compactAfter(threshold)` |
+| Workspace persistence (checkpoint chain to R2) | ~400 | `@cloudflare/shell` Workspace (SQLite + R2 hybrid) |
+| Memory context building (buildMemoryContext, 864 lines) | ~864 | Think context blocks: `withContext("memory", ...)` |
+| Active workflow tracking (active_workflows SQLite, orphaned recovery) | ~200 | `keepAliveWhile()` + Think abort — no orphans |
+| Custom WebSocket protocol (auth, reconnect, replay) | ~300 | Think `cf_agent_chat_*` protocol (standard) |
+| Custom useAgentChat in mobile (SSE over fetch) | ~85 | `useAgentChat` from agents/react (WebSocket) |
+| Circuit breaker SQLite table | ~100 | Think `beforeToolCall`/`afterToolCall` hooks |
+| Hand-rolled MCP server | ~170 | `McpAgent` from agents/mcp |
+
+**Total: ~3,100 lines eliminated.**
+
+### What Stays (Think doesn't replace these)
+
+| Component | Why It Stays |
+|---|---|
+| **Postgres (Hyperdrive)** | Multi-tenant platform metadata: agent configs, billing, orgs, API keys, tool registry, audit logs, eval data. Think's SQLite is per-DO — no cross-agent queries. |
+| **Workflows** | Durable execution for >5 min runs (deep research, batch processing). Think uses keepAliveWhile for chat-length runs. |
+| **Queues** | Async guaranteed-delivery: telemetry pipeline, signal fanout, billing records. Think has no queue primitive. |
+| **R2** | Org-level file storage shared across agents. Think Workspace uses R2 for per-agent spillover only. |
+| **Vectorize** | Cross-agent RAG, shared knowledge bases. Think context blocks are per-conversation only. |
+| **KV** | Config cache, feature flags. Thin caching layer. |
+| **AI Gateway** | Cross-tenant model routing, caching, rate limiting, cost tracking. Think calls one model per turn. |
+| **Cron Triggers** | Platform-wide scheduled tasks (billing reconciliation, data retention). |
+| **Containers/Sandboxes** | Full OS for coding agents. Think adds these as tools, doesn't replace them. |
+
+### Data Ownership Shift
+
+```
+BEFORE (monolith — everything in Postgres):
+  Postgres: conversations + sessions + agent config + billing +
+            orgs + API keys + tool registry + audit + eval + memory
+
+AFTER (Think — split by responsibility):
+  Think DO SQLite:  conversations, workspace files, session state,
+                    context blocks, scheduled tasks, MCP server state
+                    (per-agent, per-instance — 100% of chat traffic)
+
+  Postgres:         agent config, billing, orgs, API keys,
+                    tool registry, audit logs, eval data
+                    (platform metadata — admin/API traffic only)
+
+  Vectorize:        cross-agent RAG, shared knowledge bases
+  R2:               org-level file storage, eval datasets
+  KV:               config cache, feature flags
+```
+
+**Postgres traffic drops ~40%** — all conversation read/write moves to DO SQLite.
+
+---
+
+## Control-Plane: Rethinking for the Think Era
+
+The control-plane (`control-plane/`) is currently a 100+ route Hono API that does everything from auth to billing to observability. In the Think-based architecture, its role changes fundamentally.
+
+### What the Control-Plane Does Today (70 route groups)
+
+```
+Platform CRUD (stays):           Agent CRUD, orgs, API keys, secrets, domains
+Billing (stays):                 Credits, Stripe, usage metering, plans
+Auth (stays):                    JWT, API keys, end-user tokens, MFA, session management
+Governance (stays):              Policies, SLOs, compliance, guardrails, DLP, security scanning
+Observability (stays):           Sessions, traces, audit logs, alerts, security events
+Marketplace (stays):             Publish, discover, rate agents
+
+Runtime Proxy (SHRINKS):         /runtime-proxy/* — streams agent runs via SSE
+                                 Think eliminates this: clients connect directly to DO via WebSocket
+
+Conversation Data (MOVES):       /sessions, /conversations — stored in Postgres
+                                 Moves to DO SQLite: Think Session handles persistence
+
+Memory/RAG API (SPLITS):         /memory, /rag — fact extraction, episodic recall
+                                 Platform-wide search stays in control-plane (Vectorize)
+                                 Per-agent memory moves to Think context blocks
+
+Workspace API (MOVES):           /workspace — file CRUD via R2
+                                 Moves to Think Workspace (@cloudflare/shell)
+
+Config Push (SIMPLIFIES):        Agent config changes pushed to DO
+                                 Think's configure() + getConfig() handle this natively
+```
+
+### New Control-Plane Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    CONTROL-PLANE (Hono Worker)                   │
+│                                                                   │
+│  Role: Platform admin API — multi-tenant metadata, billing,      │
+│  governance. Does NOT handle real-time chat or agent execution.  │
+│                                                                   │
+│  ┌──────────────┐  ┌──────────────┐  ┌────────────────────────┐  │
+│  │ Auth & IAM   │  │ Billing &    │  │ Agent Registry         │  │
+│  │ (JWT, keys,  │  │ Credits      │  │ (CRUD, config, deploy) │  │
+│  │ MFA, tokens) │  │ (Stripe)     │  │                        │  │
+│  └──────────────┘  └──────────────┘  └────────────────────────┘  │
+│  ┌──────────────┐  ┌──────────────┐  ┌────────────────────────┐  │
+│  │ Governance   │  │ Observability│  │ Marketplace            │  │
+│  │ (policies,   │  │ (traces,     │  │ (publish, discover,    │  │
+│  │ guardrails)  │  │ audit, alerts│  │ rate, feature)         │  │
+│  └──────────────┘  └──────────────┘  └────────────────────────┘  │
+│                                                                   │
+│  Bindings: Hyperdrive (Postgres), AI, R2, Vectorize, KV,        │
+│            RUNTIME (service binding to Agent Core)                │
+│            Queues (jobs, telemetry DLQ replay)                   │
+│                                                                   │
+│  Does NOT have: SANDBOX, BROWSER, LOADER, DO namespaces          │
+│  (those belong to Agent Core / Compute workers)                  │
+└────────────────────────┬────────────────────────────────────────┘
+                         │ Service Binding: RUNTIME
+                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│              AGENT CORE (Think-based Worker)                     │
+│                                                                   │
+│  ModelAgent DO (extends Think):                                  │
+│  - Session persistence (DO SQLite)                               │
+│  - WebSocket streaming (direct to client)                        │
+│  - Workspace files (SQLite + R2)                                 │
+│  - Context blocks (soul, memory, skills)                         │
+│  - Sub-agents (specialists with isolated SQLite)                 │
+│  - MCP client + server                                           │
+│  - Code execution (CodeMode + Sandbox)                           │
+│  - Browser tools                                                 │
+│  - Voice (withVoice mixin)                                       │
+│                                                                   │
+│  Clients connect DIRECTLY to DO via WebSocket                    │
+│  (no control-plane proxy needed for real-time)                   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### What Changes in Control-Plane
+
+| Route Group | Current | Think Era | Action |
+|---|---|---|---|
+| `/runtime-proxy/*` | Proxy SSE streams to runtime worker | Clients connect directly to DO via WebSocket | **Remove** — largest route group, ~1500 lines |
+| `/sessions`, `/conversations` | Read/write conversation data from Postgres | Think Session in DO SQLite; CP reads via service binding for admin views | **Simplify** — read-only admin view |
+| `/memory`, `/rag` | Full memory API (search, extract, consolidate) | Per-agent memory in Think context blocks; cross-agent RAG stays | **Split** — per-agent → DO, cross-agent → CP |
+| `/workspace` | File CRUD via R2 | Think Workspace handles per-agent files | **Remove** — CP doesn't need file API |
+| `/agents` (config push) | Push config to DO via service binding + Supabase write | Think `configure()` called from CP via service binding | **Simplify** — one RPC call |
+| `/eval` | Eval runs via Workflow | Stays — eval is a platform concern, not per-agent | **Keep** |
+| `/billing`, `/credits`, `/stripe` | All billing logic | Stays — multi-tenant billing is platform | **Keep** |
+| `/auth`, `/api-keys` | All auth | Stays — platform IAM | **Keep** |
+| `/governance/*` | Policies, guardrails, compliance | Stays — platform governance | **Keep** |
+| `/observability/*` | Traces, audit, alerts | Stays — cross-agent observability | **Keep** |
+| `/marketplace` | Agent discovery | Stays — platform marketplace | **Keep** |
+
+### Control-Plane After Migration
+
+**Removed**: ~2,500 lines (runtime-proxy, workspace API, conversation write paths)
+**Simplified**: ~500 lines (sessions → read-only, memory → cross-agent only, config → RPC)
+**Kept**: ~5,000 lines (auth, billing, governance, observability, marketplace, eval)
+
+The control-plane becomes a **pure platform administration API** — it never touches real-time chat traffic. All agent interaction goes directly from client → Agent Core DO via WebSocket.
+
+### How Clients Connect (Before vs After)
+
+**Before (SSE via control-plane proxy)**:
+```
+Browser → control-plane → runtime-proxy → DO → Workflow → KV → DO → WS → Browser
+         (auth, billing)   (proxy SSE)    (create)  (poll)  (push)
+         7 hops, 200-800ms latency per event
+```
+
+**After (WebSocket direct to DO)**:
+```
+Browser → Agent Core DO (WebSocket)
+          Think handles: auth (onBeforeConnect), streaming, persistence
+          1 hop, <10ms latency per event
+
+Control-plane called separately for:
+  - Auth token issuance (login)
+  - Billing metering (async, post-turn)
+  - Config changes (admin action)
+```
+
+### Billing in the Think Era
+
+Currently the control-plane intercepts SSE streams to meter usage. With direct WebSocket, billing works differently:
+
+```typescript
+// In ModelAgent (extends Think)
+onChatResponse(result: ChatResponseResult) {
+  if (result.status === "completed") {
+    // Async billing: enqueue to telemetry pipeline
+    this.env.TELEMETRY_QUEUE.send({
+      type: "billing",
+      payload: {
+        org_id: this.getConfig()?.orgId,
+        agent_name: this.name,
+        tokens_in: result.usage?.promptTokens || 0,
+        tokens_out: result.usage?.completionTokens || 0,
+        model: this.getConfig()?.modelTier || "fast",
+        ts: Date.now(),
+      },
+    });
+  }
+}
+```
+
+Queue → Control-plane consumer → Postgres. Billing is **async and non-blocking** — never in the critical chat path.
+
+### hono-agents Middleware
+
+The control-plane uses Hono. For routes that need to talk to agents, use `hono-agents` middleware:
+
+```typescript
+import { agentsMiddleware } from "hono-agents";
+
+// In control-plane routes that need agent access
+app.use("/api/v1/agents/:name/configure", agentsMiddleware());
+
+// The middleware handles WebSocket upgrades + HTTP routing
+// to DOs via the RUNTIME service binding
+```
+
+This replaces the current hand-rolled runtime-proxy routes with a single middleware line.
+
+### Rethinking Control-Plane with CF-Native Primitives
+
+The current control-plane is a traditional API server (Hono + Postgres via Hyperdrive). But Cloudflare has primitives that can replace most of what Postgres does:
+
+**Replace Postgres with D1 + KV + DO SQLite:**
+
+| Current (Postgres) | CF-Native Replacement | Why Better |
+|---|---|---|
+| `agents` table (config, status, org_id) | **D1** — CF's serverless SQLite at the edge | No Hyperdrive latency, no connection pooling, no external DB to manage. D1 supports joins, indexes, triggers — everything agents table needs. |
+| `api_keys` table (hash, scopes, rate limits) | **D1** for storage + **KV** for fast lookup cache | KV gives <1ms reads for auth hot path. D1 for the source of truth. |
+| `credit_transactions`, `org_credit_balance` | **D1** for ledger + **DO** for real-time balance | DO per-org for atomic balance updates (no transaction isolation issues). D1 for audit trail. |
+| `sessions`, `runs` (observability data) | **D1** for query + **Analytics Engine** for metrics | Analytics Engine for high-volume writes (tool calls, tokens). D1 for structured queries (list sessions for org). |
+| `tool_registry` | **KV** (JSON per tool, fast reads) | Tools are read-heavy, write-rare. KV is perfect. |
+| `connector_tokens` (encrypted) | **KV** with encryption | Secrets stored encrypted in KV, decrypted in Worker. |
+| `audit_log` | **Analytics Engine** | Append-only, high-volume, queryable via SQL API. |
+| `eval_runs`, `eval_trials` | **D1** | Structured query needs (filter by status, model, date). |
+| `marketplace_agents` | **D1** + **Vectorize** for search | D1 for catalog, Vectorize for semantic discovery. |
+
+**The result: no external database at all.** Everything runs on CF primitives:
+
+```
+CURRENT:
+  Control-plane Worker → Hyperdrive → Railway Postgres (external)
+  Latency: 50-200ms per query (connection setup + query + network)
+
+PROPOSED:
+  Control-plane Worker → D1 (edge SQLite, <5ms)
+                       → KV (edge cache, <1ms reads)
+                       → DO (per-org atomic state)
+                       → Analytics Engine (high-volume events)
+  Latency: 1-10ms per operation
+```
+
+**D1 handles everything Postgres does** for the control-plane:
+- Relational queries with JOIN (agent + org + billing)
+- Indexes, triggers, views
+- 10GB per database (free tier: 5M reads/day)
+- Automatic replication across CF network
+- No connection pooling, no Hyperdrive needed, no external dependency
+
+**When you'd still keep Postgres**: If you need cross-region strong consistency, very large datasets (>10GB), or complex stored procedures. For a prototype with <1000 tenants, D1 is more than sufficient.
+
+### CF-Native Control-Plane Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│              CONTROL-PLANE (Hono + hono-agents)                  │
+│                                                                   │
+│  Auth:        D1 (api_keys, users) + KV (session cache)         │
+│  Billing:     BillingDO per-org (atomic balance) + D1 (ledger)  │
+│  Agents:      D1 (config CRUD) + KV (fast config cache)         │
+│  Tools:       KV (tool registry, read-heavy)                     │
+│  Eval:        D1 (runs, trials — structured queries)             │
+│  Audit:       Analytics Engine (append-only, high-volume)        │
+│  Marketplace: D1 (catalog) + Vectorize (semantic search)         │
+│  Governance:  D1 (policies, SLOs) + KV (policy cache)           │
+│  Observability: Analytics Engine (metrics) + D1 (session list)   │
+│                                                                   │
+│  NO Postgres. NO Hyperdrive. 100% CF-native.                    │
+│                                                                   │
+│  Bindings: D1, KV, Analytics Engine, Vectorize, AI,             │
+│            RUNTIME (service binding to Agent Core),              │
+│            Queue (billing events from Agent Core)                │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### BillingDO — Per-Org Atomic Balance
+
+The trickiest part of billing is atomic credit balance updates. Postgres uses transactions. With CF primitives, use a Durable Object per org:
+
+```typescript
+export class BillingDO extends DurableObject<Env> {
+  async initialize() {
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS balance (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        balance_usd REAL NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS transactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        type TEXT NOT NULL,
+        amount_usd REAL NOT NULL,
+        description TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+      INSERT OR IGNORE INTO balance (id, balance_usd) VALUES (1, 0);
+    `);
+  }
+
+  async deduct(amount: number, description: string): Promise<{ ok: boolean; balance: number }> {
+    const [row] = this.ctx.storage.sql.exec("SELECT balance_usd FROM balance WHERE id = 1").toArray() as any[];
+    const current = Number(row?.balance_usd || 0);
+    if (current < amount) return { ok: false, balance: current };
+
+    // Atomic: single DO, single thread, no races
+    const newBalance = current - amount;
+    this.ctx.storage.sql.exec("UPDATE balance SET balance_usd = ? WHERE id = 1", newBalance);
+    this.ctx.storage.sql.exec(
+      "INSERT INTO transactions (type, amount_usd, description) VALUES ('burn', ?, ?)",
+      -amount, description,
+    );
+    return { ok: true, balance: newBalance };
+  }
+
+  async topUp(amount: number, description: string): Promise<{ balance: number }> {
+    this.ctx.storage.sql.exec("UPDATE balance SET balance_usd = balance_usd + ? WHERE id = 1", amount);
+    this.ctx.storage.sql.exec(
+      "INSERT INTO transactions (type, amount_usd, description) VALUES ('topup', ?, ?)",
+      amount, description,
+    );
+    const [row] = this.ctx.storage.sql.exec("SELECT balance_usd FROM balance WHERE id = 1").toArray() as any[];
+    return { balance: Number(row?.balance_usd || 0) };
+  }
+
+  async getBalance(): Promise<number> {
+    const [row] = this.ctx.storage.sql.exec("SELECT balance_usd FROM balance WHERE id = 1").toArray() as any[];
+    return Number(row?.balance_usd || 0);
+  }
+}
+```
+
+Agent Core calls this after each turn:
+```typescript
+// In Think agent's onChatResponse:
+const billingDO = this.env.BILLING.get(this.env.BILLING.idFromName(orgId));
+await billingDO.deduct(costUsd, `Agent ${this.name} turn`);
+```
+
+### Migration: Postgres → D1
+
+D1 supports the same SQL as Postgres for the queries we run. Migration path:
+1. Export Postgres tables as SQL
+2. Import into D1 via `wrangler d1 execute`
+3. Update control-plane queries (minimal changes — both are SQL)
+4. Remove Hyperdrive config
+5. Remove Railway/Supabase dependency
+
+**For the prototype with no users, this is the right time to do it.**
