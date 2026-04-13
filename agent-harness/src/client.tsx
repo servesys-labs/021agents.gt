@@ -75,6 +75,99 @@ type DynamicAgent = {
 
 type ConnectionStatus = "connecting" | "connected" | "disconnected";
 
+// ── Perplexity-style Tool Step ────────────────────────────────────────────────
+// Collapsible step indicator. Shows tool name + status dot/spinner.
+// Click to expand and see input/output. Running tools pulse.
+// Multiple parallel tool calls render as a compact step group.
+
+function ToolStep({
+  name,
+  status,
+  defaultOpen = false,
+  children,
+}: {
+  name: string;
+  status: "running" | "done" | "denied" | "approval";
+  defaultOpen?: boolean;
+  children?: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+
+  const statusDot = {
+    running: (
+      <span className="relative flex h-2 w-2">
+        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+        <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
+      </span>
+    ),
+    done: <span className="inline-flex rounded-full h-2 w-2 bg-emerald-500" />,
+    denied: <span className="inline-flex rounded-full h-2 w-2 bg-red-400" />,
+    approval: <span className="inline-flex rounded-full h-2 w-2 bg-amber-400 animate-pulse" />,
+  };
+
+  const statusLabel = {
+    running: "Running...",
+    done: "",
+    denied: "Denied",
+    approval: "Needs approval",
+  };
+
+  // Friendly display names for common tools
+  const friendlyName: Record<string, string> = {
+    webSearch: "Searching the web",
+    fetchUrl: "Reading page",
+    browserScreenshot: "Taking screenshot",
+    browserGetContent: "Rendering page",
+    execCommand: "Running command",
+    writeFile: "Writing file",
+    readFile: "Reading file",
+    runCode: "Executing code",
+    gitClone: "Cloning repo",
+    codemode: "Running code",
+    getWeather: "Checking weather",
+    calculate: "Calculating",
+  };
+
+  const displayName = friendlyName[name] || name;
+
+  return (
+    <div className="flex justify-start">
+      <div className="max-w-[85%] w-full">
+        <button
+          type="button"
+          onClick={() => children && setOpen(!open)}
+          className={`
+            flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs
+            transition-colors duration-150
+            ${status === "running" ? "bg-blue-50 dark:bg-blue-950/30" : ""}
+            ${status === "done" ? "bg-emerald-50 dark:bg-emerald-950/20 hover:bg-emerald-100 dark:hover:bg-emerald-950/40" : ""}
+            ${status === "approval" ? "bg-amber-50 dark:bg-amber-950/30" : ""}
+            ${status === "denied" ? "bg-red-50 dark:bg-red-950/20" : ""}
+            ${children ? "cursor-pointer" : "cursor-default"}
+          `}
+        >
+          {statusDot[status]}
+          <span className="text-kumo-subtle font-medium">{displayName}</span>
+          {statusLabel[status] && (
+            <span className="text-kumo-inactive text-[10px]">{statusLabel[status]}</span>
+          )}
+          {children && status === "done" && (
+            <CaretDownIcon
+              size={10}
+              className={`text-kumo-inactive transition-transform ${open ? "rotate-180" : ""}`}
+            />
+          )}
+        </button>
+        {open && children && (
+          <div className="mt-1 ml-4 pl-3 border-l-2 border-kumo-line py-2">
+            {children}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Terminal panel ────────────────────────────────────────────────────────────
 
 function TerminalPanel({ onClose }: { onClose: () => void }) {
@@ -821,6 +914,35 @@ function Chat() {
 
             return (
               <div key={message.id} className="space-y-2">
+                {/* Group consecutive tool calls into a collapsible step group */}
+                {(() => {
+                  // Count tool parts for the "N steps" summary
+                  const toolParts = message.parts.filter(p => isToolUIPart(p));
+                  const runningCount = toolParts.filter(p => p.state === "input-available" || p.state === "input-streaming").length;
+                  const doneCount = toolParts.filter(p => p.state === "output-available").length;
+                  if (toolParts.length > 1 && (runningCount > 0 || doneCount > 0)) {
+                    // Show a compact summary line above the steps
+                    return (
+                      <div className="flex items-center gap-2 px-3 py-1 text-[11px] text-kumo-inactive">
+                        {runningCount > 0 ? (
+                          <>
+                            <span className="relative flex h-1.5 w-1.5">
+                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+                              <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-blue-500" />
+                            </span>
+                            Running {runningCount} task{runningCount > 1 ? "s" : ""} in parallel
+                          </>
+                        ) : (
+                          <>
+                            <span className="inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500" />
+                            Completed {doneCount} step{doneCount > 1 ? "s" : ""}
+                          </>
+                        )}
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
                 {message.parts.map((part, partIndex) => {
                   if (part.type === "text") {
                     if (!part.text) return null;
@@ -868,29 +990,9 @@ function Chat() {
                   if (!isToolUIPart(part)) return null;
                   const toolName = getToolName(part);
 
-                  if (part.state === "output-available") {
-                    return (
-                      <div key={part.toolCallId} className="flex justify-start">
-                        <Surface className="max-w-[85%] px-4 py-2.5 rounded-xl ring ring-kumo-line">
-                          <div className="flex items-center gap-2 mb-1">
-                            <GearIcon
-                              size={14}
-                              className="text-kumo-inactive"
-                            />
-                            <Text size="xs" variant="secondary" bold>
-                              {toolName}
-                            </Text>
-                            <Badge variant="secondary">Done</Badge>
-                          </div>
-                          <div className="font-mono">
-                            <Text size="xs" variant="secondary">
-                              {JSON.stringify(part.output, null, 2)}
-                            </Text>
-                          </div>
-                        </Surface>
-                      </div>
-                    );
-                  }
+                  // ── Perplexity-style collapsible step ──
+                  // Shows tool name + status indicator. Expands to show
+                  // input/output on click. Running tools pulse with animation.
 
                   if (
                     "approval" in part &&
@@ -898,97 +1000,42 @@ function Chat() {
                   ) {
                     const approvalId = (part.approval as { id?: string })?.id;
                     return (
-                      <div key={part.toolCallId} className="flex justify-start">
-                        <Surface className="max-w-[85%] px-4 py-3 rounded-xl ring-2 ring-kumo-warning">
-                          <div className="flex items-center gap-2 mb-2">
-                            <GearIcon size={14} className="text-kumo-warning" />
-                            <Text size="sm" bold>
-                              Approval needed: {toolName}
-                            </Text>
-                          </div>
-                          <div className="font-mono mb-3">
-                            <Text size="xs" variant="secondary">
-                              {JSON.stringify(part.input, null, 2)}
-                            </Text>
-                          </div>
-                          <div className="flex gap-2">
-                            <Button
-                              variant="primary"
-                              size="sm"
-                              icon={<CheckCircleIcon size={14} />}
-                              onClick={() => {
-                                if (approvalId) {
-                                  addToolApprovalResponse({
-                                    id: approvalId,
-                                    approved: true,
-                                  });
-                                }
-                              }}
-                            >
-                              Approve
-                            </Button>
-                            <Button
-                              variant="secondary"
-                              size="sm"
-                              icon={<XCircleIcon size={14} />}
-                              onClick={() => {
-                                if (approvalId) {
-                                  addToolApprovalResponse({
-                                    id: approvalId,
-                                    approved: false,
-                                  });
-                                }
-                              }}
-                            >
-                              Reject
-                            </Button>
-                          </div>
-                        </Surface>
-                      </div>
+                      <ToolStep key={part.toolCallId} name={toolName} status="approval" defaultOpen>
+                        <div className="font-mono text-xs text-kumo-subtle mb-3 max-h-32 overflow-auto">
+                          {JSON.stringify(part.input, null, 2)}
+                        </div>
+                        <div className="flex gap-2">
+                          <Button variant="primary" size="sm" icon={<CheckCircleIcon size={14} />}
+                            onClick={() => { if (approvalId) addToolApprovalResponse({ id: approvalId, approved: true }); }}>
+                            Approve
+                          </Button>
+                          <Button variant="secondary" size="sm" icon={<XCircleIcon size={14} />}
+                            onClick={() => { if (approvalId) addToolApprovalResponse({ id: approvalId, approved: false }); }}>
+                            Reject
+                          </Button>
+                        </div>
+                      </ToolStep>
                     );
                   }
 
                   if (part.state === "output-denied") {
+                    return <ToolStep key={part.toolCallId} name={toolName} status="denied" />;
+                  }
+
+                  if (part.state === "output-available") {
                     return (
-                      <div key={part.toolCallId} className="flex justify-start">
-                        <Surface className="max-w-[85%] px-4 py-2.5 rounded-xl ring ring-kumo-line">
-                          <div className="flex items-center gap-2">
-                            <XCircleIcon
-                              size={14}
-                              className="text-kumo-inactive"
-                            />
-                            <Text size="xs" variant="secondary" bold>
-                              {toolName}
-                            </Text>
-                            <Badge variant="secondary">Denied</Badge>
-                          </div>
-                        </Surface>
-                      </div>
+                      <ToolStep key={part.toolCallId} name={toolName} status="done">
+                        <div className="font-mono text-xs text-kumo-subtle max-h-40 overflow-auto">
+                          {typeof part.output === "string"
+                            ? part.output.slice(0, 2000)
+                            : JSON.stringify(part.output, null, 2)?.slice(0, 2000)}
+                        </div>
+                      </ToolStep>
                     );
                   }
 
-                  if (
-                    part.state === "input-available" ||
-                    part.state === "input-streaming"
-                  ) {
-                    return (
-                      <div key={part.toolCallId} className="flex justify-start">
-                        <Surface className="max-w-[85%] px-4 py-2.5 rounded-xl ring ring-kumo-line">
-                          <div className="flex items-center gap-2">
-                            <GearIcon
-                              size={14}
-                              className="text-kumo-inactive animate-spin"
-                            />
-                            <Text size="xs" variant="secondary">
-                              Running {toolName}...
-                            </Text>
-                          </div>
-                        </Surface>
-                      </div>
-                    );
-                  }
-
-                  return null;
+                  // Running / streaming
+                  return <ToolStep key={part.toolCallId} name={toolName} status="running" />;
                 })}
               </div>
             );
