@@ -1,5 +1,5 @@
-// Model Agent — reference implementation using all CF Agents SDK features.
-// Follows canonical patterns from cloudflare/agents examples.
+// Model Agent — reference implementation using the FULL CF Agents SDK surface.
+// Think + Sub-Agents + Voice + A2A + Structured Input + CodeMode + MCP + Observability
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "model-agent",
@@ -8,28 +8,35 @@
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true, "head_sampling_rate": 1 },
 
-  // SPA asset serving — worker handles /agents/* and /api/* first
+  // SPA asset serving — worker handles /agents/*, /api/*, /.well-known/* first
   "assets": {
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/agents/*", "/api/*"]
+    "run_worker_first": ["/agents/*", "/api/*", "/.well-known/*"]
   },
 
-  // ── Durable Objects ──
+  // ── Durable Objects: main agent + specialist sub-agents ──
   "durable_objects": {
     "bindings": [
-      { "name": "ModelAgent", "class_name": "ModelAgent" }
+      { "name": "ModelAgent", "class_name": "ModelAgent" },
+      { "name": "ResearchSpecialist", "class_name": "ResearchSpecialist" },
+      { "name": "CodingSpecialist", "class_name": "CodingSpecialist" }
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["ModelAgent"] }
+    { "tag": "v1", "new_sqlite_classes": ["ModelAgent", "ResearchSpecialist", "CodingSpecialist"] }
   ],
 
-  // ── Dynamic Workers (CodeMode isolate execution) ──
+  // ── Dynamic Workers (CodeMode + extensions) ──
   "worker_loaders": [{ "binding": "LOADER" }],
 
-  // ── Workers AI ──
+  // ── Workers AI (LLM + embeddings + STT + TTS) ──
   "ai": { "binding": "AI" },
 
   // ── Browser Rendering ──
-  "browser": { "binding": "MYBROWSER" }
+  "browser": { "binding": "MYBROWSER" },
+
+  // ── Analytics Engine (observability telemetry) ──
+  "analytics_engine_datasets": [
+    { "binding": "ANALYTICS", "dataset": "model_agent_telemetry" }
+  ]
 }

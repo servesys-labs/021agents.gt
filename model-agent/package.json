@@ -15,6 +15,8 @@
     "@cloudflare/kumo": "^1.18.0",
     "@cloudflare/puppeteer": "^1.0.6",
     "@cloudflare/shell": "^0.1.0",
+    "@cloudflare/think": "^0.1.0",
+    "@cloudflare/voice": "^0.1.0",
     "agents": "^0.7.9",
     "ai": "^6.0.158",
     "react": "^19.2.5",
