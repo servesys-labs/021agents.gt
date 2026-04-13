@@ -13,12 +13,11 @@
 
 import {
   Agent,
-  AgentNamespace,
   Connection,
   callable,
   routeAgentRequest,
 } from "agents";
-import { isAutoReplyEmail, createAddressBasedEmailResolver } from "agents/email";
+import { isAutoReplyEmail } from "agents/email";
 import { getSandbox, Sandbox } from "@cloudflare/sandbox";
 // @ts-expect-error — ContainerProxy exists at runtime but may not be in type defs
 import { ContainerProxy } from "@cloudflare/containers";
@@ -829,7 +828,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
 
   // ── Callable Methods (RPC from client) ──────────────────────────
 
-  @callable()
+  @callable({ description: "Run the agent on a task input. Returns turn results with output, cost, and trace." })
   async run(
     input: string,
     opts?: {
@@ -940,12 +939,12 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     throw new Error("AGENT_RUN_WORKFLOW binding not configured. Deploy with Workflows enabled.");
   }
 
-  @callable()
+  @callable({ description: "Get the current agent configuration." })
   getConfig(): AgentConfig {
     return this.state.config;
   }
 
-  @callable()
+  @callable({ description: "Update agent configuration. Returns the merged config." })
   setConfig(config: Partial<AgentConfig>): AgentConfig {
     const before = this.state.config;
     const plan = normalizePlan(config.plan ?? before.plan ?? this.env.DEFAULT_PLAN);
@@ -975,12 +974,12 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     return updated;
   }
 
-  @callable()
+  @callable({ description: "Get the agent's working memory (ephemeral key-value store)." })
   getWorkingMemory(): Record<string, unknown> {
     return this.state.working;
   }
 
-  @callable()
+  @callable({ description: "Set a key in the agent's working memory." })
   setWorkingMemory(key: string, value: unknown): void {
     const working = { ...this.state.working, [key]: value };
     this.setState({ ...this.state, working });
@@ -8125,8 +8124,7 @@ export default {
     }
 
     // Parse agent name from email address: {agent_name}.{org_short}@oneshots.co
-    // SDK's createAddressBasedEmailResolver uses sub-addressing, but we need
-    // the dot-based org hint pattern, so we keep custom parsing here.
+    // Uses dot-based org hint pattern (custom to our multi-tenant routing).
     const toAddress = message.to;
     const localPart = toAddress.split("@")[0].toLowerCase().replace(/[^a-z0-9.-]/g, "");
 
