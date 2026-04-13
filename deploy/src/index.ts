@@ -872,9 +872,15 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
 
     // ── Workflow path (primary) ──
     if (this.env.AGENT_RUN_WORKFLOW) {
-      // SDK keepAliveWhile(): prevent eviction during RPC-initiated workflow poll
-      const keepAlivePromise = this.keepAliveWhile(async () => {
-        await new Promise(r => setTimeout(r, 300_000)); // max 5 min
+      // SDK keepAliveWhile(): prevent eviction during RPC poll.
+      // Uses AbortController so the keep-alive ends when the run returns,
+      // allowing the DO to hibernate instead of sleeping the full 5 minutes.
+      const keepAliveAc = new AbortController();
+      this.keepAliveWhile(async () => {
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 300_000);
+          keepAliveAc.signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); });
+        });
       }).catch(() => {});
       const history = this._loadConversationHistory(24);
       const progressKey = `rpc:${this.name}:${Date.now()}`;
@@ -908,31 +914,35 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         },
       });
 
-      // Poll for completion
-      const maxWait = 300_000;
-      const pollStart = Date.now();
-      while (Date.now() - pollStart < maxWait) {
-        await new Promise(r => setTimeout(r, 2000));
-        const status = await instance.status().catch(() => ({ status: "unknown" as const }));
-        if (status.status === "complete") {
-          const out = (status as any).output as RunOutput | undefined;
-          this._appendConversationMessage("user", input, "rpc");
-          this._appendConversationMessage("assistant", out?.output || "", "rpc");
-          return [{
-            output: out?.output || "",
-            session_id: out?.session_id || "",
-            trace_id: out?.trace_id || "",
-            tool_calls: out?.tool_calls || 0,
-            cost_usd: out?.cost_usd || 0,
-            stop_reason: "complete",
-            wall_clock_ms: Date.now() - started,
-          }] as any;
+      // Poll for completion — wrapped in try/finally to cancel keepAlive on exit
+      try {
+        const maxWait = 300_000;
+        const pollStart = Date.now();
+        while (Date.now() - pollStart < maxWait) {
+          await new Promise(r => setTimeout(r, 2000));
+          const status = await instance.status().catch(() => ({ status: "unknown" as const }));
+          if (status.status === "complete") {
+            const out = (status as any).output as RunOutput | undefined;
+            this._appendConversationMessage("user", input, "rpc");
+            this._appendConversationMessage("assistant", out?.output || "", "rpc");
+            return [{
+              output: out?.output || "",
+              session_id: out?.session_id || "",
+              trace_id: out?.trace_id || "",
+              tool_calls: out?.tool_calls || 0,
+              cost_usd: out?.cost_usd || 0,
+              stop_reason: "complete",
+              wall_clock_ms: Date.now() - started,
+            }] as any;
+          }
+          if (status.status === "errored" || status.status === "terminated") {
+            throw new Error((status as any).error?.message || "Workflow failed");
+          }
         }
-        if (status.status === "errored" || status.status === "terminated") {
-          throw new Error((status as any).error?.message || "Workflow failed");
-        }
+        throw new Error("Workflow timed out");
+      } finally {
+        keepAliveAc.abort(); // release keep-alive so DO can hibernate
       }
-      throw new Error("Workflow timed out");
     }
 
     // Workflow unavailable
@@ -2642,6 +2652,23 @@ export class AgentOSMcpServer extends McpAgent<Env, {}, {}> {
     version: "0.2.0",
   });
 
+  /** Delegate a request to the main agent DO. Handles errors gracefully for MCP. */
+  private async _delegateToAgent(doNameSuffix: string, body: Record<string, unknown>): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
+    try {
+      const orgPrefix = this._orgId ? `${this._orgId}-` : "";
+      const agentId = this.env.AGENTOS_AGENT.idFromName(`${orgPrefix}${doNameSuffix}`);
+      const agent = this.env.AGENTOS_AGENT.get(agentId);
+      const resp = await agent.fetch(new Request("http://internal/run", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }));
+      const result = await resp.json() as Record<string, unknown>;
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (err: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${err?.message || String(err)}` }], isError: true };
+    }
+  }
+
   async init() {
     // Load agent config from Supabase to discover tools
     await this._loadAgentConfig();
@@ -2653,16 +2680,7 @@ export class AgentOSMcpServer extends McpAgent<Env, {}, {}> {
       "Run an AgentOS agent on a task. Returns the agent's output.",
       { task: z.string().describe("Task to execute"), agent_name: z.string().optional().describe("Agent name (defaults to this agent)") },
       async ({ task, agent_name }) => {
-        const targetAgent = agent_name || this.name || "default";
-        const orgPrefix = this._orgId ? `${this._orgId}-` : "";
-        const agentId = this.env.AGENTOS_AGENT.idFromName(`${orgPrefix}${targetAgent}`);
-        const agent = this.env.AGENTOS_AGENT.get(agentId);
-        const resp = await agent.fetch(new Request("http://internal/run", {
-          method: "POST",
-          body: JSON.stringify({ input: task }),
-        }));
-        const result = await resp.json() as Record<string, unknown>;
-        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+        return this._delegateToAgent(agent_name || this.name || "default", { input: task });
       },
     );
 
@@ -2671,15 +2689,7 @@ export class AgentOSMcpServer extends McpAgent<Env, {}, {}> {
       "Search the agent's knowledge base for relevant information.",
       { query: z.string().min(1).describe("Search query") },
       async ({ query }) => {
-        const orgPrefix = this._orgId ? `${this._orgId}-` : "";
-        const agentId = this.env.AGENTOS_AGENT.idFromName(`${orgPrefix}${this.name || "default"}`);
-        const agent = this.env.AGENTOS_AGENT.get(agentId);
-        const resp = await agent.fetch(new Request("http://internal/run", {
-          method: "POST",
-          body: JSON.stringify({ input: `Use knowledge search for: ${query}` }),
-        }));
-        const result = await resp.json() as Record<string, unknown>;
-        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+        return this._delegateToAgent(this.name || "default", { input: `Use knowledge search for: ${query}` });
       },
     );
 
@@ -2689,7 +2699,6 @@ export class AgentOSMcpServer extends McpAgent<Env, {}, {}> {
       ? (this._agentConfig!.tools as string[])
       : [];
 
-    // Load tool schemas from registry for richer definitions
     const schemaMap = await this._loadToolSchemas(configuredTools);
 
     for (const toolName of configuredTools) {
@@ -2701,19 +2710,11 @@ export class AgentOSMcpServer extends McpAgent<Env, {}, {}> {
         description,
         { input: z.string().describe("Input for the tool"), parameters: z.record(z.unknown()).optional().describe("Additional parameters") },
         async ({ input, parameters }) => {
-          const orgPrefix = this._orgId ? `${this._orgId}-` : "";
-          const agentId = this.env.AGENTOS_AGENT.idFromName(`${orgPrefix}${this.name || "default"}`);
-          const agent = this.env.AGENTOS_AGENT.get(agentId);
-          const resp = await agent.fetch(new Request("http://internal/run", {
-            method: "POST",
-            body: JSON.stringify({
-              input: `Execute tool '${toolName}' with input: ${input}`,
-              tool_override: toolName,
-              tool_args: { input, ...parameters },
-            }),
-          }));
-          const result = await resp.json() as Record<string, unknown>;
-          return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+          return this._delegateToAgent(this.name || "default", {
+            input: `Execute tool '${toolName}' with input: ${input}`,
+            tool_override: toolName,
+            tool_args: { input, ...parameters },
+          });
         },
       );
     }
