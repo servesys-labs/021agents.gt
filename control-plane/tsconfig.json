@@ -11,5 +11,5 @@
     "resolveJsonModule": true,
     "types": ["@cloudflare/workers-types", "@types/node"]
   },
-  "include": ["src/**/*.ts", "worker-configuration.d.ts", "../config/default.json"]
+  "include": ["src/**/*.ts", "scripts/**/*.ts", "worker-configuration.d.ts", "../config/default.json"]
 }

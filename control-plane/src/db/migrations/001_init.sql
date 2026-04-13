@@ -78,6 +78,11 @@ CREATE TABLE IF NOT EXISTS agents (
   agent_id    TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
   org_id      TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
   project_id  TEXT,
+  handle      TEXT NOT NULL DEFAULT '',
+  display_name TEXT NOT NULL DEFAULT '',
+  -- Deprecated compatibility mirror of handle. New identity code should
+  -- read/write `handle` and only keep `name` in sync for legacy paths that
+  -- have not been cut over yet.
   name        TEXT NOT NULL DEFAULT '',
   description TEXT NOT NULL DEFAULT '',
   version     TEXT NOT NULL DEFAULT '1.0.0',
@@ -90,23 +95,28 @@ CREATE TABLE IF NOT EXISTS agents (
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- One agent per name per org (needed for ON CONFLICT (name, org_id))
+-- Canonical runnable identifier: one handle per org.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_agents_handle_org
+  ON agents (handle, org_id);
+
+-- Deprecated compatibility mirror — keep unique while legacy code paths
+-- still upsert on (name, org_id). `name` should always mirror `handle`.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_agents_name_org
   ON agents (name, org_id);
 
 CREATE TABLE IF NOT EXISTS agent_versions (
   id          BIGSERIAL PRIMARY KEY,
   org_id      TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+  agent_id    TEXT NOT NULL DEFAULT '',
+  agent_handle TEXT NOT NULL DEFAULT '',
+  display_name TEXT NOT NULL DEFAULT '',
+  -- Deprecated compatibility mirror of `agent_handle`.
   agent_name  TEXT NOT NULL,
   version     TEXT NOT NULL,
   config      JSONB NOT NULL DEFAULT '{}',
   created_by  TEXT,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  -- Multi-tenant uniqueness: two orgs can each have their own
-  -- `my-assistant v1.0.0`. The old UNIQUE (agent_name, version)
-  -- would have let one org's snapshot clobber another's via
-  -- ON CONFLICT DO UPDATE — a data-layer RLS violation.
-  UNIQUE (org_id, agent_name, version)
+  UNIQUE (org_id, agent_id, version)
 );
 
 -- ============================================================================
@@ -2688,8 +2698,8 @@ CREATE INDEX IF NOT EXISTS idx_channel_configs_org_channel_active
   ON channel_configs(org_id, channel) WHERE is_active = true;
 CREATE INDEX IF NOT EXISTS idx_billing_records_org_agent
   ON billing_records(org_id, agent_name);
-CREATE INDEX IF NOT EXISTS idx_agent_versions_name
-  ON agent_versions(agent_name);
+CREATE INDEX IF NOT EXISTS idx_agent_versions_handle
+  ON agent_versions(agent_handle);
 CREATE INDEX IF NOT EXISTS idx_otel_events_session_created
   ON otel_events(session_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_eval_runs_org_created

@@ -10,6 +10,7 @@ import type { AgentConfig, TurnResult, RuntimeEvent } from "./types";
 import type { RuntimeEventType } from "./events";
 import { applyDeployPolicyToConfigJson } from "./deploy-policy-contract";
 import { log } from "./log";
+import { getAmbientPlatformAgentConfig } from "./platform-agents";
 
 /** Coerce a DB row's event_type to the typed union. Logs once per unknown value. */
 const _warnedEventTypes = new Set<string>();
@@ -193,7 +194,7 @@ export function getDbOrgContext(): string { return ""; }
  */
 export async function loadAgentConfig(
   hyperdrive: Hyperdrive,
-  agentName: string,
+  agentIdentifier: string,
   defaults: { provider: string; model: string; plan: string },
   orgId?: string,
 ): Promise<AgentConfig> {
@@ -216,31 +217,46 @@ export async function loadAgentConfig(
   let dbFailed = false;
   try {
     const sql = await getDb(hyperdrive);
+    const cleanId = String(agentIdentifier || "").replace(/^agt_/, "");
     rows = orgId
       ? await sql`
-          SELECT name, org_id, project_id, config, description
+          SELECT agent_id, handle, display_name, name, org_id, project_id, config, description
           FROM agents
-          WHERE name = ${agentName} AND org_id = ${orgId} AND is_active = true
+          WHERE (
+            agent_id = ${agentIdentifier}
+            OR agent_id = ${cleanId}
+            OR handle = ${agentIdentifier}
+            OR name = ${agentIdentifier}
+          ) AND org_id = ${orgId} AND is_active = true
           LIMIT 1
         `
       : await sql`
-          SELECT name, org_id, project_id, config, description
+          SELECT agent_id, handle, display_name, name, org_id, project_id, config, description
           FROM agents
-          WHERE name = ${agentName} AND is_active = true
+          WHERE (
+            agent_id = ${agentIdentifier}
+            OR agent_id = ${cleanId}
+            OR handle = ${agentIdentifier}
+            OR name = ${agentIdentifier}
+          ) AND is_active = true
           LIMIT 1
         `;
   } catch (err) {
     dbFailed = true;
-    log.error(`[DB] loadAgentConfig failed for ${agentName}: ${err instanceof Error ? err.message : err}`);
+    log.error(`[DB] loadAgentConfig failed for ${agentIdentifier}: ${err instanceof Error ? err.message : err}`);
   }
 
   if (rows.length === 0) {
+    const ambientConfig = getAmbientPlatformAgentConfig(agentIdentifier, defaults, orgId);
+    if (ambientConfig) return ambientConfig;
     if (dbFailed) {
       // DB error — return MINIMAL tools to prevent privilege escalation.
       // A restricted agent must not gain full access because of a transient DB failure.
-      log.warn(`[DB] Returning restricted defaults for ${agentName} due to DB error`);
+      log.warn(`[DB] Returning restricted defaults for ${agentIdentifier} due to DB error`);
       return {
-        agent_name: agentName,
+        agent_handle: agentIdentifier,
+        agent_name: agentIdentifier,
+        display_name: agentIdentifier,
         system_prompt: "You are a helpful AI assistant. Note: your configuration could not be loaded from the database. Some features may be limited.",
         provider: defaults.provider,
         model: defaults.model,
@@ -262,7 +278,9 @@ export async function loadAgentConfig(
     }
     // Agent genuinely not in DB — return full defaults for development/onboarding
     return {
-      agent_name: agentName,
+      agent_handle: agentIdentifier,
+      agent_name: agentIdentifier,
+      display_name: agentIdentifier,
       system_prompt: "You are a helpful AI assistant. You have access to tools including web search, Python code execution, file operations, knowledge base search, and more. Use your tools proactively to help the user — always search for real data instead of guessing.\n\nCapabilities:\n- **Memory**: Use memory-save to persist facts across sessions. Use memory-recall to retrieve them. Memory is scoped to this agent and org.\n- **Knowledge Base**: Use store-knowledge to add documents to the RAG index. Use knowledge-search to retrieve. Use ingest-document for PDFs/images with OCR.\n- **Scheduling**: Use create-schedule to set up recurring tasks (cron format). Use list-schedules to see active schedules. Use delete-schedule to remove them.\n- **Sub-agents**: Use run-agent to delegate tasks to other agents. Use create-agent to build new specialized agents. Use list-agents to see available agents.\n- **Skills**: You have skills loaded from the database. When a user's request matches a skill's trigger, follow the skill's prompt template.\n- **Code Execution**: Use python-exec for Python and bash for shell commands. Both run in sandboxed containers.\n\nFor knowledge retrieval: If your first knowledge-search doesn't return relevant results, try rephrasing the query with different keywords. You can call knowledge-search multiple times with different queries.",
       provider: defaults.provider,
       model: defaults.model,
@@ -292,9 +310,12 @@ export async function loadAgentConfig(
   const policyAttach = applyDeployPolicyToConfigJson(cfgRec, { fallbackStripOverlay: true });
   if (!policyAttach.ok) {
     log.warn(
-      `[DB] deploy_policy could not be attached for ${agentName}: ${policyAttach.errors.join("; ")}`,
+      `[DB] deploy_policy could not be attached for ${agentIdentifier}: ${policyAttach.errors.join("; ")}`,
     );
   }
+
+  const resolvedHandle = String(row.handle || cfg.handle || row.name || agentIdentifier);
+  const resolvedDisplayName = String(row.display_name || cfg.display_name || resolvedHandle);
 
   // Tools come from config (no top-level tools column in DB)
   const cfgTools = parseJsonArray(cfg.tools);
@@ -311,15 +332,15 @@ export async function loadAgentConfig(
   const resolvedProvider = String(cfg.provider || defaults.provider);
   const resolvedModel = String(cfg.model || defaults.model);
   if (resolvedProvider && !KNOWN_PROVIDERS.has(resolvedProvider) && !resolvedProvider.includes("/")) {
-    log.warn(`[config:${agentName}] Unknown provider '${resolvedProvider}' — may fail at LLM call`);
+    log.warn(`[config:${agentIdentifier}] Unknown provider '${resolvedProvider}' — may fail at LLM call`);
   }
   if (resolvedModel && !resolvedModel.includes("/") && !resolvedModel.startsWith("@cf/")) {
-    log.warn(`[config:${agentName}] Model '${resolvedModel}' missing provider prefix (e.g. 'openai/gpt-5.4-mini') — may fail at LLM call`);
+    log.warn(`[config:${agentIdentifier}] Model '${resolvedModel}' missing provider prefix (e.g. 'openai/gpt-5.4-mini') — may fail at LLM call`);
   }
   const VALID_PLANS = new Set(["free", "basic", "standard", "premium"]);
   const resolvedPlan = String(cfg.plan || defaults.plan);
   if (resolvedPlan && !VALID_PLANS.has(resolvedPlan)) {
-    log.warn(`[config:${agentName}] Unknown plan '${resolvedPlan}' — falling back to 'standard' routing`);
+    log.warn(`[config:${agentIdentifier}] Unknown plan '${resolvedPlan}' — falling back to 'standard' routing`);
   }
 
   const hasExplicitCodeMode =
@@ -327,12 +348,15 @@ export async function loadAgentConfig(
   const cfgTags = Array.isArray(cfg.tags) ? cfg.tags.map((t: any) => String(t).toLowerCase()) : [];
   const looksLikePersonalAssistant =
     cfg.is_personal === true ||
-    row.name === "my-assistant" ||
+    resolvedHandle === "my-assistant" ||
     (cfgTags.includes("personal") && cfgTags.includes("assistant"));
   const personalAgentDefaultCodeMode = looksLikePersonalAssistant && !hasExplicitCodeMode;
 
   return {
-    agent_name: row.name || agentName,
+    agent_id: String(row.agent_id || ""),
+    agent_handle: resolvedHandle,
+    agent_name: resolvedHandle,
+    display_name: resolvedDisplayName,
     system_prompt: String(cfg.system_prompt || cfg.systemPrompt || row.description || "You are a helpful AI assistant."),
     provider: String(cfg.provider || defaults.provider),
     model: String(cfg.model || defaults.model),
@@ -437,25 +461,29 @@ const PLAN_ROUTING: Record<string, Record<string, Record<string, { model: string
   free: {
     general: { simple: GEMMA_FAST, moderate: GEMMA_FAST, complex: KIMI_COMPLEX, tool_call: GEMMA_FAST },
     coding: { planner: KIMI_COMPLEX, implementer: KIMI_COMPLEX, reviewer: GEMMA_DEEP, debugger: GEMMA_DEEP, simple: GEMMA_FAST, moderate: GEMMA_FAST, complex: KIMI_COMPLEX },
-    research: { search: GEMMA_FAST, analyze: GEMMA_DEEP, synthesize: KIMI_COMPLEX, simple: GEMMA_FAST, moderate: GEMMA_FAST, complex: KIMI_COMPLEX },
+    research: { search: KIMI_COMPLEX, analyze: KIMI_COMPLEX, synthesize: KIMI_COMPLEX, simple: GEMMA_FAST, moderate: KIMI_COMPLEX, complex: KIMI_COMPLEX },
+    creative: { write: KIMI_COMPLEX, simple: GEMMA_FAST, moderate: KIMI_COMPLEX, complex: KIMI_COMPLEX },
     multimodal: { vision: GEMMA_DEEP },
   },
   basic: {
     general: { simple: GEMMA_FAST, moderate: GEMMA_FAST, complex: KIMI_COMPLEX, tool_call: GEMMA_FAST },
     coding: { planner: KIMI_COMPLEX, implementer: KIMI_COMPLEX, reviewer: GEMMA_DEEP, debugger: GEMMA_DEEP, simple: GEMMA_FAST, moderate: GEMMA_FAST, complex: KIMI_COMPLEX },
-    research: { search: GEMMA_FAST, analyze: GEMMA_DEEP, synthesize: KIMI_COMPLEX, simple: GEMMA_FAST, moderate: GEMMA_FAST, complex: KIMI_COMPLEX },
+    research: { search: KIMI_COMPLEX, analyze: KIMI_COMPLEX, synthesize: KIMI_COMPLEX, simple: GEMMA_FAST, moderate: KIMI_COMPLEX, complex: KIMI_COMPLEX },
+    creative: { write: KIMI_COMPLEX, simple: GEMMA_FAST, moderate: KIMI_COMPLEX, complex: KIMI_COMPLEX },
     multimodal: { vision: GEMMA_DEEP },
   },
   standard: {
     general: { simple: GEMMA_FAST, moderate: GEMMA_DEEP, complex: KIMI_COMPLEX, tool_call: GEMMA_FAST },
     coding: { planner: KIMI_COMPLEX, implementer: GEMMA_DEEP, reviewer: GEMMA_DEEP, debugger: GEMMA_DEEP, simple: GEMMA_FAST, moderate: GEMMA_DEEP, complex: KIMI_COMPLEX },
-    research: { search: GEMMA_FAST, analyze: GEMMA_DEEP, synthesize: KIMI_COMPLEX, simple: GEMMA_FAST, moderate: GEMMA_DEEP, complex: KIMI_COMPLEX },
+    research: { search: KIMI_COMPLEX, analyze: KIMI_COMPLEX, synthesize: KIMI_COMPLEX, simple: GEMMA_FAST, moderate: KIMI_COMPLEX, complex: KIMI_COMPLEX },
+    creative: { write: KIMI_COMPLEX, simple: GEMMA_FAST, moderate: KIMI_COMPLEX, complex: KIMI_COMPLEX },
     multimodal: { vision: GEMMA_DEEP },
   },
   premium: {
     general: { simple: GEMMA_FAST, moderate: GEMMA_DEEP, complex: KIMI_COMPLEX, tool_call: GEMMA_FAST },
     coding: { planner: KIMI_COMPLEX, implementer: GEMMA_DEEP, reviewer: GEMMA_DEEP, debugger: GEMMA_DEEP, simple: GEMMA_FAST, moderate: GEMMA_DEEP, complex: KIMI_COMPLEX },
-    research: { search: GEMMA_FAST, analyze: GEMMA_DEEP, synthesize: KIMI_COMPLEX, simple: GEMMA_FAST, moderate: GEMMA_DEEP, complex: KIMI_COMPLEX },
+    research: { search: KIMI_COMPLEX, analyze: KIMI_COMPLEX, synthesize: KIMI_COMPLEX, simple: GEMMA_FAST, moderate: KIMI_COMPLEX, complex: KIMI_COMPLEX },
+    creative: { write: KIMI_COMPLEX, simple: GEMMA_FAST, moderate: KIMI_COMPLEX, complex: KIMI_COMPLEX },
     multimodal: { vision: GEMMA_DEEP },
   },
   // ── Paid plans (uncomment when ready to monetize) ──────────────────
@@ -2438,9 +2466,15 @@ export async function loadAgentList(
 ): Promise<Array<{ name: string; description?: string }>> {
   const sql = await getDb(hyperdrive);
   const rows = await sql`
-    SELECT agent_name as name, description FROM agents
-    WHERE org_id = ${orgId} AND is_active = true
-    ORDER BY agent_name ASC LIMIT 50
+    SELECT handle as name, description
+    FROM agents
+    WHERE org_id = ${orgId}
+      AND is_active = true
+      AND COALESCE(config->>'internal', 'false') <> 'true'
+      AND COALESCE(config->>'hidden', 'false') <> 'true'
+      AND COALESCE(config->>'parent_agent', '') = ''
+    ORDER BY handle ASC
+    LIMIT 50
   `;
   return rows.map((r: any) => ({ name: r.name, description: r.description || undefined }));
 }

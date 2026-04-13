@@ -50,9 +50,17 @@ async function resolveChannelAgent(sql: any, orgId: string, channel: string): Pr
   // Fallback: first active agent in the org
   try {
     const rows = await sql`
-      SELECT name FROM agents WHERE org_id = ${orgId} AND is_active = true ORDER BY created_at ASC LIMIT 1
+      SELECT handle
+      FROM agents
+      WHERE org_id = ${orgId}
+        AND is_active = true
+        AND COALESCE(config->>'internal', 'false') <> 'true'
+        AND COALESCE(config->>'hidden', 'false') <> 'true'
+        AND COALESCE(config->>'parent_agent', '') = ''
+      ORDER BY created_at ASC
+      LIMIT 1
     `;
-    if (rows.length > 0) return String(rows[0].name);
+    if (rows.length > 0) return String(rows[0].handle);
   } catch {}
   return channel + "-bot";
 }

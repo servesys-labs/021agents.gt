@@ -125,7 +125,7 @@ export type { FetchErrorKind, ClassifiedFetchError } from "./errors";
 export { createChildAbortController, createSiblingGroup } from "./abort";
 
 // Workspace
-export { syncFileToR2, hydrateWorkspace, loadManifest, listWorkspaceFiles, readFileFromR2 } from "./workspace";
+export { syncFileToR2, syncBinaryFileToR2, hydrateWorkspace, loadManifest, listWorkspaceFiles, readFileFromR2 } from "./workspace";
 
 // Reasoning strategies
 export { REASONING_STRATEGIES, selectReasoningStrategy, autoSelectStrategy, REASONING_STRATEGY_SNIPPET_CODE } from "./reasoning";

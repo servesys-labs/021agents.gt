@@ -63,7 +63,7 @@ export interface CurrentUser {
   rateLimitRpm?: number;
   /** Per-key rate limit: requests per day (API key / end-user token auth). */
   rateLimitRpd?: number;
-  /** Agent names this key/token is allowed to access (empty = all). */
+  /** Agent handles this key/token is allowed to access (empty = all). */
   allowedAgents?: string[];
   /** IP allowlist for API key auth (empty = allow all). Supports exact IPs and CIDR ranges. */
   ipAllowlist?: string[];

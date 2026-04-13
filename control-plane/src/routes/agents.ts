@@ -11,6 +11,12 @@ import { withOrgDb, type OrgSql } from "../db/client";
 import { failSafe } from "../lib/error-response";
 import type { AuditAction } from "../telemetry/events";
 import { latestEvalGate, rolloutRecommendation } from "../logic/gate-pack";
+import {
+  buildAgentIdentity,
+  decorateAgentConfigIdentity,
+  isHiddenAgentConfig,
+  isReservedPlatformAgentHandle,
+} from "../logic/agent-identity";
 import { buildFromDescription, recommendTools, expandEvalConfig, generateEvolutionSuggestions, type EvalTestCase, type EvalRubric } from "../logic/meta-agent";
 import { normalizeEnabledSkills } from "../logic/meta-agent-chat";
 import { runMetaChat, type MetaChatMessage } from "../logic/meta-agent-chat";
@@ -71,7 +77,7 @@ agentRoutes.openapi(getTemplateRoute, (c): any => {
  */
 async function notifyRuntimeOfConfigChange(
   env: Env,
-  agentName: string,
+  agentHandle: string,
   version: string,
 ): Promise<void> {
   try {
@@ -81,11 +87,11 @@ async function notifyRuntimeOfConfigChange(
         "Content-Type": "application/json",
         ...(env.SERVICE_TOKEN ? { Authorization: `Bearer ${env.SERVICE_TOKEN}` } : {}),
       },
-      body: JSON.stringify({ agent_name: agentName, version, timestamp: Date.now() }),
+      body: JSON.stringify({ agent_handle: agentHandle, agent_name: agentHandle, version, timestamp: Date.now() }),
     });
   } catch (e) {
     // Non-critical: runtime will reload on next request anyway
-    console.warn(`[agents] Failed to notify runtime of config change for ${agentName}:`, e);
+    console.warn(`[agents] Failed to notify runtime of config change for ${agentHandle}:`, e);
   }
 }
 
@@ -125,6 +131,8 @@ async function listAgentsViaDataProxy(
 
 const CreateFromDescriptionSchema = z.object({
   description: z.string().min(1).max(5000),
+  handle: z.string().max(128).default(""),
+  display_name: z.string().max(160).default(""),
   name: z.string().max(128).default(""),
   tools: z.string().default("auto"),
   plan: z.enum(["free", "basic", "standard", "premium"]).default("standard"),
@@ -158,22 +166,32 @@ function runtimeMovedToEdge(detail_suffix = ""): Response {
  */
 async function snapshotVersion(
   sql: OrgSql,
-  agentName: string,
+  agent: { agentId: string; handle: string; displayName: string },
   version: string,
   configJson: Record<string, unknown>,
   createdBy: string,
 ): Promise<void> {
   try {
-    // agent_versions.org_id is NOT NULL. Because this runs inside a
-    // withOrgDb callback, current_org_id() returns the caller's org
-    // from the transaction-local GUC — same value every other query
-    // in the same handler sees. UNIQUE is (org_id, agent_name, version)
-    // so the conflict target must include org_id too.
     await sql`
-      INSERT INTO agent_versions (agent_name, org_id, version, config, created_by, created_at)
-      VALUES (${agentName}, current_org_id(), ${version}, ${JSON.stringify(configJson)}, ${createdBy}, now())
-      ON CONFLICT (org_id, agent_name, version) DO UPDATE
-      SET config = ${JSON.stringify(configJson)}, created_by = ${createdBy}
+      INSERT INTO agent_versions (agent_id, agent_handle, display_name, agent_name, org_id, version, config, created_by, created_at)
+      VALUES (
+        ${agent.agentId},
+        ${agent.handle},
+        ${agent.displayName},
+        ${agent.handle},
+        current_org_id(),
+        ${version},
+        ${JSON.stringify(configJson)},
+        ${createdBy},
+        now()
+      )
+      ON CONFLICT (org_id, agent_id, version) DO UPDATE
+      SET
+        agent_handle = EXCLUDED.agent_handle,
+        display_name = EXCLUDED.display_name,
+        agent_name = EXCLUDED.agent_name,
+        config = EXCLUDED.config,
+        created_by = EXCLUDED.created_by
     `;
   } catch {
     // Non-critical
@@ -182,9 +200,13 @@ async function snapshotVersion(
 
 function agentResponse(row: Record<string, unknown>): Record<string, unknown> {
   const config = parseConfig(row.config);
+  const handle = String(row.handle ?? config.handle ?? row.name ?? config.name ?? "");
+  const displayName = String(row.display_name ?? config.display_name ?? handle);
   return {
     agent_id: row.agent_id ?? "",
-    name: row.name ?? config.name ?? "",
+    handle,
+    display_name: displayName,
+    name: handle,
     description: row.description ?? config.description ?? "",
     system_prompt: config.system_prompt ?? config.systemPrompt ?? "",
     model: config.model ?? "",
@@ -205,28 +227,65 @@ function agentResponse(row: Record<string, unknown>): Record<string, unknown> {
 }
 
 /**
- * Resolve an agent identifier (either agent_id or name) to the agent's name.
- * This allows frontend URLs to use agent_id while backend routes still key on name.
+ * Resolve a user-facing agent identifier (agent_id or handle) to the
+ * canonical routing identity. Hidden/internal agents are excluded unless the
+ * caller explicitly opts in.
  */
+async function resolveAgentRecord(
+  sql: OrgSql,
+  identifier: string,
+  options: { includeHidden?: boolean } = {},
+): Promise<Record<string, unknown> | null> {
+  const cleanId = identifier.replace(/^agt_/, "");
+  const rows = await sql`
+    SELECT agent_id, handle, display_name, name, description, config, is_active, created_at, updated_at
+    FROM agents
+    WHERE is_active = true
+      AND (
+        agent_id = ${identifier}
+        OR agent_id = ${cleanId}
+        OR LOWER(handle) = LOWER(${identifier})
+        OR LOWER(name) = LOWER(${identifier})
+      )
+    LIMIT 1
+  `;
+  if (rows.length === 0) return null;
+  const row = rows[0] as Record<string, unknown>;
+  const config = parseConfig(row.config);
+  if (!options.includeHidden && isHiddenAgentConfig(config)) {
+    return null;
+  }
+  return row;
+}
+
+async function assertHandleAvailable(
+  sql: OrgSql,
+  handle: string,
+  excludeAgentId?: string,
+): Promise<string | null> {
+  if (isReservedPlatformAgentHandle(handle)) {
+    return `Agent handle '${handle}' is reserved for a platform-owned ambient agent`;
+  }
+  const rows = await sql`
+    SELECT agent_id, handle, is_active
+    FROM agents
+    WHERE LOWER(handle) = LOWER(${handle})
+    LIMIT 1
+  `;
+  if (rows.length === 0) return null;
+  const row = rows[0] as Record<string, unknown>;
+  if (row.is_active === false) return null;
+  if (excludeAgentId && String(row.agent_id || "") === excludeAgentId) return null;
+  return `Agent handle '${row.handle}' already exists (handles are case-insensitive)`;
+}
+
 async function resolveAgentName(
   sql: OrgSql,
   identifier: string,
   _orgId: string,
 ): Promise<string | null> {
-  // RLS enforces org isolation on agents under withOrgDb.
-  // First try as agent_id (hex string with optional agt_ prefix)
-  const cleanId = identifier.replace(/^agt_/, "");
-  if (/^[a-f0-9]{8,32}$/i.test(cleanId) || identifier.startsWith("agt_")) {
-    const rows = await sql`
-      SELECT name FROM agents WHERE (agent_id = ${identifier} OR agent_id = ${cleanId}) AND is_active = true LIMIT 1
-    `;
-    if (rows.length > 0) return String(rows[0].name);
-  }
-  // Fall back to treating it as a name (case-insensitive)
-  const rows = await sql`
-    SELECT name FROM agents WHERE LOWER(name) = LOWER(${identifier}) LIMIT 1
-  `;
-  return rows.length > 0 ? String(rows[0].name) : null;
+  const row = await resolveAgentRecord(sql, identifier);
+  return row ? String(row.handle ?? row.name ?? "") : null;
 }
 
 function parseConfig(raw: unknown): Record<string, unknown> {
@@ -257,18 +316,26 @@ agentRoutes.openapi(listAgentsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const proxied = await listAgentsViaDataProxy(c.env, user);
   if (proxied) {
-    return c.json(proxied.map((r) => agentResponse(r as Record<string, unknown>)) as any);
+    return c.json(
+      proxied
+        .filter((r) => !isHiddenAgentConfig(parseConfig((r as Record<string, unknown>).config)))
+        .map((r) => agentResponse(r as Record<string, unknown>)) as any,
+    );
   }
 
   return await withOrgDb(c.env, user.org_id, async (sql) => {
     const rows = await sql`
-      SELECT agent_id, name, description, config, is_active, created_at, updated_at
+      SELECT agent_id, handle, display_name, name, description, config, is_active, created_at, updated_at
       FROM agents
       WHERE is_active = true
       ORDER BY created_at DESC
     `;
 
-    return c.json(rows.map((r) => agentResponse(r as Record<string, unknown>)) as any);
+    return c.json(
+      rows
+        .filter((r) => !isHiddenAgentConfig(parseConfig((r as Record<string, unknown>).config)))
+        .map((r) => agentResponse(r as Record<string, unknown>)) as any,
+    );
   });
 });
 
@@ -288,23 +355,11 @@ agentRoutes.openapi(getAgentRoute, async (c): Promise<any> => {
   const { name: identifier } = c.req.valid("param");
   const user = c.get("user");
   return await withOrgDb(c.env, user.org_id, async (sql) => {
-    const agentName = await resolveAgentName(sql, identifier, user.org_id);
-    if (!agentName) {
+    const row = await resolveAgentRecord(sql, identifier);
+    if (!row) {
       return c.json({ error: `Agent '${identifier}' not found` }, 404);
     }
-
-    const rows = await sql`
-      SELECT agent_id, name, description, config, is_active, created_at, updated_at
-      FROM agents
-      WHERE name = ${agentName}
-      LIMIT 1
-    `;
-
-    if (rows.length === 0) {
-      return c.json({ error: `Agent '${identifier}' not found` }, 404);
-    }
-
-    return c.json(agentResponse(rows[0] as Record<string, unknown>) as any);
+    return c.json(agentResponse(row) as any);
   });
 });
 
@@ -329,39 +384,70 @@ agentRoutes.openapi(createAgentRoute, async (c): Promise<any> => {
     const user = c.get("user");
     return await withOrgDb(c.env, user.org_id, async (sql) => {
 
-    // Normalize agent name to lowercase — prevents case-variant duplicates
-    req.name = req.name.toLowerCase().replace(/\s+/g, "-");
+    const identity = buildAgentIdentity({
+      handle: req.handle || req.name,
+      displayName: req.display_name,
+      fallbackHandle: "agent",
+    });
+    const handleConflict = await assertHandleAvailable(sql, identity.handle);
+    if (handleConflict) {
+      return c.json({ error: handleConflict }, 409);
+    }
 
-    // Check for existing agent with same name in org (case-insensitive)
+    // Check for existing soft-deleted agent with same handle (case-insensitive)
     const existing = await sql`
-      SELECT name, is_active FROM agents WHERE LOWER(name) = LOWER(${req.name}) LIMIT 1
+      SELECT agent_id, handle, display_name, name, description, config, is_active
+      FROM agents
+      WHERE LOWER(handle) = LOWER(${identity.handle})
+      LIMIT 1
     `;
     if (existing.length > 0) {
       if (existing[0].is_active) {
-        return c.json({ error: `Agent '${existing[0].name}' already exists (names are case-insensitive)` }, 409);
+        return c.json({ error: `Agent handle '${existing[0].handle}' already exists (handles are case-insensitive)` }, 409);
       }
       // Reactivate soft-deleted agent with new config
-      const configJson: Record<string, unknown> = {
-        name: req.name, description: req.description, system_prompt: req.system_prompt,
+      const existingAgentId = String(existing[0].agent_id || "");
+      const configJson = decorateAgentConfigIdentity({
+        description: req.description,
+        system_prompt: req.system_prompt,
         model: req.model || "", plan: req.plan || "free",
         tools: req.tools, max_turns: req.max_turns, temperature: req.temperature,
         tags: req.tags, version: "0.1.0",
         governance: req.governance ?? { budget_limit_usd: req.budget_limit_usd },
-      };
+      }, {
+        agentId: existingAgentId,
+        handle: identity.handle,
+        displayName: identity.displayName,
+      });
       await sql`
-        UPDATE agents SET is_active = true, config = ${JSON.stringify(configJson)}::jsonb,
-          description = ${req.description}, updated_at = now()
-        WHERE LOWER(name) = LOWER(${req.name})
+        UPDATE agents
+        SET
+          is_active = true,
+          handle = ${identity.handle},
+          display_name = ${identity.displayName},
+          name = ${identity.handle},
+          config = ${JSON.stringify(configJson)}::jsonb,
+          description = ${req.description},
+          updated_at = now()
+        WHERE agent_id = ${existingAgentId}
       `;
-      return c.json(agentResponse({ ...existing[0], is_active: true, config: configJson } as any), 201);
+      return c.json(agentResponse({
+        ...existing[0],
+        agent_id: existingAgentId,
+        handle: identity.handle,
+        display_name: identity.displayName,
+        name: identity.handle,
+        is_active: true,
+        config: configJson,
+      } as any), 201);
     }
 
     // Agent creation is unlimited — agents are just config rows with zero cost.
     // Billing is purely usage-based (LLM tokens + tool execution).
 
     // Build config JSON
-    const configJson: Record<string, unknown> = {
-      name: req.name,
+    const newAgentId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+    const configJson: Record<string, unknown> = decorateAgentConfigIdentity({
       description: req.description,
       system_prompt: req.system_prompt,
       personality: req.personality,
@@ -376,7 +462,11 @@ agentRoutes.openapi(createAgentRoute, async (c): Promise<any> => {
       version: "0.1.0",
       governance: req.governance ?? { budget_limit_usd: req.budget_limit_usd },
       harness: {},
-    };
+    }, {
+      agentId: newAgentId,
+      handle: identity.handle,
+      displayName: identity.displayName,
+    });
 
     // Phase 5 — validate enabled_skills against the bundled catalog; drop
     // unknowns and surface them via package_errors so the caller sees what
@@ -414,14 +504,15 @@ agentRoutes.openapi(createAgentRoute, async (c): Promise<any> => {
 
     // Insert agent + snapshot version + package — withOrgDb already opened
     // a transaction so we just run the writes directly.
-    const newAgentId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
     let packageErrors: string[] = [];
 
     await sql`
-      INSERT INTO agents (agent_id, name, org_id, project_id, config, description, is_active, created_at, updated_at)
+      INSERT INTO agents (agent_id, handle, display_name, name, org_id, project_id, config, description, is_active, created_at, updated_at)
       VALUES (
         ${newAgentId},
-        ${req.name},
+        ${identity.handle},
+        ${identity.displayName},
+        ${identity.handle},
         ${user.org_id},
         ${user.project_id || ""},
         ${JSON.stringify(configJson)},
@@ -433,12 +524,16 @@ agentRoutes.openapi(createAgentRoute, async (c): Promise<any> => {
     `;
 
     // Snapshot version
-    await snapshotVersion(sql, req.name, "0.1.0", configJson, user.user_id);
+    await snapshotVersion(sql, {
+      agentId: newAgentId,
+      handle: identity.handle,
+      displayName: identity.displayName,
+    }, "0.1.0", configJson, user.user_id);
 
     // Persist full package if provided
     const hasPackage = req.sub_agents || req.skills || req.codemode_snippets || req.guardrails || req.release_strategy;
     if (hasPackage) {
-      packageErrors = await persistAgentPackage(sql, req.name, user.org_id, user.project_id || "", user.user_id, {
+      packageErrors = await persistAgentPackage(sql, identity.handle, user.org_id, user.project_id || "", user.user_id, {
         sub_agents: req.sub_agents,
         skills: req.skills,
         codemode_snippets: req.codemode_snippets,
@@ -449,7 +544,9 @@ agentRoutes.openapi(createAgentRoute, async (c): Promise<any> => {
 
     const response: Record<string, unknown> = {
       agent_id: newAgentId,
-      name: req.name,
+      handle: identity.handle,
+      display_name: identity.displayName,
+      name: identity.handle,
       description: req.description,
       model: configJson.model,
       tools: req.tools,
@@ -489,19 +586,35 @@ agentRoutes.openapi(updateAgentRoute, async (c): Promise<any> => {
     const user = c.get("user");
     return await withOrgDb(c.env, user.org_id, async (sql) => {
 
-    const name = await resolveAgentName(sql, identifier, user.org_id);
-    if (!name) {
+    const agentRow = await resolveAgentRecord(sql, identifier);
+    if (!agentRow) {
       return c.json({ error: `Agent '${identifier}' not found` }, 404);
     }
+    const agentId = String(agentRow.agent_id || "");
+    const currentHandle = String(agentRow.handle || agentRow.name || "");
+    const currentDisplayName = String(agentRow.display_name || currentHandle);
 
     // Fetch existing
     const rows = await sql`
-      SELECT config FROM agents
-      WHERE name = ${name}
+      SELECT config, description, display_name
+      FROM agents
+      WHERE agent_id = ${agentId}
       LIMIT 1
     `;
 
     const existingConfig = parseConfig((rows[0] as Record<string, unknown>).config);
+    const nextIdentity = buildAgentIdentity({
+      handle: req.handle || req.name || currentHandle,
+      displayName: req.display_name || String(rows[0]?.display_name || currentDisplayName),
+      fallbackHandle: currentHandle,
+    });
+    const handleConflict = await assertHandleAvailable(sql, nextIdentity.handle, agentId);
+    if (handleConflict) {
+      return c.json({ error: handleConflict }, 409);
+    }
+    if (isReservedPlatformAgentHandle(nextIdentity.handle) && nextIdentity.handle !== currentHandle) {
+      return c.json({ error: `Agent handle '${nextIdentity.handle}' is reserved for a platform-owned ambient agent` }, 409);
+    }
 
     // Merge updates
     if (req.description) existingConfig.description = req.description;
@@ -560,27 +673,39 @@ agentRoutes.openapi(updateAgentRoute, async (c): Promise<any> => {
     parts[2] = (parts[2] ?? 0) + 1;
     const newVersion = parts.join(".");
     existingConfig.version = newVersion;
+    const updatedConfig = decorateAgentConfigIdentity(existingConfig, {
+      agentId,
+      handle: nextIdentity.handle,
+      displayName: nextIdentity.displayName,
+    });
 
     await sql`
       UPDATE agents
-      SET config = ${JSON.stringify(existingConfig)},
-          description = ${req.description || (existingConfig.description as string) || ""},
+      SET handle = ${nextIdentity.handle},
+          display_name = ${nextIdentity.displayName},
+          name = ${nextIdentity.handle},
+          config = ${JSON.stringify(updatedConfig)},
+          description = ${req.description || (updatedConfig.description as string) || ""},
           updated_at = now()
-      WHERE name = ${name}
+      WHERE agent_id = ${agentId}
     `;
 
-    await snapshotVersion(sql, name, newVersion, existingConfig, user.user_id);
+    await snapshotVersion(sql, {
+      agentId,
+      handle: nextIdentity.handle,
+      displayName: nextIdentity.displayName,
+    }, newVersion, updatedConfig, user.user_id);
 
     // Phase 10.4: Deploy policy audit trail
     // Log policy-relevant field changes for compliance
     const policyFields = ["deploy_policy", "tools", "model", "governance", "system_prompt"];
     for (const field of policyFields) {
       const oldVal = rows[0] ? JSON.stringify((parseConfig((rows[0] as any).config) as any)[field]) : null;
-      const newVal = JSON.stringify((existingConfig as any)[field]);
+      const newVal = JSON.stringify((updatedConfig as any)[field]);
       if (oldVal !== newVal) {
         sql`
           INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
-          VALUES (${user.org_id}, ${user.user_id}, ${"config_change" satisfies AuditAction}, 'agent', ${name},
+          VALUES (${user.org_id}, ${user.user_id}, ${"config_change" satisfies AuditAction}, 'agent', ${nextIdentity.handle},
             ${JSON.stringify({ field, old_hash: oldVal?.slice(0, 50), new_hash: newVal?.slice(0, 50), version: newVersion })},
             NOW())
         `.catch(() => {}); // fire-and-forget
@@ -589,18 +714,21 @@ agentRoutes.openapi(updateAgentRoute, async (c): Promise<any> => {
 
     // Notify runtime of config change (fire-and-forget)
     // This triggers the DO to reload config on next request
-    notifyRuntimeOfConfigChange(c.env, name, newVersion).catch(() => {});
+    notifyRuntimeOfConfigChange(c.env, nextIdentity.handle, newVersion).catch(() => {});
 
     const updateResponse: Record<string, unknown> = {
-      name,
-      description: existingConfig.description ?? "",
-      model: existingConfig.model ?? "",
-      tools: Array.isArray(existingConfig.tools) ? existingConfig.tools : [],
-      tags: Array.isArray(existingConfig.tags) ? existingConfig.tags : [],
+      agent_id: agentId,
+      handle: nextIdentity.handle,
+      display_name: nextIdentity.displayName,
+      name: nextIdentity.handle,
+      description: updatedConfig.description ?? "",
+      model: updatedConfig.model ?? "",
+      tools: Array.isArray(updatedConfig.tools) ? updatedConfig.tools : [],
+      tags: Array.isArray(updatedConfig.tags) ? updatedConfig.tags : [],
       version: newVersion,
     };
-    if (Array.isArray(existingConfig.enabled_skills) && existingConfig.enabled_skills.length > 0) {
-      updateResponse.enabled_skills = existingConfig.enabled_skills;
+    if (Array.isArray(updatedConfig.enabled_skills) && updatedConfig.enabled_skills.length > 0) {
+      updateResponse.enabled_skills = updatedConfig.enabled_skills;
     }
     if (updateDroppedSkills.length > 0) {
       updateResponse.warning_enabled_skills = `dropped ${updateDroppedSkills.length} unknown skill name(s): ${updateDroppedSkills.join(", ")}`;
@@ -631,14 +759,16 @@ agentRoutes.openapi(deleteAgentRoute, async (c): Promise<any> => {
     const user = c.get("user");
     return await withOrgDb(c.env, user.org_id, async (sql) => {
 
-    const name = await resolveAgentName(sql, identifier, user.org_id);
-    if (!name) {
+    const agentRow = await resolveAgentRecord(sql, identifier);
+    if (!agentRow) {
       return c.json({ error: `Agent '${identifier}' not found` }, 404);
     }
+    const agentId = String(agentRow.agent_id || "");
+    const agentHandle = String(agentRow.handle || agentRow.name || "");
 
     // Block deletion of personal agents (my-assistant) — they're permanent per account
     try {
-      const configRows = await sql`SELECT config FROM agents WHERE name = ${name} LIMIT 1`;
+      const configRows = await sql`SELECT config FROM agents WHERE agent_id = ${agentId} LIMIT 1`;
       const cfg = parseConfig(configRows[0]?.config);
       if (cfg.is_personal) {
         return c.json({ error: "Cannot delete the personal assistant. This agent is permanent for your account." }, 403);
@@ -650,43 +780,43 @@ agentRoutes.openapi(deleteAgentRoute, async (c): Promise<any> => {
     if (hardDelete) {
       // Hard delete — cascading removal of all associated records.
       // withOrgDb already opened a transaction, so the writes are atomic.
-      const r1 = await sql`DELETE FROM turns WHERE session_id IN (SELECT session_id FROM sessions WHERE agent_name = ${name})`;
+      const r1 = await sql`DELETE FROM turns WHERE session_id IN (SELECT session_id FROM sessions WHERE agent_name = ${agentHandle})`;
       counts.turns = r1.count ?? 0;
 
-      const r2 = await sql`DELETE FROM sessions WHERE agent_name = ${name}`;
+      const r2 = await sql`DELETE FROM sessions WHERE agent_name = ${agentHandle}`;
       counts.sessions = r2.count ?? 0;
 
-      const r3 = await sql`DELETE FROM billing_records WHERE agent_name = ${name}`;
+      const r3 = await sql`DELETE FROM billing_records WHERE agent_name = ${agentHandle}`;
       counts.billing_records = r3.count ?? 0;
 
-      const r4 = await sql`DELETE FROM eval_runs WHERE agent_name = ${name}`;
+      const r4 = await sql`DELETE FROM eval_runs WHERE agent_name = ${agentHandle}`;
       counts.eval_runs = r4.count ?? 0;
 
-      const r5 = await sql`DELETE FROM eval_results WHERE agent_name = ${name}`;
+      const r5 = await sql`DELETE FROM eval_results WHERE agent_name = ${agentHandle}`;
       counts.eval_results = r5.count ?? 0;
 
-      const r6 = await sql`DELETE FROM issues WHERE agent_name = ${name}`;
+      const r6 = await sql`DELETE FROM issues WHERE agent_name = ${agentHandle}`;
       counts.issues = r6.count ?? 0;
 
-      const r7 = await sql`DELETE FROM compliance_checks WHERE agent_name = ${name}`;
+      const r7 = await sql`DELETE FROM compliance_checks WHERE agent_name = ${agentHandle}`;
       counts.compliance_checks = r7.count ?? 0;
 
-      const r8 = await sql`DELETE FROM schedules WHERE agent_name = ${name}`;
+      const r8 = await sql`DELETE FROM schedules WHERE agent_name = ${agentHandle}`;
       counts.schedules = r8.count ?? 0;
 
-      const r9 = await sql`DELETE FROM webhooks WHERE agent_name = ${name}`;
+      const r9 = await sql`DELETE FROM webhooks WHERE agent_name = ${agentHandle}`;
       counts.webhooks = r9.count ?? 0;
 
-      const r10 = await sql`DELETE FROM agent_versions WHERE agent_name = ${name}`;
+      const r10 = await sql`DELETE FROM agent_versions WHERE agent_id = ${agentId}`;
       counts.agent_versions = r10.count ?? 0;
 
-      await sql`DELETE FROM agents WHERE name = ${name}`;
+      await sql`DELETE FROM agents WHERE agent_id = ${agentId}`;
       counts.agent = 1;
     } else {
       // Soft delete
       await sql`
         UPDATE agents SET is_active = false, updated_at = now()
-        WHERE name = ${name}
+        WHERE agent_id = ${agentId}
       `;
       counts.agent = 1;
     }
@@ -694,7 +824,7 @@ agentRoutes.openapi(deleteAgentRoute, async (c): Promise<any> => {
     // Audit log (fire-and-forget)
     sql`
       INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
-      VALUES (${user.org_id}, ${user.user_id}, ${"delete" satisfies AuditAction}, 'agent', ${name}, ${JSON.stringify({
+      VALUES (${user.org_id}, ${user.user_id}, ${"delete" satisfies AuditAction}, 'agent', ${agentHandle}, ${JSON.stringify({
         hard_delete: hardDelete,
       })}::jsonb, now())
     `.catch(() => {});
@@ -702,7 +832,7 @@ agentRoutes.openapi(deleteAgentRoute, async (c): Promise<any> => {
     const totalRecords = Object.values(counts).reduce((a, b) => a + b, 0);
 
     return c.json({
-      deleted: name,
+      deleted: agentHandle,
       hard_delete: hardDelete,
       db_cleanup: counts,
       total_records_affected: totalRecords,
@@ -727,12 +857,14 @@ agentRoutes.openapi(listVersionsRoute, async (c): Promise<any> => {
     const user = c.get("user");
     return await withOrgDb(c.env, user.org_id, async (sql) => {
 
-    const agentName = await resolveAgentName(sql, identifier, user.org_id) || identifier;
+    const agentRow = await resolveAgentRecord(sql, identifier);
+    if (!agentRow) return c.json({ error: `Agent '${identifier}' not found` }, 404);
+    const agentId = String(agentRow.agent_id || "");
 
     const rows = await sql`
-      SELECT id, agent_name, version, config, created_by, created_at
+      SELECT id, agent_handle, display_name, version, config, created_by, created_at
       FROM agent_versions
-      WHERE agent_name = ${agentName}
+      WHERE agent_id = ${agentId}
       ORDER BY created_at DESC
       LIMIT 50
     `;
@@ -768,12 +900,12 @@ agentRoutes.openapi(listToolsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   return await withOrgDb(c.env, user.org_id, async (sql) => {
 
-  const name = await resolveAgentName(sql, identifier, user.org_id);
-  if (!name) return c.json({ error: `Agent '${identifier}' not found` }, 404);
+  const agentRow = await resolveAgentRecord(sql, identifier);
+  if (!agentRow) return c.json({ error: `Agent '${identifier}' not found` }, 404);
 
   const rows = await sql`
     SELECT config FROM agents
-    WHERE name = ${name}
+    WHERE agent_id = ${agentRow.agent_id as string}
     LIMIT 1
   `;
 
@@ -798,12 +930,12 @@ agentRoutes.openapi(getConfigRoute, async (c): Promise<any> => {
   const { name: identifier } = c.req.valid("param");
   const user = c.get("user");
   return await withOrgDb(c.env, user.org_id, async (sql) => {
-    const name = await resolveAgentName(sql, identifier, user.org_id);
-    if (!name) return c.json({ error: `Agent '${identifier}' not found` }, 404);
+    const agentRow = await resolveAgentRecord(sql, identifier);
+    if (!agentRow) return c.json({ error: `Agent '${identifier}' not found` }, 404);
 
     const rows = await sql`
       SELECT config FROM agents
-      WHERE name = ${name}
+      WHERE agent_id = ${agentRow.agent_id as string}
       LIMIT 1
     `;
 
@@ -820,7 +952,11 @@ const cloneAgentRoute = createRoute({
   middleware: [requireScope("agents:write")],
   request: {
     params: z.object({ name: z.string() }),
-    body: { content: { "application/json": { schema: z.object({ new_name: z.string().min(1).max(128) }) } } },
+    body: { content: { "application/json": { schema: z.object({
+      new_handle: z.string().min(1).max(128).optional(),
+      new_display_name: z.string().min(1).max(160).optional(),
+      new_name: z.string().min(1).max(128).optional(),
+    }) } } },
   },
   responses: {
     201: { description: "Agent cloned", content: { "application/json": { schema: AgentSummary } } },
@@ -830,33 +966,41 @@ const cloneAgentRoute = createRoute({
 });
 agentRoutes.openapi(cloneAgentRoute, async (c): Promise<any> => {
   const { name: identifier } = c.req.valid("param");
-  const { new_name: newNameValue } = c.req.valid("json");
+  const { new_handle: newHandleValue, new_display_name: newDisplayName, new_name: newNameValue } = c.req.valid("json");
 
   const user = c.get("user");
   return await withOrgDb(c.env, user.org_id, async (sql) => {
-    const name = await resolveAgentName(sql, identifier, user.org_id);
-    if (!name) return c.json({ error: `Agent '${identifier}' not found` }, 404);
+    const sourceRow = await resolveAgentRecord(sql, identifier);
+    if (!sourceRow) return c.json({ error: `Agent '${identifier}' not found` }, 404);
 
     // Fetch source agent
     const rows = await sql`
-      SELECT name, description, config FROM agents
-      WHERE name = ${name}
+      SELECT agent_id, handle, display_name, description, config FROM agents
+      WHERE agent_id = ${String(sourceRow.agent_id || "")}
       LIMIT 1
     `;
-
-    // Check target name doesn't exist (case-insensitive)
-    const existCheck = await sql`
-      SELECT name FROM agents WHERE LOWER(name) = LOWER(${newNameValue}) LIMIT 1
-    `;
-    if (existCheck.length > 0) {
-      return c.json({ error: `Agent '${existCheck[0].name}' already exists (names are case-insensitive)` }, 409);
+    const cloneIdentity = buildAgentIdentity({
+      handle: newHandleValue || newNameValue,
+      displayName: newDisplayName,
+      fallbackHandle: `${String(sourceRow.handle || "agent")}-copy`,
+    });
+    const handleConflict = await assertHandleAvailable(sql, cloneIdentity.handle);
+    if (handleConflict) {
+      return c.json({ error: handleConflict }, 409);
     }
 
     const config = parseConfig((rows[0] as Record<string, unknown>).config);
-    config.name = newNameValue;
-    config.version = "0.1.0";
+    const newAgentId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+    const clonedConfig = decorateAgentConfigIdentity({
+      ...config,
+      version: "0.1.0",
+    }, {
+      agentId: newAgentId,
+      handle: cloneIdentity.handle,
+      displayName: cloneIdentity.displayName,
+    });
 
-    const clonePolicy = applyDeployPolicyToConfigJson(config);
+    const clonePolicy = applyDeployPolicyToConfigJson(clonedConfig);
     if (!clonePolicy.ok) {
       return c.json(
         {
@@ -869,26 +1013,37 @@ agentRoutes.openapi(cloneAgentRoute, async (c): Promise<any> => {
     }
 
     await sql`
-      INSERT INTO agents (agent_id, name, org_id, project_id, config, description, is_active, created_at, updated_at)
+      INSERT INTO agents (agent_id, handle, display_name, name, org_id, project_id, config, description, is_active, created_at, updated_at)
       VALUES (
-        ${crypto.randomUUID().replace(/-/g, "").slice(0, 16)},
-        ${newNameValue},
+        ${newAgentId},
+        ${cloneIdentity.handle},
+        ${cloneIdentity.displayName},
+        ${cloneIdentity.handle},
         ${user.org_id},
         ${user.project_id || ""},
-        ${JSON.stringify(config)},
-        ${(config.description as string) || ""},
+        ${JSON.stringify(clonedConfig)},
+        ${(clonedConfig.description as string) || ""},
         true,
         now(),
         now()
       )
     `;
 
+    await snapshotVersion(sql, {
+      agentId: newAgentId,
+      handle: cloneIdentity.handle,
+      displayName: cloneIdentity.displayName,
+    }, "0.1.0", clonedConfig, user.user_id);
+
     return c.json({
-      name: newNameValue,
-      description: config.description ?? "",
-      model: config.model ?? "",
-      tools: Array.isArray(config.tools) ? config.tools : [],
-      tags: Array.isArray(config.tags) ? config.tags : [],
+      agent_id: newAgentId,
+      handle: cloneIdentity.handle,
+      display_name: cloneIdentity.displayName,
+      name: cloneIdentity.handle,
+      description: clonedConfig.description ?? "",
+      model: clonedConfig.model ?? "",
+      tools: Array.isArray(clonedConfig.tools) ? clonedConfig.tools : [],
+      tags: Array.isArray(clonedConfig.tags) ? clonedConfig.tags : [],
       version: "0.1.0",
     } as any, 201);
   });
@@ -915,9 +1070,22 @@ agentRoutes.openapi(importAgentRoute, async (c): Promise<any> => {
     const user = c.get("user");
     return await withOrgDb(c.env, user.org_id, async (sql) => {
 
-    const agentName = String(config.name || "imported_agent");
+    const importIdentity = buildAgentIdentity({
+      handle: String((config as Record<string, unknown>).handle || config.name || "imported-agent"),
+      displayName: String((config as Record<string, unknown>).display_name || ""),
+      fallbackHandle: "imported-agent",
+    });
+    const handleConflict = await assertHandleAvailable(sql, importIdentity.handle);
+    if (handleConflict) {
+      return c.json({ error: handleConflict }, 409);
+    }
 
-    const importCfg = config as Record<string, unknown>;
+    const newAgentId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+    const importCfg = decorateAgentConfigIdentity(config as Record<string, unknown>, {
+      agentId: newAgentId,
+      handle: importIdentity.handle,
+      displayName: importIdentity.displayName,
+    });
     const importPolicy = applyDeployPolicyToConfigJson(importCfg);
     if (!importPolicy.ok) {
       return c.json(
@@ -931,10 +1099,12 @@ agentRoutes.openapi(importAgentRoute, async (c): Promise<any> => {
     }
 
     await sql`
-      INSERT INTO agents (agent_id, name, org_id, project_id, config, description, is_active, created_at, updated_at)
+      INSERT INTO agents (agent_id, handle, display_name, name, org_id, project_id, config, description, is_active, created_at, updated_at)
       VALUES (
-        ${crypto.randomUUID().replace(/-/g, "").slice(0, 16)},
-        ${agentName},
+        ${newAgentId},
+        ${importIdentity.handle},
+        ${importIdentity.displayName},
+        ${importIdentity.handle},
         ${user.org_id},
         ${user.project_id || ""},
         ${JSON.stringify(importCfg)},
@@ -943,12 +1113,25 @@ agentRoutes.openapi(importAgentRoute, async (c): Promise<any> => {
         now(),
         now()
       )
-      ON CONFLICT (name, org_id) DO UPDATE
-      SET config = ${JSON.stringify(importCfg)}, updated_at = now()
+      ON CONFLICT (handle, org_id) DO UPDATE
+      SET
+        display_name = EXCLUDED.display_name,
+        name = EXCLUDED.name,
+        config = EXCLUDED.config,
+        updated_at = now()
     `;
 
+    await snapshotVersion(sql, {
+      agentId: newAgentId,
+      handle: importIdentity.handle,
+      displayName: importIdentity.displayName,
+    }, String(importCfg.version || "0.1.0"), importCfg, user.user_id);
+
     return c.json({
-      name: agentName,
+      agent_id: newAgentId,
+      handle: importIdentity.handle,
+      display_name: importIdentity.displayName,
+      name: importIdentity.handle,
       description: config.description ?? "",
       model: config.model ?? "",
       tools: Array.isArray(config.tools) ? config.tools : [],
@@ -974,16 +1157,16 @@ agentRoutes.openapi(exportAgentRoute, async (c): Promise<any> => {
   const { name: identifier } = c.req.valid("param");
   const user = c.get("user");
   return await withOrgDb(c.env, user.org_id, async (sql) => {
-    const name = await resolveAgentName(sql, identifier, user.org_id);
-    if (!name) return c.json({ error: `Agent '${identifier}' not found` }, 404);
+    const agentRow = await resolveAgentRecord(sql, identifier);
+    if (!agentRow) return c.json({ error: `Agent '${identifier}' not found` }, 404);
 
     const rows = await sql`
       SELECT config FROM agents
-      WHERE name = ${name}
+      WHERE agent_id = ${agentRow.agent_id as string}
       LIMIT 1
     `;
     if (rows.length === 0) {
-      return c.json({ error: `Agent '${name}' not found` }, 404);
+      return c.json({ error: `Agent '${identifier}' not found` }, 404);
     }
 
     return c.json({ agent: parseConfig((rows[0] as Record<string, unknown>).config) } as any);
@@ -999,7 +1182,7 @@ agentRoutes.openapi(exportAgentRoute, async (c): Promise<any> => {
 
 async function persistAgentPackage(
   sql: OrgSql,
-  agentName: string,
+  agentHandle: string,
   orgId: string,
   projectId: string,
   userId: string,
@@ -1012,24 +1195,42 @@ async function persistAgentPackage(
   const subAgents = Array.isArray(pkg.sub_agents) ? pkg.sub_agents.slice(0, 3) : [];
   for (const sa of subAgents) {
     try {
-      const subConfig = {
+      const subIdentity = buildAgentIdentity({
+        handle: String((sa as Record<string, unknown>).handle || (sa as Record<string, unknown>).name || `${agentHandle}-sub`),
+        displayName: String((sa as Record<string, unknown>).display_name || ""),
+        fallbackHandle: `${agentHandle}-sub`,
+      });
+      const subConfig = decorateAgentConfigIdentity({
         ...(sa as Record<string, unknown>),
-        parent_agent: agentName,
+        parent_agent: agentHandle,
         governance: { budget_limit_usd: 10 },
         harness: {},
-      } as Record<string, unknown>;
+        hidden: true,
+        visibility: "hidden",
+      } as Record<string, unknown>, {
+        handle: subIdentity.handle,
+        displayName: subIdentity.displayName,
+      });
       const subPolicy = applyDeployPolicyToConfigJson(subConfig);
       if (!subPolicy.ok) {
-        errors.push(`sub-agent ${(sa as Record<string, unknown>).name}: deploy policy: ${subPolicy.errors.join("; ")}`);
+        errors.push(`sub-agent ${(sa as Record<string, unknown>).name || subIdentity.handle}: deploy policy: ${subPolicy.errors.join("; ")}`);
         continue;
       }
-      const subName = String((sa as Record<string, unknown>).name || `${agentName}-sub`);
       const subId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
       await sql`
-        INSERT INTO agents (agent_id, name, org_id, project_id, config, description, is_active, created_at, updated_at)
-        VALUES (${subId}, ${subName}, ${orgId}, ${projectId}, ${JSON.stringify(subConfig)},
+        INSERT INTO agents (agent_id, handle, display_name, name, org_id, project_id, config, description, is_active, created_at, updated_at)
+        VALUES (${subId}, ${subIdentity.handle}, ${subIdentity.displayName}, ${subIdentity.handle}, ${orgId}, ${projectId}, ${JSON.stringify(decorateAgentConfigIdentity(subConfig, {
+          agentId: subId,
+          handle: subIdentity.handle,
+          displayName: subIdentity.displayName,
+        }))},
                 ${String((sa as Record<string, unknown>).description || "")}, ${true}, now(), now())
-        ON CONFLICT (name, org_id) DO UPDATE SET config = ${JSON.stringify(subConfig)}, updated_at = now()
+        ON CONFLICT (handle, org_id) DO UPDATE
+        SET
+          display_name = EXCLUDED.display_name,
+          name = EXCLUDED.name,
+          config = EXCLUDED.config,
+          updated_at = now()
       `;
     } catch (e) {
       errors.push(`sub-agent ${(sa as Record<string, unknown>).name}: ${(e as Error).message}`);
@@ -1044,7 +1245,7 @@ async function persistAgentPackage(
       await sql`
         INSERT INTO skills (name, description, category, prompt, prompt_template, agent_name, org_id, is_active, created_at)
         VALUES (${String(s.name)}, ${String(s.description || "")}, ${String(s.category || "general")},
-                ${String(s.content || "")}, ${String(s.content || "")}, ${agentName}, ${orgId}, true, now())
+                ${String(s.content || "")}, ${String(s.content || "")}, ${agentHandle}, ${orgId}, true, now())
         ON CONFLICT (org_id, name) DO NOTHING
       `;
     } catch (e) {
@@ -1079,7 +1280,7 @@ async function persistAgentPackage(
       const policyJson = JSON.stringify({ type: g.type, rule: g.rule, action: g.action });
       await sql`
         INSERT INTO guardrail_policies (id, org_id, agent_name, policy_type, config, created_at)
-        VALUES (${grId}, ${orgId}, ${agentName}, ${String(g.type || '')}, ${policyJson}, ${now})
+        VALUES (${grId}, ${orgId}, ${agentHandle}, ${String(g.type || '')}, ${policyJson}, ${now})
         ON CONFLICT DO NOTHING
       `;
     } catch (e) {
@@ -1094,7 +1295,7 @@ async function persistAgentPackage(
       const channel = String(release.initial_channel || "staging");
       await sql`
         INSERT INTO release_channels (org_id, agent_name, channel, version, config, promoted_by, promoted_at)
-        VALUES (${orgId}, ${agentName}, ${channel}, ${"0.1.0"}, ${JSON.stringify(release)}, ${userId}, ${now})
+        VALUES (${orgId}, ${agentHandle}, ${channel}, ${"0.1.0"}, ${JSON.stringify(release)}, ${userId}, ${now})
         ON CONFLICT DO NOTHING
       `;
     } catch (e) {
@@ -1142,7 +1343,7 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
     let config: Record<string, any>;
     try {
       config = await buildFromDescription(c.env.AI, req.description, {
-        name: req.name || undefined,
+        name: req.handle || req.name || undefined,
         hyperdrive: c.env.HYPERDRIVE,
         orgId: user.org_id,
         plan: req.plan,
@@ -1163,7 +1364,19 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
       return c.json(failSafe(err, "agents/create-from-description", { userMessage: "Couldn't generate the agent from that description. Please try rephrasing or contact support." }), 500);
     }
 
-    if (req.name) config.name = req.name;
+    const generatedIdentity = buildAgentIdentity({
+      handle: req.handle || req.name || String(config.handle || config.name || ""),
+      displayName: req.display_name || String(config.display_name || ""),
+      fallbackHandle: "generated-agent",
+    });
+    const handleConflict = await assertHandleAvailable(sql, generatedIdentity.handle);
+    if (handleConflict) {
+      return c.json({ error: handleConflict }, 409);
+    }
+    config = decorateAgentConfigIdentity(config, {
+      handle: generatedIdentity.handle,
+      displayName: generatedIdentity.displayName,
+    });
 
     // Apply LLM plan
     config.plan = req.plan;
@@ -1199,7 +1412,7 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
     }
 
     // Eval gate
-    const evalGate = await latestEvalGate(sql, String(config.name), {
+    const evalGate = await latestEvalGate(sql, String(config.handle || config.name), {
       minEvalPassRate: req.min_eval_pass_rate,
       minEvalTrials: req.min_eval_trials,
       orgId: user.org_id,
@@ -1208,7 +1421,7 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
     const gatePack = {
       eval_gate: evalGate,
       rollout: rolloutRecommendation({
-        agentName: String(config.name),
+        agentName: String(config.handle || config.name),
         evalGate,
         targetChannel: req.target_channel,
       }),
@@ -1225,7 +1438,9 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
 
       const payload: Record<string, unknown> = {
         created: false,
-        name: config.name,
+        handle: config.handle,
+        display_name: config.display_name,
+        name: config.handle,
         description: config.description,
         system_prompt: config.system_prompt,
         model: config.model,
@@ -1279,7 +1494,7 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
       // Audit the override (fire-and-forget)
       sql`
         INSERT INTO config_audit (agent_name, action, details, created_at)
-        VALUES (${String(config.name)}, 'hold_override', ${JSON.stringify({
+        VALUES (${String(config.handle || config.name)}, 'hold_override', ${JSON.stringify({
           user: user.user_id,
           org: user.org_id,
           reason: req.override_reason.trim(),
@@ -1306,44 +1521,64 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
     const generatedAgentId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
     let agentId = generatedAgentId;
     let packageErrors: string[] = [];
+    const persistedIdentity = buildAgentIdentity({
+      handle: String(config.handle || config.name || generatedIdentity.handle),
+      displayName: String(config.display_name || generatedIdentity.displayName),
+      fallbackHandle: generatedIdentity.handle,
+    });
+    const persistedConfig = decorateAgentConfigIdentity(cfgRecord, {
+      agentId: generatedAgentId,
+      handle: persistedIdentity.handle,
+      displayName: persistedIdentity.displayName,
+    });
 
     // withOrgDb already opened a transaction; run writes directly.
     await sql`
-      INSERT INTO agents (agent_id, name, org_id, project_id, config, description, is_active, created_at, updated_at)
+      INSERT INTO agents (agent_id, handle, display_name, name, org_id, project_id, config, description, is_active, created_at, updated_at)
       VALUES (
         ${generatedAgentId},
-        ${String(config.name)},
+        ${persistedIdentity.handle},
+        ${persistedIdentity.displayName},
+        ${persistedIdentity.handle},
         ${user.org_id},
         ${user.project_id || ""},
-        ${JSON.stringify(cfgRecord)},
+        ${JSON.stringify(persistedConfig)},
         ${String(config.description || "")},
         ${true},
         now(),
         now()
       )
-      ON CONFLICT (name, org_id) DO UPDATE
-      SET config = ${JSON.stringify(cfgRecord)}, updated_at = now()
+      ON CONFLICT (handle, org_id) DO UPDATE
+      SET
+        display_name = EXCLUDED.display_name,
+        name = EXCLUDED.name,
+        config = EXCLUDED.config,
+        updated_at = now()
     `;
 
     // Retrieve the actual agent_id (may differ on conflict/update)
     try {
-      const idRows = await sql`SELECT agent_id FROM agents WHERE name = ${String(config.name)} LIMIT 1`;
+      const idRows = await sql`SELECT agent_id FROM agents WHERE handle = ${persistedIdentity.handle} LIMIT 1`;
       if (idRows.length > 0) agentId = String(idRows[0].agent_id);
     } catch {}
 
-    await snapshotVersion(sql, String(config.name), String(config.version), cfgRecord, user.user_id);
+    await snapshotVersion(sql, {
+      agentId,
+      handle: persistedIdentity.handle,
+      displayName: persistedIdentity.displayName,
+    }, String(config.version), persistedConfig, user.user_id);
 
     // Persist the full agent package (sub-agents, skills, codemode, guardrails, releases)
     if (pkg) {
       // Clean _package from config before using it
       delete (config as Record<string, unknown>)._package;
       packageErrors = await persistAgentPackage(
-        sql, String(config.name), user.org_id, user.project_id || "", user.user_id, pkg,
+        sql, persistedIdentity.handle, user.org_id, user.project_id || "", user.user_id, pkg,
       );
     }
 
     // Notify runtime of new agent (fire-and-forget)
-    notifyRuntimeOfConfigChange(c.env, String(config.name), String(config.version)).catch(() => {});
+    notifyRuntimeOfConfigChange(c.env, persistedIdentity.handle, String(config.version)).catch(() => {});
 
     // ── Auto-Eval: expand eval_config into executable test cases ──────
     // This runs after agent creation so the agent exists before we test it.
@@ -1356,7 +1591,7 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
         const expanded = await expandEvalConfig(
           evalCfg,
           String(config.description || req.description),
-          String(config.name),
+          persistedIdentity.handle,
           { openrouterApiKey: c.env.OPENROUTER_API_KEY },
         );
         autoEvalTasks = expanded.tasks;
@@ -1378,13 +1613,13 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
               '{eval_config}',
               ${JSON.stringify(evalConfigWithTasks)}::jsonb
             )
-            WHERE name = ${String(config.name)}
+            WHERE handle = ${persistedIdentity.handle}
           `.catch(() => {
             // Fallback: re-write the whole config if jsonb_set isn't available
-            const updatedConfig = { ...cfgRecord, eval_config: evalConfigWithTasks };
+            const updatedConfig = { ...persistedConfig, eval_config: evalConfigWithTasks };
             return sql`
               UPDATE agents SET config = ${JSON.stringify(updatedConfig)}
-              WHERE name = ${String(config.name)}
+              WHERE handle = ${persistedIdentity.handle}
             `;
           });
         }
@@ -1397,7 +1632,9 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
     const payload: Record<string, unknown> = {
       created: true,
       agent_id: agentId,
-      name: config.name,
+      handle: persistedIdentity.handle,
+      display_name: persistedIdentity.displayName,
+      name: persistedIdentity.handle,
       description: config.description,
       model: config.model,
       tools: config.tools,
@@ -1841,11 +2078,15 @@ agentRoutes.openapi(restoreVersionRoute, async (c): Promise<any> => {
     const { name: identifier, commitId } = c.req.valid("param");
     return await withOrgDb(c.env, user.org_id, async (sql) => {
 
-    const agentName = await resolveAgentName(sql, identifier, user.org_id) || identifier;
+    const agentRow = await resolveAgentRecord(sql, identifier);
+    if (!agentRow) return c.json({ error: `Agent '${identifier}' not found` }, 404);
+    const agentId = String(agentRow.agent_id || "");
+    const agentHandle = String(agentRow.handle || agentRow.name || "");
+    const agentDisplayName = String(agentRow.display_name || agentHandle);
 
     const rows = await sql`
       SELECT config, version FROM agent_versions
-      WHERE id = ${commitId} AND agent_name = ${agentName}
+      WHERE id = ${commitId} AND agent_id = ${agentId}
       LIMIT 1
     `;
     if (rows.length === 0) return c.json({ error: "Version not found" }, 404);
@@ -1871,19 +2112,39 @@ agentRoutes.openapi(restoreVersionRoute, async (c): Promise<any> => {
 
     // Snapshot current config before overwriting (for undo)
     const current = await sql`
-      SELECT config FROM agents WHERE name = ${agentName} LIMIT 1
+      SELECT config FROM agents WHERE agent_id = ${agentId} LIMIT 1
     `;
     if (current.length > 0) {
-      await snapshotVersion(sql, agentName, `pre-restore-${Date.now()}`,
+      await snapshotVersion(sql, {
+        agentId,
+        handle: agentHandle,
+        displayName: agentDisplayName,
+      }, `pre-restore-${Date.now()}`,
         parseJsonColumn(current[0].config), user.user_id);
     }
 
-    await sql`UPDATE agents SET config = ${configJson}, updated_at = now() WHERE name = ${agentName}`;
+    await sql`
+      UPDATE agents
+      SET config = ${JSON.stringify(decorateAgentConfigIdentity(JSON.parse(configJson) as Record<string, unknown>, {
+        agentId,
+        handle: agentHandle,
+        displayName: agentDisplayName,
+      }))}, updated_at = now()
+      WHERE agent_id = ${agentId}
+    `;
     await snapshotVersion(
       sql,
-      agentName,
+      {
+        agentId,
+        handle: agentHandle,
+        displayName: agentDisplayName,
+      },
       String(rows[0].version || "restored"),
-      JSON.parse(configJson) as Record<string, unknown>,
+      decorateAgentConfigIdentity(JSON.parse(configJson) as Record<string, unknown>, {
+        agentId,
+        handle: agentHandle,
+        displayName: agentDisplayName,
+      }),
       user.user_id,
     );
 

@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { buildDefaultInternalAgents } from "../src/logic/internal-agents";
+import { buildDefaultInternalAgents, buildMemoryAgent } from "../src/logic/internal-agents";
 import { buildPersonalAgentPrompt } from "../src/prompts/personal-agent";
 
 // ══════════════════════════════════════════════════════════════════
@@ -99,13 +99,13 @@ describe("personal assistant — meta-agent delegation", () => {
 
 describe("signup flow — agent creation", () => {
   const seededAgents = buildDefaultInternalAgents("TestUser");
-  const personalConfig = seededAgents.find((agent) => agent.name === "my-assistant")!.config as {
+  const personalConfig = seededAgents.find((agent) => agent.handle === "my-assistant")!.config as {
     tools: string[];
     enabled_skills: string[];
     reasoning_strategy: string;
     parallel_tool_calls: boolean;
   };
-  const memoryConfig = seededAgents.find((agent) => agent.name === "memory-agent")!.config as {
+  const memoryConfig = buildMemoryAgent().config as {
     tools: string[];
     enabled_skills: string[];
     internal: boolean;
@@ -115,12 +115,13 @@ describe("signup flow — agent creation", () => {
 
   it("seeds my-assistant with the core tool list + enabled_skills", () => {
     expect(personalConfig.tools).toHaveLength(14);
-    expect(personalConfig.enabled_skills).toHaveLength(6);
+    expect(personalConfig.enabled_skills).toHaveLength(7);
+    expect(personalConfig.enabled_skills).toContain("plan");
     expect(personalConfig.tools).not.toContain("marketplace-search");
     expect(personalConfig.tools).not.toContain("mcp-call");
   });
 
-  it("seeds memory-agent as an internal curation worker", () => {
+  it("defines memory-agent as an ambient internal curation worker", () => {
     expect(memoryConfig.tools).toEqual([
       "memory-save",
       "memory-recall",
@@ -141,7 +142,7 @@ describe("signup flow — agent creation", () => {
 
   it("all enabled_skills are real skill names in the catalog", async () => {
     const { SKILL_CATALOG_NAMES } = await import("../src/lib/skill-catalog.generated");
-    const enabledSkills = ["research", "debug", "remember", "batch", "verify", "build-app"];
+    const enabledSkills = ["research", "debug", "remember", "batch", "verify", "build-app", "plan"];
     for (const name of enabledSkills) {
       expect(SKILL_CATALOG_NAMES.has(name), `enabled_skill "${name}" not found in SKILL_CATALOG`).toBe(true);
     }
@@ -231,6 +232,8 @@ describe("personal assistant prompt — quality checks", () => {
   it("has planning vs execution guidance", () => {
     expect(prompt).toContain("Execute immediately");
     expect(prompt).toContain("Plan first");
+    expect(prompt).toContain("/plan");
+    expect(prompt).toContain("plan.v1");
   });
 
   it("has memory protocol", () => {

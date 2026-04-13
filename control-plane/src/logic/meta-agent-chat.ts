@@ -883,16 +883,38 @@ async function executeTool(
         WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}
       `;
 
-      // Snapshot version. agent_versions.org_id is NOT NULL; we're
-      // inside withOrgDb so ctx.orgId matches current_org_id(). The
-      // UNIQUE is (org_id, agent_name, version) so the conflict target
-      // must include org_id too.
       try {
+        const identityRows = await sql`
+          SELECT agent_id, handle, display_name
+          FROM agents
+          WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}
+          LIMIT 1
+        `;
+        const agentId = String(identityRows[0]?.agent_id || "");
+        const agentHandle = String(identityRows[0]?.handle || ctx.agentName);
+        const displayName = String(identityRows[0]?.display_name || agentHandle);
         await sql`
-          INSERT INTO agent_versions (agent_name, org_id, version, config, created_by, created_at)
-          VALUES (${ctx.agentName}, ${ctx.orgId}, ${newVersion}, ${JSON.stringify(config)}, ${"meta-agent"}, now())
-          ON CONFLICT (org_id, agent_name, version) DO UPDATE
-          SET config = ${JSON.stringify(config)}, created_by = ${"meta-agent"}
+          INSERT INTO agent_versions (
+            agent_id, agent_handle, display_name, agent_name, org_id, version, config, created_by, created_at
+          )
+          VALUES (
+            ${agentId},
+            ${agentHandle},
+            ${displayName},
+            ${agentHandle},
+            ${ctx.orgId},
+            ${newVersion},
+            ${JSON.stringify(config)},
+            ${"meta-agent"},
+            now()
+          )
+          ON CONFLICT (org_id, agent_id, version) DO UPDATE
+          SET
+            agent_handle = EXCLUDED.agent_handle,
+            display_name = EXCLUDED.display_name,
+            agent_name = EXCLUDED.agent_name,
+            config = EXCLUDED.config,
+            created_by = EXCLUDED.created_by
         `;
       } catch {}
 

@@ -21,6 +21,7 @@ guard("run_phase_state");
 guard("query_profile");
 guard("completion_contract");
 guard("completion_gate");
+guard("implementation_complexity");
 guard("research_artifact");
 
 // LLM
@@ -68,7 +69,7 @@ guard("do_eviction");
 // this block will cause a compile error.
 type Covered =
   | "turn_phase" | "run_phase_state" | "query_profile"
-  | "completion_contract" | "completion_gate" | "research_artifact"
+  | "completion_contract" | "completion_gate" | "implementation_complexity" | "research_artifact"
   | "llm_fallback" | "llm_fallback_alert"
   | "tool_exec" | "sandbox_start" | "sandbox.error"
   | "memory_read" | "memory_hit" | "memory_miss" | "memory_write"

@@ -60,6 +60,7 @@ import { BudgetError, AgentOSError, SSRFError } from "./runtime/errors";
 import { createChildAbortController } from "./runtime/abort";
 import { queueSessionEpisodicNote } from "./runtime/memory";
 import { buildMemoryConsolidateParams, buildMemoryDigestParams } from "./runtime/memory-digest";
+import { extractPlanningArtifact, requiresPlanningArtifact, validatePlanningArtifact, type PlanningArtifact } from "./runtime/plan-artifact";
 import { applyContentBudget, applyHistoryBudget, buildQueryIntentProfile } from "./runtime/query-profile";
 import type { RuntimeEventType } from "./runtime/events";
 import { summarizeImplementationComplexity } from "./runtime/implementation-complexity";
@@ -83,6 +84,7 @@ async function memo<T>(key: string, loader: () => Promise<T>): Promise<T> {
 // progressive truncation when the budget is exceeded.
 const MAX_PENDING_RESULT_BYTES = 500_000; // 500KB aggregate cap
 const MAX_COMPLETION_GATE_INTERVENTIONS = 2;
+const MAX_PLANNING_ARTIFACT_INTERVENTIONS = 2;
 
 type RunPhase =
   | "setup"
@@ -771,6 +773,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       } as any,
     );
     const queryProfile = buildQueryIntentProfile(selectedRoute as any, safeInput);
+    const planningArtifactRequired = requiresPlanningArtifact(selectedRoute as any, safeInput);
 
     // ── Phase 0 Security: Validate system prompt override ──
     // Size check runs AFTER sanitization so zero-width padding can't bypass the limit
@@ -1060,6 +1063,7 @@ ALWAYS:
       input_tokens: number; output_tokens: number; cost_usd: number;
       latency_ms: number; tool_calls: Array<{ name: string; arguments: Record<string, unknown> }>; tool_results: Array<{ name: string; latency_ms: number; error?: string; result?: string; cost_usd?: number }>;
       errors: string[];
+      plan_artifact?: PlanningArtifact;
       // Observability enrichment
       llm_latency_ms?: number; stop_reason?: string; refusal?: boolean;
       ttft_ms?: number;
@@ -1075,6 +1079,8 @@ ALWAYS:
       phase_tool_exec_ms?: number;
       phase_total_turn_ms?: number;
     }> = [];
+    let validatedPlanningArtifact: PlanningArtifact | null = null;
+    let planningArtifactInterventions = 0;
     const implementationComplexityInputs: Array<{
       tool: string;
       error?: string;
@@ -1582,6 +1588,12 @@ ALWAYS:
           }
         }
       }
+      const planningArtifactCheck = validatePlanningArtifact(extractPlanningArtifact(llm.content || ""));
+      const turnPlanningArtifact = planningArtifactCheck.ok ? planningArtifactCheck.artifact : null;
+      const planningArtifactReason = planningArtifactCheck.ok ? undefined : planningArtifactCheck.reason;
+      if (turnPlanningArtifact) {
+        validatedPlanningArtifact = turnPlanningArtifact;
+      }
 
       // ── Phase 9.3: Handle model refusal ──
       if (llm.refusal) {
@@ -1638,6 +1650,50 @@ ALWAYS:
       // ── No tools → final answer (stream as tokens for the frontend) ──
       if (llm.tool_calls.length === 0) {
         transitionPhase("synthesizing");
+        if (planningArtifactRequired && planOnlyRequested && !validatedPlanningArtifact) {
+          if (planningArtifactInterventions < MAX_PLANNING_ARTIFACT_INTERVENTIONS && turn < config.max_turns) {
+            planningArtifactInterventions++;
+            messages.push({ role: "assistant", content: llm.content || "" });
+            messages.push({
+              role: "system",
+              content: "Planning contract: for this complex plan-first task, include a fenced ```json``` artifact with schema_version \"plan.v1\", goal, steps[{id,title,acceptance}], assumptions[], alternatives[{option,rationale}], and tradeoffs[]. Keep the visible checklist above the JSON.",
+            });
+            await this.emit(p.progress_key, {
+              type: "warning",
+              message: "Structured planning artifact required before this task can finalize.",
+              planning_artifact_reason: planningArtifactReason,
+              planning_artifact_interventions: planningArtifactInterventions,
+            });
+            await this.emit(p.progress_key, {
+              type: "turn_end",
+              turn,
+              model: llm.model,
+              cost_usd: llm.cost_usd,
+              tokens: llm.input_tokens + llm.output_tokens,
+              input_tokens: llm.input_tokens,
+              output_tokens: llm.output_tokens,
+              latency_ms: Date.now() - turnStartedAt,
+              llm_latency_ms: llm.llm_latency_ms,
+              phase_pre_llm_ms: preLlmMs,
+              phase_tool_exec_ms: 0,
+              done: false,
+              planning_artifact_reason: planningArtifactReason,
+              query_profile: queryProfile.key,
+              query_profile_complexity: (selectedRoute as any)?.complexity || "unknown",
+              query_profile_category: (selectedRoute as any)?.category || "unknown",
+              query_profile_role: (selectedRoute as any)?.role || "unknown",
+            });
+            continue;
+          }
+          terminationReason = "planning_artifact_exhausted";
+          finalOutput = "I could not finalize because this task required a structured plan artifact and the run never produced a valid plan.v1 block.";
+          await this.emit(p.progress_key, {
+            type: "error",
+            message: "Planning artifact gate exhausted: no valid plan.v1 artifact was produced.",
+            planning_artifact_reason: planningArtifactReason,
+          });
+          break;
+        }
         const completionGate = (planOnlyRequested || planApprovedByParent)
           ? { blocked: false, reason: "" }
           : looksLikePrematurePlanCompletion(llm.content, p.input, totalToolCalls);
@@ -1723,6 +1779,7 @@ ALWAYS:
           input_tokens: llm.input_tokens, output_tokens: llm.output_tokens,
           cost_usd: llm.cost_usd, latency_ms: totalTurnMs,
           tool_calls: [], tool_results: [], errors: [],
+          plan_artifact: turnPlanningArtifact || undefined,
           stop_reason: llm.stop_reason, refusal: llm.refusal,
           llm_latency_ms: llm.llm_latency_ms,
           ttft_ms: llm.ttft_ms,
@@ -1790,6 +1847,50 @@ ALWAYS:
 
       // Filter out discover-tools from actual execution
       const executableCalls = llm.tool_calls.filter(tc => tc.name !== "discover-tools");
+      if (planningArtifactRequired && executableCalls.length > 0 && !validatedPlanningArtifact) {
+        if (planningArtifactInterventions < MAX_PLANNING_ARTIFACT_INTERVENTIONS && turn < config.max_turns) {
+          planningArtifactInterventions++;
+          messages.push({ role: "assistant", content: llm.content || "" });
+          messages.push({
+            role: "system",
+            content: "Planning contract: before executing tools for this task, emit a fenced ```json``` artifact with schema_version \"plan.v1\", goal, steps[{id,title,acceptance}], assumptions[], alternatives[{option,rationale}], and tradeoffs[]. Do not call tools until the artifact is present.",
+          });
+          await this.emit(p.progress_key, {
+            type: "warning",
+            message: "Structured planning artifact required before tool execution.",
+            planning_artifact_reason: planningArtifactReason,
+            planning_artifact_interventions: planningArtifactInterventions,
+          });
+          await this.emit(p.progress_key, {
+            type: "turn_end",
+            turn,
+            model: llm.model,
+            cost_usd: llm.cost_usd,
+            tokens: llm.input_tokens + llm.output_tokens,
+            input_tokens: llm.input_tokens,
+            output_tokens: llm.output_tokens,
+            latency_ms: Date.now() - turnStartedAt,
+            llm_latency_ms: llm.llm_latency_ms,
+            phase_pre_llm_ms: preLlmMs,
+            phase_tool_exec_ms: 0,
+            done: false,
+            planning_artifact_reason: planningArtifactReason,
+            query_profile: queryProfile.key,
+            query_profile_complexity: (selectedRoute as any)?.complexity || "unknown",
+            query_profile_category: (selectedRoute as any)?.category || "unknown",
+            query_profile_role: (selectedRoute as any)?.role || "unknown",
+          });
+          continue;
+        }
+        terminationReason = "planning_artifact_exhausted";
+        finalOutput = "I could not continue because this task required a structured plan artifact before any tools could run, and the run never produced a valid plan.v1 block.";
+        await this.emit(p.progress_key, {
+          type: "error",
+          message: "Planning artifact gate exhausted before tool execution.",
+          planning_artifact_reason: planningArtifactReason,
+        });
+        break;
+      }
       transitionPhase("executing");
       const toolExecStartedAt = Date.now();
 
@@ -2140,6 +2241,7 @@ ALWAYS:
           error: tr.error,
         })),
         errors: toolResultEntries.filter(tr => tr.error).map(tr => `${tr.name}: ${tr.error}`),
+        plan_artifact: turnPlanningArtifact || undefined,
       });
 
       // ── Cloud C4.1+C4.2: Heartbeat + cost backup ──
@@ -3060,6 +3162,7 @@ ALWAYS:
             tool_calls: JSON.stringify(turnData.tool_calls || []),
             tool_results: JSON.stringify(turnData.tool_results || []),
             errors: JSON.stringify(turnData.errors || []),
+            plan_artifact: turnData.plan_artifact || {},
           },
         })
       ));

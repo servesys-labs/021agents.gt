@@ -55,19 +55,23 @@ function requireAuth(c: any): Response | null {
 async function checkAgentAccess(c: any, agentName: string, orgId: string): Promise<Response | null> {
   const user = c.get("user");
 
-  // Check if API key is scoped to specific agents (resolved in auth middleware)
-  if (user?.allowedAgents && user.allowedAgents.length > 0) {
-    if (!user.allowedAgents.includes(agentName) && !user.allowedAgents.includes("*")) {
-      return c.json({ error: `API key not authorized for agent: ${agentName}` }, 403);
-    }
-  }
-
   // Verify agent exists and is active
   let agents: any[] = [];
   try {
     agents = await withOrgDb(c.env, orgId, async (sql) => {
       return await sql`
-        SELECT name FROM agents WHERE name = ${agentName} AND is_active = true LIMIT 1
+        SELECT handle
+        FROM agents
+        WHERE (
+          agent_id = ${agentName}
+          OR handle = ${agentName}
+          OR name = ${agentName}
+        )
+          AND is_active = true
+          AND COALESCE(config->>'internal', 'false') <> 'true'
+          AND COALESCE(config->>'hidden', 'false') <> 'true'
+          AND COALESCE(config->>'parent_agent', '') = ''
+        LIMIT 1
       `;
     });
   } catch (err) {
@@ -76,6 +80,16 @@ async function checkAgentAccess(c: any, agentName: string, orgId: string): Promi
 
   if (agents.length === 0) {
     return c.json({ error: `Agent not found: ${agentName}` }, 404);
+  }
+
+  const resolvedHandle = String(agents[0].handle || agentName);
+  // Check if API key is scoped to specific agents (resolved in auth middleware).
+  // Allow either the resolved handle or "*" so callers can use agent_id paths
+  // without breaking key-scoped access.
+  if (user?.allowedAgents && user.allowedAgents.length > 0) {
+    if (!user.allowedAgents.includes(resolvedHandle) && !user.allowedAgents.includes("*")) {
+      return c.json({ error: `API key not authorized for agent: ${resolvedHandle}` }, 403);
+    }
   }
 
   return null;

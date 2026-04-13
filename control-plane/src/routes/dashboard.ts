@@ -57,12 +57,22 @@ dashboardRoutes.openapi(statsRoute, async (c): Promise<any> => {
         COALESCE(SUM(CASE WHEN is_active = true THEN 1 ELSE 0 END), 0) as live
       FROM agents
       WHERE is_active = true
+        AND COALESCE(config->>'internal', 'false') <> 'true'
+        AND COALESCE(config->>'hidden', 'false') <> 'true'
+        AND COALESCE(config->>'parent_agent', '') = ''
     `;
     total_agents = Number(agentStats.total);
     live_agents = Number(agentStats.live);
 
-    const nameRows = await sql`SELECT name FROM agents WHERE is_active = true`;
-    agentNames = nameRows.map((a: any) => String(a.name));
+    const nameRows = await sql`
+      SELECT handle
+      FROM agents
+      WHERE is_active = true
+        AND COALESCE(config->>'internal', 'false') <> 'true'
+        AND COALESCE(config->>'hidden', 'false') <> 'true'
+        AND COALESCE(config->>'parent_agent', '') = ''
+    `;
+    agentNames = nameRows.map((a: any) => String(a.handle));
   } catch (err) {
     console.error("[dashboard] Agent stats failed:", err);
   }

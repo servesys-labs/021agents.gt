@@ -66,6 +66,25 @@ export interface ToolResult {
   error?: string;
   latency_ms: number;
   cost_usd?: number;  // Tool execution cost (e.g., search API calls)
+  file_mutation?: FileMutationTelemetry;
+}
+
+export interface FileMutationTelemetry {
+  tool: "write-file" | "edit-file";
+  path: string;
+  existed_before: boolean;
+  before_content: string;
+  after_content: string;
+}
+
+export interface ImplementationComplexityMetrics {
+  files_touched: number;
+  lines_added: number;
+  lines_removed: number;
+  new_files_created: number;
+  measurement_scope: "tracked_file_tools_only";
+  tracked_tools: Array<"write-file" | "edit-file">;
+  possible_untracked_mutations: boolean;
 }
 
 // ── Turn ───────────────────────────────────────────────────────
@@ -87,7 +106,10 @@ export interface TurnResult {
 // ── Agent Config (loaded from Supabase) ────────────────────────
 
 export interface AgentConfig {
+  agent_id?: string;
+  agent_handle?: string;
   agent_name: string;
+  display_name?: string;
   system_prompt: string;
   provider: string;
   model: string;
@@ -137,6 +159,8 @@ export interface AgentConfig {
   harness?: Record<string, unknown>;
   /** Derived: false only when harness.enable_checkpoints === false. */
   enable_workspace_checkpoints?: boolean;
+  internal?: boolean;
+  hidden?: boolean;
 }
 
 // ── Runtime Context (flows through graph nodes) ────────────────
