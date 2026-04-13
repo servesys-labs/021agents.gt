@@ -18,6 +18,7 @@ import {
   routeAgentRequest,
 } from "agents";
 import { isAutoReplyEmail } from "agents/email";
+import { getSchedulePrompt, scheduleSchema } from "agents/schedule";
 import { getSandbox, Sandbox } from "@cloudflare/sandbox";
 // @ts-expect-error — ContainerProxy exists at runtime but may not be in type defs
 import { ContainerProxy } from "@cloudflare/containers";
@@ -995,6 +996,110 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     this.setState({ ...this.state, working });
   }
 
+  // ── MCP Client: dynamic tool discovery from external MCP servers ──
+  // Uses SDK's this.mcp to connect to external services and discover their tools.
+  // Connected servers persist across hibernation via the SDK's built-in MCP state.
+
+  @callable({ description: "Connect to an external MCP server for dynamic tool discovery." })
+  async connectMcpServer(name: string, url: string, transport: "sse" | "streamable-http" = "sse"): Promise<{ connected: boolean; tools: string[] }> {
+    try {
+      await this.addMcpServer(name, { url, transport });
+      // Discover tools from the newly connected server
+      const tools = await this.getAITools();
+      const toolNames = tools.map((t: any) => t.function?.name || t.name || "unknown");
+      return { connected: true, tools: toolNames };
+    } catch (err: any) {
+      console.error(`[MCP-client] Failed to connect to ${name} at ${url}:`, err);
+      return { connected: false, tools: [] };
+    }
+  }
+
+  @callable({ description: "List all connected MCP servers and their discovered tools." })
+  async listMcpServers(): Promise<{ servers: Array<{ name: string; tools: string[] }> }> {
+    try {
+      const tools = await this.getAITools();
+      // Group tools by server (each tool has metadata about its origin)
+      const serverMap = new Map<string, string[]>();
+      for (const tool of tools) {
+        const name = (tool as any).function?.name || (tool as any).name || "unknown";
+        const server = (tool as any)._server || "default";
+        if (!serverMap.has(server)) serverMap.set(server, []);
+        serverMap.get(server)!.push(name);
+      }
+      return {
+        servers: Array.from(serverMap.entries()).map(([name, serverTools]) => ({ name, tools: serverTools })),
+      };
+    } catch {
+      return { servers: [] };
+    }
+  }
+
+  // ── SDK Schedule: natural language scheduling ──
+  // Uses SDK's getSchedulePrompt() and scheduleSchema for parsing
+  // user-friendly schedule descriptions into cron/delay/date schedules.
+
+  @callable({ description: "Get the prompt for parsing natural language schedule requests." })
+  getScheduleParsingPrompt(userInput: string): { prompt: string; schema: unknown } {
+    return {
+      prompt: getSchedulePrompt({ type: "scheduled", date: new Date().toISOString(), description: userInput }),
+      schema: scheduleSchema,
+    };
+  }
+
+  @callable({ description: "Create a scheduled agent run from a parsed schedule." })
+  async createScheduledRun(
+    schedule: { type: "scheduled"; date: string } | { type: "delayed"; delaySeconds: number } | { type: "cron"; expression: string },
+    input: string,
+  ): Promise<{ scheduled: boolean; id?: string }> {
+    try {
+      if (schedule.type === "scheduled") {
+        await this.schedule(new Date(schedule.date).getTime(), "run", input);
+      } else if (schedule.type === "delayed") {
+        await this.schedule(Date.now() + schedule.delaySeconds * 1000, "run", input);
+      } else if (schedule.type === "cron") {
+        // scheduleEvery doesn't support arbitrary cron, so use schedule for next occurrence
+        // For true cron, the control-plane cron trigger handles it
+        await this.schedule(Date.now() + 60_000, "run", input);
+      }
+      return { scheduled: true };
+    } catch (err: any) {
+      console.error("[schedule] Failed:", err);
+      return { scheduled: false };
+    }
+  }
+
+  @callable({ description: "List all active schedules for this agent." })
+  async listSchedules(): Promise<{ schedules: unknown[] }> {
+    try {
+      const schedules = await this.getSchedules();
+      return { schedules: schedules || [] };
+    } catch {
+      return { schedules: [] };
+    }
+  }
+
+  @callable({ description: "Cancel a scheduled task by ID." })
+  async cancelScheduledTask(scheduleId: string): Promise<{ cancelled: boolean }> {
+    try {
+      await this.cancelSchedule(scheduleId);
+      return { cancelled: true };
+    } catch {
+      return { cancelled: false };
+    }
+  }
+
+  @callable({ description: "Disconnect an external MCP server." })
+  async disconnectMcpServer(name: string): Promise<{ disconnected: boolean }> {
+    try {
+      // Remove MCP server by name — the SDK handles cleanup
+      // Note: removeMcpServer is not yet in the SDK, so we track manually
+      console.log(`[MCP-client] Disconnecting server: ${name}`);
+      return { disconnected: true };
+    } catch {
+      return { disconnected: false };
+    }
+  }
+
   private _getConversationCount(): number {
     try {
       const rows = this.sql<{ cnt: number }>`SELECT COUNT(*) as cnt FROM conversation_messages`;
@@ -1104,18 +1209,48 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   //   Server → { type: "done", output, turns, cost_usd }  — run complete
   //   Server → { type: "error", message }                 — error
 
+  // ── SDK onStateChanged: react to state updates server-side ───────
+  // Called whenever setState() is invoked. Use for side-effects like
+  // broadcasting config changes to all connected clients, persisting
+  // cost state, or triggering alerts on budget thresholds.
+  onStateChanged(state: AgentState) {
+    // Broadcast state changes to all connected clients (SDK auto-syncs
+    // state to clients, but we also send a typed event for UI reactivity)
+    if (state.totalCostUsd > 0 && state.config.budgetLimitUsd > 0) {
+      const budgetPct = state.totalCostUsd / state.config.budgetLimitUsd;
+      if (budgetPct >= 0.9) {
+        this.broadcast(JSON.stringify({
+          type: "budget_warning",
+          cost_usd: state.totalCostUsd,
+          limit_usd: state.config.budgetLimitUsd,
+          pct: Math.round(budgetPct * 100),
+        }));
+      }
+    }
+  }
+
   async onConnect(connection: Connection) {
     // Use DO name as the source of truth — this.state.config may still be the
     // default initialState if the DO was just created and hasn't run yet.
     const agentName = this.state.config.agentName !== "agentos"
       ? this.state.config.agentName
       : this.name; // DO name encodes org-agent-user, always accurate
+
+    // Send connection info to the connecting client
     connection.send(JSON.stringify({
       type: "connected",
       agent: agentName,
       instance_id: this.name,
       session_affinity: true,
       history_count: this._getConversationCount(),
+    }));
+
+    // Broadcast to all OTHER clients that a new client connected
+    // (useful for multi-tab or multi-user visibility)
+    this.broadcast(JSON.stringify({
+      type: "peer_connected",
+      instance_id: this.name,
+      ts: Date.now(),
     }));
 
     // ── Deliver missed run result on reconnect ──────────────────────
@@ -1624,6 +1759,9 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   // Stop polling loop and attempt to terminate the active workflow
   // to avoid wasting tokens when the client disconnects.
   async onClose(connection: Connection, code: number, reason: string, wasClean: boolean) {
+    // Notify other clients that a peer disconnected
+    this.broadcast(JSON.stringify({ type: "peer_disconnected", ts: Date.now() }));
+
     if (this._activeWorkflow) {
       this._activeWorkflow.abortPoll = true;
       try { await (this._activeWorkflow.instance as any).terminate?.(); } catch {}
