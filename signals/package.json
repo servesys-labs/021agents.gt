@@ -1,0 +1,14 @@
+{
+  "name": "agentos-signals",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260301.0",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.80.0"
+  }
+}
