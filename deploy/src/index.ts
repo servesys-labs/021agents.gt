@@ -1,11 +1,13 @@
 /**
- * AgentOS — Cloudflare Agents Deployment (Modernized)
+ * AgentOS — Cloudflare Agents Deployment
  *
- * Uses Cloudflare Agents SDK patterns:
+ * Aligned with Cloudflare Agents SDK patterns:
  *   - @callable() methods for type-safe RPC
- *   - Dedicated MCP server agent for MCP protocol support
- *   - this.schedule() / this.queue() for job orchestration
+ *   - McpAgent for MCP protocol support
+ *   - this.scheduleEvery() for recurring job orchestration
  *   - this.sql`` for persistent state
+ *   - this.keepAliveWhile() to prevent mid-operation eviction
+ *   - isAutoReplyEmail() for email safety
  *   - routeAgentRequest for URL-based agent dispatch
  */
 
@@ -681,13 +683,13 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       console.warn(`[DO:onStart] workspace recovery failed: ${err instanceof Error ? err.message : err}`);
     }
 
-    // ── Initiate checkpoint schedule ────────────────────────────────
-    // Kick off the self-rescheduling checkpoint chain. Without this,
-    // checkpointWorkspace() is never called (it relies on being scheduled).
-    // Skipped when harness.enable_checkpoints === false (synced from DB on first run).
+    // ── Initiate recurring checkpoint schedule ──────────────────────
+    // SDK scheduleEvery() creates a recurring schedule that survives hibernation.
+    // Replaces the self-rescheduling chain (this.schedule → callback → this.schedule)
+    // which was fragile: if the callback threw, the chain broke silently.
     if (this.state.config.enableWorkspaceCheckpoints !== false) {
       try {
-        await this.schedule(Date.now() + 30_000, "checkpointWorkspace");
+        await this.scheduleEvery(30, "checkpointWorkspace");
       } catch {}
     }
 
@@ -719,7 +721,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   /**
    * Scheduled callback: save workspace + state to DO SQLite every 30 seconds.
    * If the DO hibernates between checkpoints, SQLite retains the last one.
-   * Called via `this.schedule(Date.now() + 30_000, "checkpointWorkspace")`.
+   * Called every 30s via `this.scheduleEvery(30, "checkpointWorkspace")` from onStart().
    */
   async checkpointWorkspace() {
     if (this.state.config.enableWorkspaceCheckpoints === false) {
@@ -799,11 +801,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       console.warn(`[DO:alarm] checkpoint failed: ${err instanceof Error ? err.message : err}`);
     }
 
-    // Re-schedule for next checkpoint (30 seconds)
-    // (enableWorkspaceCheckpoints === false already returned above)
-    try {
-      await this.schedule(Date.now() + 30_000, "checkpointWorkspace");
-    } catch {}
+    // No manual re-scheduling needed — scheduleEvery() in onStart() handles recurrence.
   }
 
   /** Load harness.enable_checkpoints from Supabase and update DO state. Cached 5 minutes. */
@@ -875,6 +873,10 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
 
     // ── Workflow path (primary) ──
     if (this.env.AGENT_RUN_WORKFLOW) {
+      // SDK keepAliveWhile(): prevent eviction during RPC-initiated workflow poll
+      const keepAlivePromise = this.keepAliveWhile(async () => {
+        await new Promise(r => setTimeout(r, 300_000)); // max 5 min
+      }).catch(() => {});
       const history = this._loadConversationHistory(24);
       const progressKey = `rpc:${this.name}:${Date.now()}`;
       const instance = await this.env.AGENT_RUN_WORKFLOW.create({
@@ -1323,6 +1325,16 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       }
 
       this._activeRun = true;
+
+      // SDK keepAliveWhile(): prevent DO eviction during the entire run.
+      // Without this, a long-running workflow poll can be interrupted by
+      // hibernation, requiring the complex orphaned-workflow recovery path.
+      this.keepAliveWhile(async () => {
+        // Wait for _activeRun to flip false (set in onClose, run completion, or error)
+        while (this._activeRun) {
+          await new Promise(r => setTimeout(r, 5000));
+        }
+      }).catch(() => {}); // non-blocking — just prevents eviction
 
       const config = this.state.config;
       const inputText = rawInput;
