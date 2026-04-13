@@ -1003,10 +1003,12 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   @callable({ description: "Connect to an external MCP server for dynamic tool discovery." })
   async connectMcpServer(name: string, url: string, transport: "sse" | "streamable-http" = "sse"): Promise<{ connected: boolean; tools: string[] }> {
     try {
-      await this.addMcpServer(name, { url, transport });
-      // Discover tools from the newly connected server
-      const tools = await this.getAITools();
-      const toolNames = tools.map((t: any) => t.function?.name || t.name || "unknown");
+      // SDK signature: addMcpServer(serverName, url, options?)
+      // url must be a string, transport type goes in options
+      await this.addMcpServer(name, url, { transport: { type: transport } } as any);
+      // Discover tools from all connected MCP servers via this.mcp
+      const tools = await this.mcp.getAITools();
+      const toolNames = Object.keys(tools || {});
       return { connected: true, tools: toolNames };
     } catch (err: any) {
       console.error(`[MCP-client] Failed to connect to ${name} at ${url}:`, err);
@@ -1017,17 +1019,16 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   @callable({ description: "List all connected MCP servers and their discovered tools." })
   async listMcpServers(): Promise<{ servers: Array<{ name: string; tools: string[] }> }> {
     try {
-      const tools = await this.getAITools();
-      // Group tools by server (each tool has metadata about its origin)
-      const serverMap = new Map<string, string[]>();
-      for (const tool of tools) {
-        const name = (tool as any).function?.name || (tool as any).name || "unknown";
-        const server = (tool as any)._server || "default";
-        if (!serverMap.has(server)) serverMap.set(server, []);
-        serverMap.get(server)!.push(name);
-      }
+      // this.mcp.getAITools() returns Record<string, CoreTool> (flat map of all tools)
+      const tools = await this.mcp.getAITools();
+      const toolNames = Object.keys(tools || {});
+      // The SDK's mcpServers state tracks connected servers
+      const mcpState = this.state as any;
+      const serverNames = Array.isArray(mcpState?._mcpServers)
+        ? mcpState._mcpServers.map((s: any) => s.name || "unknown")
+        : ["default"];
       return {
-        servers: Array.from(serverMap.entries()).map(([name, serverTools]) => ({ name, tools: serverTools })),
+        servers: serverNames.map((name: string) => ({ name, tools: toolNames })),
       };
     } catch {
       return { servers: [] };
@@ -1040,8 +1041,9 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
 
   @callable({ description: "Get the prompt for parsing natural language schedule requests." })
   getScheduleParsingPrompt(userInput: string): { prompt: string; schema: unknown } {
+    // SDK expects { date: Date } — Date object, not ISO string
     return {
-      prompt: getSchedulePrompt({ type: "scheduled", date: new Date().toISOString(), description: userInput }),
+      prompt: getSchedulePrompt({ date: new Date() }),
       schema: scheduleSchema,
     };
   }
@@ -1091,11 +1093,10 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   @callable({ description: "Disconnect an external MCP server." })
   async disconnectMcpServer(name: string): Promise<{ disconnected: boolean }> {
     try {
-      // Remove MCP server by name — the SDK handles cleanup
-      // Note: removeMcpServer is not yet in the SDK, so we track manually
-      console.log(`[MCP-client] Disconnecting server: ${name}`);
+      await this.removeMcpServer(name);
       return { disconnected: true };
-    } catch {
+    } catch (err: any) {
+      console.error(`[MCP-client] Failed to disconnect ${name}:`, err);
       return { disconnected: false };
     }
   }
@@ -1210,12 +1211,11 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   //   Server → { type: "error", message }                 — error
 
   // ── SDK onStateChanged: react to state updates server-side ───────
-  // Called whenever setState() is invoked. Use for side-effects like
-  // broadcasting config changes to all connected clients, persisting
-  // cost state, or triggering alerts on budget thresholds.
-  onStateChanged(state: AgentState) {
-    // Broadcast state changes to all connected clients (SDK auto-syncs
-    // state to clients, but we also send a typed event for UI reactivity)
+  // Called whenever setState() is invoked. SDK signature passes
+  // (state | undefined, source) — state can be undefined on reset.
+  onStateChanged(state: AgentState | undefined, source: Connection | "server") {
+    if (!state) return; // state can be undefined on reset
+    // Broadcast budget warnings to all connected clients
     if (state.totalCostUsd > 0 && state.config.budgetLimitUsd > 0) {
       const budgetPct = state.totalCostUsd / state.config.budgetLimitUsd;
       if (budgetPct >= 0.9) {
@@ -1473,9 +1473,10 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       // SDK keepAliveWhile(): prevent DO eviction during the entire run.
       // Without this, a long-running workflow poll can be interrupted by
       // hibernation, requiring the complex orphaned-workflow recovery path.
+      // Timeout guard: exit after 5 minutes even if _activeRun is stuck.
       this.keepAliveWhile(async () => {
-        // Wait for _activeRun to flip false (set in onClose, run completion, or error)
-        while (this._activeRun) {
+        const deadline = Date.now() + 300_000; // 5 min max
+        while (this._activeRun && Date.now() < deadline) {
           await new Promise(r => setTimeout(r, 5000));
         }
       }).catch(() => {}); // non-blocking — just prevents eviction
@@ -1915,8 +1916,10 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   // and replies to the sender with the agent's response.
 
   async onEmail(email: ForwardableEmailMessage) {
-    // SDK safety: reject auto-reply emails (OOO, vacation, mailing-list) to prevent infinite loops
-    if (isAutoReplyEmail(email.headers)) {
+    // SDK safety: reject auto-reply emails (OOO, vacation, mailing-list) to prevent infinite loops.
+    // Convert Web API Headers to the EmailHeader[] format the SDK expects.
+    const headerArray = [...email.headers].map(([key, value]) => ({ key, value }));
+    if (isAutoReplyEmail(headerArray)) {
       console.log(`[onEmail] Skipping auto-reply from ${email.from}`);
       return;
     }
@@ -8256,8 +8259,10 @@ export default {
   // Uses SDK auto-reply detection to prevent infinite loops, then resolves
   // agent via address-based sub-addressing (e.g. support-bot.d8ec4cf7@oneshots.co).
   async email(message: ForwardableEmailMessage, env: Env, ctx: ExecutionContext): Promise<void> {
-    // SDK safety: reject auto-reply emails (OOO, vacation, mailing-list bounces)
-    if (isAutoReplyEmail(message.headers)) {
+    // SDK safety: reject auto-reply emails (OOO, vacation, mailing-list bounces).
+    // Convert Web API Headers to the EmailHeader[] format the SDK expects.
+    const msgHeaders = [...message.headers].map(([key, value]) => ({ key, value }));
+    if (isAutoReplyEmail(msgHeaders)) {
       console.log(`[email] Skipping auto-reply from ${message.from}`);
       return;
     }
