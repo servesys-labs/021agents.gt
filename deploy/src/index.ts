@@ -2621,24 +2621,127 @@ async function authorizeAgentIngress(request: Request, env: Env): Promise<Respon
 
 // ---------------------------------------------------------------------------
 // MCP Server Agent — exposes tools via Model Context Protocol
+//
+// Uses SDK's McpAgent base class for full MCP protocol compliance:
+// - SSE + HTTP streaming transports (handled by SDK)
+// - Proper capability negotiation
+// - Resources + prompts support (beyond just tools)
+// - Lifecycle management (initialize, notifications)
 // ---------------------------------------------------------------------------
 
-export class AgentOSMcpServer extends Agent<Env> {
+import { McpAgent } from "agents/mcp";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+
+export class AgentOSMcpServer extends McpAgent<Env, {}, {}> {
   // Cached agent config loaded from Supabase
   private _agentConfig: Record<string, unknown> | null = null;
-  private _agentTools: Array<{ name: string; description: string; inputSchema: Record<string, unknown> }> = [];
+  private _orgId: string = "";
 
-  async onStart() {
-    // Load agent config from Supabase via Hyperdrive on startup
+  server = new McpServer({
+    name: "agentos-mcp",
+    version: "0.2.0",
+  });
+
+  async init() {
+    // Load agent config from Supabase to discover tools
     await this._loadAgentConfig();
+
+    // ── Core tools: always available ──
+
+    this.server.tool(
+      "run-agent",
+      "Run an AgentOS agent on a task. Returns the agent's output.",
+      { task: z.string().describe("Task to execute"), agent_name: z.string().optional().describe("Agent name (defaults to this agent)") },
+      async ({ task, agent_name }) => {
+        const targetAgent = agent_name || this.name || "default";
+        const orgPrefix = this._orgId ? `${this._orgId}-` : "";
+        const agentId = this.env.AGENTOS_AGENT.idFromName(`${orgPrefix}${targetAgent}`);
+        const agent = this.env.AGENTOS_AGENT.get(agentId);
+        const resp = await agent.fetch(new Request("http://internal/run", {
+          method: "POST",
+          body: JSON.stringify({ input: task }),
+        }));
+        const result = await resp.json() as Record<string, unknown>;
+        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+      },
+    );
+
+    this.server.tool(
+      "search-knowledge",
+      "Search the agent's knowledge base for relevant information.",
+      { query: z.string().min(1).describe("Search query") },
+      async ({ query }) => {
+        const orgPrefix = this._orgId ? `${this._orgId}-` : "";
+        const agentId = this.env.AGENTOS_AGENT.idFromName(`${orgPrefix}${this.name || "default"}`);
+        const agent = this.env.AGENTOS_AGENT.get(agentId);
+        const resp = await agent.fetch(new Request("http://internal/run", {
+          method: "POST",
+          body: JSON.stringify({ input: `Use knowledge search for: ${query}` }),
+        }));
+        const result = await resp.json() as Record<string, unknown>;
+        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+      },
+    );
+
+    // ── Dynamic tools: loaded from agent config ──
+
+    const configuredTools = Array.isArray(this._agentConfig?.tools)
+      ? (this._agentConfig!.tools as string[])
+      : [];
+
+    // Load tool schemas from registry for richer definitions
+    const schemaMap = await this._loadToolSchemas(configuredTools);
+
+    for (const toolName of configuredTools) {
+      const registered = schemaMap.get(toolName);
+      const description = registered?.description || `Execute the '${toolName}' tool via AgentOS`;
+
+      this.server.tool(
+        toolName,
+        description,
+        { input: z.string().describe("Input for the tool"), parameters: z.record(z.unknown()).optional().describe("Additional parameters") },
+        async ({ input, parameters }) => {
+          const orgPrefix = this._orgId ? `${this._orgId}-` : "";
+          const agentId = this.env.AGENTOS_AGENT.idFromName(`${orgPrefix}${this.name || "default"}`);
+          const agent = this.env.AGENTOS_AGENT.get(agentId);
+          const resp = await agent.fetch(new Request("http://internal/run", {
+            method: "POST",
+            body: JSON.stringify({
+              input: `Execute tool '${toolName}' with input: ${input}`,
+              tool_override: toolName,
+              tool_args: { input, ...parameters },
+            }),
+          }));
+          const result = await resp.json() as Record<string, unknown>;
+          return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+        },
+      );
+    }
+
+    // ── Resources: expose agent info ──
+
+    this.server.resource(
+      "agent-config",
+      "agentos://agent/config",
+      async (uri) => ({
+        contents: [{
+          uri: uri.href,
+          text: JSON.stringify({
+            name: this.name || "default",
+            org_id: this._orgId,
+            tools: configuredTools,
+            config: this._agentConfig,
+          }, null, 2),
+          mimeType: "application/json",
+        }],
+      }),
+    );
   }
 
   /**
-   * Load agent configuration and tool definitions from Supabase.
-   * The agent name is derived from this DO's name (set via idFromName).
+   * Load agent configuration from Supabase.
    */
-  private _orgId: string = "";
-
   private async _loadAgentConfig(orgId?: string): Promise<void> {
     if (orgId) this._orgId = orgId;
     if (!this.env.HYPERDRIVE) return;
@@ -2661,249 +2764,35 @@ export class AgentOSMcpServer extends Agent<Env> {
           `;
       if (rows.length === 0) return;
 
-      let config: Record<string, unknown> = {};
-      config = parseJsonColumn(rows[0].config);
-      this._agentConfig = config;
-
-      // Ensure org_id from the agents table flows into the DO state and config
+      this._agentConfig = parseJsonColumn(rows[0].config);
       const dbOrgId = rows[0].org_id || "";
-      if (dbOrgId) {
-        this._orgId = dbOrgId;
-        // Merge into state.config so all code paths (REST, WS, billing) can find it
-        const st = this.state as AgentState;
-        if (!st.config.orgId) {
-          this.setState({ ...st, config: { ...st.config, orgId: dbOrgId } });
-        }
-      }
-
-      // Build MCP tool definitions from agent's configured tools
-      const configuredTools = Array.isArray(config.tools) ? (config.tools as string[]) : [];
-      this._agentTools = [
-        // Always include the built-in run-agent tool
-        {
-          name: "run-agent",
-          description: `Run the ${agentName} agent on a task`,
-          inputSchema: {
-            type: "object",
-            properties: {
-              agent_name: { type: "string", description: "Agent name (defaults to this agent)" },
-              task: { type: "string", description: "Task to execute" },
-            },
-            required: ["task"],
-          },
-        },
-        // Always include knowledge search
-        {
-          name: "search-knowledge",
-          description: "Search the agent's knowledge base",
-          inputSchema: {
-            type: "object",
-            properties: {
-              query: { type: "string", description: "Search query" },
-            },
-            required: ["query"],
-          },
-        },
-        // Expose each configured tool as an MCP tool
-        ...configuredTools.map((toolName: string) => ({
-          name: toolName,
-          description: `Execute the '${toolName}' tool via AgentOS`,
-          inputSchema: {
-            type: "object" as const,
-            properties: {
-              input: { type: "string", description: "Input for the tool" },
-              parameters: { type: "object", description: "Additional parameters" },
-            },
-            required: ["input"],
-          },
-        })),
-      ];
-
-      // Load detailed tool schemas from tool_registry if available.
-      // IN ${sql(array)} (no parens) — see control-plane/routes/dashboard.ts
-      // for why ANY(${array}) breaks under Hyperdrive's prepare:false.
-      if (configuredTools.length > 0) {
-        try {
-          const toolRows = await sql`
-            SELECT name, description, schema FROM tool_registry
-            WHERE name IN ${sql(configuredTools)}
-          `;
-          const schemaMap = new Map<string, { description: string; schema: Record<string, unknown> }>();
-          for (const row of toolRows) {
-            let schema: Record<string, unknown> = {};
-            schema = parseJsonColumn(row.schema);
-            schemaMap.set(String(row.name), {
-              description: String(row.description || ""),
-              schema,
-            });
-          }
-          // Enrich tool definitions with proper schemas
-          for (const tool of this._agentTools) {
-            const registered = schemaMap.get(tool.name);
-            if (registered) {
-              if (registered.description) tool.description = registered.description;
-              if (Object.keys(registered.schema).length > 0) tool.inputSchema = registered.schema;
-            }
-          }
-        } catch { /* tool_registry may not exist — use defaults */ }
-      }
+      if (dbOrgId) this._orgId = dbOrgId;
     } catch (err) {
       console.error("[MCP] Failed to load agent config:", err);
     }
   }
 
-  async onRequest(request: Request): Promise<Response> {
-    // Extract org_id from query params for scoped agent lookups
-    const url = new URL(request.url);
-    const reqOrgId = url.searchParams.get("org_id") || "";
-    if (reqOrgId && !this._orgId) this._orgId = reqOrgId;
-
-    // MCP JSON-RPC handler
-    if (request.method === "POST") {
-      const body = await request.json() as any;
-      const method = body.method;
-      const id = body.id;
-
-      if (method === "initialize") {
-        // Reload config on each initialize to pick up changes
-        await this._loadAgentConfig(reqOrgId || undefined);
-        return Response.json({
-          jsonrpc: "2.0", id,
-          result: {
-            protocolVersion: "2024-11-05",
-            capabilities: {
-              tools: { listChanged: true },
-            },
-            serverInfo: {
-              name: "agentos-mcp",
-              version: "0.2.0",
-              agentName: this.name || "default",
-            },
-          },
+  /**
+   * Load tool schemas from tool_registry for richer MCP tool definitions.
+   */
+  private async _loadToolSchemas(toolNames: string[]): Promise<Map<string, { description: string; schema: Record<string, unknown> }>> {
+    const map = new Map<string, { description: string; schema: Record<string, unknown> }>();
+    if (toolNames.length === 0 || !this.env.HYPERDRIVE) return map;
+    try {
+      const { getDb } = await import("./runtime/db");
+      const sql = await getDb(this.env.HYPERDRIVE);
+      const rows = await sql`
+        SELECT name, description, schema FROM tool_registry
+        WHERE name IN ${sql(toolNames)}
+      `;
+      for (const row of rows) {
+        map.set(String(row.name), {
+          description: String(row.description || ""),
+          schema: parseJsonColumn(row.schema),
         });
       }
-
-      if (method === "tools/list") {
-        // Ensure config is loaded
-        if (this._agentTools.length === 0) await this._loadAgentConfig();
-        return Response.json({
-          jsonrpc: "2.0", id,
-          result: { tools: this._agentTools },
-        });
-      }
-
-      if (method === "tools/call") {
-        const toolName = body.params?.name;
-        const args = body.params?.arguments || {};
-
-        if (toolName === "run-agent") {
-          // Delegate to the main agent
-          try {
-            const targetAgent = args.agent_name || this.name || "default";
-            const agentId = this.env.AGENTOS_AGENT.idFromName(targetAgent);
-            const agent = this.env.AGENTOS_AGENT.get(agentId);
-            const resp = await agent.fetch(new Request("http://internal/run", {
-              method: "POST",
-              body: JSON.stringify({ input: args.task }),
-            }));
-            const result = await resp.json();
-            return Response.json({
-              jsonrpc: "2.0", id,
-              result: { content: [{ type: "text", text: JSON.stringify(result) }] },
-            });
-          } catch (err: any) {
-            return Response.json({
-              jsonrpc: "2.0", id,
-              result: {
-                content: [{ type: "text", text: `run-agent failed: ${err?.message || err}` }],
-                isError: true,
-              },
-            });
-          }
-        }
-
-        if (toolName === "search-knowledge") {
-          const query = String(args.query || "");
-          if (!query.trim()) {
-            return Response.json({
-              jsonrpc: "2.0", id,
-              result: { content: [{ type: "text", text: "query is required" }], isError: true },
-            });
-          }
-          try {
-            const agentId = this.env.AGENTOS_AGENT.idFromName(this.name || "default");
-            const agent = this.env.AGENTOS_AGENT.get(agentId);
-            const resp = await agent.fetch(new Request("http://internal/run", {
-              method: "POST",
-              body: JSON.stringify({ input: `Use knowledge search for: ${query}` }),
-            }));
-            const result = await resp.json();
-            return Response.json({
-              jsonrpc: "2.0", id,
-              result: { content: [{ type: "text", text: JSON.stringify(result) }] },
-            });
-          } catch (err: any) {
-            return Response.json({
-              jsonrpc: "2.0", id,
-              result: {
-                content: [{ type: "text", text: `search-knowledge failed: ${err?.message || err}` }],
-                isError: true,
-              },
-            });
-          }
-        }
-
-        // Dispatch configured tools via the agent DO
-        const configuredTools = Array.isArray(this._agentConfig?.tools) ? (this._agentConfig!.tools as string[]) : [];
-        if (configuredTools.includes(toolName)) {
-          try {
-            const agentId = this.env.AGENTOS_AGENT.idFromName(this.name || "default");
-            const agent = this.env.AGENTOS_AGENT.get(agentId);
-            const resp = await agent.fetch(new Request("http://internal/run", {
-              method: "POST",
-              body: JSON.stringify({
-                input: `Execute tool '${toolName}' with input: ${args.input || JSON.stringify(args)}`,
-                tool_override: toolName,
-                tool_args: args,
-              }),
-            }));
-            const result = await resp.json();
-            return Response.json({
-              jsonrpc: "2.0", id,
-              result: { content: [{ type: "text", text: JSON.stringify(result) }] },
-            });
-          } catch (err: any) {
-            return Response.json({
-              jsonrpc: "2.0", id,
-              result: {
-                content: [{ type: "text", text: `Tool '${toolName}' failed: ${err?.message || err}` }],
-                isError: true,
-              },
-            });
-          }
-        }
-
-        return Response.json({
-          jsonrpc: "2.0", id,
-          result: { content: [{ type: "text", text: `Unknown tool: ${toolName}` }], isError: true },
-        });
-      }
-
-      // Unsupported method
-      return Response.json({
-        jsonrpc: "2.0", id,
-        error: { code: -32601, message: `Method not found: ${method}` },
-      });
-    }
-
-    // GET request — return server info
-    return Response.json({
-      name: "agentos-mcp",
-      version: "0.2.0",
-      agent: this.name || "default",
-      protocol: "MCP/2024-11-05",
-      endpoints: ["initialize", "tools/list", "tools/call"],
-    });
+    } catch { /* tool_registry may not exist */ }
+    return map;
   }
 }
 
