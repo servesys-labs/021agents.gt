@@ -40,6 +40,7 @@ import { createCodeTool, generateTypes } from "@cloudflare/codemode/ai";
 import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 import puppeteer from "@cloudflare/puppeteer";
 import webpush from "web-push";
+import { metaAgentTools as metaAgentToolSet, META_AGENT_SYSTEM_PROMPT } from "./meta-agent";
 
 // Env type is declared globally in env.d.ts via Cloudflare.Env.
 // LOADER, AgentSupervisor, GITHUB_TOKEN, OPENAI_API_KEY, ANTHROPIC_API_KEY
@@ -344,13 +345,24 @@ function createSkillProvider(skill: SkillDefinition) {
 
 const TENANTS: TenantConfig[] = [
   {
+    id: "meta",
+    name: "Agent Builder",
+    icon: "🧠",
+    description: "I help you create, test, and improve your AI agents",
+    model: "@cf/moonshotai/kimi-k2.5",
+    systemPrompt: "", // Set dynamically from meta-agent.ts
+    skills: [
+      SKILL_LIBRARY.find(s => s.name === "planning")!,
+    ],
+  },
+  {
     id: "default",
-    name: "General Assistant",
+    name: "Personal Assistant",
     icon: "✦",
-    description: "General purpose AI assistant",
+    description: "General purpose AI assistant for everyday tasks",
     model: "@cf/moonshotai/kimi-k2.5",
     systemPrompt:
-      "You are a helpful, concise assistant. You have skills available as context blocks — activate them when relevant. For general questions, respond with your own knowledge without calling any tools.",
+      "You are a helpful personal assistant. Help with research, writing, analysis, planning, and everyday tasks. Be concise and actionable. You have skills available as context blocks — activate them when the task benefits from structured methodology.",
     skills: [
       SKILL_LIBRARY.find(s => s.name === "deep-research")!,
       SKILL_LIBRARY.find(s => s.name === "report")!,
@@ -358,30 +370,13 @@ const TENANTS: TenantConfig[] = [
     ],
   },
   {
-    id: "coding",
-    name: "Coding Agent",
-    icon: "⌨",
-    description: "Code execution, review & architecture",
-    model: "@cf/moonshotai/kimi-k2.5",
-    systemPrompt: `You are an expert software engineer with a live sandbox and web tools.
-Execute code, install packages, clone repos, run commands. Use codemode for complex workflows.
-You have specialized skills available as context blocks — activate them when relevant.`,
-    enableSandbox: true,
-    skills: [
-      SKILL_LIBRARY.find(s => s.name === "code-review")!,
-      SKILL_LIBRARY.find(s => s.name === "debug")!,
-      SKILL_LIBRARY.find(s => s.name === "data-analysis")!,
-      SKILL_LIBRARY.find(s => s.name === "planning")!,
-    ],
-  },
-  {
     id: "support",
     name: "Customer Support",
     icon: "◎",
-    description: "Empathetic support & troubleshooting",
+    description: "Empathetic support agent for customer-facing interactions",
     model: "@cf/moonshotai/kimi-k2.5",
     systemPrompt:
-      "You are a friendly, empathetic customer support agent. Help troubleshoot issues, explain things clearly, and ensure the customer feels heard.",
+      "You are a friendly, empathetic customer support agent. Help troubleshoot issues, explain things clearly, and ensure the customer feels heard. Always be patient and professional. If you can't resolve something, acknowledge it and suggest next steps.",
     skills: [
       SKILL_LIBRARY.find(s => s.name === "debug")!,
     ],
@@ -390,10 +385,10 @@ You have specialized skills available as context blocks — activate them when r
     id: "research",
     name: "Research Analyst",
     icon: "◈",
-    description: "Analysis, synthesis & insights",
+    description: "Deep research, analysis, and report generation",
     model: "@cf/moonshotai/kimi-k2.5",
-    systemPrompt: `You are a research analyst with full web access. Always cite sources with URLs.
-You have specialized skills available as context blocks — activate them when the task requires structured methodology.`,
+    systemPrompt:
+      "You are a research analyst. Provide thorough analysis, cite sources with URLs, consider multiple perspectives, and synthesize findings clearly. Use your skills for structured research and reporting.",
     skills: [
       SKILL_LIBRARY.find(s => s.name === "deep-research")!,
       SKILL_LIBRARY.find(s => s.name === "report")!,
@@ -929,7 +924,10 @@ export class ChatAgent extends Think<Env> {
   }
 
   getSystemPrompt() {
-    return getTenantConfig(this.name).systemPrompt;
+    const config = getTenantConfig(this.name);
+    // Meta Agent uses its own system prompt from meta-agent.ts
+    if (config.id === "meta") return META_AGENT_SYSTEM_PROMPT;
+    return config.systemPrompt;
   }
 
   getTools() {
@@ -943,6 +941,8 @@ export class ChatAgent extends Think<Env> {
       ...browserTools(this.env),
       ...(config.enableSandbox ? sandboxTools(this.env) : {}),
       ...structuredInputTools(),
+      // Meta Agent gets agent management tools
+      ...(config.id === "meta" ? metaAgentToolSet(this.env) : {}),
     };
 
     // Wrap all tools with CodeMode — model writes JS to orchestrate tools
