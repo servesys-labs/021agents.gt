@@ -18,21 +18,29 @@
   // Vite-built React SPA served as static assets
   "assets": {
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/agents/*", "/api/*"]
+    "run_worker_first": ["/agents/*", "/api/*", "/.well-known/*", "/mcp"]
   },
 
-  // Durable Objects: ChatAgent (chat) + Sandbox (code execution) + AgentSupervisor (facets)
+  // Durable Objects: ChatAgent (Think) + Sandbox + AgentSupervisor + ReminderAgent + McpElicitation
   "durable_objects": {
     "bindings": [
       { "class_name": "ChatAgent", "name": "ChatAgent" },
       { "class_name": "Sandbox", "name": "Sandbox" },
-      { "class_name": "AgentSupervisor", "name": "AgentSupervisor" }
+      { "class_name": "AgentSupervisor", "name": "AgentSupervisor" },
+      { "class_name": "ReminderAgent", "name": "ReminderAgent" },
+      { "class_name": "McpElicitationServer", "name": "McpElicitationServer" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["ChatAgent"] },
     { "tag": "v2", "new_sqlite_classes": ["Sandbox"] },
-    { "tag": "v3", "new_sqlite_classes": ["AgentSupervisor"] }
+    { "tag": "v3", "new_sqlite_classes": ["AgentSupervisor"] },
+    { "tag": "v4", "new_sqlite_classes": ["ReminderAgent", "McpElicitationServer"] }
+  ],
+
+  // Analytics Engine for observability telemetry
+  "analytics_engine_datasets": [
+    { "binding": "ANALYTICS", "dataset": "agent_harness_telemetry" }
   ],
 
   // Cloudflare Container for Sandbox (code execution environment)
