@@ -1,9 +1,5 @@
-// wrangler.jsonc — Model Agent: reference implementation using all CF Agents SDK features
-//
-// This is the canonical pattern for building agents on Cloudflare.
-// Uses: Agent class, @callable, scheduleEvery, keepAliveWhile, broadcast,
-//       onStateChanged, McpAgent, DO Facets, Dynamic Workers, Workflows,
-//       WebSocket + SSE, email, and the full Agents SDK surface.
+// Model Agent — reference implementation using all CF Agents SDK features.
+// Follows canonical patterns from cloudflare/agents examples.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "model-agent",
@@ -12,39 +8,28 @@
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true, "head_sampling_rate": 1 },
 
+  // SPA asset serving — worker handles /agents/* and /api/* first
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*", "/api/*"]
+  },
+
   // ── Durable Objects ──
   "durable_objects": {
     "bindings": [
-      { "name": "AGENT", "class_name": "ModelAgent" },
-      { "name": "MCP_SERVER", "class_name": "ModelMcpServer" }
+      { "name": "ModelAgent", "class_name": "ModelAgent" }
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["ModelAgent", "ModelMcpServer"] }
+    { "tag": "v1", "new_sqlite_classes": ["ModelAgent"] }
   ],
 
-  // ── Dynamic Workers (for facets + code execution) ──
+  // ── Dynamic Workers (CodeMode isolate execution) ──
   "worker_loaders": [{ "binding": "LOADER" }],
 
   // ── Workers AI ──
   "ai": { "binding": "AI" },
 
-  // ── Vectorize for memory facet ──
-  "vectorize": [
-    { "binding": "VECTORIZE", "index_name": "agentos-knowledge-v2" }
-  ],
-
-  // ── KV for progress events ──
-  "kv_namespaces": [
-    { "binding": "PROGRESS_KV", "id": "30da23c287ee4f4c93d1a1f08cdd48a0" }
-  ],
-
-  // ── Cron for periodic tasks ──
-  "triggers": {
-    "crons": ["*/15 * * * *"]
-  },
-
-  "vars": {
-    "DEFAULT_MODEL": "gemma-4-26b-moe"
-  }
+  // ── Browser Rendering ──
+  "browser": { "binding": "MYBROWSER" }
 }
