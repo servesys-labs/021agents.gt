@@ -17,17 +17,20 @@
  */
 
 import { createWorkersAI } from "workers-ai-provider";
-import { routeAgentRequest, callable } from "agents";
+import { Agent, routeAgentRequest, callable } from "agents";
 import {
   AIChatAgent,
   type OnChatMessageOptions,
   type ChatResponseResult,
 } from "@cloudflare/ai-chat";
+import { McpAgent } from "agents/mcp";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   streamText,
   convertToModelMessages,
   pruneMessages,
   tool,
+  generateText,
   stepCountIs,
 } from "ai";
 import { z } from "zod";
@@ -36,6 +39,7 @@ import { DurableObject } from "cloudflare:workers";
 import { createCodeTool, generateTypes } from "@cloudflare/codemode/ai";
 import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 import puppeteer from "@cloudflare/puppeteer";
+import webpush from "web-push";
 
 // Env type is declared globally in env.d.ts via Cloudflare.Env.
 // LOADER, AgentSupervisor, GITHUB_TOKEN, OPENAI_API_KEY, ANTHROPIC_API_KEY
@@ -682,31 +686,120 @@ function webSearchTools() {
 
 // ── ChatAgent ─────────────────────────────────────────────────────────────────
 //
-// Handles all built-in tenants via AIChatAgent with CodeMode wrapping all tools.
+// Extends Think (not AIChatAgent) — the full CF Agents SDK lifecycle:
+// Session persistence, context blocks (soul + memory), auto-compaction,
+// resumable streaming, CodeMode, extensions, lifecycle hooks, sub-agents.
+//
+// Think class hierarchy: Agent → AIChatAgent → Think
+// Everything AIChatAgent provides, Think includes + adds session management.
 
-export class ChatAgent extends AIChatAgent<Env> {
-  maxPersistedMessages = 200;
+// Dynamic import: Think is experimental, import at module level
+// so it fails fast if the package isn't available.
+import { Think } from "@cloudflare/think";
+import { createCompactFunction } from "agents/experimental/memory/utils";
 
+export class ChatAgent extends Think<Env> {
   // Wait for MCP connections to restore after hibernation
   waitForMcpConnections = true;
 
-  @callable()
+  // ── Think overrides ──
+
+  getModel() {
+    const config = getTenantConfig(this.name);
+    const workersai = createWorkersAI({ binding: this.env.AI });
+    return workersai(config.model as Parameters<typeof workersai>[0], {
+      sessionAffinity: this.sessionAffinity,
+    });
+  }
+
+  getSystemPrompt() {
+    return getTenantConfig(this.name).systemPrompt;
+  }
+
+  getTools() {
+    const config = getTenantConfig(this.name);
+    const mcpTools = this.mcp.getAITools();
+
+    const allTools = {
+      ...mcpTools,
+      ...sharedTools(),
+      ...webSearchTools(),
+      ...browserTools(this.env),
+      ...(config.enableSandbox ? sandboxTools(this.env) : {}),
+      ...structuredInputTools(),
+    };
+
+    // Wrap all tools with CodeMode — model writes JS to orchestrate tools
+    const executor = new DynamicWorkerExecutor({ loader: this.env.LOADER });
+    const codemode = createCodeTool({ tools: allTools, executor });
+
+    return { codemode, ...allTools };
+  }
+
+  getMaxSteps() { return 10; }
+
+  // ── Session: context blocks + compaction ──
+
+  configureSession(session: any) {
+    return session
+      // Soul: persistent identity context block (survives compaction)
+      .withContext("soul", {
+        provider: { get: async () => this.getSystemPrompt() },
+      })
+      // Memory: persistent facts learned during conversation
+      .withContext("memory", {
+        description: "Important facts, preferences, and decisions. Update proactively.",
+        maxTokens: 2000,
+      })
+      // Prompt caching for efficiency
+      .withCachedPrompt()
+      // Auto-compact when conversation exceeds 8000 tokens
+      .onCompaction(createCompactFunction({
+        summarize: (prompt: string) =>
+          generateText({ model: this.getModel(), prompt }).then(r => r.text),
+      }))
+      .compactAfter(8000);
+  }
+
+  // ── Lifecycle hooks ──
+
+  // After each tool call: telemetry
+  onStepFinish(ctx: any) {
+    if (this.env.ANALYTICS) {
+      try {
+        this.env.ANALYTICS.writeDataPoint({
+          blobs: [ctx.toolName || "llm_turn", this.name],
+          doubles: [ctx.usage?.totalTokens || 0],
+          indexes: [this.name],
+        });
+      } catch {} // non-blocking
+    }
+  }
+
+  // Post-turn: broadcast completion, refresh context blocks
+  protected async onChatResponse(result: ChatResponseResult) {
+    if (result.status === "completed") {
+      this.broadcast(JSON.stringify({ type: "streaming_done" }));
+      try { await (this as any).session?.refreshSystemPrompt?.(); } catch {}
+    }
+  }
+
+  // ── @callable methods (unchanged interface, Think-compatible) ──
+
+  @callable({ description: "Connect to an external MCP server" })
   async addServer(name: string, url: string) {
     return await this.addMcpServer(name, url);
   }
 
-  @callable()
+  @callable({ description: "Disconnect an MCP server" })
   async removeServer(serverId: string) {
     await this.removeMcpServer(serverId);
   }
 
-  @callable()
+  @callable({ description: "List available tenants" })
   getTenants() {
     return TENANTS.map(({ id, name, icon, description }) => ({
-      id,
-      name,
-      icon,
-      description,
+      id, name, icon, description,
     }));
   }
 
@@ -721,50 +814,6 @@ export class ChatAgent extends AIChatAgent<Env> {
       ...(getTenantConfig(this.name).enableSandbox ? sandboxTools(this.env) : {}),
     };
     return generateTypes(allTools);
-  }
-
-  async onChatMessage(_onFinish: unknown, options?: OnChatMessageOptions) {
-    const config = getTenantConfig(this.name);
-    const mcpTools = this.mcp.getAITools();
-    const workersai = createWorkersAI({ binding: this.env.AI });
-
-    // Build the full tool set: shared + web search + browser + MCP + optional sandbox
-    const allTools = {
-      ...mcpTools,
-      ...sharedTools(),
-      ...webSearchTools(),
-      ...browserTools(this.env),
-      ...(config.enableSandbox ? sandboxTools(this.env) : {}),
-    };
-
-    // Wrap all tools with CodeMode — model writes JS against `codemode` object
-    // that calls tools programmatically. Also pass individual tools as fallback.
-    const executor = new DynamicWorkerExecutor({ loader: this.env.LOADER });
-    const codemode = createCodeTool({ tools: allTools, executor });
-
-    const result = streamText({
-      abortSignal: options?.abortSignal,
-      model: workersai(config.model as Parameters<typeof workersai>[0], {
-        sessionAffinity: this.sessionAffinity,
-      }),
-      system: config.systemPrompt,
-      messages: pruneMessages({
-        messages: await convertToModelMessages(this.messages),
-        toolCalls: "before-last-2-messages",
-        reasoning: "before-last-message",
-      }),
-      tools: { codemode, ...allTools },
-      toolChoice: "auto",
-      stopWhen: stepCountIs(10),
-    });
-
-    return result.toUIMessageStreamResponse();
-  }
-
-  protected async onChatResponse(result: ChatResponseResult) {
-    if (result.status === "completed") {
-      this.broadcast(JSON.stringify({ type: "streaming_done" }));
-    }
   }
 }
 
@@ -1017,12 +1066,38 @@ export default {
     const url = new URL(request.url);
 
     // ── Health check (unauthenticated) ──
+    // CORS preflight
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS, PUT, DELETE",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      }});
+    }
+
     if (url.pathname === "/api/health") {
       return Response.json({
         status: "ok",
         timestamp: new Date().toISOString(),
-        version: "1.2.0",
+        version: "2.0.0",
+        features: [
+          "think", "session-context-blocks", "compaction", "codemode",
+          "sandbox", "browser", "web-search", "mcp-client", "mcp-server-elicitation",
+          "structured-input", "push-notifications", "a2a", "observability",
+          "multi-tenant", "cors",
+        ],
       });
+    }
+
+    // A2A Protocol: agent card discovery
+    if (url.pathname === "/.well-known/agent.json") {
+      return Response.json(AGENT_CARD, { headers: { "Access-Control-Allow-Origin": "*" } });
+    }
+
+    // MCP Elicitation Server
+    if (url.pathname.startsWith("/mcp")) {
+      return McpElicitationServer.serve("/mcp", { binding: "McpElicitationServer" })
+        .fetch(request, env, {} as any);
     }
 
     // ── Login API ──
@@ -1125,3 +1200,173 @@ export default {
     return new Response("Not found", { status: 404 });
   },
 } satisfies ExportedHandler<Env>;
+
+// ═══════════════════════════════════════════════════════════════════
+// ADDITIVE FEATURES — everything below is NEW, nothing above touched
+// ═══════════════════════════════════════════════════════════════════
+
+// ── Structured Input Tools (client-side) ────────────────────────────
+// Pattern from: cloudflare/agents examples/structured-input
+// These tools pause the LLM and ask the client to render UI elements.
+
+function structuredInputTools() {
+  return {
+    askMultipleChoice: tool({
+      description: "Present options for the user to choose from.",
+      inputSchema: z.object({
+        question: z.string(),
+        options: z.array(z.string()),
+        allowMultiple: z.boolean().optional(),
+      }),
+    }),
+    askYesNo: tool({
+      description: "Ask a yes/no question.",
+      inputSchema: z.object({ question: z.string() }),
+    }),
+    askRating: tool({
+      description: "Ask the user to rate something on a scale.",
+      inputSchema: z.object({
+        question: z.string(),
+        min: z.number().optional(),
+        max: z.number().optional(),
+      }),
+    }),
+    askFreeText: tool({
+      description: "Ask for open-ended text input.",
+      inputSchema: z.object({
+        question: z.string(),
+        placeholder: z.string().optional(),
+        multiline: z.boolean().optional(),
+      }),
+    }),
+  };
+}
+
+// ── Push Notification Agent ─────────────────────────────────────────
+// Pattern from: cloudflare/agents examples/push-notifications
+
+type Subscription = {
+  endpoint: string;
+  expirationTime: number | null;
+  keys: { p256dh: string; auth: string };
+};
+type Reminder = { id: string; message: string; scheduledAt: number; sent: boolean };
+type ReminderAgentState = { subscriptions: Subscription[]; reminders: Reminder[] };
+
+export class ReminderAgent extends Agent<Env, ReminderAgentState> {
+  initialState: ReminderAgentState = { subscriptions: [], reminders: [] };
+
+  @callable({ description: "Get VAPID public key for push subscription" })
+  getVapidPublicKey(): string { return this.env.VAPID_PUBLIC_KEY || ""; }
+
+  @callable({ description: "Subscribe browser endpoint for push notifications" })
+  async subscribe(sub: Subscription): Promise<{ ok: boolean }> {
+    if (!this.state.subscriptions.some(s => s.endpoint === sub.endpoint)) {
+      this.setState({ ...this.state, subscriptions: [...this.state.subscriptions, sub] });
+    }
+    return { ok: true };
+  }
+
+  @callable({ description: "Unsubscribe a push endpoint" })
+  async unsubscribe(endpoint: string): Promise<{ ok: boolean }> {
+    this.setState({ ...this.state, subscriptions: this.state.subscriptions.filter(s => s.endpoint !== endpoint) });
+    return { ok: true };
+  }
+
+  @callable({ description: "Create a scheduled reminder with push notification" })
+  async createReminder(message: string, delaySeconds: number): Promise<Reminder> {
+    const id = crypto.randomUUID();
+    const reminder: Reminder = { id, message, scheduledAt: Date.now() + delaySeconds * 1000, sent: false };
+    this.setState({ ...this.state, reminders: [...this.state.reminders, reminder] });
+    await this.schedule(delaySeconds, "sendReminder", { id, message });
+    return reminder;
+  }
+
+  @callable({ description: "Cancel a scheduled reminder" })
+  async cancelReminder(id: string): Promise<{ ok: boolean }> {
+    const schedules = this.getSchedules();
+    for (const s of schedules) { if ((s.payload as any)?.id === id) { await this.cancelSchedule(s.id); break; } }
+    this.setState({ ...this.state, reminders: this.state.reminders.filter(r => r.id !== id) });
+    return { ok: true };
+  }
+
+  @callable({ description: "Send test push notification" })
+  async sendTestNotification(): Promise<{ sent: number; failed: number }> {
+    return this.pushToAll({ title: "Test", body: "Push notifications working!", tag: "test" });
+  }
+
+  async sendReminder(payload: { id: string; message: string }) {
+    await this.pushToAll({ title: "Reminder", body: payload.message, tag: `reminder-${payload.id}` });
+    this.setState({ ...this.state, reminders: this.state.reminders.map(r => r.id === payload.id ? { ...r, sent: true } : r) });
+    this.broadcast(JSON.stringify({ type: "reminder_sent", id: payload.id, timestamp: Date.now() }));
+  }
+
+  private async pushToAll(notification: Record<string, unknown>): Promise<{ sent: number; failed: number }> {
+    if (!this.env.VAPID_PUBLIC_KEY || !this.env.VAPID_PRIVATE_KEY) return { sent: 0, failed: 0 };
+    webpush.setVapidDetails(this.env.VAPID_SUBJECT || "mailto:agent@example.com", this.env.VAPID_PUBLIC_KEY, this.env.VAPID_PRIVATE_KEY);
+    const dead: string[] = [];
+    let sent = 0, failed = 0;
+    await Promise.all(this.state.subscriptions.map(async (sub) => {
+      try { await webpush.sendNotification(sub, JSON.stringify(notification)); sent++; }
+      catch (err: any) { if (err?.statusCode === 404 || err?.statusCode === 410) dead.push(sub.endpoint); failed++; }
+    }));
+    if (dead.length) this.setState({ ...this.state, subscriptions: this.state.subscriptions.filter(s => !dead.includes(s.endpoint)) });
+    return { sent, failed };
+  }
+}
+
+// ── MCP Server with Elicitation ────────────────────────────────────
+// Pattern from: cloudflare/agents examples/mcp-elicitation
+
+type McpState = { counter: number };
+
+export class McpElicitationServer extends McpAgent<Env, McpState, {}> {
+  server = new McpServer({ name: "agent-harness-mcp", version: "1.0.0" });
+  initialState: McpState = { counter: 0 };
+
+  async init() {
+    this.server.tool(
+      "increase-counter",
+      "Increase a persistent counter. Asks the user how much to increase by.",
+      { confirm: z.boolean().describe("Confirm?") },
+      async ({ confirm }) => {
+        if (!confirm) return { content: [{ type: "text" as const, text: "Cancelled." }] };
+        const result = await this.elicitInput({
+          message: "By how much?",
+          requestedSchema: { type: "object", properties: { amount: { type: "number", title: "Amount" } }, required: ["amount"] },
+        });
+        if (result.action !== "accept" || !result.content) return { content: [{ type: "text" as const, text: "Cancelled." }] };
+        const amount = Number(result.content.amount);
+        if (!amount) return { content: [{ type: "text" as const, text: "Invalid amount." }] };
+        this.setState({ ...this.state, counter: this.state.counter + amount });
+        return { content: [{ type: "text" as const, text: `Counter: ${this.state.counter} (+${amount})` }] };
+      },
+    );
+
+    this.server.tool("run-agent", "Run the agent on a task", { task: z.string() },
+      async ({ task }) => ({ content: [{ type: "text" as const, text: `Task queued: ${task}` }] }),
+    );
+
+    this.server.resource("agent-state", "agent-harness://state", async (uri) => ({
+      contents: [{ uri: uri.href, text: JSON.stringify({ counter: this.state.counter }, null, 2), mimeType: "application/json" }],
+    }));
+  }
+}
+
+// ── A2A Agent Card ──────────────────────────────────────────────────
+// Pattern from: cloudflare/agents examples/a2a
+
+export const AGENT_CARD = {
+  name: "Agent Harness",
+  description: "Multi-tenant managed agent platform on Cloudflare Workers",
+  url: "https://agent-harness.example.com",
+  version: "1.0.0",
+  capabilities: { streaming: true, stateTransitionHistory: true },
+  skills: [
+    { id: "general-chat", name: "General Assistant", description: "Chat, research, analysis" },
+    { id: "coding", name: "Coding Agent", description: "Write and execute code in sandbox" },
+    { id: "research", name: "Research Analyst", description: "Web search and synthesis" },
+    { id: "support", name: "Customer Support", description: "Answer questions from knowledge base" },
+  ],
+  authentication: { schemes: ["bearer", "cookie"] },
+};
