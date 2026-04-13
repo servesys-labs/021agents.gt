@@ -1,0 +1,58 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "agent-harness",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-04-01",
+  // Note: ctx.facets works in production without "experimental" flag
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Workers AI binding
+  "ai": { "binding": "AI" },
+
+  // Browser Rendering API — Puppeteer-powered headless browser
+  "browser": { "binding": "MYBROWSER" },
+
+  // Dynamic Worker loading — used by AgentSupervisor for facet code
+  "worker_loaders": [{ "binding": "LOADER" }],
+
+  // Vite-built React SPA served as static assets
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*", "/api/*"]
+  },
+
+  // Durable Objects: ChatAgent (chat) + Sandbox (code execution) + AgentSupervisor (facets)
+  "durable_objects": {
+    "bindings": [
+      { "class_name": "ChatAgent", "name": "ChatAgent" },
+      { "class_name": "Sandbox", "name": "Sandbox" },
+      { "class_name": "AgentSupervisor", "name": "AgentSupervisor" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ChatAgent"] },
+    { "tag": "v2", "new_sqlite_classes": ["Sandbox"] },
+    { "tag": "v3", "new_sqlite_classes": ["AgentSupervisor"] }
+  ],
+
+  // Cloudflare Container for Sandbox (code execution environment)
+  "containers": [
+    {
+      "class_name": "Sandbox",
+      "image": "./Dockerfile",
+      "instance_type": "basic",
+      "max_instances": 3
+    }
+  ],
+
+  // Observability — built-in structured logging
+  "observability": {
+    "enabled": true
+  },
+
+  // Access code for login protection — set via: wrangler secret put ACCESS_CODE
+  // Optional API keys for outbound Workers — also set as secrets
+  "vars": {
+    "SANDBOX_TRANSPORT": "websocket"
+  }
+}
