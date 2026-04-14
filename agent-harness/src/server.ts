@@ -350,12 +350,27 @@ When breaking down a complex task:
  * Overlay merge (Phase 6 pattern): base template + "\n\n---\n" + overlays
  * Overlays are loaded from DO SQLite — local to this agent DO, fast.
  */
+const MAX_OVERLAY_CHARS = 10_000; // Bug fix #2: cap total overlay size
+
 function createSkillProvider(skill: SkillDefinition, overlayLoader?: () => string[]) {
   const mergeWithOverlays = () => {
     let content = skill.content;
     const overlays = overlayLoader?.() || [];
     if (overlays.length > 0) {
-      content += "\n\n---\n## Learned Rules\n\n" + overlays.join("\n\n---\n");
+      // Bug fix #2: cap overlay section to MAX_OVERLAY_CHARS, keep newest
+      let overlayText = overlays.join("\n\n---\n");
+      if (overlayText.length > MAX_OVERLAY_CHARS) {
+        // Keep the newest overlays (end of array) that fit
+        const trimmed: string[] = [];
+        let total = 0;
+        for (let i = overlays.length - 1; i >= 0; i--) {
+          if (total + overlays[i].length + 5 > MAX_OVERLAY_CHARS) break;
+          trimmed.unshift(overlays[i]);
+          total += overlays[i].length + 5;
+        }
+        overlayText = trimmed.join("\n\n---\n");
+      }
+      content += "\n\n---\n## Learned Rules\n\n" + overlayText;
     }
     return content;
   };
@@ -556,12 +571,14 @@ function createVectorizeSearchProvider(env: Env, ftsProvider?: { search(q: strin
           topK: 10, returnMetadata: "all",
         });
 
-        const vectorItems = (vectorResults.matches || []).map((m: any) => ({
-          key: m.metadata?.key || m.id,
-          content: m.metadata?.content || "",
-          score: effectiveConfidence(m.score || 0, m.metadata?.timestamp || 0),
-          timestamp: m.metadata?.timestamp || 0,
-        })).filter((m: any) => m.score > 0);
+        const vectorItems = (vectorResults.matches || [])
+          .filter((m: any) => (m.score || 0) > 0) // Bug fix #5: filter negative/zero raw scores before time-decay
+          .map((m: any) => ({
+            key: m.metadata?.key || m.id,
+            content: m.metadata?.content || "",
+            score: effectiveConfidence(m.score || 0, m.metadata?.timestamp || 0),
+            timestamp: m.metadata?.timestamp || 0,
+          })).filter((m: any) => m.score > 0); // Also filter after time-decay
 
         // 2. FTS5 keyword search (if provider available)
         let ftsItems: Array<{ key: string; content: string }> = [];
@@ -569,14 +586,20 @@ function createVectorizeSearchProvider(env: Env, ftsProvider?: { search(q: strin
           const ftsResult = await ftsProvider.search(query);
           if (ftsResult) {
             // Parse FTS results (format: "[key]\ncontent\n\n[key2]\n...")
+            // Bug fix #6: validate key format to prevent content injection
             ftsItems = ftsResult.split("\n\n").map(block => {
               const lines = block.split("\n");
               const keyMatch = lines[0]?.match(/^\[(.+)\]$/);
+              const key = keyMatch?.[1] || "";
+              // Reject keys that look like system content (injection attempt)
+              if (key.length > 200 || /system|prompt|instruction/i.test(key)) {
+                return { key: "", content: "" };
+              }
               return {
-                key: keyMatch?.[1] || lines[0] || "",
+                key: key || lines[0] || "",
                 content: lines.slice(1).join("\n"),
               };
-            }).filter(r => r.content);
+            }).filter(r => r.content && r.key);
           }
         }
 
@@ -1659,7 +1682,10 @@ export class ChatAgent extends Think<Env> {
       const msgs = ctx.messages || [];
       const lastUser = [...msgs].reverse().find((m: any) => m.role === "user");
       const text = typeof lastUser?.content === "string" ? lastUser.content : "";
-      if (text && /\b(no|wrong|incorrect|that'?s not|you'?re wrong|actually|I said|I meant|not what I asked|try again)\b/i.test(text)) {
+      // Bug fix #8: tighter correction detection to reduce false positives
+      // Old pattern had ~80% false positive rate ("I have no idea" triggers "no")
+      // New pattern requires correction-specific phrases, not just isolated words
+      if (text && /\b(that'?s (?:not |in)?correct|you'?re wrong|not what I (?:asked|meant)|I (?:said|meant) |no[,.]? (?:that|it|this) (?:is|was)n?'?t|try (?:again|that again)|wrong answer)\b/i.test(text)) {
         this._userCorrectionCount++;
         this._recordSignal("user_correction", text.slice(0, 100), 2, {
           correctionNumber: this._userCorrectionCount,
@@ -1970,8 +1996,12 @@ export class ChatAgent extends Think<Env> {
             const facts = extractFacts(lastUserMsg.content);
             const provider = createVectorizeSearchProvider(this.env);
             for (const fact of facts) {
+              // Bug fix #1: scan extracted facts for adversarial content
+              // before storing in Vectorize (prevents fact poisoning)
+              const factText = `[${fact.category}] ${fact.content}`;
+              if (scanMemoryContent(factText)) continue; // skip adversarial facts
               const key = `fact:${fact.category}:${Date.now()}:${crypto.randomUUID().slice(0, 4)}`;
-              provider.set(key, `[${fact.category}] ${fact.content}`).catch(() => {});
+              provider.set(key, factText).catch(() => {});
             }
           }
         } catch {} // never block on fact extraction
@@ -2135,8 +2165,18 @@ export class ChatAgent extends Think<Env> {
   }
 
   /** Record a signal event and update its cluster. */
+  private static readonly MAX_SIGNALS_PER_WINDOW = 100; // Bug fix #3: cap signal insertion
+
   private _recordSignal(type: string, topic: string, severity: number, metadata: Record<string, unknown> = {}) {
     this._ensureSignalTable();
+
+    // Bug fix #3: cap signals to prevent SQLite flooding from rapid failures
+    const [countRow] = this.sql<{ cnt: number }>`
+      SELECT COUNT(*) as cnt FROM cf_agent_signals
+      WHERE created_at > datetime('now', '-1 minutes')
+    `;
+    if ((countRow?.cnt || 0) >= ChatAgent.MAX_SIGNALS_PER_WINDOW) return; // drop excess
+
     this.sql`
       INSERT INTO cf_agent_signals (signal_type, topic, severity, metadata)
       VALUES (${type}, ${topic}, ${severity}, ${JSON.stringify(metadata)})
@@ -2193,8 +2233,11 @@ export class ChatAgent extends Think<Env> {
       WHERE count >= 3 AND (last_fired_at IS NULL OR last_fired_at < datetime('now', '-6 hours'))
     `;
 
+    // Bug fix #4: get tenant skills for auto-fire validation
+    const tenantConfig = getTenantConfig(this.name);
+    const tenantSkillNames = new Set((tenantConfig.skills || []).map(s => s.name));
+
     for (const cluster of clusters) {
-      // Emit telemetry for the cluster trigger
       emit(this.env as TelemetryBindings, {
         type: "signal.cluster_triggered",
         agentName: this.name,
@@ -2204,16 +2247,16 @@ export class ChatAgent extends Think<Env> {
       });
 
       // Auto-fire: generate skill overlay from signal cluster
-      // Pattern from old deploy/runtime/skill-feedback.ts
-      if (cluster.signal_type === "tool_failure" && cluster.count >= 3) {
+      // Bug fix #4: only fire if target skill exists in tenant config
+      if (cluster.signal_type === "tool_failure" && cluster.count >= 3 && tenantSkillNames.has("debug")) {
         this.appendSkillRule(
-          "debug", // target the debug skill
+          "debug",
           `When "${cluster.topic}" tool fails repeatedly, try alternative approaches first. This tool has failed ${cluster.count} times recently.`,
           "auto",
           `auto-fire: ${cluster.count} ${cluster.signal_type} signals for ${cluster.topic}`,
         );
       }
-      if (cluster.signal_type === "loop_detected" && cluster.count >= 2) {
+      if (cluster.signal_type === "loop_detected" && cluster.count >= 2 && tenantSkillNames.has("debug")) {
         this.appendSkillRule(
           "debug",
           `Avoid calling "${cluster.topic}" in tight loops. If the first call doesn't produce the expected result, change your approach rather than retrying with the same arguments.`,
@@ -3298,14 +3341,19 @@ export default {
                 // Chunk: 512 tokens (~2048 chars) with 100-char overlap
                 const CHUNK_SIZE = 2048;
                 const OVERLAP = 100;
+                // Bug fix #7: clamp step to prevent infinite loop if overlap >= chunk_size
+                const step = Math.max(1, CHUNK_SIZE - OVERLAP);
                 const chunks: string[] = [];
-                for (let i = 0; i < text.length; i += CHUNK_SIZE - OVERLAP) {
-                  chunks.push(text.slice(i, i + CHUNK_SIZE));
+                for (let i = 0; i < text.length; i += step) {
+                  const chunk = text.slice(i, i + CHUNK_SIZE).trim();
+                  if (chunk.length >= 10) chunks.push(chunk); // Bug fix: skip whitespace-only chunks
                 }
+                // Cap total chunks to prevent memory exhaustion on huge files
+                const cappedChunks = chunks.slice(0, 500);
 
                 // Embed + upsert to Vectorize in batches of 8
-                for (let i = 0; i < chunks.length; i += 8) {
-                  const batch = chunks.slice(i, i + 8);
+                for (let i = 0; i < cappedChunks.length; i += 8) {
+                  const batch = cappedChunks.slice(i, i + 8);
                   const embedding = await env.AI?.run("@cf/baai/bge-base-en-v1.5", { text: batch });
                   if (!embedding?.data) continue;
 
