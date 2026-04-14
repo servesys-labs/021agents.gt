@@ -972,12 +972,15 @@ function sharedTools() {
 
 // ── Sandbox tools (only for tenants with enableSandbox) ──────────────────────
 
+// Sandbox tools — ONLY tools that require a container (shell exec).
+// File operations (read, write, edit, list, find, grep, delete) are provided
+// by Think's createWorkspaceTools(this.workspace) automatically — no container needed.
 function sandboxTools(env: Env) {
   return {
-    // Execute a shell command in the sandbox
+    // Execute a shell command in the sandbox container (requires container runtime)
     execCommand: tool({
       description:
-        "Execute a shell command in the sandbox (e.g., 'ls', 'npm install', 'python script.py'). Returns stdout and stderr.",
+        "Execute a shell command in a Linux container (e.g., 'npm install', 'python script.py', 'npm run build'). Requires container runtime. For file operations, prefer the workspace tools (read, write, edit) which don't need a container.",
       inputSchema: z.object({
         command: z.string().describe("The command to run (e.g., 'npm test')"),
         args: z
@@ -992,7 +995,6 @@ function sandboxTools(env: Env) {
       execute: async ({ command, args, cwd }) => {
         try {
           const sandbox = getSandbox(env.Sandbox, "coding-sandbox");
-          // exec() takes (command, options?) — args go into the command string
           const fullCommand = args?.length ? `${command} ${args.join(" ")}` : command;
           const result = await sandbox.exec(fullCommand, {
             cwd: cwd ?? "/workspace",
@@ -1004,112 +1006,6 @@ function sandboxTools(env: Env) {
           };
         } catch (err) {
           return { error: `Sandbox exec failed: ${String(err)}` };
-        }
-      },
-    }),
-
-    // Write a file in the sandbox
-    writeFile: tool({
-      description:
-        "Write content to a file in the sandbox. Creates directories as needed.",
-      inputSchema: z.object({
-        path: z
-          .string()
-          .describe("File path in the sandbox (e.g., '/workspace/app.py')"),
-        content: z.string().describe("File content to write"),
-      }),
-      execute: async ({ path, content }) => {
-        try {
-          const sandbox = getSandbox(env.Sandbox, "coding-sandbox");
-          await sandbox.writeFile(path, content);
-          return { success: true, path, bytes: content.length };
-        } catch (err) {
-          return { error: `Write failed: ${String(err)}` };
-        }
-      },
-    }),
-
-    // Read a file from the sandbox
-    readFile: tool({
-      description: "Read the contents of a file in the sandbox.",
-      inputSchema: z.object({
-        path: z
-          .string()
-          .describe("File path to read (e.g., '/workspace/output.txt')"),
-      }),
-      execute: async ({ path }) => {
-        try {
-          const sandbox = getSandbox(env.Sandbox, "coding-sandbox");
-          const content = await sandbox.readFile(path);
-          const text =
-            typeof content === "string"
-              ? content
-              : new TextDecoder().decode(content as unknown as Uint8Array);
-          return {
-            path,
-            content: text.slice(0, 8000),
-            truncated: text.length > 8000,
-          };
-        } catch (err) {
-          return { error: `Read failed: ${String(err)}` };
-        }
-      },
-    }),
-
-    // Run code in a persistent interpreter (Python/JS/TS)
-    runCode: tool({
-      description:
-        "Run code in a persistent interpreter. Variables and imports persist across calls. Supports Python, JavaScript, and TypeScript.",
-      inputSchema: z.object({
-        code: z.string().describe("The code to execute"),
-        language: z
-          .enum(["python", "javascript", "typescript"])
-          .describe("Programming language"),
-      }),
-      execute: async ({ code, language }) => {
-        try {
-          const sandbox = getSandbox(env.Sandbox, "coding-sandbox");
-          const ctx = await sandbox.createCodeContext({ language });
-          const output: string[] = [];
-          const result = await sandbox.runCode(code, {
-            context: ctx,
-            onStdout: (line) => { output.push(line.text); },
-          });
-          return {
-            language,
-            output: output.join("\n").slice(0, 8000),
-            result: result ? JSON.stringify(result).slice(0, 4000) : null,
-          };
-        } catch (err) {
-          return { error: `Code execution failed: ${String(err)}` };
-        }
-      },
-    }),
-
-    // Clone a git repository into the sandbox
-    gitClone: tool({
-      description:
-        "Clone a git repository into the sandbox for building, testing, or analysis.",
-      inputSchema: z.object({
-        url: z
-          .string()
-          .url()
-          .describe("Git repository URL (e.g., 'https://github.com/org/repo')"),
-        targetDir: z
-          .string()
-          .optional()
-          .describe("Target directory (default: /workspace)"),
-      }),
-      execute: async ({ url, targetDir }) => {
-        try {
-          const sandbox = getSandbox(env.Sandbox, "coding-sandbox");
-          const result = await sandbox.gitCheckout(url, {
-            targetDir: targetDir ?? "/workspace",
-            depth: 1,
-          });
-          return { success: true, url, directory: targetDir ?? "/workspace", result };
-        } catch (err) {
-          return { error: `Git clone failed: ${String(err)}` };
         }
       },
     }),
