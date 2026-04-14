@@ -124,27 +124,28 @@ function mapThinkResponse(data: any, onEvent: (event: ChatEvent) => void): void 
           case "reasoning":
             onEvent({ type: "thinking", data: { content: chunk.delta || chunk.textDelta || "" } });
             break;
-          case "tool-call":
+          case "tool-input-start":
+          case "tool-input-available":
             onEvent({
               type: "tool_call",
               data: {
                 name: chunk.toolName || "tool",
                 tool_call_id: chunk.toolCallId || "",
-                args_preview: typeof chunk.args === "string"
-                  ? chunk.args.slice(0, 200)
-                  : JSON.stringify(chunk.args || {}).slice(0, 200),
+                args_preview: chunk.input
+                  ? JSON.stringify(chunk.input).slice(0, 200)
+                  : "",
               },
             });
             break;
-          case "tool-result":
+          case "tool-output-available":
             onEvent({
               type: "tool_result",
               data: {
                 name: chunk.toolName || "tool",
                 tool_call_id: chunk.toolCallId || "",
-                result: typeof chunk.result === "string"
-                  ? chunk.result.slice(0, 4000)
-                  : JSON.stringify(chunk.result || "").slice(0, 4000),
+                result: typeof chunk.output === "string"
+                  ? chunk.output.slice(0, 4000)
+                  : JSON.stringify(chunk.output || "").slice(0, 4000),
               },
             });
             break;
