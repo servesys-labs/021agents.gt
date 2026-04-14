@@ -11,9 +11,7 @@
   },
   "dependencies": {
     "hono": "^4.7.0",
-    "hono-agents": "^0.1.0",
-    "postgres": "^3.4.9",
-    "zod": "^4.3.6"
+    "postgres": "^3.4.9"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260413.1",

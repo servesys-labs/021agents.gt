@@ -84,7 +84,7 @@
   // Agent-harness writes: session records, billing, OTEL events
   // Gateway also connects to the same Postgres for admin queries
   "hyperdrive": [
-    { "binding": "DB", "id": "PLACEHOLDER_HYPERDRIVE_ID" }
+    { "binding": "DB", "id": "775f7e11ce8c479993855531f728770a" }
   ],
 
   // Queues — async writes to Postgres (non-blocking, with DLQ)
