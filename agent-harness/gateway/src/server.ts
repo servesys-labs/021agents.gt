@@ -38,6 +38,8 @@ interface Env {
   STORAGE: R2Bucket;
   // Secrets
   JWT_SECRET?: string;
+  STRIPE_SECRET_KEY?: string;
+  STRIPE_WEBHOOK_SECRET?: string;
 }
 
 type Variables = {
@@ -466,6 +468,202 @@ app.get("/api/v1/credits/transactions", async (c) => {
     SELECT * FROM credit_transactions
     WHERE org_id = ${orgId}
     ORDER BY created_at DESC LIMIT 100
+  `;
+  await sql.end();
+  return c.json(rows);
+});
+
+// ── Credit packages (public pricing tiers) ──
+
+app.get("/api/v1/credits/packages", async (c) => {
+  const packages = await kvCached(c.env.CACHE, "credit_packages", 300, async () => {
+    const sql = await getDb(c.env.DB);
+    const rows = await sql`
+      SELECT id, name, credits_usd, price_usd, stripe_price_id
+      FROM credit_packages WHERE is_active = true ORDER BY price_usd ASC
+    `;
+    await sql.end();
+    return rows;
+  });
+  return c.json(packages);
+});
+
+// ── Stripe checkout session ──
+
+app.post("/api/v1/credits/checkout", async (c) => {
+  const orgId = c.get("orgId");
+  const body = await c.req.json<{ package_id: number; success_url?: string; cancel_url?: string }>();
+
+  if (!c.env.STRIPE_SECRET_KEY) {
+    return c.json({ error: "Stripe not configured" }, 503);
+  }
+
+  // Look up the package
+  const sql = await getDb(c.env.DB);
+  const [pkg] = await sql`
+    SELECT * FROM credit_packages WHERE id = ${body.package_id} AND is_active = true
+  `;
+  if (!pkg) {
+    await sql.end();
+    return c.json({ error: "Package not found" }, 404);
+  }
+
+  // Get or create Stripe customer for this org
+  const [org] = await sql`SELECT id, stripe_customer_id, name FROM orgs WHERE id = ${orgId}`;
+  await sql.end();
+
+  let customerId = org?.stripe_customer_id;
+  if (!customerId) {
+    // Create Stripe customer
+    const customerResp = await fetch("https://api.stripe.com/v1/customers", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${c.env.STRIPE_SECRET_KEY}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        "metadata[org_id]": orgId,
+        ...(org?.name ? { name: org.name } : {}),
+      }),
+    });
+    const customer = await customerResp.json() as { id: string };
+    customerId = customer.id;
+
+    // Save customer ID
+    const sql2 = await getDb(c.env.DB);
+    await sql2`UPDATE orgs SET stripe_customer_id = ${customerId} WHERE id = ${orgId}`;
+    await sql2.end();
+  }
+
+  // Create checkout session
+  const params = new URLSearchParams({
+    "mode": "payment",
+    "customer": customerId,
+    "line_items[0][quantity]": "1",
+    "metadata[org_id]": orgId,
+    "metadata[package_id]": String(pkg.id),
+    "metadata[credits_usd]": String(pkg.credits_usd),
+    ...(body.success_url ? { "success_url": body.success_url } : { "success_url": "https://app.oneshots.co/settings/billing?success=true" }),
+    ...(body.cancel_url ? { "cancel_url": body.cancel_url } : { "cancel_url": "https://app.oneshots.co/settings/billing?cancelled=true" }),
+  });
+
+  // Use stripe_price_id if available, otherwise create a one-time price
+  if (pkg.stripe_price_id) {
+    params.set("line_items[0][price]", pkg.stripe_price_id);
+  } else {
+    params.set("line_items[0][price_data][currency]", "usd");
+    params.set("line_items[0][price_data][unit_amount]", String(Math.round(Number(pkg.price_usd) * 100)));
+    params.set("line_items[0][price_data][product_data][name]", `${pkg.name} Credits`);
+  }
+
+  const sessionResp = await fetch("https://api.stripe.com/v1/checkout/sessions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${c.env.STRIPE_SECRET_KEY}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: params,
+  });
+  const session = await sessionResp.json() as { id: string; url: string };
+
+  return c.json({ checkout_url: session.url, session_id: session.id });
+});
+
+// ── Stripe webhook (payment confirmation → credit topup) ──
+
+app.post("/api/v1/webhooks/stripe", async (c) => {
+  if (!c.env.STRIPE_WEBHOOK_SECRET) {
+    return c.json({ error: "Webhook not configured" }, 503);
+  }
+
+  // Verify Stripe signature
+  const signature = c.req.header("stripe-signature") || "";
+  const rawBody = await c.req.text();
+
+  // Parse signature header
+  const sigParts = Object.fromEntries(
+    signature.split(",").map(p => p.trim().split("=", 2) as [string, string])
+  );
+  const timestamp = sigParts["t"];
+  const sig = sigParts["v1"];
+  if (!timestamp || !sig) return c.json({ error: "Invalid signature" }, 400);
+
+  // Verify HMAC
+  const signedPayload = `${timestamp}.${rawBody}`;
+  const key = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(c.env.STRIPE_WEBHOOK_SECRET),
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"],
+  );
+  const expectedSig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(signedPayload));
+  const expectedHex = [...new Uint8Array(expectedSig)].map(b => b.toString(16).padStart(2, "0")).join("");
+  if (expectedHex !== sig) return c.json({ error: "Invalid signature" }, 400);
+
+  // Check timestamp freshness (5 min tolerance)
+  if (Math.abs(Date.now() / 1000 - Number(timestamp)) > 300) {
+    return c.json({ error: "Timestamp too old" }, 400);
+  }
+
+  const event = JSON.parse(rawBody) as { id: string; type: string; data: { object: any } };
+
+  // Idempotency check
+  const sql = await getDb(c.env.DB_ADMIN);
+  const [existing] = await sql`
+    SELECT event_id FROM stripe_events_processed WHERE event_id = ${event.id}
+  `;
+  if (existing) {
+    await sql.end();
+    return c.json({ received: true, duplicate: true });
+  }
+
+  if (event.type === "checkout.session.completed") {
+    const session = event.data.object;
+    const orgId = session.metadata?.org_id;
+    const creditsUsd = Number(session.metadata?.credits_usd || 0);
+    const packageId = session.metadata?.package_id;
+
+    if (orgId && creditsUsd > 0) {
+      // Top up via BillingDO (atomic balance update)
+      const billingDO = c.env.BILLING.get(c.env.BILLING.idFromName(orgId));
+      await billingDO.fetch(new Request("http://internal/topup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ amount: creditsUsd, description: `Credit purchase (package ${packageId})` }),
+      }));
+
+      // Record transaction in Postgres for history
+      await sql`
+        INSERT INTO credit_transactions (org_id, type, amount_usd, description, stripe_payment_intent_id)
+        VALUES (${orgId}, 'purchase', ${creditsUsd}, ${`Package ${packageId}`}, ${session.payment_intent || ""})
+      `;
+    }
+  }
+
+  // Mark event as processed
+  await sql`
+    INSERT INTO stripe_events_processed (event_id, event_type) VALUES (${event.id}, ${event.type})
+  `;
+  await sql.end();
+
+  return c.json({ received: true });
+});
+
+// ── Usage summary ──
+
+app.get("/api/v1/usage", async (c) => {
+  const orgId = c.get("orgId");
+  const days = Number(c.req.query("days")) || 30;
+  const sql = await getDb(c.env.DB);
+  const rows = await sql`
+    SELECT
+      agent_name,
+      COUNT(*) as session_count,
+      COALESCE(SUM(cost_usd), 0) as total_cost,
+      COALESCE(SUM(input_tokens), 0) as total_input_tokens,
+      COALESCE(SUM(output_tokens), 0) as total_output_tokens
+    FROM sessions
+    WHERE org_id = ${orgId} AND created_at > NOW() - make_interval(days => ${days})
+    GROUP BY agent_name
+    ORDER BY total_cost DESC
   `;
   await sql.end();
   return c.json(rows);
