@@ -28,7 +28,7 @@
   "assets": {
     "directory": "./ui/build",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/agents/*", "/api/*", "/.well-known/*", "/a2a", "/mcp", "/channels/*", "/webhook/*", "/sfu/*"]
+    "run_worker_first": ["/agents/*", "/api/*", "/.well-known/*", "/a2a", "/a/*", "/mcp", "/channels/*", "/webhook/*", "/sfu/*"]
   },
 
   // Durable Objects: ChatAgent (Think) + Sandbox + AgentSupervisor + ReminderAgent + McpElicitation

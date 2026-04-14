@@ -132,18 +132,22 @@ If the seller wants direct payments:
 </script>
 ```
 
-## Phase 3: Deploy
+## Phase 3: Publish
 
-After building:
+No deploy needed. Write files to `/storefront/` in the workspace:
 
-1. `gitInit()` in `/storefront/`
-2. `gitAdd({ filepath: "." })`
-3. `gitCommit({ message: "storefront: [product name]" })`
+```
+write({ path: "/storefront/index.html", content: "..." })
+write({ path: "/storefront/style.css", content: "..." })
+```
 
-Then tell the user:
-> "Your product page is ready! To make it live, I'll deploy it to a public URL."
+The platform automatically serves these at `app.021agents.ai/a/[agent-name]/`.
 
-Deploy using `runStateCode` or guide the user to connect GitHub for auto-deploy.
+Tell the user:
+> "Your product page is live at app.021agents.ai/a/[agent-name]/"
+> "Share this link anywhere — WhatsApp, Instagram, email."
+
+The page is served directly from the workspace — zero deploy, instant updates. To update, just edit the files.
 
 ## Phase 4: Register in Marketplace
 
