@@ -13,7 +13,7 @@ export class ApiError extends Error {
 export class ApiClient {
   baseUrl: string;
 
-  constructor(baseUrl = "https://agent-harness-gateway.servesys.workers.dev/api/v1") {
+  constructor(baseUrl = "https://api.021agents.ai/api/v1") {
     this.baseUrl = baseUrl;
   }
 
