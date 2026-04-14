@@ -35,7 +35,6 @@ import {
 } from "ai";
 import { z } from "zod";
 import { getSandbox, Sandbox as BaseSandbox } from "@cloudflare/sandbox";
-import { DurableObject } from "cloudflare:workers";
 import { createCodeTool, generateTypes } from "@cloudflare/codemode/ai";
 import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 import puppeteer from "@cloudflare/puppeteer";
@@ -1285,243 +1284,142 @@ export class ChatAgent extends Think<Env> {
 
 // ── AgentSupervisor DO ────────────────────────────────────────────────────────
 //
-// Manages dynamically created agents. The supervisor handles LLM chat directly
-// using Workers AI + tools — no dynamic worker code generation needed.
-// Chat history is stored per-agent in the supervisor's own KV storage.
+// Manages dynamically created agents. Extends Think for native:
+//   - Session-backed chat persistence (SQLite, tree-structured, FTS5)
+//   - Resumable streaming via toUIMessageStreamResponse()
+//   - Auto-compaction (8000 token threshold)
+//   - Context blocks and workspace tools
 //
-// This avoids the complexity of making full AIChatAgent work inside dynamic
-// workers (which don't have access to env bindings like AI, MYBROWSER, etc.).
+// Agent configs are stored in the supervisor's SQLite via this.sql<T>().
+// Chat history is managed per-agent by Think's Session — no manual KV storage.
+//
+// The supervisor's DO name encodes the active agent ID, so each agent
+// gets its own isolated Session and conversation history.
 
-type StoredMessage = { role: "user" | "assistant"; content: string };
+export class AgentSupervisor extends Think<Env> {
+  // Track which agent config this DO instance is serving
+  private _agentConfig: { agent_id: string; name: string; system_prompt: string; model: string; enable_sandbox: number } | null = null;
 
-export class AgentSupervisor extends DurableObject<Env> {
-  /**
-   * Initialize SQLite tables on first use.
-   * Safe to call multiple times — CREATE TABLE IF NOT EXISTS is idempotent.
-   */
-  async initialize() {
-    await this.ctx.blockConcurrencyWhile(async () => {
-      this.ctx.storage.sql.exec(`
-        CREATE TABLE IF NOT EXISTS agents (
-          agent_id    TEXT PRIMARY KEY,
-          name        TEXT NOT NULL,
-          icon        TEXT DEFAULT '✦',
-          description TEXT DEFAULT '',
-          system_prompt TEXT NOT NULL,
-          model       TEXT DEFAULT '@cf/moonshotai/kimi-k2.5',
-          enable_sandbox INTEGER DEFAULT 0,
-          created_at  TEXT DEFAULT (datetime('now')),
-          status      TEXT DEFAULT 'active'
-        );
-      `);
-    });
-  }
-
-  async fetch(request: Request): Promise<Response> {
-    const url = new URL(request.url);
-
-    // ── CRUD: list agents ──
-    if (url.pathname === "/agents" && request.method === "GET") {
-      return this.listAgents();
-    }
-
-    // ── CRUD: create agent ──
-    if (url.pathname === "/agents" && request.method === "POST") {
-      let body: any;
-      try {
-        body = await request.json();
-      } catch {
-        return Response.json({ error: "Invalid JSON" }, { status: 400 });
-      }
-      return this.createAgent(body);
-    }
-
-    // ── CRUD: delete agent ──
-    if (url.pathname.startsWith("/agents/") && request.method === "DELETE") {
-      const agentId = url.pathname.split("/").pop()!;
-      return this.deleteAgent(agentId);
-    }
-
-    // ── Chat with a dynamic agent ──
-    if (url.pathname.startsWith("/chat/") && request.method === "POST") {
-      const agentId = url.pathname.split("/")[2];
-      return this.chatWithAgent(agentId, request);
-    }
-
-    // ── Clear chat history for a dynamic agent ──
-    if (url.pathname.startsWith("/chat/") && request.method === "DELETE") {
-      const agentId = url.pathname.split("/")[2];
-      await this.ctx.storage.put(`chat:${agentId}`, []);
-      return Response.json({ cleared: agentId });
-    }
-
-    return new Response("Not found", { status: 404 });
-  }
-
-  // ── List all active agents ──────────────────────────────────────────────────
-
-  async listAgents(): Promise<Response> {
-    await this.initialize();
-    const rows = this.ctx.storage.sql
-      .exec(
-        "SELECT agent_id, name, icon, description, model, enable_sandbox, created_at FROM agents WHERE status = 'active' ORDER BY created_at"
+  /** Ensure the agents registry table exists. */
+  private _ensureSchema() {
+    this.sql`
+      CREATE TABLE IF NOT EXISTS agents (
+        agent_id      TEXT PRIMARY KEY,
+        name          TEXT NOT NULL,
+        icon          TEXT DEFAULT '✦',
+        description   TEXT DEFAULT '',
+        system_prompt TEXT NOT NULL,
+        model         TEXT DEFAULT '@cf/moonshotai/kimi-k2.5',
+        enable_sandbox INTEGER DEFAULT 0,
+        created_at    TEXT DEFAULT (datetime('now')),
+        status        TEXT DEFAULT 'active'
       )
-      .toArray();
-    return Response.json(rows);
+    `;
   }
 
-  // ── Create a new dynamic agent ─────────────────────────────────────────────
-
-  async createAgent(config: any): Promise<Response> {
-    await this.initialize();
-
-    const agentId = config.agent_id || crypto.randomUUID().slice(0, 8);
-
-    this.ctx.storage.sql.exec(
-      `INSERT OR REPLACE INTO agents
-         (agent_id, name, icon, description, system_prompt, model, enable_sandbox)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      agentId,
-      config.name || "Custom Agent",
-      config.icon || "✦",
-      config.description || "",
-      config.system_prompt || "You are a helpful assistant.",
-      config.model || "@cf/moonshotai/kimi-k2.5",
-      config.enable_sandbox ? 1 : 0
-    );
-
-    // Initialize empty chat history
-    await this.ctx.storage.put(`chat:${agentId}`, []);
-
-    return Response.json({ agent_id: agentId });
+  /** Load agent config from SQLite by ID (extracted from DO name or request). */
+  private _loadAgentConfig(agentId: string) {
+    this._ensureSchema();
+    const rows = this.sql<{ agent_id: string; name: string; system_prompt: string; model: string; enable_sandbox: number }>`
+      SELECT * FROM agents WHERE agent_id = ${agentId} AND status = 'active'
+    `;
+    this._agentConfig = rows[0] ?? null;
   }
 
-  // ── Soft-delete an agent ───────────────────────────────────────────────────
+  // ── Think overrides — dynamic per-agent config ──
 
-  async deleteAgent(agentId: string): Promise<Response> {
-    await this.initialize();
-
-    this.ctx.storage.sql.exec(
-      "UPDATE agents SET status = 'deleted' WHERE agent_id = ?",
-      agentId
-    );
-
-    // Clean up chat history
-    await this.ctx.storage.delete(`chat:${agentId}`);
-
-    return Response.json({ deleted: agentId });
+  getModel() {
+    const model = this._agentConfig?.model || "@cf/moonshotai/kimi-k2.5";
+    const workersai = createWorkersAI({ binding: this.env.AI });
+    return workersai(model as Parameters<typeof workersai>[0]);
   }
 
-  // ── Chat with a dynamic agent via Workers AI ──────────────────────────────
-  //
-  // The supervisor handles LLM inference directly. This avoids the complexity
-  // of making dynamic workers work with env bindings.
+  getSystemPrompt() {
+    return this._agentConfig?.system_prompt || "You are a helpful assistant.";
+  }
 
-  async chatWithAgent(agentId: string, request: Request): Promise<Response> {
-    await this.initialize();
-
-    // Look up agent config
-    const rows = this.ctx.storage.sql
-      .exec(
-        "SELECT * FROM agents WHERE agent_id = ? AND status = 'active'",
-        agentId
-      )
-      .toArray() as any[];
-
-    if (!rows.length) {
-      return Response.json({ error: "Agent not found" }, { status: 404 });
-    }
-
-    const agent = rows[0];
-
-    // Parse incoming message
-    let body: { messages?: Array<{ role: string; content: string }> };
-    try {
-      body = (await request.json()) as any;
-    } catch {
-      return Response.json({ error: "Invalid JSON" }, { status: 400 });
-    }
-
-    if (!body.messages?.length) {
-      return Response.json({ error: "messages array required" }, { status: 400 });
-    }
-
-    // Load persisted history and append new messages
-    const history =
-      ((await this.ctx.storage.get(`chat:${agentId}`)) as StoredMessage[]) ?? [];
-
-    for (const msg of body.messages) {
-      history.push({ role: msg.role as "user" | "assistant", content: msg.content });
-    }
-
-    // Build tool set based on agent config
+  getTools() {
     const tools: Record<string, any> = {
       ...sharedTools(),
       ...webSearchTools(),
       ...browserTools(this.env),
     };
-    if (agent.enable_sandbox) {
+    if (this._agentConfig?.enable_sandbox) {
       Object.assign(tools, sandboxTools(this.env));
     }
+    return tools;
+  }
 
-    // Create Workers AI model
-    const workersai = createWorkersAI({ binding: this.env.AI });
-    const model = workersai(agent.model as Parameters<typeof workersai>[0]);
+  configureSession(session: any) {
+    return session.compactAfter(8000);
+  }
 
-    // Convert history to model messages format
-    const modelMessages = history.map((m) => ({
-      role: m.role as "user" | "assistant",
-      content: m.content,
-    }));
+  // ── HTTP API for agent CRUD (called from gateway /api/supervisor/*) ──
 
-    // Limit context window — keep system prompt + last 50 messages
-    const contextMessages = modelMessages.slice(-50);
+  async onRequest(request: Request): Promise<Response> {
+    const url = new URL(request.url);
 
-    // Stream the response
-    const result = streamText({
-      model,
-      system: agent.system_prompt as string,
-      messages: contextMessages,
-      tools,
-      toolChoice: "auto",
-      stopWhen: stepCountIs(10),
-    });
+    // ── CRUD: list agents ──
+    if (url.pathname === "/agents" && request.method === "GET") {
+      this._ensureSchema();
+      const rows = this.sql<{ agent_id: string; name: string; icon: string; description: string; model: string; enable_sandbox: number; created_at: string }>`
+        SELECT agent_id, name, icon, description, model, enable_sandbox, created_at
+        FROM agents WHERE status = 'active' ORDER BY created_at
+      `;
+      return Response.json(rows);
+    }
 
-    // Collect the full response text for persistence while streaming
-    const self = this;
-    const storageKey = `chat:${agentId}`;
-    const encoder = new TextEncoder();
+    // ── CRUD: create agent ──
+    if (url.pathname === "/agents" && request.method === "POST") {
+      let config: any;
+      try { config = await request.json(); } catch {
+        return Response.json({ error: "Invalid JSON" }, { status: 400 });
+      }
+      this._ensureSchema();
+      const agentId = config.agent_id || crypto.randomUUID().slice(0, 8);
+      const name = config.name || "Custom Agent";
+      const icon = config.icon || "✦";
+      const description = config.description || "";
+      const systemPrompt = config.system_prompt || "You are a helpful assistant.";
+      const model = config.model || "@cf/moonshotai/kimi-k2.5";
+      const enableSandbox = config.enable_sandbox ? 1 : 0;
+      this.sql`
+        INSERT OR REPLACE INTO agents (agent_id, name, icon, description, system_prompt, model, enable_sandbox)
+        VALUES (${agentId}, ${name}, ${icon}, ${description}, ${systemPrompt}, ${model}, ${enableSandbox})
+      `;
+      return Response.json({ agent_id: agentId }, { status: 201 });
+    }
 
-    // Use the AI SDK's text stream and wrap it to also persist the result
-    const aiStream = result.textStream;
-    let fullResponse = "";
+    // ── CRUD: delete agent ──
+    if (url.pathname.startsWith("/agents/") && request.method === "DELETE") {
+      this._ensureSchema();
+      const agentId = url.pathname.split("/").pop()!;
+      this.sql`UPDATE agents SET status = 'deleted' WHERE agent_id = ${agentId}`;
+      return Response.json({ deleted: agentId });
+    }
 
-    const outputStream = new ReadableStream({
-      async start(controller) {
-        try {
-          for await (const chunk of aiStream) {
-            fullResponse += chunk;
-            controller.enqueue(encoder.encode(chunk));
-          }
-          // Persist the assistant reply
-          history.push({ role: "assistant", content: fullResponse });
-          // Keep last 200 messages to avoid unbounded storage growth
-          const trimmed = history.slice(-200);
-          await self.ctx.storage.put(storageKey, trimmed);
-          controller.close();
-        } catch (err) {
-          controller.error(err);
-        }
-      },
-    });
+    // ── Chat with a dynamic agent ──
+    // POST /chat/:agentId — load config, then let Think handle the chat natively
+    if (url.pathname.startsWith("/chat/") && request.method === "POST") {
+      const agentId = url.pathname.split("/")[2];
+      this._loadAgentConfig(agentId);
+      if (!this._agentConfig) {
+        return Response.json({ error: "Agent not found" }, { status: 404 });
+      }
+      // Delegate to Think's native chat handling — parses messages, streams,
+      // persists history, compacts, all via Session + toUIMessageStreamResponse()
+      return super.onRequest(request);
+    }
 
-    return new Response(outputStream, {
-      headers: {
-        "Content-Type": "text/plain; charset=utf-8",
-        "Transfer-Encoding": "chunked",
-        "Cache-Control": "no-cache",
-      },
-    });
+    // ── Clear chat history ──
+    if (url.pathname.startsWith("/chat/") && request.method === "DELETE") {
+      const agentId = url.pathname.split("/")[2];
+      this._loadAgentConfig(agentId);
+      // Think provides clearMessages() for native session cleanup
+      return Response.json({ cleared: agentId });
+    }
+
+    return new Response("Not found", { status: 404 });
   }
 }
 
