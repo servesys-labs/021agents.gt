@@ -1,5 +1,6 @@
 <script lang="ts">
   import { page } from "$app/stores";
+  import { untrack } from "svelte";
   import { agentStore as agentListStore } from "$lib/stores/agents.svelte";
   import { agentStore as agentRpc } from "$lib/stores/agent.svelte";
   // SDK-first: AgentClient for WebSocket RPC, no SSE streaming
@@ -55,9 +56,13 @@
   let rpcConnected = $derived(agentRpc.connected);
 
   // ── Connect to Agent DO via SDK AgentClient (WebSocket) ──
+  // Track only agentName. Everything inside untrack() won't re-trigger this effect.
+  let prevAgent = "";
   $effect(() => {
-    if (!agentName) return;
-    agentRpc.connect(agentName);
+    const name = agentName; // track this
+    if (!name || name === prevAgent) return;
+    prevAgent = name;
+    untrack(() => agentRpc.connect(name));
 
     // Listen for SDK chat protocol messages from the Agent DO.
     // These feed the same UI state (messages, segments, toolCalls, thinking)
