@@ -75,7 +75,11 @@
     // First-time visitors keep the existing default (dark)
   });
 
+  // Run auth init ONCE on mount — not reactively (avoids infinite effect loop)
+  let authInitDone = false;
   $effect(() => {
+    if (authInitDone) return;
+    authInitDone = true;
     authStore.init().then(() => {
       if (!authStore.loading && !authStore.isAuthenticated) {
         const path = window.location.pathname;
@@ -91,8 +95,10 @@
   });
 
   // Re-fetch agents when auth state changes (e.g., after login redirect)
+  let agentsFetched = false;
   $effect(() => {
-    if (authStore.isAuthenticated && agentStore.agents.length === 0 && !agentStore.loading) {
+    if (authStore.isAuthenticated && agentStore.agents.length === 0 && !agentStore.loading && !agentsFetched) {
+      agentsFetched = true;
       agentStore.fetchAgents();
     }
   });
