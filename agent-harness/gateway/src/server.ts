@@ -115,6 +115,7 @@ const PUBLIC_PATHS = new Set([
   "/api/v1/auth/reset-password",
   "/api/v1/auth/verify-email",
   "/api/v1/webhooks/stripe",
+  "/api/v1/models",
 ]);
 
 app.use("/api/v1/*", async (c, next) => {
@@ -2073,6 +2074,49 @@ app.get("/api/v1/agents/:name/procedures", async (c) => {
   const userId = c.get("userId");
   const agentName = c.req.param("name");
   const resp = await callAgentMethod(c.env, orgId, agentName, userId, "getLearnedProcedures", []);
+  return new Response(resp.body, { status: resp.status, headers: resp.headers });
+});
+
+// ── Model Selection ──
+
+// Get available models (static catalog — no DO call needed)
+app.get("/api/v1/models", (c) => {
+  // Import from agent worker would require service binding RPC.
+  // Instead, return the catalog directly (it's static config).
+  return c.json([
+    { id: "@cf/moonshotai/kimi-k2.5", name: "Kimi K2.5", provider: "Workers AI", tier: "free", costPer1kTokens: 0 },
+    { id: "@cf/google/gemma-3-27b-it", name: "Gemma 3 27B", provider: "Workers AI", tier: "free", costPer1kTokens: 0 },
+    { id: "@cf/meta/llama-4-scout-17b-16e-instruct", name: "Llama 4 Scout", provider: "Workers AI", tier: "free", costPer1kTokens: 0 },
+    { id: "deepseek/deepseek-chat-v3.2", name: "DeepSeek V3.2", provider: "OpenRouter", tier: "budget", costPer1kTokens: 0.0003 },
+    { id: "google/gemini-2.5-flash", name: "Gemini 2.5 Flash", provider: "OpenRouter", tier: "budget", costPer1kTokens: 0.0001 },
+    { id: "anthropic/claude-haiku-4-5", name: "Claude Haiku 4.5", provider: "OpenRouter", tier: "budget", costPer1kTokens: 0.0008 },
+    { id: "anthropic/claude-sonnet-4-6", name: "Claude Sonnet 4.6", provider: "OpenRouter", tier: "standard", costPer1kTokens: 0.003 },
+    { id: "openai/gpt-5-mini", name: "GPT-5 Mini", provider: "OpenRouter", tier: "standard", costPer1kTokens: 0.002 },
+    { id: "google/gemini-2.5-pro", name: "Gemini 2.5 Pro", provider: "OpenRouter", tier: "standard", costPer1kTokens: 0.003 },
+    { id: "minimax/minimax-m2.7", name: "MiniMax M2.7", provider: "OpenRouter", tier: "standard", costPer1kTokens: 0.002 },
+    { id: "anthropic/claude-opus-4-6", name: "Claude Opus 4.6", provider: "OpenRouter", tier: "premium", costPer1kTokens: 0.015 },
+    { id: "openai/gpt-5.4", name: "GPT-5.4", provider: "OpenRouter", tier: "premium", costPer1kTokens: 0.01 },
+    { id: "x-ai/grok-4", name: "Grok 4", provider: "OpenRouter", tier: "premium", costPer1kTokens: 0.005 },
+    { id: "groq/llama-4-scout-17b-16e-instruct", name: "Llama 4 Scout (Groq)", provider: "OpenRouter", tier: "speed", costPer1kTokens: 0.0002 },
+  ]);
+});
+
+// Get/set model for a specific agent (proxy to DO)
+app.get("/api/v1/agents/:name/model", async (c) => {
+  const orgId = c.get("orgId");
+  const userId = c.get("userId");
+  const agentName = c.req.param("name");
+  const resp = await callAgentMethod(c.env, orgId, agentName, userId, "getCurrentModel", []);
+  return new Response(resp.body, { status: resp.status, headers: resp.headers });
+});
+
+app.put("/api/v1/agents/:name/model", async (c) => {
+  const orgId = c.get("orgId");
+  const userId = c.get("userId");
+  const agentName = c.req.param("name");
+  const body = await c.req.json<{ model: string }>();
+  if (!body.model) return c.json({ error: "model required" }, 400);
+  const resp = await callAgentMethod(c.env, orgId, agentName, userId, "setModel", [body.model]);
   return new Response(resp.body, { status: resp.status, headers: resp.headers });
 });
 

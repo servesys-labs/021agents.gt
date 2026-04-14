@@ -727,12 +727,42 @@ const TENANTS: TenantConfig[] = [
   },
 ];
 
+// ── Model Catalog (available via settings UI + gateway API) ──
+// Users choose their model. Cost = usage + markup (like OpenRouter).
+// Workers AI models are free. OpenRouter models charged at provider rate + margin.
+
+export const MODEL_CATALOG = [
+  // ── Free (Workers AI) ──
+  { id: "@cf/moonshotai/kimi-k2.5", name: "Kimi K2.5", provider: "Workers AI", tier: "free", description: "Fast reasoning, free via Workers AI", costPer1kTokens: 0 },
+  { id: "@cf/google/gemma-3-27b-it", name: "Gemma 3 27B", provider: "Workers AI", tier: "free", description: "Google's open model, free via Workers AI", costPer1kTokens: 0 },
+  { id: "@cf/meta/llama-4-scout-17b-16e-instruct", name: "Llama 4 Scout", provider: "Workers AI", tier: "free", description: "Meta's latest, free via Workers AI", costPer1kTokens: 0 },
+
+  // ── Budget (OpenRouter via AI Gateway) ──
+  { id: "deepseek/deepseek-chat-v3.2", name: "DeepSeek V3.2", provider: "OpenRouter", tier: "budget", description: "Near-free, strong coding + reasoning", costPer1kTokens: 0.0003 },
+  { id: "google/gemini-2.5-flash", name: "Gemini 2.5 Flash", provider: "OpenRouter", tier: "budget", description: "Google's fast model, very cheap", costPer1kTokens: 0.0001 },
+  { id: "anthropic/claude-haiku-4-5", name: "Claude Haiku 4.5", provider: "OpenRouter", tier: "budget", description: "Fast, cheap, good for simple tasks", costPer1kTokens: 0.0008 },
+
+  // ── Standard (OpenRouter via AI Gateway) ──
+  { id: "anthropic/claude-sonnet-4-6", name: "Claude Sonnet 4.6", provider: "OpenRouter", tier: "standard", description: "Best value — strong reasoning + coding", costPer1kTokens: 0.003 },
+  { id: "openai/gpt-5-mini", name: "GPT-5 Mini", provider: "OpenRouter", tier: "standard", description: "OpenAI's efficient model", costPer1kTokens: 0.002 },
+  { id: "google/gemini-2.5-pro", name: "Gemini 2.5 Pro", provider: "OpenRouter", tier: "standard", description: "Google's best, strong multimodal", costPer1kTokens: 0.003 },
+  { id: "minimax/minimax-m2.7", name: "MiniMax M2.7", provider: "OpenRouter", tier: "standard", description: "Strong reasoning with step-by-step thinking", costPer1kTokens: 0.002 },
+
+  // ── Premium (OpenRouter via AI Gateway) ──
+  { id: "anthropic/claude-opus-4-6", name: "Claude Opus 4.6", provider: "OpenRouter", tier: "premium", description: "Top quality — complex reasoning, long context", costPer1kTokens: 0.015 },
+  { id: "openai/gpt-5.4", name: "GPT-5.4", provider: "OpenRouter", tier: "premium", description: "OpenAI's flagship model", costPer1kTokens: 0.01 },
+  { id: "x-ai/grok-4", name: "Grok 4", provider: "OpenRouter", tier: "premium", description: "xAI's flagship reasoning model", costPer1kTokens: 0.005 },
+
+  // ── Speed (Groq — ultra-fast inference) ──
+  { id: "groq/llama-4-scout-17b-16e-instruct", name: "Llama 4 Scout (Groq)", provider: "OpenRouter", tier: "speed", description: "Ultra-fast inference via Groq", costPer1kTokens: 0.0002 },
+  { id: "groq/meta-llama/llama-4-maverick-17b-128e-instruct", name: "Llama 4 Maverick (Groq)", provider: "OpenRouter", tier: "speed", description: "128 experts, blazing fast", costPer1kTokens: 0.0003 },
+] as const;
+
+export type ModelId = typeof MODEL_CATALOG[number]["id"];
+
 function getTenantConfig(tenantId: string): TenantConfig {
-  // Support both tenant ID and DO name patterns
-  // DO name may be: orgId-tenantId-u-userId
   const match = TENANTS.find((t) => t.id === tenantId);
   if (match) return match;
-  // Try to extract tenant from DO name pattern
   for (const t of TENANTS) {
     if (tenantId.includes(`-${t.id}-`) || tenantId.endsWith(`-${t.id}`)) return t;
   }
@@ -1371,7 +1401,16 @@ export class ChatAgent extends Think<Env> {
 
   getModel() {
     const config = getTenantConfig(this.name);
-    const modelId = config.model;
+
+    // Check for per-agent model override (set via setModel() or settings UI)
+    let modelId = config.model;
+    try {
+      this._ensureSecretsTable();
+      const [override] = this.sql<{ value: string }>`
+        SELECT value FROM cf_agent_secrets WHERE key = '_model_override'
+      `;
+      if (override?.value) modelId = override.value;
+    } catch {} // Fall back to config model if table doesn't exist yet
 
     // OpenRouter models (via AI Gateway): model IDs contain "/" (e.g., "minimax/minimax-m2.7")
     // Workers AI models: prefixed with "@cf/" (e.g., "@cf/moonshotai/kimi-k2.5")
@@ -3251,6 +3290,58 @@ export class ChatAgent extends Think<Env> {
     return TENANTS.map(({ id, name, icon, description }) => ({
       id, name, icon, description,
     }));
+  }
+
+  @callable({ description: "List all available AI models with pricing" })
+  getAvailableModels() {
+    return MODEL_CATALOG.map(m => ({
+      id: m.id, name: m.name, provider: m.provider, tier: m.tier,
+      description: m.description, costPer1kTokens: m.costPer1kTokens,
+    }));
+  }
+
+  @callable({ description: "Get the currently active model for this agent" })
+  getCurrentModel() {
+    // Check if user has a per-agent model override in DO SQLite
+    this._ensureSecretsTable(); // reuse secrets table for settings
+    const [row] = this.sql<{ value: string }>`
+      SELECT value FROM cf_agent_secrets WHERE key = '_model_override'
+    `;
+    const config = getTenantConfig(this.name);
+    const activeModel = row?.value || config.model;
+    const catalogEntry = MODEL_CATALOG.find(m => m.id === activeModel);
+    return {
+      model: activeModel,
+      name: catalogEntry?.name || activeModel,
+      provider: catalogEntry?.provider || "unknown",
+      tier: catalogEntry?.tier || "unknown",
+      costPer1kTokens: catalogEntry?.costPer1kTokens || 0,
+    };
+  }
+
+  @callable({ description: "Change the AI model for this agent. Takes a model ID from getAvailableModels()." })
+  setModel(modelId: string) {
+    // Validate model exists in catalog
+    const model = MODEL_CATALOG.find(m => m.id === modelId);
+    if (!model) return { error: `Unknown model: ${modelId}. Use getAvailableModels() to see options.` };
+
+    // Store as per-agent override in DO SQLite
+    this._ensureSecretsTable();
+    this.sql`
+      INSERT INTO cf_agent_secrets (key, value, category, description)
+      VALUES ('_model_override', ${modelId}, 'setting', ${`Model: ${model.name}`})
+      ON CONFLICT(key) DO UPDATE SET value = ${modelId}, updated_at = datetime('now')
+    `;
+
+    emit(this.env as TelemetryBindings, {
+      type: "agent.model_changed",
+      agentName: this.name,
+      model: modelId,
+      provider: model.provider,
+      tier: model.tier,
+    });
+
+    return { model: modelId, name: model.name, provider: model.provider, tier: model.tier };
   }
 
   @callable({ description: "List all available skills for this agent" })
