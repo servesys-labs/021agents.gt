@@ -6,21 +6,26 @@ category: development
 version: 2.0.0
 enabled: true
 allowed-tools:
-  - bash
-  - read-file
-  - write-file
-  - edit-file
-  - execute-code
-  - python-exec
+  - readFile
+  - writeFile
+  - listDirectory
+  - deleteFile
+  - mkdir
+  - glob
+  - runStateCode
+  - gitInit
+  - gitStatus
+  - gitAdd
+  - gitCommit
+  - gitLog
+  - gitDiff
+  - gitClone
+  - gitPush
+  - gitBranch
+  - gitCheckout
+  - gitRemote
   - web-search
   - browse
-  - expose_preview
-  - unexpose_preview
-  - start_process
-  - create_checkpoint
-  - restore_checkpoint
-  - run_code_persistent
-  - git_clone
   - memory-save
   - swarm
 ---
@@ -82,20 +87,23 @@ For trivial tasks (1-3 files), skip the plan and just build.
 
 ### Phase 2: Scaffold
 
-```bash
-# Create project in /workspace/
-cd /workspace
-[scaffold command from table above]
-cd [project-name]
-npm install  # or uv sync
+Use `runStateCode` to scaffold the project via shell commands, or `writeFile` to create files directly:
+
+```javascript
+// runStateCode example:
+async () => {
+  await state.writeFile("/package.json", JSON.stringify({ name: "my-app", ... }));
+  await state.writeFile("/src/index.ts", "export default { ... }");
+  return "Scaffolded";
+}
 ```
 
 **Immediately after scaffolding:**
-1. `git init && git add -A && git commit -m "initial scaffold"`
-2. Start the dev server: `npm run dev` (use `start_process` for background)
-3. Expose preview: `expose_preview(port=5173)` (or 3000 for Next.js)
+1. `gitInit()` → `gitAdd({ filepath: "." })` → `gitCommit({ message: "initial scaffold" })`
+2. Write all project files via `writeFile`
+3. For projects that need a dev server, use `runStateCode` to run build commands
 
-The user should see a live preview URL within 60 seconds of asking.
+The user should see working files within 60 seconds of asking.
 
 ### Phase 3: Build (Iterative)
 
@@ -129,136 +137,107 @@ See **Deployment** section below.
 
 ## GitHub Integration
 
+Uses SDK git primitives (`@cloudflare/shell/git`) — isomorphic-git running in the DO's virtual filesystem.
+
 ### Clone & Work on Existing Repos
 
-```bash
-# Clone with credentials from secrets
-git_clone(url="https://github.com/user/repo.git", branch="main")
-cd /workspace/repo
-
-# Or with auth token (stored in agent secrets)
-git clone https://${GITHUB_TOKEN}@github.com/user/repo.git /workspace/repo
+```
+gitClone({ url: "https://github.com/user/repo.git", branch: "main", token: "GITHUB_TOKEN" })
 ```
 
 ### Commit & Push
 
-```bash
-cd /workspace/project
-git add -A
-git commit -m "feat: [description of changes]"
-
-# Push to existing remote
-git push origin main
-
-# Or push to a new branch for PR
-git checkout -b feature/my-changes
-git push -u origin feature/my-changes
+```
+gitAdd({ filepath: "." })
+gitCommit({ message: "feat: description of changes" })
+gitPush({ remote: "origin", token: "GITHUB_TOKEN" })
 ```
 
-### Create Pull Request
+### Branch & PR Workflow
 
-```bash
-# Using GitHub CLI (pre-installed in sandbox)
-cd /workspace/project
-gh pr create \
-  --title "feat: [title]" \
-  --body "## Summary\n- [change 1]\n- [change 2]\n\n## Preview\n[preview URL from expose_preview]" \
-  --base main
+```
+gitBranch({ name: "feature/my-changes" })
+gitCheckout({ ref: "feature/my-changes" })
+// ... make changes ...
+gitAdd({ filepath: "." })
+gitCommit({ message: "feat: new feature" })
+gitPush({ remote: "origin", ref: "feature/my-changes", token: "GITHUB_TOKEN" })
 ```
 
-### Create New Repository
-
-```bash
-cd /workspace/project
-gh repo create user/repo-name --public --source=. --push
+For creating the PR itself, use `runStateCode` with a fetch call to GitHub's API:
+```javascript
+async () => {
+  const resp = await fetch("https://api.github.com/repos/OWNER/REPO/pulls", {
+    method: "POST",
+    headers: { Authorization: "token GITHUB_TOKEN", "Content-Type": "application/json" },
+    body: JSON.stringify({ title: "feat: ...", head: "feature/my-changes", base: "main", body: "## Summary\n..." })
+  });
+  return await resp.json();
+}
 ```
 
-### GitHub Workflow
+### Full GitHub Workflow
 
-When the user asks to work on a GitHub project:
-1. **Clone** the repo into `/workspace/`
-2. **Create a branch** for changes
-3. **Make changes** with the build loop
-4. **Commit** with clear commit messages (conventional commits)
-5. **Push** and create a PR with a preview URL
-6. **Share the PR link** with the user
+1. **Clone** with `gitClone({ url, token })`
+2. **Branch** with `gitBranch({ name })` + `gitCheckout({ ref })`
+3. **Build** using the iterative loop (writeFile, readFile, etc.)
+4. **Commit** with `gitAdd` + `gitCommit` (conventional commits)
+5. **Push** with `gitPush({ token })`
+6. **PR** via `runStateCode` GitHub API call
 
-**Authentication:** GitHub tokens are stored as agent secrets. Use `GITHUB_TOKEN` env var. If not configured, ask the user to add their token via the Connectors page.
+**Authentication:** GitHub tokens stored as agent secrets. If not configured, ask the user to add their token in Connectors.
 
 ---
 
 ## Deployment
 
-### Deploy to Cloudflare Pages (Default)
-
-Every web project can be deployed to a live URL with one command:
-
-```bash
-cd /workspace/project
-
-# Build the project
-npm run build
-
-# Deploy to CF Pages
-npx wrangler pages deploy ./dist \
-  --project-name="[project-slug]" \
-  --branch=production \
-  --commit-dirty=true
-
-# The deployed URL will be: https://[project-slug].pages.dev
-```
-
-**For Next.js projects:**
-```bash
-npm run build
-npx wrangler pages deploy ./.next \
-  --project-name="[project-slug]" \
-  --compatibility-date=2025-04-01
-```
-
-**For SvelteKit projects:**
-```bash
-npm run build
-npx wrangler pages deploy ./build \
-  --project-name="[project-slug]"
-```
-
-### Deploy to Cloudflare Workers (APIs/backends)
-
-```bash
-cd /workspace/project
-
-# Create wrangler.toml if not exists
-cat > wrangler.toml << 'TOML'
-name = "[project-slug]"
-main = "src/index.ts"
-compatibility_date = "2025-04-01"
-TOML
-
-npx wrangler deploy
-# URL: https://[project-slug].[account].workers.dev
-```
-
-### Custom Domain (User's Own)
-
-```bash
-# Add custom domain to Pages project
-npx wrangler pages project edit [project-slug] \
-  --production-branch=production
-
-# User configures DNS CNAME: custom.domain.com → [project-slug].pages.dev
-```
+Use `runStateCode` to build and deploy. The virtual filesystem contains the project files; export them for deployment via the Cloudflare API or wrangler.
 
 ### Deploy Workflow
 
-When the user says "deploy" or "publish" or "make it live":
+When the user says "deploy", "publish", or "make it live":
 
-1. **Checkpoint** current workspace state
-2. **Build** the project (`npm run build`)
-3. **Fix any build errors** — don't deploy broken code
-4. **Deploy** to CF Pages (web) or Workers (API)
-5. **Return the live URL** to the user
-6. **Save** the deployment info to memory for future reference
+1. **Verify** all files are committed (`gitStatus` should be clean)
+2. **Build** using `runStateCode` — run the build step programmatically
+3. **Deploy** using `runStateCode` with CF Pages API:
+
+```javascript
+async () => {
+  // Read built files from workspace
+  const files = await state.glob("dist/**/*");
+
+  // Deploy via CF Pages Direct Upload API
+  const formData = new FormData();
+  for (const file of files) {
+    const content = await state.readFile(file.path);
+    formData.append(file.path.replace("dist/", ""), new Blob([content]));
+  }
+
+  const resp = await fetch(
+    `https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/pages/projects/PROJECT/deployments`,
+    {
+      method: "POST",
+      headers: { Authorization: "Bearer CF_API_TOKEN" },
+      body: formData
+    }
+  );
+  return await resp.json();
+}
+```
+
+4. **Return the live URL** to the user: `https://[project-slug].pages.dev`
+5. **Save** deployment info to memory for future reference
+
+### Deploy via Git Push (Recommended)
+
+If the project is connected to a GitHub repo with CF Pages auto-deploy:
+
+1. `gitAdd({ filepath: "." })`
+2. `gitCommit({ message: "deploy: production build" })`
+3. `gitPush({ remote: "origin", token: "GITHUB_TOKEN" })`
+4. CF Pages auto-deploys from the push
+
+This is the cleanest path — no API tokens needed beyond GitHub.
 
 ---
 
