@@ -123,6 +123,22 @@ export class Sandbox extends BaseSandbox {
       return new Response(null, { status: 403, statusText: "Blocked by policy" });
     },
 
+    /** Per-agent credential injection from stored secrets.
+     * ctx.params.secrets = { "api.example.com": "Bearer token123", ... }
+     * Maps hostname → Authorization header value.
+     * Called by ChatAgent before sandbox code execution. */
+    injectSecrets: async (req: Request, _env: Env, ctx: any) => {
+      const url = new URL(req.url);
+      const secrets: Record<string, string> = ctx.params?.secrets || {};
+      const authValue = secrets[url.hostname];
+      if (authValue) {
+        const headers = new Headers(req.headers);
+        headers.set("Authorization", authValue);
+        return fetch(new Request(req.url, { ...req, headers }));
+      }
+      return fetch(req);
+    },
+
     /** Hard block — no network access at all. */
     blockAll: async (_req: Request) => {
       return new Response(null, { status: 403, statusText: "Network access disabled" });
@@ -1570,7 +1586,169 @@ export class ChatAgent extends Think<Env> {
       }),
     };
 
-    return { codemode, ...allTools, ...delegationTools, ...dataSourceTools };
+    // ═══════════════════════════════════════════════════════════════════
+    // SANDBOX GA TOOLS — Live preview, file watching, checkpoints, git
+    //
+    // These use the @cloudflare/sandbox GA APIs (April 2026):
+    // - exposePort: live preview URLs for dev servers
+    // - createBackup/restoreBackup: checkpoint workspace state
+    // - watch: file system monitoring via inotify
+    // - git.checkout: clone repos into workspace
+    // - startProcess: long-running background processes
+    // - createCodeContext: persistent REPL sessions (Jupyter-like)
+    //
+    // The sandbox has persistent filesystem, networking, and processes.
+    // Credentials injected via Outbound Workers — agent never sees secrets.
+    // ═══════════════════════════════════════════════════════════════════
+    const sandboxGaTools = config.enableSandbox ? {
+      expose_preview: tool({
+        description: "Expose a port from the sandbox container and get a live preview URL. Use after starting a dev server (npm run dev, python -m http.server, etc). The URL is shareable and persists until unexposed.",
+        inputSchema: z.object({
+          port: z.number().min(1024).max(65535).describe("Port number the server is listening on"),
+          name: z.string().optional().describe("Friendly name for this port (e.g., 'frontend', 'api')"),
+        }),
+        execute: async ({ port, name }) => {
+          try {
+            const sandbox = getSandbox(this.env.Sandbox, "coding-sandbox");
+            const hostname = "agent-harness.servesys.workers.dev";
+            const result = await sandbox.exposePort(port, { hostname, name });
+            return {
+              url: result.url,
+              port: result.port,
+              name: result.name,
+              message: `Preview live at ${result.url}`,
+            };
+          } catch (err: any) {
+            return { error: `Failed to expose port ${port}: ${err.message?.slice(0, 200)}` };
+          }
+        },
+      }),
+
+      unexpose_preview: tool({
+        description: "Stop exposing a port's preview URL",
+        inputSchema: z.object({
+          port: z.number().describe("Port number to unexpose"),
+        }),
+        execute: async ({ port }) => {
+          try {
+            const sandbox = getSandbox(this.env.Sandbox, "coding-sandbox");
+            await sandbox.unexposePort(port);
+            return { unexposed: port };
+          } catch (err: any) {
+            return { error: err.message?.slice(0, 200) };
+          }
+        },
+      }),
+
+      create_checkpoint: tool({
+        description: "Create a backup/snapshot of the workspace. Creates a squashfs archive uploaded to R2. Use before risky operations (major refactors, deleting files) so you can restore if things go wrong. The backup handle is returned — save it to restore later.",
+        inputSchema: z.object({
+          name: z.string().optional().describe("Human-readable checkpoint name"),
+          path: z.string().default("/workspace").describe("Directory to back up"),
+        }),
+        execute: async ({ name, path }) => {
+          try {
+            const sandbox = getSandbox(this.env.Sandbox, "coding-sandbox");
+            const backup = await sandbox.createBackup({
+              path: path || "/workspace",
+              name: name || `checkpoint-${Date.now()}`,
+            });
+            return {
+              backup: backup,
+              message: `Checkpoint "${name || 'checkpoint'}" created. Save the backup handle to restore later.`,
+            };
+          } catch (err: any) {
+            return { error: `Backup failed: ${err.message?.slice(0, 200)}` };
+          }
+        },
+      }),
+
+      restore_checkpoint: tool({
+        description: "Restore a previous workspace checkpoint from a backup handle. Replaces the current directory contents with the backed-up state.",
+        inputSchema: z.object({
+          backup: z.any().describe("The backup handle returned by create_checkpoint"),
+        }),
+        execute: async ({ backup }) => {
+          try {
+            const sandbox = getSandbox(this.env.Sandbox, "coding-sandbox");
+            const result = await sandbox.restoreBackup(backup);
+            return { restored: true, result };
+          } catch (err: any) {
+            return { error: `Restore failed: ${err.message?.slice(0, 200)}` };
+          }
+        },
+      }),
+
+      git_clone: tool({
+        description: "Clone a git repository into the sandbox workspace. Supports public repos and private repos if credentials are stored as secrets.",
+        inputSchema: z.object({
+          url: z.string().describe("Git repository URL (HTTPS)"),
+          path: z.string().default("/workspace/repo").describe("Destination path in sandbox"),
+          branch: z.string().optional().describe("Branch to checkout (default: main)"),
+        }),
+        execute: async ({ url, path, branch }) => {
+          try {
+            const sandbox = getSandbox(this.env.Sandbox, "coding-sandbox");
+            const result = await sandbox.git.checkout({
+              url,
+              dir: path || "/workspace/repo",
+              branch: branch || "main",
+            });
+            return { cloned: true, path: path || "/workspace/repo", result };
+          } catch (err: any) {
+            return { error: `Git clone failed: ${err.message?.slice(0, 200)}` };
+          }
+        },
+      }),
+
+      start_process: tool({
+        description: "Start a long-running background process in the sandbox (dev server, build watcher, test runner). Returns a process handle. Use expose_preview to make the port accessible.",
+        inputSchema: z.object({
+          command: z.string().describe("Command to run (e.g., 'npm run dev', 'python -m http.server 8080')"),
+          cwd: z.string().default("/workspace").describe("Working directory"),
+        }),
+        execute: async ({ command, cwd }) => {
+          try {
+            const sandbox = getSandbox(this.env.Sandbox, "coding-sandbox");
+            const session = await sandbox.createSession();
+            const result = await session.exec(command, { cwd: cwd || "/workspace", background: true } as any);
+            return {
+              process: result,
+              message: `Process started: ${command}. Use expose_preview to make ports accessible.`,
+            };
+          } catch (err: any) {
+            return { error: `Process start failed: ${err.message?.slice(0, 200)}` };
+          }
+        },
+      }),
+
+      run_code_persistent: tool({
+        description: "Run code in a persistent context (like a Jupyter notebook cell). Variables and imports persist across calls. Supports Python, JavaScript, TypeScript.",
+        inputSchema: z.object({
+          code: z.string().describe("Code to execute"),
+          language: z.enum(["python", "javascript", "typescript"]).default("python").describe("Programming language"),
+          context_id: z.string().optional().describe("Reuse an existing context (for persistent variables). Omit for new context."),
+        }),
+        execute: async ({ code, language, context_id }) => {
+          try {
+            const sandbox = getSandbox(this.env.Sandbox, "coding-sandbox");
+            const result = await sandbox.runCode(code, {
+              language: language || "python",
+              contextId: context_id,
+            } as any);
+            return {
+              output: (result as any).output?.slice(0, 10000) || "",
+              error: (result as any).error?.slice(0, 2000) || null,
+              context_id: (result as any).contextId,
+            };
+          } catch (err: any) {
+            return { error: `Code execution failed: ${err.message?.slice(0, 200)}` };
+          }
+        },
+      }),
+    } : {};
+
+    return { codemode, ...allTools, ...delegationTools, ...dataSourceTools, ...sandboxGaTools };
   }
 
   getMaxSteps() { return 10; }
