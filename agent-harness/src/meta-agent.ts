@@ -19,13 +19,33 @@
 
 import { tool } from "ai";
 import { z } from "zod";
+import {
+  progressiveMcpTools,
+  otelMaintenanceTools,
+  skillManagementTools,
+} from "./codemode-patterns";
 
 /**
- * Create the Meta Agent's tool set.
- * These tools call the AgentSupervisor DO via the AGENT_CORE service binding.
+ * Create the Meta Agent's FULL tool set.
+ *
+ * Every tool uses CF primitives:
+ * - Agent CRUD → service binding to AgentSupervisor DO (DO RPC)
+ * - Skill generation → Workers AI (@cf/moonshotai/kimi-k2.5)
+ * - OTEL/metrics → Analytics Engine (writeDataPoint / SQL API)
+ * - Code execution → Dynamic Workers via CodeMode (LOADER binding)
+ * - MCP discovery → agents SDK (addMcpServer / removeMcpServer / mcp.getAITools)
+ * - Eval testing → service binding → AgentSupervisor.chatWithAgent()
+ *
+ * Zero external dependencies. Everything runs on CF edge.
  */
-export function metaAgentTools(env: { AGENT_CORE: Fetcher; AI: Ai }) {
+export function metaAgentTools(env: { AGENT_CORE: Fetcher; AI: Ai; ANALYTICS?: AnalyticsEngineDataset }) {
   return {
+    // ── CodeMode-powered tools (from codemode-patterns.ts) ──
+    ...progressiveMcpTools(env),
+    ...otelMaintenanceTools(env),
+    ...skillManagementTools(env),
+
+    // ── Agent CRUD (below) ──
     // ── Agent CRUD ──────────────────────────────────────────────
 
     createAgent: tool({
@@ -348,10 +368,42 @@ Only assign skills that are relevant to the agent's purpose.
 - messenger: Facebook Messenger
 - voice: Voice calls (browser or phone)
 
+## API Integrations (CodeMode Skills)
+When a user needs their agent to connect to an API (Shopify, Stripe, GitHub, Notion, CRM, etc.):
+- Do NOT suggest an MCP server — use createApiSkill instead
+- CodeMode skills wrap API calls using codemode.fetchUrl() — no external server needed
+- Check listApiTemplates first — built-in templates exist for Shopify, Stripe, GitHub, Notion
+- For custom APIs, describe the API to createApiSkill and it generates the skill
+
+This approach has zero context rot — the skill is only loaded when the agent needs it.
+
+## MCP Servers (Progressive Discovery)
+If the user insists on connecting an MCP server:
+- Use discoverMcpTools first to see what the server offers WITHOUT permanent connection
+- Only use connectMcpForTask for temporary, task-specific connections
+- Never leave MCP servers permanently connected (causes context window bloat)
+
+## Agent Health & Maintenance
+You have observability tools to monitor agent health:
+- analyzeAgentHealth: health score, response times, error rates
+- findFailingConversations: scan for failures and user complaints
+- generateAgentReport: comprehensive org-wide report
+- bulkUpdateAgents: apply changes across multiple agents at once
+- suggestImprovements: specific recommendations based on config analysis
+
+Use these proactively — check agent health after creation, during testing, and when users report issues.
+
+## Efficiency Principle
+Always prefer CodeMode orchestration over multiple individual tool calls.
+Instead of 5 separate API calls, write ONE codemode script that does all 5 in parallel.
+The LLM writes JavaScript, CodeMode executes it in an isolated Dynamic Worker.
+
 ## Guidelines
 - Be conversational and helpful, not technical
 - Ask clarifying questions before creating an agent
 - Always test the agent before declaring it ready
 - Suggest specific prompt improvements, don't be vague
 - If the user is unsure, suggest a starting point and iterate
-- Celebrate when the agent works well — this is exciting!`;
+- Prefer CodeMode skills over MCP servers for API integrations
+- Check agent health proactively, don't wait for users to report issues
+- Celebrate when the agent works well!`;
