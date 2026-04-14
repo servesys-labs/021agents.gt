@@ -159,7 +159,8 @@ app.use("/api/v1/*", async (c, next) => {
     const [key] = await sql`
       SELECT org_id, user_id, scopes FROM api_keys
       WHERE key_hash = encode(digest(${token}, 'sha256'), 'hex')
-        AND revoked_at IS NULL
+        AND (revoked = false OR revoked IS NULL)
+        AND is_active = true
       LIMIT 1
     `;
     await sql.end();
@@ -226,6 +227,7 @@ app.get("/api/v1/health/detailed", async (c) => {
 
 // ═══════════════════════════════════════════════════════════════════
 // AGENT LIFECYCLE (Pattern A: KV cache + Pattern E: Postgres)
+// Old schema: agents table uses handle (not name), agent_id (not id)
 // ═══════════════════════════════════════════════════════════════════
 
 app.get("/api/v1/agents", async (c) => {
@@ -233,8 +235,8 @@ app.get("/api/v1/agents", async (c) => {
   const agents = await kvCached(c.env.CACHE, `agents:${orgId}`, 60, async () => {
     const sql = await getDb(c.env.DB);
     const rows = await sql`
-      SELECT name, description, config, is_active, created_at FROM agents
-      WHERE org_id = ${orgId} ORDER BY created_at DESC
+      SELECT agent_id, handle as name, display_name, description, config, is_active, created_at
+      FROM agents WHERE org_id = ${orgId} ORDER BY created_at DESC
     `;
     await sql.end();
     return rows;
@@ -248,7 +250,7 @@ app.get("/api/v1/agents/:name", async (c) => {
   const agent = await kvCached(c.env.CACHE, `agent:${orgId}:${name}`, 60, async () => {
     const sql = await getDb(c.env.DB);
     const [row] = await sql`
-      SELECT * FROM agents WHERE name = ${name} AND org_id = ${orgId} LIMIT 1
+      SELECT * FROM agents WHERE (handle = ${name} OR name = ${name}) AND org_id = ${orgId} LIMIT 1
     `;
     await sql.end();
     return row || null;
@@ -262,21 +264,20 @@ app.post("/api/v1/agents", async (c) => {
   const body = await c.req.json();
   const sql = await getDb(c.env.DB);
   const [agent] = await sql`
-    INSERT INTO agents (name, description, config, org_id)
-    VALUES (${body.name}, ${body.description || ""}, ${JSON.stringify(body.config || {})}, ${orgId})
+    INSERT INTO agents (handle, name, display_name, description, config, org_id)
+    VALUES (${body.name}, ${body.name}, ${body.name}, ${body.description || ""}, ${JSON.stringify(body.config || {})}::jsonb, ${orgId})
     RETURNING *
   `;
   await sql.end();
   await kvInvalidate(c.env.CACHE, `agents:${orgId}`, `agent:${orgId}:${body.name}`);
 
-  // Push config to Agent Core DO via service binding
   try {
     await c.env.AGENT_CORE.fetch(new Request(`http://internal/agents/${body.name}/default`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ type: "configure", config: body.config }),
     }));
-  } catch {} // best-effort
+  } catch {}
 
   return c.json(agent, 201);
 });
@@ -289,9 +290,9 @@ app.put("/api/v1/agents/:name", async (c) => {
   const [agent] = await sql`
     UPDATE agents SET
       description = COALESCE(${body.description}, description),
-      config = COALESCE(${body.config ? JSON.stringify(body.config) : null}, config),
+      config = COALESCE(${body.config ? JSON.stringify(body.config) : null}::jsonb, config),
       updated_at = now()
-    WHERE name = ${name} AND org_id = ${orgId}
+    WHERE (handle = ${name} OR name = ${name}) AND org_id = ${orgId}
     RETURNING *
   `;
   await sql.end();
@@ -304,7 +305,7 @@ app.delete("/api/v1/agents/:name", async (c) => {
   const orgId = c.get("orgId");
   const name = c.req.param("name");
   const sql = await getDb(c.env.DB);
-  await sql`UPDATE agents SET is_active = false WHERE name = ${name} AND org_id = ${orgId}`;
+  await sql`UPDATE agents SET is_active = false WHERE (handle = ${name} OR name = ${name}) AND org_id = ${orgId}`;
   await sql.end();
   await kvInvalidate(c.env.CACHE, `agents:${orgId}`, `agent:${orgId}:${name}`);
   return c.json({ deleted: name });
@@ -509,7 +510,7 @@ app.post("/api/v1/credits/checkout", async (c) => {
   }
 
   // Get or create Stripe customer for this org
-  const [org] = await sql`SELECT id, stripe_customer_id, name FROM orgs WHERE id = ${orgId}`;
+  const [org] = await sql`SELECT org_id, stripe_customer_id, name FROM orgs WHERE org_id = ${orgId}`;
   await sql.end();
 
   let customerId = org?.stripe_customer_id;
@@ -531,7 +532,7 @@ app.post("/api/v1/credits/checkout", async (c) => {
 
     // Save customer ID
     const sql2 = await getDb(c.env.DB);
-    await sql2`UPDATE orgs SET stripe_customer_id = ${customerId} WHERE id = ${orgId}`;
+    await sql2`UPDATE orgs SET stripe_customer_id = ${customerId} WHERE org_id = ${orgId}`;
     await sql2.end();
   }
 
@@ -657,11 +658,9 @@ app.get("/api/v1/usage", async (c) => {
     SELECT
       agent_name,
       COUNT(*) as session_count,
-      COALESCE(SUM(cost_usd), 0) as total_cost,
-      COALESCE(SUM(input_tokens), 0) as total_input_tokens,
-      COALESCE(SUM(output_tokens), 0) as total_output_tokens
+      COALESCE(SUM(cost_total_usd), 0) as total_cost
     FROM sessions
-    WHERE org_id = ${orgId} AND created_at > NOW() - make_interval(days => ${days})
+    WHERE org_id = ${orgId} AND created_at > NOW() - (${days} || ' days')::interval
     GROUP BY agent_name
     ORDER BY total_cost DESC
   `;
@@ -715,7 +714,7 @@ app.get("/api/v1/sessions/:id/turns", async (c) => {
 
   // Verify session belongs to this org
   const [session] = await sql`
-    SELECT id FROM sessions WHERE id = ${sessionId} AND org_id = ${orgId}
+    SELECT session_id FROM sessions WHERE session_id = ${sessionId} AND org_id = ${orgId}
   `;
   if (!session) {
     await sql.end();
@@ -728,7 +727,7 @@ app.get("/api/v1/sessions/:id/turns", async (c) => {
   // execution events which we can query from the telemetry tables.
   // For now, return what we have from the session + any tool executions.
   const [detail] = await sql`
-    SELECT * FROM sessions WHERE id = ${sessionId}
+    SELECT * FROM sessions WHERE session_id = ${sessionId}
   `;
   await sql.end();
 
@@ -765,7 +764,7 @@ app.get("/api/v1/conversations", async (c) => {
       FROM conversations
       WHERE org_id = ${orgId}
         AND agent_name = ${agentName}
-        AND is_deleted = false
+        AND status != 'deleted'
         AND created_at < ${cursor}
       ORDER BY created_at DESC
       LIMIT ${limit + 1}
@@ -777,7 +776,7 @@ app.get("/api/v1/conversations", async (c) => {
       FROM conversations
       WHERE org_id = ${orgId}
         AND agent_name = ${agentName}
-        AND is_deleted = false
+        AND status != 'deleted'
       ORDER BY created_at DESC
       LIMIT ${limit + 1}
     `;
@@ -803,7 +802,7 @@ app.get("/api/v1/conversations/:id/messages", async (c) => {
   // Verify conversation belongs to this org
   const [conv] = await sql`
     SELECT id FROM conversations
-    WHERE id = ${conversationId} AND org_id = ${orgId} AND is_deleted = false
+    WHERE id = ${conversationId} AND org_id = ${orgId} AND status != 'deleted'
   `;
   if (!conv) {
     await sql.end();
@@ -872,7 +871,7 @@ app.put("/api/v1/conversations/:id", async (c) => {
     UPDATE conversations
     SET title = COALESCE(${body.title || null}, title),
         updated_at = now()
-    WHERE id = ${conversationId} AND org_id = ${orgId} AND is_deleted = false
+    WHERE id = ${conversationId} AND org_id = ${orgId} AND status != 'deleted'
     RETURNING id, org_id, user_id, agent_name, channel, title,
               message_count, total_cost_usd, created_at, updated_at
   `;
@@ -888,7 +887,7 @@ app.delete("/api/v1/conversations/:id", async (c) => {
 
   const sql = await getDb(c.env.DB);
   await sql`
-    UPDATE conversations SET is_deleted = true, updated_at = now()
+    UPDATE conversations SET status = 'deleted', updated_at = now()
     WHERE id = ${conversationId} AND org_id = ${orgId}
   `;
   await sql.end();
@@ -923,7 +922,7 @@ app.get("/api/v1/conversations/:id/export", async (c) => {
   const sql = await getDb(c.env.DB);
   const [conv] = await sql`
     SELECT * FROM conversations
-    WHERE id = ${conversationId} AND org_id = ${orgId} AND is_deleted = false
+    WHERE id = ${conversationId} AND org_id = ${orgId} AND status != 'deleted'
   `;
   if (!conv) {
     await sql.end();
@@ -1033,7 +1032,7 @@ app.get("/api/v1/sessions/:id/trace", async (c) => {
   const sql = await getDb(c.env.DB);
 
   const [session] = await sql`
-    SELECT * FROM sessions WHERE id = ${sessionId} AND org_id = ${orgId}
+    SELECT * FROM sessions WHERE session_id = ${sessionId} AND org_id = ${orgId}
   `;
   if (!session) {
     await sql.end();
@@ -1192,7 +1191,7 @@ app.get("/api/v1/guardrails", async (c) => {
   const rules = await kvCached(c.env.CACHE, `guardrails:${orgId}`, 60, async () => {
     const sql = await getDb(c.env.DB);
     const rows = await sql`
-      SELECT * FROM guardrail_rules WHERE org_id = ${orgId} AND is_active = true
+      SELECT * FROM guardrail_policies WHERE org_id = ${orgId} AND is_active = true
     `;
     await sql.end();
     return rows;
@@ -1205,8 +1204,8 @@ app.post("/api/v1/guardrails", async (c) => {
   const body = await c.req.json();
   const sql = await getDb(c.env.DB);
   const [rule] = await sql`
-    INSERT INTO guardrail_rules (name, type, config, org_id)
-    VALUES (${body.name}, ${body.type}, ${JSON.stringify(body.config)}, ${orgId})
+    INSERT INTO guardrail_policies (policy_type, config, org_id)
+    VALUES (${body.type || body.name}, ${JSON.stringify(body.config)}::jsonb, ${orgId})
     RETURNING *
   `;
   await sql.end();
@@ -1220,7 +1219,7 @@ app.put("/api/v1/guardrails/:id", async (c) => {
   const body = await c.req.json<{ name?: string; config?: Record<string, unknown>; is_active?: boolean }>();
   const sql = await getDb(c.env.DB);
   const [rule] = await sql`
-    UPDATE guardrail_rules SET
+    UPDATE guardrail_policies SET
       name = COALESCE(${body.name || null}, name),
       config = COALESCE(${body.config ? JSON.stringify(body.config) : null}::jsonb, config),
       is_active = COALESCE(${body.is_active ?? null}, is_active)
@@ -1237,7 +1236,7 @@ app.delete("/api/v1/guardrails/:id", async (c) => {
   const orgId = c.get("orgId");
   const ruleId = c.req.param("id");
   const sql = await getDb(c.env.DB);
-  await sql`DELETE FROM guardrail_rules WHERE id = ${ruleId} AND org_id = ${orgId}`;
+  await sql`DELETE FROM guardrail_policies WHERE id = ${ruleId} AND org_id = ${orgId}`;
   await sql.end();
   await kvInvalidate(c.env.CACHE, `guardrails:${orgId}`);
   return c.json({ deleted: ruleId });
@@ -1252,10 +1251,10 @@ app.get("/api/v1/skills", async (c) => {
   const skills = await kvCached(c.env.CACHE, `skills:${orgId}`, 120, async () => {
     const sql = await getDb(c.env.DB);
     const rows = await sql`
-      SELECT id, name, description, version, is_builtin, is_active, created_at
+      SELECT skill_id, name, description, category, is_active, created_at
       FROM skills
       WHERE (org_id = ${orgId} OR org_id IS NULL) AND is_active = true
-      ORDER BY is_builtin DESC, name
+      ORDER BY name
     `;
     await sql.end();
     return rows;
@@ -1269,9 +1268,9 @@ app.post("/api/v1/skills", async (c) => {
   if (!body.name || !body.content) return c.json({ error: "Name and content required" }, 400);
   const sql = await getDb(c.env.DB);
   const [skill] = await sql`
-    INSERT INTO skills (org_id, name, description, content)
+    INSERT INTO skills (org_id, name, description, prompt_template)
     VALUES (${orgId}, ${body.name}, ${body.description || ""}, ${body.content})
-    RETURNING id, name, description, version, is_active, created_at
+    RETURNING skill_id, name, description, is_active, created_at
   `;
   await sql.end();
   await kvInvalidate(c.env.CACHE, `skills:${orgId}`);
@@ -1287,12 +1286,11 @@ app.put("/api/v1/skills/:id", async (c) => {
     UPDATE skills SET
       name = COALESCE(${body.name || null}, name),
       description = COALESCE(${body.description || null}, description),
-      content = COALESCE(${body.content || null}, content),
+      prompt_template = COALESCE(${body.content || null}, prompt_template),
       is_active = COALESCE(${body.is_active ?? null}, is_active),
-      version = version + 1,
       updated_at = NOW()
-    WHERE id = ${skillId} AND org_id = ${orgId}
-    RETURNING id, name, description, version, is_active, created_at
+    WHERE skill_id = ${skillId} AND org_id = ${orgId}
+    RETURNING skill_id, name, description, is_active, created_at
   `;
   await sql.end();
   if (!skill) return c.json({ error: "Skill not found" }, 404);
@@ -1304,10 +1302,7 @@ app.delete("/api/v1/skills/:id", async (c) => {
   const orgId = c.get("orgId");
   const skillId = c.req.param("id");
   const sql = await getDb(c.env.DB);
-  // Don't delete built-in skills
-  await sql`
-    DELETE FROM skills WHERE id = ${skillId} AND org_id = ${orgId} AND is_builtin = false
-  `;
+  await sql`DELETE FROM skills WHERE skill_id = ${skillId} AND org_id = ${orgId}`;
   await sql.end();
   await kvInvalidate(c.env.CACHE, `skills:${orgId}`);
   return c.json({ deleted: skillId });
@@ -1467,10 +1462,10 @@ app.post("/api/v1/auth/forgot-password", async (c) => {
   if (!body.email) return c.json({ error: "Email required" }, 400);
 
   const sql = await getDb(c.env.DB_ADMIN);
-  const [user] = await sql`SELECT id FROM users WHERE email = ${body.email.toLowerCase().trim()} AND is_active = true`;
+  const [user] = await sql`SELECT user_id FROM users WHERE email = ${body.email.toLowerCase().trim()} AND is_active = true`;
   if (user) {
     const [token] = await sql`
-      INSERT INTO password_reset_tokens (user_id) VALUES (${user.id}) RETURNING token
+      INSERT INTO password_reset_tokens (user_id) VALUES (${user.user_id}) RETURNING token
     `;
     // TODO: send email via MailChannels or SES with reset link containing token.token
     // For now, log it (in production, NEVER log tokens)
@@ -1491,7 +1486,7 @@ app.post("/api/v1/auth/reset-password", async (c) => {
   const sql = await getDb(c.env.DB_ADMIN);
   const [resetToken] = await sql`
     SELECT user_id FROM password_reset_tokens
-    WHERE token = ${body.token} AND used_at IS NULL AND expires_at > NOW()
+    WHERE token = ${body.token} AND expires_at > NOW()
   `;
   if (!resetToken) {
     await sql.end();
@@ -1499,8 +1494,8 @@ app.post("/api/v1/auth/reset-password", async (c) => {
   }
 
   const passwordHash = await hashPassword(body.password);
-  await sql`UPDATE users SET password_hash = ${passwordHash}, updated_at = NOW() WHERE id = ${resetToken.user_id}`;
-  await sql`UPDATE password_reset_tokens SET used_at = NOW() WHERE token = ${body.token}`;
+  await sql`UPDATE users SET password_hash = ${passwordHash}, updated_at = NOW() WHERE user_id = ${resetToken.user_id}`;
+  await sql`DELETE FROM password_reset_tokens WHERE token = ${body.token}`;
   await sql.end();
 
   return c.json({ message: "Password updated successfully" });
@@ -1515,15 +1510,15 @@ app.post("/api/v1/auth/verify-email", async (c) => {
   const sql = await getDb(c.env.DB_ADMIN);
   const [verifyToken] = await sql`
     SELECT user_id FROM email_verification_tokens
-    WHERE token = ${body.token} AND used_at IS NULL AND expires_at > NOW()
+    WHERE token = ${body.token} AND expires_at > NOW()
   `;
   if (!verifyToken) {
     await sql.end();
     return c.json({ error: "Invalid or expired verification token" }, 400);
   }
 
-  await sql`UPDATE users SET email_verified = true, updated_at = NOW() WHERE id = ${verifyToken.user_id}`;
-  await sql`UPDATE email_verification_tokens SET used_at = NOW() WHERE token = ${body.token}`;
+  await sql`UPDATE users SET email_verified = true, updated_at = NOW() WHERE user_id = ${verifyToken.user_id}`;
+  await sql`DELETE FROM email_verification_tokens WHERE token = ${body.token}`;
   await sql.end();
 
   return c.json({ message: "Email verified successfully" });
@@ -1538,8 +1533,8 @@ app.get("/api/v1/auth/me", async (c) => {
 
   const sql = await getDb(c.env.DB);
   const [user] = await sql`
-    SELECT id, email, name, avatar_url, email_verified, created_at
-    FROM users WHERE id = ${userId}
+    SELECT user_id, email, name, avatar_url, email_verified, created_at
+    FROM users WHERE user_id = ${userId}
   `;
   await sql.end();
   if (!user) return c.json({ error: "User not found" }, 404);
@@ -1551,8 +1546,8 @@ app.get("/api/v1/api-keys", async (c) => {
   const orgId = c.get("orgId");
   const sql = await getDb(c.env.DB);
   const rows = await sql`
-    SELECT id, name, prefix, scopes, created_at FROM api_keys
-    WHERE org_id = ${orgId} AND revoked_at IS NULL
+    SELECT key_id, name, key_prefix as prefix, scopes, created_at FROM api_keys
+    WHERE org_id = ${orgId} AND (revoked = false OR revoked IS NULL) AND is_active = true
     ORDER BY created_at DESC
   `;
   await sql.end();
@@ -1565,16 +1560,16 @@ app.post("/api/v1/api-keys", async (c) => {
   const key = `ak_${crypto.randomUUID().replace(/-/g, "")}`;
   const sql = await getDb(c.env.DB);
   const [row] = await sql`
-    INSERT INTO api_keys (name, key_hash, prefix, scopes, org_id, user_id)
+    INSERT INTO api_keys (name, key_hash, key_prefix, scopes, org_id, user_id)
     VALUES (
       ${body.name},
       encode(digest(${key}, 'sha256'), 'hex'),
       ${key.slice(0, 8)},
-      ${JSON.stringify(body.scopes || ["agent:read", "agent:write"])},
+      ${JSON.stringify(body.scopes || ["agent:read", "agent:write"])}::jsonb,
       ${orgId},
       ${c.get("userId")}
     )
-    RETURNING id, name, prefix, scopes, created_at
+    RETURNING key_id, name, key_prefix as prefix, scopes, created_at
   `;
   await sql.end();
   return c.json({ ...row, key }, 201); // key returned only once
@@ -1585,8 +1580,8 @@ app.delete("/api/v1/api-keys/:id", async (c) => {
   const keyId = c.req.param("id");
   const sql = await getDb(c.env.DB);
   await sql`
-    UPDATE api_keys SET revoked_at = NOW()
-    WHERE id = ${keyId} AND org_id = ${orgId} AND revoked_at IS NULL
+    UPDATE api_keys SET revoked = true, updated_at = NOW()
+    WHERE key_id = ${keyId} AND org_id = ${orgId} AND (revoked = false OR revoked IS NULL)
   `;
   await sql.end();
   // Invalidate any cached auth entries for this key
@@ -1602,7 +1597,7 @@ app.get("/api/v1/orgs/current", async (c) => {
   const orgId = c.get("orgId");
   const org = await kvCached(c.env.CACHE, `org:${orgId}`, 300, async () => {
     const sql = await getDb(c.env.DB);
-    const [row] = await sql`SELECT * FROM orgs WHERE id = ${orgId}`;
+    const [row] = await sql`SELECT * FROM orgs WHERE org_id = ${orgId}`;
     await sql.end();
     return row;
   });
@@ -1618,7 +1613,7 @@ app.put("/api/v1/orgs/current", async (c) => {
       name = COALESCE(${body.name || null}, name),
       settings = COALESCE(${body.settings ? JSON.stringify(body.settings) : null}::jsonb, settings),
       updated_at = NOW()
-    WHERE id = ${orgId}
+    WHERE org_id = ${orgId}
     RETURNING *
   `;
   await sql.end();
@@ -1632,10 +1627,10 @@ app.get("/api/v1/orgs/current/members", async (c) => {
   const orgId = c.get("orgId");
   const sql = await getDb(c.env.DB);
   const rows = await sql`
-    SELECT u.id, u.email, u.name, u.avatar_url, m.role, m.joined_at
+    SELECT u.id, u.email, u.name, u.avatar_url, m.role, m.created_at
     FROM org_members m JOIN users u ON m.user_id = u.id
     WHERE m.org_id = ${orgId}
-    ORDER BY m.joined_at
+    ORDER BY m.created_at
   `;
   await sql.end();
   return c.json(rows);
@@ -1678,7 +1673,7 @@ app.delete("/api/v1/orgs/current/members/:userId", async (c) => {
 
   // Prevent removing the org owner
   const sql = await getDb(c.env.DB);
-  const [org] = await sql`SELECT owner_user_id FROM orgs WHERE id = ${orgId}`;
+  const [org] = await sql`SELECT owner_user_id FROM orgs WHERE org_id = ${orgId}`;
   if (org?.owner_user_id === targetUserId) {
     await sql.end();
     return c.json({ error: "Cannot remove org owner" }, 403);
@@ -1730,8 +1725,8 @@ app.post("/api/v1/eval/runs", async (c) => {
 
   const sql = await getDb(c.env.DB);
   const [run] = await sql`
-    INSERT INTO eval_runs (agent_name, dataset_id, config, org_id, status)
-    VALUES (${body.agent_name}, ${body.dataset_id || null}, ${JSON.stringify(body.config || {})}, ${orgId}, 'pending')
+    INSERT INTO eval_runs (agent_name, config, org_id, status)
+    VALUES (${body.agent_name}, ${JSON.stringify(body.config || {})}::jsonb, ${orgId}, 'pending')
     RETURNING *
   `;
   await sql.end();
@@ -1758,8 +1753,8 @@ app.get("/api/v1/features", async (c) => {
   const features = await kvCached(c.env.CACHE, `features:${orgId}`, 30, async () => {
     const sql = await getDb(c.env.DB);
     const rows = await sql`
-      SELECT name, enabled, config FROM feature_flags
-      WHERE org_id = ${orgId} OR org_id IS NULL
+      SELECT flag_name as name, is_active as enabled, value as config FROM feature_flags
+      WHERE org_id = ${orgId}
     `;
     await sql.end();
     return Object.fromEntries(rows.map((r: any) => [r.name, { enabled: r.enabled, config: r.config }]));
@@ -1781,15 +1776,12 @@ app.get("/api/v1/marketplace/search", async (c) => {
   const sql = await getDb(c.env.DB);
   const rows = await sql`
     SELECT id, org_id, agent_name, title, description, category,
-           price_usd, is_free, quality_score, install_count, created_at
+           quality_score, total_tasks_completed, created_at
     FROM marketplace_listings
-    WHERE status = 'published'
+    WHERE is_published = true
       AND (${category} = '' OR category = ${category})
       AND (${query} = '' OR title ILIKE ${"%" + query + "%"} OR description ILIKE ${"%" + query + "%"})
-    ORDER BY
-      CASE WHEN ${sort} = 'quality_score' THEN quality_score END DESC NULLS LAST,
-      CASE WHEN ${sort} = 'install_count' THEN install_count END DESC NULLS LAST,
-      CASE WHEN ${sort} = 'newest' THEN extract(epoch from created_at) END DESC NULLS LAST
+    ORDER BY quality_score DESC NULLS LAST
     LIMIT ${limit} OFFSET ${offset}
   `;
   await sql.end();
@@ -1838,12 +1830,8 @@ app.post("/api/v1/marketplace/publish", async (c) => {
   }
 
   const [listing] = await sql`
-    INSERT INTO marketplace_listings (org_id, agent_name, title, description, category, price_usd, is_free, status, config)
-    VALUES (
-      ${orgId}, ${body.agent_name}, ${body.title}, ${body.description || ""},
-      ${body.category || "general"}, ${body.price_usd || 0}, ${!body.price_usd || body.price_usd === 0},
-      'published', ${JSON.stringify(agent.config || {})}
-    )
+    INSERT INTO marketplace_listings (org_id, agent_name, title, description, category, is_published)
+    VALUES (${orgId}, ${body.agent_name}, ${body.title}, ${body.description || ""}, ${body.category || "general"}, true)
     RETURNING *
   `;
   await sql.end();
@@ -1860,15 +1848,16 @@ app.post("/api/v1/marketplace/:id/rate", async (c) => {
 
   const sql = await getDb(c.env.DB);
   const [rating] = await sql`
-    INSERT INTO marketplace_ratings (listing_id, user_id, score, review)
-    VALUES (${listingId}, ${userId}, ${body.score}, ${body.review || ""})
-    ON CONFLICT (listing_id, user_id) DO UPDATE SET score = ${body.score}, review = ${body.review || ""}
+    INSERT INTO marketplace_ratings (listing_id, rater_org_id, rating, review_text)
+    VALUES (${listingId}, ${c.get("orgId")}, ${body.score}, ${body.review || ""})
+    ON CONFLICT DO NOTHING
     RETURNING *
   `;
   // Update quality_score (rolling average)
   await sql`
     UPDATE marketplace_listings SET
-      quality_score = (SELECT AVG(score) FROM marketplace_ratings WHERE listing_id = ${listingId})
+      avg_rating = COALESCE((SELECT AVG(rating) FROM marketplace_ratings WHERE listing_id = ${listingId}), 0),
+      total_ratings = (SELECT COUNT(*) FROM marketplace_ratings WHERE listing_id = ${listingId})
     WHERE id = ${listingId}
   `;
   await sql.end();
@@ -1883,7 +1872,7 @@ app.post("/api/v1/marketplace/:id/install", async (c) => {
 
   const sql = await getDb(c.env.DB);
   const [listing] = await sql`
-    SELECT * FROM marketplace_listings WHERE id = ${listingId} AND status = 'published'
+    SELECT * FROM marketplace_listings WHERE id = ${listingId} AND is_published = true
   `;
   if (!listing) {
     await sql.end();
@@ -1899,7 +1888,7 @@ app.post("/api/v1/marketplace/:id/install", async (c) => {
   `;
 
   // Increment install count
-  await sql`UPDATE marketplace_listings SET install_count = install_count + 1 WHERE id = ${listingId}`;
+  await sql`UPDATE marketplace_listings SET total_tasks_completed = total_tasks_completed + 1 WHERE id = ${listingId}`;
   await sql.end();
 
   await kvInvalidate(c.env.CACHE, `agents:${orgId}`);
@@ -2008,14 +1997,14 @@ app.get("/api/v1/eval/runs/:id/results", async (c) => {
   const runId = c.req.param("id");
   const sql = await getDb(c.env.DB);
 
-  const [run] = await sql`SELECT * FROM eval_runs WHERE id = ${runId} AND org_id = ${orgId}`;
+  const [run] = await sql`SELECT * FROM eval_runs WHERE eval_run_id = ${runId} AND org_id = ${orgId}`;
   if (!run) {
     await sql.end();
     return c.json({ error: "Run not found" }, 404);
   }
 
   const trials = await sql`
-    SELECT * FROM eval_trials WHERE run_id = ${runId} ORDER BY id
+    SELECT * FROM eval_trials WHERE eval_run_id = ${runId} ORDER BY id
   `;
   await sql.end();
 
