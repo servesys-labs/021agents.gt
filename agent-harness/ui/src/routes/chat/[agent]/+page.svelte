@@ -116,96 +116,103 @@
         return;
       }
 
-      // cf_agent_use_chat_response — streaming response chunks
+      // cf_agent_use_chat_response — Think streaming chunks
+      // Think sends { type, id, body: stringifiedJSON, done: bool }
+      // where body contains: text-delta, reasoning-delta, tool-call, tool-result, etc.
       if (data.type === "cf_agent_use_chat_response") {
         const last = messages[messages.length - 1];
         if (!last || last.role !== "assistant") return;
 
-        // The server streams UIMessage[] updates — extract text + tool parts
+        // Parse the streaming chunk from body (Think protocol)
+        if (data.body) {
+          try {
+            const chunk = typeof data.body === "string" ? JSON.parse(data.body) : data.body;
+
+            if (chunk.type === "text-delta") {
+              last.content += chunk.delta || chunk.textDelta || "";
+              scheduleMessageFlush(true);
+            }
+
+            if (chunk.type === "reasoning-delta" || chunk.type === "reasoning") {
+              const text = chunk.delta || chunk.textDelta || "";
+              last.thinking = (last.thinking || "") + text;
+              // Add to segments
+              const lastSeg = last.segments?.[last.segments.length - 1];
+              if (lastSeg?.type === "thinking") {
+                (lastSeg as any).content += text;
+              } else {
+                last.segments = [...(last.segments || []), { type: "thinking", content: text }];
+              }
+              scheduleMessageFlush(true);
+            }
+
+            if (chunk.type === "tool-call") {
+              const tc: ToolCall = {
+                name: chunk.toolName || "tool",
+                input: typeof chunk.args === "string" ? chunk.args : JSON.stringify(chunk.args || {}),
+                call_id: chunk.toolCallId || crypto.randomUUID(),
+              };
+              last.toolCalls = [...(last.toolCalls || []), tc];
+              // Add to segments
+              const lastSeg = last.segments?.[last.segments.length - 1];
+              if (lastSeg?.type === "tool_calls") {
+                lastSeg.calls.push(tc);
+              } else {
+                last.segments = [...(last.segments || []), { type: "tool_calls", calls: [tc] }];
+              }
+              scheduleMessageFlush(true);
+            }
+
+            if (chunk.type === "tool-result") {
+              const existing = last.toolCalls?.find((t: ToolCall) => t.call_id === chunk.toolCallId);
+              if (existing) {
+                existing.output = typeof chunk.result === "string" ? chunk.result : JSON.stringify(chunk.result || "");
+                scheduleMessageFlush(true);
+
+                // ── Computer Panel: extract workspace data from completed tool calls ──
+                const args = existing.input ? (() => { try { return JSON.parse(existing.input); } catch { return {}; } })() : {};
+                const result = existing.output ? (() => { try { return JSON.parse(existing.output); } catch { return existing.output; } })() : null;
+
+                // File write/edit → Code tab
+                if (["write", "write-file", "edit", "edit-file"].includes(existing.name)) {
+                  const path = args.path || args.file || "";
+                  const content = args.content || args.text || existing.output || "";
+                  if (path && content) { activeFile = { path, content, language: "" }; computerOpen = true; }
+                }
+                // Bash/python → Terminal tab
+                if (["bash", "python-exec", "execute-code", "start_process", "run_code_persistent", "runStateCode", "execCommand"].includes(existing.name)) {
+                  const output = typeof result === "string" ? result : (result?.output || result?.stdout || existing.output || "");
+                  if (output) { terminalLines = [...terminalLines, `$ ${args.command || args.code || existing.name}`, output].slice(-200); computerOpen = true; }
+                }
+                // Preview URL → Preview tab
+                if (existing.name === "expose_preview" && result?.url) { previewUrl = result.url; computerOpen = true; }
+              }
+            }
+
+            if (chunk.type === "finish") {
+              streaming = false;
+              abortFn = null;
+              if (workspaceOpen && workspacePanelRef) workspacePanelRef.refresh();
+            }
+          } catch {
+            // Non-JSON body
+          }
+        }
+
+        // Fallback: older AIChatAgent format with messages[].parts[]
         if (data.messages) {
           const serverMsgs = data.messages as any[];
           const lastServer = serverMsgs[serverMsgs.length - 1];
           if (lastServer?.parts) {
-            // Rebuild content + segments from UIMessage parts
             let textContent = "";
-            const newToolCalls: ToolCall[] = [];
-            const newSegments: Segment[] = [];
-
             for (const part of lastServer.parts) {
-              if (part.type === "text" && part.text) {
-                textContent += part.text;
-              }
-              if (part.type === "reasoning" && part.text) {
-                const lastSeg = newSegments[newSegments.length - 1];
-                if (lastSeg?.type === "thinking") {
-                  (lastSeg as any).content += part.text;
-                } else {
-                  newSegments.push({ type: "thinking", content: part.text });
-                }
-              }
-              if (part.type === "tool-invocation") {
-                const tc: ToolCall = {
-                  name: part.toolName || "tool",
-                  input: JSON.stringify(part.args || {}),
-                  call_id: part.toolCallId || crypto.randomUUID(),
-                  output: part.result ? JSON.stringify(part.result) : undefined,
-                };
-                newToolCalls.push(tc);
-                // Add to segments
-                const lastSeg = newSegments[newSegments.length - 1];
-                if (lastSeg?.type === "tool_calls") {
-                  lastSeg.calls.push(tc);
-                } else {
-                  newSegments.push({ type: "tool_calls", calls: [tc] });
-                }
-              }
+              if (part.type === "text" && part.text) textContent += part.text;
             }
-
-            last.content = textContent;
-            last.toolCalls = newToolCalls.length > 0 ? newToolCalls : last.toolCalls;
-            last.segments = newSegments.length > 0 ? newSegments : last.segments;
-            scheduleMessageFlush(true);
-
-            // ── Computer Panel: extract workspace data from tool calls ──
-            for (const tc of newToolCalls) {
-              const args = tc.input ? (() => { try { return JSON.parse(tc.input); } catch { return {}; } })() : {};
-              const result = tc.output ? (() => { try { return JSON.parse(tc.output); } catch { return tc.output; } })() : null;
-
-              // File write/edit → show in Code tab
-              if (["write", "write-file", "edit", "edit-file"].includes(tc.name)) {
-                const path = args.path || args.file || "";
-                const content = args.content || args.text || tc.output || "";
-                if (path && content) {
-                  activeFile = { path, content, language: "" };
-                  computerOpen = true;
-                }
-              }
-
-              // Bash/python → show in Terminal tab
-              if (["bash", "python-exec", "execute-code", "start_process", "run_code_persistent"].includes(tc.name)) {
-                const output = typeof result === "string" ? result : (result?.output || result?.stdout || tc.output || "");
-                if (output) {
-                  terminalLines = [...terminalLines, `$ ${args.command || args.code || tc.name}`, output].slice(-200);
-                  computerOpen = true;
-                }
-              }
-
-              // Preview URL → show in Preview tab
-              if (tc.name === "expose_preview" && result?.url) {
-                previewUrl = result.url;
-                computerOpen = true;
-              }
-
-              // Git clone → show in Terminal
-              if (tc.name === "git_clone" && result) {
-                terminalLines = [...terminalLines, `$ git clone ${args.url}`, JSON.stringify(result)].slice(-200);
-                computerOpen = true;
-              }
-            }
+            if (textContent) { last.content = textContent; scheduleMessageFlush(true); }
           }
         }
 
-        // Check if streaming is done
+        // done flag on wrapper
         if (data.done) {
           streaming = false;
           abortFn = null;
