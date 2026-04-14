@@ -382,8 +382,8 @@
           ></div>
         </div>
         <div class="mt-0.5 flex justify-between text-[9px] text-muted-foreground font-mono">
-          <span>${liveSpend.toFixed(3)}</span>
-          <span>${budgetLimit.toFixed(2)} cap</span>
+          <span>${Number(liveSpend || 0).toFixed(3)}</span>
+          <span>${Number(budgetLimit || 0).toFixed(2)} cap</span>
         </div>
       {:else}
         <p class="text-[9px] text-muted-foreground italic">No budget cap set</p>

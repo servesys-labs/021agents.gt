@@ -129,7 +129,7 @@
 
           {#if listing.avg_rating > 0}
             <div class="mt-1 text-xs text-muted-foreground">
-              {listing.avg_rating.toFixed(1)} avg ({listing.total_ratings} ratings)
+              {Number(listing.avg_rating || 0).toFixed(1)} avg ({listing.total_ratings} ratings)
             </div>
           {/if}
         </div>

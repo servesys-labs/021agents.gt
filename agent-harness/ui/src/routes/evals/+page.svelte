@@ -101,7 +101,7 @@
             <td class="px-4 py-3 font-medium text-foreground">{run.agent_name}</td>
             <td class="px-4 py-3">
               <span class="font-medium {passRateColor(run.pass_rate)}">
-                {(run.pass_rate * 100).toFixed(0)}%
+                {Number((run.pass_rate || 0) * 100).toFixed(0)}%
               </span>
             </td>
             <td class="px-4 py-3 text-muted-foreground">{(run.avg_score ?? 0).toFixed(2)}</td>
@@ -138,7 +138,7 @@
                               {trial.passed ? "passed" : "failed"}
                             </Badge>
                             {#if trial.score != null}
-                              <span class="text-muted-foreground">score: {trial.score.toFixed(2)}</span>
+                              <span class="text-muted-foreground">score: {Number(trial.score || 0).toFixed(2)}</span>
                             {/if}
                             {#if trial.latency_ms}
                               <span class="text-muted-foreground">{trial.latency_ms}ms</span>

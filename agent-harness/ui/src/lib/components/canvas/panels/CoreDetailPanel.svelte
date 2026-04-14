@@ -64,7 +64,7 @@
 
   <div>
     <label for="cd-temp" class="mb-1 block text-xs font-medium text-muted-foreground">
-      Temperature: {store.temperature.toFixed(2)}
+      Temperature: {Number(store.temperature || 0).toFixed(2)}
     </label>
     <input
       id="cd-temp"
