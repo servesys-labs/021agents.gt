@@ -12,6 +12,7 @@ export interface Conversation {
   title: string;
   message_count: number;
   total_cost_usd: number;
+  pinned?: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -68,4 +69,8 @@ export async function deleteConversation(id: string): Promise<void> {
 
 export async function updateTitle(id: string, title: string): Promise<void> {
   await api.put(`/conversations/${id}`, { title });
+}
+
+export async function updateConversation(id: string, data: { title?: string; pinned?: boolean }): Promise<void> {
+  await api.put(`/conversations/${id}`, data);
 }

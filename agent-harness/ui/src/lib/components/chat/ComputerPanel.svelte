@@ -14,6 +14,7 @@
 
   import { cn } from "$lib/utils";
   import { agentStore } from "$lib/stores/agent.svelte";
+  import SyntaxHighlightedCode from "./SyntaxHighlightedCode.svelte";
 
   interface Props {
     open: boolean;
@@ -79,30 +80,6 @@
     return map[ext] || "plaintext";
   }
 
-  // ── Syntax highlighting (basic token coloring) ──
-  function highlightCode(code: string, language: string): string {
-    // Simple keyword highlighting — production would use highlight.js
-    if (!code) return "";
-    const escaped = code.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-
-    if (["typescript", "javascript"].includes(language)) {
-      return escaped
-        .replace(/\b(const|let|var|function|return|if|else|for|while|import|export|from|async|await|class|extends|new|this|type|interface)\b/g, '<span class="text-purple-400">$1</span>')
-        .replace(/\b(true|false|null|undefined|void)\b/g, '<span class="text-amber-400">$1</span>')
-        .replace(/(\/\/.*$)/gm, '<span class="text-muted-foreground">$1</span>')
-        .replace(/("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)/g, '<span class="text-green-400">$1</span>')
-        .replace(/\b(\d+(?:\.\d+)?)\b/g, '<span class="text-cyan-400">$1</span>');
-    }
-    if (language === "python") {
-      return escaped
-        .replace(/\b(def|class|import|from|return|if|elif|else|for|while|with|as|try|except|finally|raise|yield|async|await|lambda|pass|break|continue)\b/g, '<span class="text-purple-400">$1</span>')
-        .replace(/\b(True|False|None)\b/g, '<span class="text-amber-400">$1</span>')
-        .replace(/(#.*$)/gm, '<span class="text-muted-foreground">$1</span>')
-        .replace(/("""[\s\S]*?"""|'''[\s\S]*?'''|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/g, '<span class="text-green-400">$1</span>');
-    }
-    return escaped;
-  }
-
   // ── File icon ──
   function fileIcon(path: string): string {
     const ext = path.split(".").pop()?.toLowerCase() || "";
@@ -133,8 +110,8 @@
   >
     <!-- Resize handle -->
     <div
-      class="absolute left-0 top-0 h-full w-1 cursor-col-resize hover:bg-primary/30 transition-colors z-10"
-      class:bg-primary/50={resizing}
+      class="absolute left-0 top-0 h-full w-1 cursor-col-resize hover:bg-primary/30 transition-colors z-10
+        {resizing ? 'bg-primary/50' : ''}"
       onmousedown={startResize}
     ></div>
 
@@ -183,18 +160,15 @@
               <span class="text-xs font-mono text-muted-foreground truncate">{activeFile.path}</span>
               <span class="ml-auto rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">{detectLanguage(activeFile.path)}</span>
             </div>
-            <!-- Code content with line numbers -->
-            <div class="flex-1 overflow-auto">
-              <div class="flex font-mono text-xs leading-5">
-                <!-- Line numbers -->
-                <div class="flex-shrink-0 select-none border-r border-border bg-card/30 px-2 py-3 text-right text-muted-foreground/50">
-                  {#each activeFile.content.split("\n") as _, i}
-                    <div>{i + 1}</div>
-                  {/each}
-                </div>
-                <!-- Code -->
-                <pre class="flex-1 overflow-x-auto py-3 px-3"><code>{@html highlightCode(activeFile.content, detectLanguage(activeFile.path))}</code></pre>
-              </div>
+            <!-- Code content with highlight.js -->
+            <div class="flex-1 overflow-hidden">
+              <SyntaxHighlightedCode
+                code={activeFile.content}
+                language={detectLanguage(activeFile.path)}
+                maxHeight="100%"
+                showLineNumbers={true}
+                class="h-full rounded-none border-0"
+              />
             </div>
           {:else}
             <div class="flex h-full items-center justify-center">

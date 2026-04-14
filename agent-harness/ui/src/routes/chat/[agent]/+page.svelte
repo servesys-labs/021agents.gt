@@ -65,10 +65,53 @@
     const unsubscribe = agentRpc.onMessage((data: any) => {
       // cf_agent_chat_messages — full message list sync from server
       if (data.type === "cf_agent_chat_messages") {
-        // Server sends complete message history — reconcile with local
-        // For now, use server as source of truth on reconnect
-        if (!streaming && data.messages) {
-          // TODO: convert UIMessage parts to our Message shape
+        // Server sends complete UIMessage history — convert to local Message shape on reconnect
+        if (!streaming && data.messages && Array.isArray(data.messages)) {
+          messages = (data.messages as any[]).map((uiMsg: any) => {
+            const msg: Message = {
+              role: uiMsg.role === "user" ? "user" : "assistant",
+              content: "",
+              toolCalls: [],
+              thinking: "",
+              segments: [],
+            };
+            if (!uiMsg.parts) {
+              // Legacy: plain content string
+              msg.content = typeof uiMsg.content === "string" ? uiMsg.content : "";
+              return msg;
+            }
+            for (const part of uiMsg.parts) {
+              if (part.type === "text" && part.text) {
+                msg.content += part.text;
+              } else if (part.type === "reasoning" && part.text) {
+                msg.thinking = (msg.thinking || "") + part.text;
+                const lastSeg = msg.segments![msg.segments!.length - 1];
+                if (lastSeg?.type === "thinking") {
+                  (lastSeg as any).content += part.text;
+                } else {
+                  msg.segments!.push({ type: "thinking", content: part.text });
+                }
+              } else if (part.type === "tool-invocation") {
+                const tc: ToolCall = {
+                  name: part.toolName || "tool",
+                  call_id: part.toolCallId || "",
+                  input: typeof part.args === "string" ? part.args : JSON.stringify(part.args || {}),
+                  output: part.state === "result"
+                    ? (typeof part.result === "string" ? part.result : JSON.stringify(part.result || ""))
+                    : undefined,
+                };
+                msg.toolCalls!.push(tc);
+                // Add to segments
+                const lastSeg = msg.segments![msg.segments!.length - 1];
+                if (lastSeg?.type === "tool_calls") {
+                  lastSeg.calls.push(tc);
+                } else {
+                  msg.segments!.push({ type: "tool_calls", calls: [tc] });
+                }
+              }
+            }
+            return msg;
+          });
         }
         return;
       }
@@ -298,8 +341,11 @@
     showScrollBtn = !autoScroll.isAtBottom();
   }
 
-  // History
+  // History sidebar
   let historyOpen = $state(false);
+  let renamingId = $state<string | null>(null);
+  let renameValue = $state("");
+  let contextMenuId = $state<string | null>(null);
 
   $effect(() => {
     if (agentName) agentListStore.setActive(agentName);
@@ -477,67 +523,30 @@
   <div class="flex min-w-0 flex-1 flex-col overflow-hidden">
     <ChatHeader {agent} {agentName} />
 
-    <!-- History dropdown (server-backed conversations) -->
-    <div class="relative">
-      <div class="flex items-center justify-end gap-1 px-4 py-1.5 sm:px-6">
-        <button
-          type="button"
-          class="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-          onclick={() => { workspaceOpen = !workspaceOpen; }}
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-          </svg>
-          Files
-        </button>
-        <button
-          type="button"
-          class="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-          onclick={toggleHistory}
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 8v4l3 3" />
-            <circle cx="12" cy="12" r="10" />
-          </svg>
-          History
-        </button>
-      </div>
-      {#if historyOpen}
-        <div class="absolute right-4 top-full z-20 mt-1 w-72 overflow-hidden rounded-lg border border-border bg-popover shadow-lg sm:right-6">
-          {#if conversationStore.loading}
-            <div class="flex items-center justify-center py-6">
-              <div class="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent"></div>
-            </div>
-          {:else if conversationStore.conversations.length === 0}
-            <div class="px-4 py-6 text-center text-sm text-muted-foreground">No conversations yet</div>
-          {:else}
-            <div class="max-h-72 overflow-y-auto">
-              {#each conversationStore.conversations as conv}
-                {@const convTitle = typeof conv.title === "string" && conv.title.trim().length > 0 ? conv.title : "Untitled conversation"}
-                <button
-                  type="button"
-                  class="flex w-full items-center gap-3 px-4 py-2.5 text-left text-sm transition-colors hover:bg-accent {conversationId === conv.id ? 'bg-primary/5' : ''}"
-                  onclick={() => {
-                    historyOpen = false;
-                    conversationId = conv.id;
-                    window.history.pushState({}, "", `/chat/${agentName}?c=${conv.id}`);
-                    loadConversationFromServer(conv.id);
-                  }}
-                >
-                  <div class="min-w-0 flex-1">
-                    <p class="truncate text-xs font-medium text-foreground">
-                      {convTitle.slice(0, 50)}{convTitle.length > 50 ? "..." : ""}
-                    </p>
-                    <p class="text-[11px] text-muted-foreground">
-                      {conv.message_count} msgs &middot; {new Date(conv.updated_at).toLocaleDateString()}
-                    </p>
-                  </div>
-                </button>
-              {/each}
-            </div>
-          {/if}
-        </div>
-      {/if}
+    <!-- Toolbar -->
+    <div class="flex items-center justify-end gap-1 border-b border-border/30 px-4 py-1.5 sm:px-6">
+      <button
+        type="button"
+        class="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+        onclick={() => { workspaceOpen = !workspaceOpen; }}
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+        </svg>
+        Files
+      </button>
+      <button
+        type="button"
+        class="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs transition-colors
+          {historyOpen ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent hover:text-foreground'}"
+        onclick={toggleHistory}
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 8v4l3 3" />
+          <circle cx="12" cy="12" r="10" />
+        </svg>
+        History
+      </button>
     </div>
 
     <!-- Messages container -->
@@ -630,6 +639,174 @@
     {terminalLines}
     files={workspaceFiles}
   />
+
+  <!-- History sidebar panel -->
+  {#if historyOpen}
+    <aside class="flex w-72 shrink-0 flex-col border-l border-border bg-sidebar">
+      <div class="flex items-center justify-between border-b border-border/50 px-3 py-2">
+        <span class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">History</span>
+        <button
+          class="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+          onclick={() => (historyOpen = false)}
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+
+      <!-- Search -->
+      <div class="border-b border-border/30 px-3 py-2">
+        <div class="flex items-center gap-1.5 rounded-md bg-muted/50 px-2 py-1.5">
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 shrink-0 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8" />
+            <path d="m21 21-4.3-4.3" />
+          </svg>
+          <input
+            type="text"
+            placeholder="Search conversations..."
+            class="w-full bg-transparent text-xs text-foreground placeholder:text-muted-foreground/60 outline-none"
+            bind:value={conversationStore.searchQuery}
+          />
+          {#if conversationStore.searchQuery}
+            <button
+              class="shrink-0 text-muted-foreground hover:text-foreground"
+              onclick={() => (conversationStore.searchQuery = "")}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          {/if}
+        </div>
+      </div>
+
+      <!-- Conversation list -->
+      <div class="flex-1 overflow-y-auto">
+        {#if conversationStore.loading}
+          <div class="flex items-center justify-center py-8">
+            <div class="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent"></div>
+          </div>
+        {:else if conversationStore.grouped.length === 0}
+          <div class="px-4 py-8 text-center">
+            <p class="text-xs text-muted-foreground">
+              {conversationStore.searchQuery ? "No matching conversations" : "No conversations yet"}
+            </p>
+          </div>
+        {:else}
+          {#each conversationStore.grouped as group}
+            <div class="px-3 pt-3 pb-1">
+              <p class="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60">{group.label}</p>
+            </div>
+            {#each group.items as conv}
+              {@const convTitle = typeof conv.title === "string" && conv.title.trim().length > 0 ? conv.title : "Untitled"}
+              {@const isActive = conversationId === conv.id}
+              <div class="group relative px-2">
+                {#if renamingId === conv.id}
+                  <!-- Rename input -->
+                  <div class="flex items-center gap-1 rounded-md bg-muted p-1.5">
+                    <input
+                      type="text"
+                      class="flex-1 rounded bg-background px-2 py-1 text-xs text-foreground outline-none ring-1 ring-primary/30"
+                      bind:value={renameValue}
+                      onkeydown={(e) => {
+                        if (e.key === "Enter" && renameValue.trim()) {
+                          conversationStore.renameConversation(conv.id, renameValue.trim());
+                          renamingId = null;
+                        } else if (e.key === "Escape") {
+                          renamingId = null;
+                        }
+                      }}
+                    />
+                    <button
+                      class="rounded p-0.5 text-xs text-primary hover:bg-primary/10"
+                      onclick={() => {
+                        if (renameValue.trim()) {
+                          conversationStore.renameConversation(conv.id, renameValue.trim());
+                        }
+                        renamingId = null;
+                      }}
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                        <polyline points="20 6 9 17 4 12" />
+                      </svg>
+                    </button>
+                  </div>
+                {:else}
+                  <!-- Conversation item -->
+                  <div
+                    role="button"
+                    tabindex="0"
+                    class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors cursor-pointer
+                      {isActive ? 'bg-primary/10 text-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}"
+                    onclick={() => {
+                      conversationId = conv.id;
+                      window.history.pushState({}, "", `/chat/${agentName}?c=${conv.id}`);
+                      loadConversationFromServer(conv.id);
+                    }}
+                    onkeydown={(e) => { if (e.key === "Enter") { conversationId = conv.id; window.history.pushState({}, "", `/chat/${agentName}?c=${conv.id}`); loadConversationFromServer(conv.id); } }}
+                  >
+                    {#if conv.pinned}
+                      <span class="shrink-0 text-[10px] text-amber-500">&#9733;</span>
+                    {/if}
+                    <div class="min-w-0 flex-1">
+                      <p class="truncate font-medium">{convTitle}</p>
+                      <p class="text-[10px] text-muted-foreground/70">
+                        {conv.message_count} msgs
+                      </p>
+                    </div>
+                    <!-- Context menu trigger -->
+                    <button
+                      class="shrink-0 rounded p-0.5 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-muted-foreground/10"
+                      onclick={(e) => { e.stopPropagation(); contextMenuId = contextMenuId === conv.id ? null : conv.id; }}
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="5" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="12" cy="19" r="1" />
+                      </svg>
+                    </button>
+                  </div>
+
+                  <!-- Context menu -->
+                  {#if contextMenuId === conv.id}
+                    <div class="absolute right-2 top-full z-30 w-36 rounded-lg border border-border bg-popover py-1 shadow-lg">
+                      <button
+                        class="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-muted transition-colors"
+                        onclick={() => { conversationStore.togglePin(conv.id); contextMenuId = null; }}
+                      >
+                        <span class="text-[10px]">{conv.pinned ? "&#9734;" : "&#9733;"}</span>
+                        {conv.pinned ? "Unpin" : "Pin"}
+                      </button>
+                      <button
+                        class="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-muted transition-colors"
+                        onclick={() => { renamingId = conv.id; renameValue = convTitle; contextMenuId = null; }}
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                          <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
+                          <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
+                        </svg>
+                        Rename
+                      </button>
+                      <div class="my-1 border-t border-border/50"></div>
+                      <button
+                        class="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-destructive hover:bg-destructive/10 transition-colors"
+                        onclick={() => { conversationStore.deleteConversation(conv.id); contextMenuId = null; }}
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                          <polyline points="3 6 5 6 21 6" />
+                          <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
+                        </svg>
+                        Delete
+                      </button>
+                    </div>
+                  {/if}
+                {/if}
+              </div>
+            {/each}
+          {/each}
+        {/if}
+      </div>
+    </aside>
+  {/if}
 </div>
 
 <style>
