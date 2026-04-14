@@ -17,6 +17,7 @@
  */
 
 import { createWorkersAI } from "workers-ai-provider";
+import { createOpenAI } from "@ai-sdk/openai";
 import { Agent, routeAgentRequest, callable } from "agents";
 import {
   AIChatAgent,
@@ -702,10 +703,33 @@ const TENANTS: TenantConfig[] = [
       SKILL_LIBRARY.find(s => s.name === "planning")!,
     ],
   },
+  // ── OpenRouter models (via AI Gateway) ──
+  {
+    id: "reasoning",
+    name: "Reasoning Expert",
+    icon: "🔬",
+    description: "Deep reasoning with MiniMax M2.7 via OpenRouter",
+    model: "minimax/minimax-m2.7", // OpenRouter model ID — routed via AI Gateway
+    systemPrompt:
+      "You are an expert reasoning assistant. Think step by step. Show your reasoning process. For complex problems, break them down into sub-problems. Verify your answers. You have deep research and analysis skills available.",
+    skills: [
+      SKILL_LIBRARY.find(s => s.name === "deep-research")!,
+      SKILL_LIBRARY.find(s => s.name === "planning")!,
+      SKILL_LIBRARY.find(s => s.name === "data-analysis")!,
+    ],
+  },
 ];
 
 function getTenantConfig(tenantId: string): TenantConfig {
-  return TENANTS.find((t) => t.id === tenantId) ?? TENANTS[0];
+  // Support both tenant ID and DO name patterns
+  // DO name may be: orgId-tenantId-u-userId
+  const match = TENANTS.find((t) => t.id === tenantId);
+  if (match) return match;
+  // Try to extract tenant from DO name pattern
+  for (const t of TENANTS) {
+    if (tenantId.includes(`-${t.id}-`) || tenantId.endsWith(`-${t.id}`)) return t;
+  }
+  return TENANTS.find(t => t.id === "default") ?? TENANTS[0];
 }
 
 // ── Auth helpers ─────────────────────────────────────────────────────────────
@@ -1324,8 +1348,26 @@ export class ChatAgent extends Think<Env> {
 
   getModel() {
     const config = getTenantConfig(this.name);
+    const modelId = config.model;
+
+    // OpenRouter models (via AI Gateway): model IDs contain "/" (e.g., "minimax/minimax-m2.7")
+    // Workers AI models: prefixed with "@cf/" (e.g., "@cf/moonshotai/kimi-k2.5")
+    if (modelId && !modelId.startsWith("@cf/") && modelId.includes("/")) {
+      // Route through Cloudflare AI Gateway → OpenRouter
+      // AI Gateway has the OpenRouter API key configured as a custom provider.
+      // No API key needed here — the gateway injects it automatically.
+      const accountId = "ae92d4bf7c6c448f442d084a2358dcd5";
+      const gatewayId = "one-shots";
+      const openrouter = createOpenAI({
+        apiKey: "unused", // AI Gateway injects the real key
+        baseURL: `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/openrouter`,
+      });
+      return openrouter(modelId);
+    }
+
+    // Default: Workers AI (free, no API key needed)
     const workersai = createWorkersAI({ binding: this.env.AI });
-    return workersai(config.model as Parameters<typeof workersai>[0], {
+    return workersai(modelId as Parameters<typeof workersai>[0], {
       sessionAffinity: this.sessionAffinity,
     });
   }
