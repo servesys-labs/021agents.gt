@@ -66,8 +66,8 @@ export const agentStore = {
     client = new AgentClient({
       agent: "chat-agent",
       name: instanceName,
-      // Pass JWT token via query param (browsers can't set WS headers)
-      query: api.token ? { _pk: api.token } : undefined,
+      // Pass JWT as 'token' query param (not _pk which becomes connection tag and has 256 char limit)
+      query: api.token ? { token: api.token } : undefined,
       onStateUpdate: (state: unknown) => { agentState = state; },
       onOpen: () => { connected = true; },
       onClose: () => { connected = false; identified = false; },
