@@ -33,7 +33,7 @@ If there are no git changes, review the files the user mentioned or the most rec
 
 ## Phase 2: THREE-LENS REVIEW
 
-Run all three lenses. If using swarm, launch them in parallel — each lens is independent. Pass each lens agent the full diff AND the full content of changed files.
+Run all three lenses. If using execute-code (parallel review), launch them in parallel — each lens is independent. Pass each lens agent the full diff AND the full content of changed files.
 
 ### Lens 1: REUSE — Find existing code that makes new code unnecessary
 

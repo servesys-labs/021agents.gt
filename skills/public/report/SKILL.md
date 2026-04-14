@@ -13,7 +13,7 @@ allowed-tools:
   - python-exec
   - write-file
   - read-file
-  - memory-recall
+  - search_context
 ---
 Generate a comprehensive research report on: {{ARGS}}
 

@@ -12,8 +12,8 @@ allowed-tools:
   - browse
   - parallel-web-search
   - web-crawl
-  - memory-save
-  - memory-recall
+  - set_context
+  - search_context
   - knowledge-search
   - python-exec
 ---
@@ -24,7 +24,7 @@ You produce outputs with substantial economic value — documents that executive
 ## Research Protocol
 
 ### Phase 1: Prior Knowledge & Scoping
-- Search memory-recall for any prior findings on this topic — build on existing work rather than starting from scratch
+- Search search_context for any prior findings on this topic — build on existing work rather than starting from scratch
 - Define 3-5 specific research questions that must be answered
 - Identify what "good enough" evidence looks like
 - Create a mental todo list of research tasks
@@ -39,7 +39,7 @@ For each research question:
 4. Always `browse` or `web-crawl` the **primary source** page for critical claims — snippets miss context
 5. For any statistics or claims, find the **original source** — not a blog citing a blog
 6. Cross-reference minimum 2 independent sources for key claims
-7. For complex multi-faceted topics, use `swarm` to delegate parallel deep dives on independent sub-questions
+7. For complex multi-faceted topics, use `execute-code (parallel)` to delegate parallel deep dives on independent sub-questions
 
 **Iteration discipline:**
 - After each round of searches, evaluate: does the current evidence fully answer the user's question?
@@ -54,7 +54,7 @@ For each research question:
 - Call out **confidence levels**: High (multiple primary sources), Medium (single primary or multiple secondary), Low (limited evidence)
 - Flag gaps: explicitly state what you could NOT find
 - Note limitations in what you found
-- Save key findings to memory-save for future research continuity
+- Save key findings to set_context for future research continuity
 
 ### Phase 4: Deliverable
 Topic: {{ARGS}}
