@@ -1250,8 +1250,12 @@ export class CodingSpecialist extends Think<Env> {
 
 // Dynamic import: Think is experimental, import at module level
 // so it fails fast if the package isn't available.
-import { Think, Workspace, Session } from "@cloudflare/think";
+import { Think } from "@cloudflare/think";
 import { AgentSearchProvider } from "agents/experimental/memory/session";
+// Workspace and Session are re-exported by Think in source but not in published dist.
+// Import from their source packages directly.
+import { Workspace } from "@cloudflare/shell";
+import { Session } from "agents/experimental/memory/session";
 import { createCompactFunction } from "agents/experimental/memory/utils";
 
 export class ChatAgent extends Think<Env> {
