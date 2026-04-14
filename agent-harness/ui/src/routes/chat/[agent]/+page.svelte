@@ -238,6 +238,22 @@
         streaming = false;
         abortFn = null;
       }
+
+      // ── x402 Payment confirmation ──
+      if (data.type === "payment_required") {
+        const req = data.requirements?.[0];
+        const confirmed = window.confirm(
+          `Payment Required\n\nService: ${req?.description || "Agent service"}\nAmount: ${req?.amount || "?"} wei\nNetwork: ${req?.network || "?"}\nPay to: ${req?.payTo || "?"}\n\nApprove payment?`
+        );
+        agentRpc.call("resolvePayment", [data.confirmationId, confirmed]);
+      }
+
+      // ── Resumable streams ──
+      if (data.type === "cf_agent_stream_resuming") {
+        // Agent has an active stream — send ACK to trigger chunk replay
+        agentRpc.client?.send(JSON.stringify({ type: "cf_agent_stream_resume_ack" }));
+        streaming = true;
+      }
     });
 
     return () => { unsubscribe(); };

@@ -3,6 +3,7 @@
   "name": "agent-harness",
   "main": "src/server.ts",
   "compatibility_date": "2026-04-01",
+  // Custom domain route managed via CF API (not wrangler routes — causes worker name collision)
   // Note: ctx.facets works in production without "experimental" flag
   "compatibility_flags": ["nodejs_compat"],
 

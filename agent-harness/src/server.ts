@@ -1380,6 +1380,53 @@ export class ChatAgent extends Think<Env> {
   // with our cf_agent_connectors table for connections added via @callable.
   private _mcpReconnected = false;
 
+  // ── x402 Payment Support ──
+  // Business agents can have paid tools. When a paid tool is called,
+  // the agent broadcasts a payment_required event to the UI.
+  // The UI shows a confirmation modal → user approves → payment settles.
+  private _pendingPayments = new Map<string, { resolve: (confirmed: boolean) => void }>();
+
+  @callable({ description: "Resolve a pending x402 payment (called by UI after user confirmation)" })
+  resolvePayment(confirmationId: string, confirmed: boolean) {
+    const pending = this._pendingPayments.get(confirmationId);
+    if (pending) {
+      pending.resolve(confirmed);
+      this._pendingPayments.delete(confirmationId);
+      return { resolved: true, confirmed };
+    }
+    return { resolved: false, error: "No pending payment with that ID" };
+  }
+
+  /** Create a payment confirmation callback that broadcasts to UI and waits for response */
+  private _createPaymentCallback() {
+    return async (requirements: any[]): Promise<boolean> => {
+      const confirmationId = crypto.randomUUID();
+      // Broadcast payment request to all connected clients
+      this.broadcast(JSON.stringify({
+        type: "payment_required",
+        confirmationId,
+        requirements: requirements.map((r: any) => ({
+          resource: r.resource,
+          network: r.network,
+          amount: r.maxAmountRequired,
+          payTo: r.payTo,
+          description: r.description || "Agent service fee",
+        })),
+      }));
+
+      // Wait for user confirmation (timeout after 120s)
+      return new Promise<boolean>((resolve) => {
+        this._pendingPayments.set(confirmationId, { resolve });
+        setTimeout(() => {
+          if (this._pendingPayments.has(confirmationId)) {
+            this._pendingPayments.delete(confirmationId);
+            resolve(false); // Auto-decline on timeout
+          }
+        }, 120_000);
+      });
+    };
+  }
+
   private async _reconnectMcpServers() {
     if (this._mcpReconnected) return;
     this._mcpReconnected = true;
@@ -3922,9 +3969,82 @@ export default {
       });
     }
 
-    // A2A Protocol: agent card discovery
-    if (url.pathname === "/.well-known/agent.json") {
-      return Response.json(AGENT_CARD, { headers: { "Access-Control-Allow-Origin": "*" } });
+    // ── A2A Protocol: agent card + JSON-RPC endpoint ──
+    const A2A_CORS = {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    };
+
+    // Agent card discovery (A2A protocol v0.3.0)
+    if (url.pathname === "/.well-known/agent.json" || url.pathname === "/.well-known/agent-card.json") {
+      return Response.json({
+        ...AGENT_CARD,
+        url: `${url.origin}/a2a`,
+        protocolVersion: "0.3.0",
+        provider: { organization: "021agents", url: "https://021agents.ai" },
+      }, { headers: A2A_CORS });
+    }
+
+    // A2A JSON-RPC endpoint
+    if (url.pathname === "/a2a" && request.method === "POST") {
+      try {
+        const rpc = await request.json() as { method: string; id?: string | number; params?: any };
+        const taskId = rpc.params?.id || rpc.params?.taskId || crypto.randomUUID();
+
+        if (rpc.method === "tasks/send") {
+          // Route to the appropriate agent DO for processing
+          const message = rpc.params?.message?.parts?.[0]?.text || rpc.params?.message?.text || "";
+          const agentName = rpc.params?.skill || "default";
+          const doId = env.ChatAgent.idFromName(`a2a-${agentName}-${taskId}`);
+          const stub = env.ChatAgent.get(doId);
+
+          // Call the agent via RPC chat method
+          const result = await (stub as any).fetch(new Request(`https://internal/a2a-task`, {
+            method: "POST",
+            body: JSON.stringify({ taskId, message, skill: agentName }),
+          }));
+
+          const response = await result.json().catch(() => ({ output: "Task submitted" }));
+
+          return Response.json({
+            jsonrpc: "2.0",
+            id: rpc.id,
+            result: {
+              id: taskId,
+              status: { state: "completed" },
+              messages: [{
+                role: "agent",
+                parts: [{ type: "text", text: (response as any).output || "Task completed" }],
+              }],
+            },
+          }, { headers: A2A_CORS });
+        }
+
+        if (rpc.method === "tasks/get") {
+          return Response.json({
+            jsonrpc: "2.0",
+            id: rpc.id,
+            result: { id: taskId, status: { state: "unknown" } },
+          }, { headers: A2A_CORS });
+        }
+
+        return Response.json({
+          jsonrpc: "2.0",
+          id: rpc.id,
+          error: { code: -32601, message: `Method not found: ${rpc.method}` },
+        }, { headers: A2A_CORS, status: 400 });
+      } catch (err) {
+        return Response.json({
+          jsonrpc: "2.0",
+          error: { code: -32700, message: `Parse error: ${(err as Error).message}` },
+        }, { headers: A2A_CORS, status: 400 });
+      }
+    }
+
+    // A2A CORS preflight
+    if (url.pathname === "/a2a" && request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: A2A_CORS });
     }
 
     // MCP Elicitation Server
@@ -4599,16 +4719,29 @@ export class McpElicitationServer extends McpAgent<Env, McpState, {}> {
 // Pattern from: cloudflare/agents examples/a2a
 
 export const AGENT_CARD = {
-  name: "Agent Harness",
-  description: "Multi-tenant managed agent platform on Cloudflare Workers",
-  url: "https://agent-harness.example.com",
-  version: "1.0.0",
-  capabilities: { streaming: true, stateTransitionHistory: true },
+  name: "021agents",
+  description: "Autonomous AI agent platform — research, code, deploy, create agents, voice calls, and agent-to-agent services via A2A protocol.",
+  version: "2.0.0",
+  capabilities: {
+    streaming: true,
+    stateTransitionHistory: true,
+    pushNotifications: false,
+  },
+  defaultInputModes: ["text"],
+  defaultOutputModes: ["text"],
   skills: [
-    { id: "general-chat", name: "General Assistant", description: "Chat, research, analysis" },
-    { id: "coding", name: "Coding Agent", description: "Write and execute code in sandbox" },
-    { id: "research", name: "Research Analyst", description: "Web search and synthesis" },
-    { id: "support", name: "Customer Support", description: "Answer questions from knowledge base" },
+    { id: "chat", name: "General Assistant", description: "Chat, research, analysis, web search, calculations", tags: ["chat", "research"] },
+    { id: "code", name: "Coding Agent", description: "Full-stack development — scaffold, build, preview, deploy to CF Pages/Workers", tags: ["coding", "deploy"] },
+    { id: "research", name: "Research Analyst", description: "Deep web research with multiple sources and citations", tags: ["research", "analysis"] },
+    { id: "design", name: "Design Agent", description: "Create websites, charts, PDFs, slides with professional design", tags: ["design", "creative"] },
+    { id: "data", name: "Data Analyst", description: "Process data, generate visualizations, query databases", tags: ["data", "analytics"] },
+    { id: "voice", name: "Voice Agent", description: "Real-time voice conversations with STT/TTS", tags: ["voice", "phone"] },
   ],
-  authentication: { schemes: ["bearer", "cookie"] },
+  authentication: { schemes: ["bearer"] },
+  // x402 payment support for paid agent services
+  payment: {
+    protocol: "x402",
+    networks: ["eip155:84532", "eip155:8453"], // Base Sepolia + Base mainnet
+    facilitator: "https://x402.org/facilitator",
+  },
 };
