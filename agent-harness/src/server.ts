@@ -1235,6 +1235,29 @@ export class ChatAgent extends Think<Env> {
   // Wait for MCP connections to restore after hibernation
   waitForMcpConnections = true;
 
+  // ── MCP reconnection from DO SQLite on wake ──
+  // After hibernation, re-establish MCP connections from persisted connector table.
+  // SDK's restoreConnectionsFromStorage handles OAuth tokens; we supplement
+  // with our cf_agent_connectors table for connections added via @callable.
+  private _mcpReconnected = false;
+
+  private async _reconnectMcpServers() {
+    if (this._mcpReconnected) return;
+    this._mcpReconnected = true;
+    this._ensureConnectorTable();
+    const connectors = this.sql<{ id: string; name: string; url: string; status: string }>`
+      SELECT id, name, url, status FROM cf_agent_connectors WHERE status = 'connected'
+    `;
+    for (const conn of connectors) {
+      try {
+        await this.addMcpServer(conn.name, conn.url);
+      } catch {
+        // Mark as failed — don't block startup
+        this.sql`UPDATE cf_agent_connectors SET status = 'failed' WHERE id = ${conn.id}`;
+      }
+    }
+  }
+
   // ── Durability: wrap chat turns in runFiber for crash recovery ──
   // If the DO is evicted mid-turn, onChatRecovery() fires on restart
   // and can resume streaming or persist partial results.
@@ -1519,7 +1542,35 @@ export class ChatAgent extends Think<Env> {
   private _denialCounts = new Map<string, number>();       // denial tracking
   private _lastToolCall: { name: string; argsHash: string } | null = null;
   private _consecutiveDups = 0;                            // loop detection
-  private _sessionCostUsd = 0;                             // cost accumulator
+  private _sessionCostUsd = 0;                             // cost accumulator (loaded from DO SQLite)
+  private _costTableReady = false;
+
+  /** Load persisted session cost from DO SQLite (survives hibernation). */
+  private _loadPersistedCost() {
+    if (this._costTableReady) return;
+    this._costTableReady = true;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agent_session_cost (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        total_cost_usd REAL NOT NULL DEFAULT 0,
+        updated_at TEXT DEFAULT (datetime('now'))
+      )
+    `;
+    this.sql`INSERT OR IGNORE INTO cf_agent_session_cost (id, total_cost_usd) VALUES (1, 0)`;
+    const [row] = this.sql<{ total_cost_usd: number }>`
+      SELECT total_cost_usd FROM cf_agent_session_cost WHERE id = 1
+    `;
+    this._sessionCostUsd = row?.total_cost_usd || 0;
+  }
+
+  /** Persist current cost to DO SQLite. */
+  private _persistCost() {
+    if (!this._costTableReady) return;
+    this.sql`
+      UPDATE cf_agent_session_cost SET total_cost_usd = ${this._sessionCostUsd}, updated_at = datetime('now') WHERE id = 1
+    `;
+  }
+
   // ── Reliability signal state ──
   private _turnLatencies: number[] = [];                   // rolling window for latency spike detection
   private _sessionTokensUsed = 0;                          // context pressure tracking
@@ -1544,8 +1595,12 @@ export class ChatAgent extends Think<Env> {
   // ═══════════════════════════════════════════════════════════════════
 
   beforeTurn(ctx: any) {
-    // [1] Query source tagging — tag this call for retry policy
-    //     User-facing turns retry on 529; background (compaction) does not.
+    // Load persisted cost from DO SQLite (survives hibernation)
+    this._loadPersistedCost();
+    // Reconnect MCP servers from DO SQLite (after hibernation)
+    this._reconnectMcpServers().catch(() => {});
+
+    // [1] Query source tagging
     const querySource = ctx.continuation ? "continuation" : "user_chat";
     this._telemetry.llmRequest(ctx.sessionId || this.name, ctx.model || "", querySource);
 
@@ -1789,8 +1844,9 @@ export class ChatAgent extends Think<Env> {
     const usage = ctx.usage || {};
     const costUsd = ctx.cost || 0;
 
-    // [3] Accumulate session cost for budget tracking
+    // [3] Accumulate session cost for budget tracking (persisted to DO SQLite)
     this._sessionCostUsd += costUsd;
+    if (costUsd > 0) this._persistCost();
 
     this._telemetry.turnCompleted(ctx.sessionId || this.name, {
       turnNumber: ctx.stepNumber || 0,
@@ -1873,6 +1929,31 @@ export class ChatAgent extends Think<Env> {
 
       // Broadcast to connected clients
       this.broadcast(JSON.stringify({ type: "streaming_done", cost: costUsd }));
+
+      // ── Conversation sync: DO → Queue → Postgres ──
+      // Send conversation header to telemetry queue so gateway's Postgres
+      // conversations table stays in sync. This bridges DO SQLite → Postgres.
+      try {
+        const messages = (result as any).messages || [];
+        const messageCount = messages.length;
+        const lastUserMsg = [...messages].reverse().find((m: any) => m.role === "user");
+        const title = lastUserMsg?.content
+          ? (typeof lastUserMsg.content === "string" ? lastUserMsg.content.slice(0, 100) : "Conversation")
+          : "Conversation";
+
+        await this.env.TELEMETRY_QUEUE?.send({
+          type: "conversation_sync",
+          payload: {
+            agent_name: this.name,
+            title,
+            message_count: messageCount,
+            cost_usd: this._sessionCostUsd,
+            model,
+            // DO name encodes org+agent+user — queue consumer can parse
+            do_name: this.name,
+          },
+        });
+      } catch {} // non-blocking
 
       // Refresh context blocks (memory may have been updated during the turn)
       try { await (this as any).session?.refreshSystemPrompt?.(); } catch {}
@@ -2955,6 +3036,18 @@ export default {
       );
     }
 
+    // ── Channel webhooks (Telegram, WhatsApp, Slack, etc.) ──
+    if (url.pathname.startsWith("/channels/") || url.pathname.startsWith("/webhook/")) {
+      try {
+        const { routeChannel } = await import("./channels");
+        const channelResp = await routeChannel(request, env);
+        if (channelResp) return channelResp;
+      } catch (err) {
+        console.error(`[channels] Route failed: ${err}`);
+      }
+      return new Response("Channel not found", { status: 404 });
+    }
+
     // ── Agent routes — protected by session cookie ──
     if (url.pathname.startsWith("/agents")) {
       const response = await routeAgentRequest(request, env, {
@@ -3099,6 +3192,141 @@ export default {
                   ${p.rating || 0}, ${p.feedback || ""}, ${p.user_id || ""},
                   ${p.created_at || new Date().toISOString()})
               `;
+              break;
+            }
+            case "conversation_sync": {
+              // Upsert conversation header from DO → Postgres
+              const p = evt.payload;
+              await sql`
+                INSERT INTO conversations (id, org_id, agent_name, title, message_count, total_cost_usd, updated_at)
+                VALUES (
+                  ${p.do_name || crypto.randomUUID()},
+                  ${p.org_id || ""},
+                  ${p.agent_name || ""},
+                  ${p.title || "Conversation"},
+                  ${p.message_count || 0},
+                  ${p.cost_usd || 0},
+                  NOW()
+                )
+                ON CONFLICT (id) DO UPDATE SET
+                  title = COALESCE(EXCLUDED.title, conversations.title),
+                  message_count = GREATEST(conversations.message_count, EXCLUDED.message_count),
+                  total_cost_usd = GREATEST(conversations.total_cost_usd, EXCLUDED.total_cost_usd),
+                  updated_at = NOW()
+              `;
+              break;
+            }
+            case "eval_run": {
+              // Execute eval: run each test case against the agent DO
+              const p = evt.payload;
+              const runId = p.run_id;
+              const agentName = p.agent_name;
+              const orgId = p.org_id;
+
+              // Mark run as running
+              await sql`UPDATE eval_runs SET status = 'running' WHERE id = ${runId}`;
+
+              // Fetch test cases
+              const testCases = await sql`
+                SELECT * FROM eval_test_cases
+                WHERE org_id = ${orgId} AND agent_name = ${agentName}
+              `;
+
+              let passCount = 0;
+              let totalCost = 0;
+
+              for (const tc of testCases as any[]) {
+                const start = Date.now();
+                try {
+                  // Call agent DO via service binding
+                  const doName = `${orgId}-${agentName}`;
+                  const resp = await env.ChatAgent.get(
+                    env.ChatAgent.idFromName(doName)
+                  ).fetch(new Request("http://internal", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      type: "rpc",
+                      id: crypto.randomUUID(),
+                      method: "chat",
+                      args: [tc.input],
+                    }),
+                  }));
+
+                  const result = await resp.text();
+                  const durationMs = Date.now() - start;
+                  const passed = tc.expected ? result.includes(tc.expected) : null;
+                  if (passed) passCount++;
+
+                  await sql`
+                    INSERT INTO eval_trials (run_id, test_case_id, input, output, expected, passed, duration_ms)
+                    VALUES (${runId}, ${tc.id}, ${tc.input}, ${result.slice(0, 5000)}, ${tc.expected || null}, ${passed}, ${durationMs})
+                  `;
+                } catch (err: any) {
+                  await sql`
+                    INSERT INTO eval_trials (run_id, test_case_id, input, output, expected, passed, duration_ms)
+                    VALUES (${runId}, ${tc.id}, ${tc.input}, ${`Error: ${err.message}`}, ${tc.expected || null}, ${false}, ${Date.now() - start})
+                  `;
+                }
+              }
+
+              // Mark run as completed with summary
+              const total = (testCases as any[]).length;
+              await sql`
+                UPDATE eval_runs SET
+                  status = 'completed',
+                  summary = ${JSON.stringify({ pass_rate: total > 0 ? passCount / total : 0, total, passed: passCount, total_cost: totalCost })}::jsonb,
+                  completed_at = NOW()
+                WHERE id = ${runId}
+              `;
+              break;
+            }
+            case "rag_embed": {
+              // Chunk document from R2, embed via Workers AI, upsert to Vectorize
+              const p = evt.payload;
+              const r2Key = p.r2_key;
+              const orgId = p.org_id || "";
+              const agentName = p.agent_name || "";
+
+              try {
+                // Fetch document from R2
+                const obj = await env.STORAGE?.get(r2Key);
+                if (!obj) { msg.ack(); break; }
+                const text = await obj.text();
+
+                // Chunk: 512 tokens (~2048 chars) with 100-char overlap
+                const CHUNK_SIZE = 2048;
+                const OVERLAP = 100;
+                const chunks: string[] = [];
+                for (let i = 0; i < text.length; i += CHUNK_SIZE - OVERLAP) {
+                  chunks.push(text.slice(i, i + CHUNK_SIZE));
+                }
+
+                // Embed + upsert to Vectorize in batches of 8
+                for (let i = 0; i < chunks.length; i += 8) {
+                  const batch = chunks.slice(i, i + 8);
+                  const embedding = await env.AI?.run("@cf/baai/bge-base-en-v1.5", { text: batch });
+                  if (!embedding?.data) continue;
+
+                  const vectors = batch.map((chunk, j) => ({
+                    id: `rag:${orgId}:${agentName}:${r2Key}:${i + j}`,
+                    values: embedding.data[j],
+                    metadata: {
+                      key: `${r2Key}:chunk${i + j}`,
+                      content: chunk,
+                      org_id: orgId,
+                      agent_name: agentName,
+                      source: r2Key,
+                      chunk_index: i + j,
+                      timestamp: Date.now(),
+                    },
+                  }));
+
+                  await env.VECTORIZE?.upsert(vectors);
+                }
+              } catch (err) {
+                console.error(`[queue] RAG embed failed for ${r2Key}: ${err}`);
+              }
               break;
             }
             default:
