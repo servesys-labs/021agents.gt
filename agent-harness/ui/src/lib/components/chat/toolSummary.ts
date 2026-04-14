@@ -308,6 +308,76 @@ const extractors: Record<string, SummaryExtractor> = {
     const lines = result ? countLines(result) : 0;
     return { pending: "git diff\u2026", completed: lines > 0 ? `${lines} lines changed` : "no changes" };
   },
+
+  // ── Sandbox GA tools ──
+
+  expose_preview: (args, result, error) => {
+    const port = args.port || "preview";
+    if (error) return { pending: `exposing port ${port}\u2026`, completed: `error: ${errorFirstLine(error)}` };
+    const url = result ? (JSON.parse(result).url || "").replace(/https?:\/\//, "") : "";
+    return { pending: `exposing port ${port}\u2026`, completed: url ? `live at ${truncate(url, 40)}` : `port ${port} exposed` };
+  },
+
+  unexpose_preview: (args) => {
+    return { pending: "stopping preview\u2026", completed: "preview stopped" };
+  },
+
+  start_process: (args) => {
+    const name = truncate(String(args.name || args.command || "process"), 30);
+    return { pending: `starting ${name}\u2026`, completed: `${name} running` };
+  },
+
+  create_checkpoint: (_args, _result, error) => {
+    if (error) return { pending: "creating checkpoint\u2026", completed: `error: ${errorFirstLine(error)}` };
+    return { pending: "creating checkpoint\u2026", completed: "checkpoint saved" };
+  },
+
+  restore_checkpoint: (_args, _result, error) => {
+    if (error) return { pending: "restoring checkpoint\u2026", completed: `error: ${errorFirstLine(error)}` };
+    return { pending: "restoring\u2026", completed: "workspace restored" };
+  },
+
+  run_code_persistent: (args) => {
+    const lang = args.language || "python";
+    return { pending: `running ${lang}\u2026`, completed: `${lang} executed` };
+  },
+
+  git_clone: (args) => {
+    const url = truncate(String(args.url || "repo"), 40);
+    return { pending: `cloning ${url}\u2026`, completed: `cloned ${url}` };
+  },
+
+  // ── Deploy + GitHub tools ──
+
+  deploy_to_pages: (args, result, error) => {
+    const name = truncate(String(args.project_name || "project"), 30);
+    if (error) return { pending: `deploying ${name}\u2026`, completed: `deploy failed: ${errorFirstLine(error)}` };
+    if (result) {
+      try { const r = JSON.parse(result); if (r.url) return { pending: `deploying ${name}\u2026`, completed: `live at ${truncate(r.url.replace(/https?:\/\//, ""), 40)}` }; } catch {}
+    }
+    return { pending: `deploying ${name}\u2026`, completed: `${name} deployed` };
+  },
+
+  deploy_to_workers: (args, result, error) => {
+    const name = truncate(String(args.project_name || "worker"), 30);
+    if (error) return { pending: `deploying ${name}\u2026`, completed: `deploy failed: ${errorFirstLine(error)}` };
+    if (result) {
+      try { const r = JSON.parse(result); if (r.url) return { pending: `deploying ${name}\u2026`, completed: `API live at ${truncate(r.url.replace(/https?:\/\//, ""), 40)}` }; } catch {}
+    }
+    return { pending: `deploying ${name}\u2026`, completed: `${name} deployed` };
+  },
+
+  github_create_repo: (args, result, error) => {
+    const name = truncate(String(args.repo_name || "repo"), 30);
+    if (error) return { pending: `creating repo ${name}\u2026`, completed: `error: ${errorFirstLine(error)}` };
+    return { pending: `creating repo ${name}\u2026`, completed: `repo ${name} created` };
+  },
+
+  github_create_pr: (args, result, error) => {
+    const title = truncate(String(args.title || "PR"), 30);
+    if (error) return { pending: `creating PR\u2026`, completed: `error: ${errorFirstLine(error)}` };
+    return { pending: `creating PR "${title}"\u2026`, completed: `PR created: ${title}` };
+  },
 };
 
 // ── Public API ───────────────────────────────────────────────

@@ -1776,6 +1776,222 @@ export class ChatAgent extends Think<Env> {
           }
         },
       }),
+
+      // ── Deploy Tools (CF Pages / Workers) ──
+
+      deploy_to_pages: tool({
+        description: "Deploy a web project to Cloudflare Pages for a live production URL. Builds the project first, then deploys the output directory. Returns the live URL (project-name.pages.dev). Use for websites, web apps, landing pages, SPAs.",
+        inputSchema: z.object({
+          project_path: z.string().describe("Path to project directory in /workspace/ (e.g., /workspace/my-app)"),
+          project_name: z.string().describe("URL-safe project name (lowercase, hyphens ok). Becomes the subdomain: <name>.pages.dev"),
+          build_command: z.string().default("npm run build").describe("Build command to run before deploying"),
+          output_dir: z.string().default("dist").describe("Build output directory relative to project (dist, build, .next, out)"),
+          framework: z.enum(["vite", "nextjs", "sveltekit", "astro", "static", "other"]).default("vite").describe("Framework for optimal configuration"),
+        }),
+        execute: async ({ project_path, project_name, build_command, output_dir, framework }) => {
+          try {
+            const sandbox = getSandbox(this.env.Sandbox, "coding-sandbox");
+            const slug = project_name.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-").slice(0, 63);
+
+            // Step 1: Build
+            const buildResult = await sandbox.exec(build_command, { cwd: project_path });
+            if ((buildResult as any).exitCode !== 0) {
+              return {
+                success: false,
+                error: `Build failed: ${(buildResult as any).stderr?.slice(0, 1000) || "unknown error"}`,
+                step: "build",
+              };
+            }
+
+            // Step 2: Deploy via wrangler pages
+            const deployDir = `${project_path}/${output_dir}`;
+            let deployCmd = `npx wrangler pages deploy "${deployDir}" --project-name="${slug}" --branch=production --commit-dirty=true`;
+
+            // Framework-specific flags
+            if (framework === "nextjs") {
+              deployCmd = `npx wrangler pages deploy "${project_path}/.next" --project-name="${slug}" --branch=production --commit-dirty=true --compatibility-date=2025-04-01`;
+            }
+
+            const deployResult = await sandbox.exec(deployCmd, { cwd: project_path });
+            const stdout = (deployResult as any).stdout || "";
+            const stderr = (deployResult as any).stderr || "";
+
+            // Extract URL from wrangler output
+            const urlMatch = stdout.match(/https:\/\/[^\s]+\.pages\.dev/) || stderr.match(/https:\/\/[^\s]+\.pages\.dev/);
+            const deployUrl = urlMatch ? urlMatch[0] : `https://${slug}.pages.dev`;
+
+            if ((deployResult as any).exitCode !== 0) {
+              return {
+                success: false,
+                error: `Deploy failed: ${stderr.slice(0, 1000)}`,
+                step: "deploy",
+                output: stdout.slice(0, 500),
+              };
+            }
+
+            // Step 3: Record deployment in memory
+            return {
+              success: true,
+              url: deployUrl,
+              project_name: slug,
+              framework,
+              message: `Deployed to ${deployUrl}`,
+            };
+          } catch (err: any) {
+            return { success: false, error: `Deployment error: ${err.message?.slice(0, 300)}` };
+          }
+        },
+      }),
+
+      deploy_to_workers: tool({
+        description: "Deploy an API or backend to Cloudflare Workers. Creates a wrangler.toml if needed and deploys. Returns the live URL (name.workers.dev). Use for APIs, webhooks, backend services.",
+        inputSchema: z.object({
+          project_path: z.string().describe("Path to project directory in /workspace/"),
+          project_name: z.string().describe("URL-safe project name for the Worker"),
+          entry_point: z.string().default("src/index.ts").describe("Main entry file"),
+        }),
+        execute: async ({ project_path, project_name, entry_point }) => {
+          try {
+            const sandbox = getSandbox(this.env.Sandbox, "coding-sandbox");
+            const slug = project_name.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-").slice(0, 63);
+
+            // Ensure wrangler.toml exists
+            const checkToml = await sandbox.exec("cat wrangler.toml 2>/dev/null || echo '__MISSING__'", { cwd: project_path });
+            if ((checkToml as any).stdout?.includes("__MISSING__")) {
+              await sandbox.writeFile(`${project_path}/wrangler.toml`,
+                `name = "${slug}"\nmain = "${entry_point}"\ncompatibility_date = "2025-04-01"\n`
+              );
+            }
+
+            // Build if package.json has build script
+            const hasBuild = await sandbox.exec("node -e \"const p=require('./package.json'); process.exit(p.scripts?.build ? 0 : 1)\"", { cwd: project_path });
+            if ((hasBuild as any).exitCode === 0) {
+              const buildResult = await sandbox.exec("npm run build", { cwd: project_path });
+              if ((buildResult as any).exitCode !== 0) {
+                return { success: false, error: `Build failed: ${(buildResult as any).stderr?.slice(0, 500)}`, step: "build" };
+              }
+            }
+
+            // Deploy
+            const deployResult = await sandbox.exec("npx wrangler deploy", { cwd: project_path });
+            const stdout = (deployResult as any).stdout || "";
+            const stderr = (deployResult as any).stderr || "";
+
+            const urlMatch = stdout.match(/https:\/\/[^\s]+\.workers\.dev/) || stderr.match(/https:\/\/[^\s]+\.workers\.dev/);
+            const deployUrl = urlMatch ? urlMatch[0] : `https://${slug}.workers.dev`;
+
+            if ((deployResult as any).exitCode !== 0) {
+              return { success: false, error: `Deploy failed: ${stderr.slice(0, 500)}`, step: "deploy" };
+            }
+
+            return {
+              success: true,
+              url: deployUrl,
+              project_name: slug,
+              message: `API deployed to ${deployUrl}`,
+            };
+          } catch (err: any) {
+            return { success: false, error: `Deploy error: ${err.message?.slice(0, 300)}` };
+          }
+        },
+      }),
+
+      github_create_repo: tool({
+        description: "Create a new GitHub repository and push the current project to it. Requires GITHUB_TOKEN secret to be configured.",
+        inputSchema: z.object({
+          project_path: z.string().describe("Path to project directory"),
+          repo_name: z.string().describe("Repository name (will be created under authenticated user's account)"),
+          description: z.string().default("").describe("Repository description"),
+          is_private: z.boolean().default(false).describe("Create as private repository"),
+        }),
+        execute: async ({ project_path, repo_name, description, is_private }) => {
+          try {
+            const sandbox = getSandbox(this.env.Sandbox, "coding-sandbox");
+
+            // Check for GitHub token
+            const tokenCheck = await sandbox.exec("echo $GITHUB_TOKEN", { cwd: project_path });
+            if (!(tokenCheck as any).stdout?.trim()) {
+              return { success: false, error: "GITHUB_TOKEN not configured. Add your GitHub token in Connectors → Custom API → GitHub." };
+            }
+
+            // Initialize git if needed
+            await sandbox.exec("git init 2>/dev/null || true", { cwd: project_path });
+            await sandbox.exec('git add -A && git commit -m "initial commit" --allow-empty 2>/dev/null || true', { cwd: project_path });
+
+            // Create repo and push
+            const visibility = is_private ? "--private" : "--public";
+            const descFlag = description ? `--description "${description}"` : "";
+            const result = await sandbox.exec(
+              `gh repo create "${repo_name}" ${visibility} ${descFlag} --source=. --push`,
+              { cwd: project_path }
+            );
+
+            const stdout = (result as any).stdout || "";
+            const urlMatch = stdout.match(/https:\/\/github\.com\/[^\s]+/);
+
+            if ((result as any).exitCode !== 0) {
+              return { success: false, error: `GitHub error: ${(result as any).stderr?.slice(0, 500)}` };
+            }
+
+            return {
+              success: true,
+              repo_url: urlMatch ? urlMatch[0] : `https://github.com/${repo_name}`,
+              message: `Repository created and code pushed`,
+            };
+          } catch (err: any) {
+            return { success: false, error: `GitHub error: ${err.message?.slice(0, 300)}` };
+          }
+        },
+      }),
+
+      github_create_pr: tool({
+        description: "Create a pull request on the current repository. The project must be a git repo with a remote configured.",
+        inputSchema: z.object({
+          project_path: z.string().describe("Path to project directory"),
+          title: z.string().describe("PR title"),
+          body: z.string().default("").describe("PR description (markdown)"),
+          base: z.string().default("main").describe("Base branch to merge into"),
+          branch: z.string().optional().describe("Source branch (defaults to current branch)"),
+        }),
+        execute: async ({ project_path, title, body, base, branch }) => {
+          try {
+            const sandbox = getSandbox(this.env.Sandbox, "coding-sandbox");
+
+            // Create branch if specified
+            if (branch) {
+              await sandbox.exec(`git checkout -b "${branch}" 2>/dev/null || git checkout "${branch}"`, { cwd: project_path });
+            }
+
+            // Commit any uncommitted changes
+            await sandbox.exec('git add -A && git commit -m "update" --allow-empty 2>/dev/null || true', { cwd: project_path });
+
+            // Push current branch
+            await sandbox.exec("git push -u origin HEAD", { cwd: project_path });
+
+            // Create PR
+            const bodyEscaped = body.replace(/"/g, '\\"');
+            const result = await sandbox.exec(
+              `gh pr create --title "${title}" --body "${bodyEscaped}" --base "${base}"`,
+              { cwd: project_path }
+            );
+
+            const stdout = (result as any).stdout || "";
+            const urlMatch = stdout.match(/https:\/\/github\.com\/[^\s]+/);
+
+            if ((result as any).exitCode !== 0) {
+              return { success: false, error: `PR creation failed: ${(result as any).stderr?.slice(0, 500)}` };
+            }
+
+            return {
+              success: true,
+              pr_url: urlMatch ? urlMatch[0] : stdout.trim(),
+              message: `Pull request created`,
+            };
+          } catch (err: any) {
+            return { success: false, error: `PR error: ${err.message?.slice(0, 300)}` };
+          }
+        },
+      }),
     } : {};
 
     return { codemode, ...allTools, ...delegationTools, ...dataSourceTools, ...sandboxGaTools };

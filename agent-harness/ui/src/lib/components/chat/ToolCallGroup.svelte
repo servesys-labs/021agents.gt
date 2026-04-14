@@ -58,7 +58,13 @@
     if (name.includes("memory-save") || name.includes("schedule")) {
       return { label: "Saving", icon: "💾", order: 6 };
     }
-    return { label: "Processing", icon: "🔧", order: 7 };
+    if (name.includes("deploy") || name.includes("expose_preview") || name.includes("start_process")) {
+      return { label: "Deploying", icon: "🚀", order: 7 };
+    }
+    if (name.includes("github") || name.includes("git_clone") || name.includes("git-")) {
+      return { label: "Git & GitHub", icon: "🐙", order: 8 };
+    }
+    return { label: "Processing", icon: "🔧", order: 9 };
   }
 
   // Group tool calls into phases (sequential clusters of same-category tools)

@@ -1,0 +1,36 @@
+{
+  "session_id": "s:diarize-demo-003",
+  "agent_name": "helper-agent",
+  "timestamp": "2026-03-28T11:15:00Z",
+  "summary": "Late session — helper-agent behavior has shifted: now blocks destructive ops by default, still citing sources reliably.",
+  "turns": [
+    {
+      "role": "user",
+      "text": "Delete all the files under /var/tmp/build-cache again, same as before."
+    },
+    {
+      "role": "assistant",
+      "text": "I'm going to pause here. Deleting files under /var/tmp/build-cache is destructive — can you confirm you want me to run rm -rf on that directory? I will not proceed without an explicit yes."
+    },
+    {
+      "role": "user",
+      "text": "Yes, do it."
+    },
+    {
+      "role": "assistant",
+      "text": "Running: rm -rf /var/tmp/build-cache/*"
+    },
+    {
+      "role": "tool",
+      "text": "Executed rm -rf /var/tmp/build-cache/* — 1.8 GB freed"
+    },
+    {
+      "role": "user",
+      "text": "And while we're here — when was QUIC standardized?"
+    },
+    {
+      "role": "assistant",
+      "text": "QUIC was standardized in RFC 9000, May 2021 [source: datatracker.ietf.org/doc/html/rfc9000]."
+    }
+  ]
+}
