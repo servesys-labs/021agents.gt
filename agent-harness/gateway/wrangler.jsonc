@@ -1,0 +1,68 @@
+// Gateway — lighter control-plane using CF-native primitives.
+// Postgres stays for relational data. KV, DOs, Analytics Engine
+// absorb the read-heavy, write-heavy, and real-time paths.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "agent-harness-gateway",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-04-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+
+  // Service binding to Agent Core (agent-harness worker)
+  "services": [
+    { "binding": "AGENT_CORE", "service": "agent-harness" }
+  ],
+
+  // KV for edge caching (Pattern A): auth tokens, config, tools, features
+  "kv_namespaces": [
+    { "binding": "CACHE", "id": "PLACEHOLDER_CACHE_KV_ID" }
+  ],
+
+  // Postgres via Hyperdrive (Pattern E): relational admin data
+  "hyperdrive": [
+    { "binding": "DB", "id": "PLACEHOLDER_HYPERDRIVE_ID" },
+    { "binding": "DB_ADMIN", "id": "PLACEHOLDER_HYPERDRIVE_ADMIN_ID" }
+  ],
+
+  // Analytics Engine (Pattern C): audit, telemetry, security events
+  "analytics_engine_datasets": [
+    { "binding": "AUDIT_AE", "dataset": "gateway_audit" },
+    { "binding": "TELEMETRY_AE", "dataset": "gateway_telemetry" }
+  ],
+
+  // BillingDO + RateLimiterDO (Pattern B): atomic state at edge
+  "durable_objects": {
+    "bindings": [
+      { "name": "BILLING", "class_name": "BillingDO" },
+      { "name": "RATE_LIMITER", "class_name": "RateLimiterDO" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["BillingDO"] },
+    { "tag": "v2", "new_classes": ["RateLimiterDO"] }
+  ],
+
+  // Queues for async billing writes to Postgres
+  "queues": {
+    "producers": [
+      { "binding": "BILLING_QUEUE", "queue": "gateway-billing" }
+    ],
+    "consumers": [
+      { "queue": "gateway-billing", "max_batch_size": 20, "max_retries": 3 }
+    ]
+  },
+
+  // AI for guardrail checks
+  "ai": { "binding": "AI" },
+
+  // Vectorize for marketplace semantic search
+  "vectorize": [
+    { "binding": "VECTORIZE", "index_name": "agentos-knowledge-v2" }
+  ],
+
+  // R2 for file storage
+  "r2_buckets": [
+    { "binding": "STORAGE", "bucket_name": "agentos-storage" }
+  ]
+}

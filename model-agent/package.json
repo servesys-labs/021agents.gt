@@ -1,0 +1,39 @@
+{
+  "name": "@agentos/model-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Reference implementation — AIChatAgent + Workspace + CodeMode + MCP + Browser",
+  "scripts": {
+    "start": "vite dev",
+    "deploy": "vite build && wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
+  "dependencies": {
+    "@cloudflare/ai-chat": "^0.1.0",
+    "@cloudflare/codemode": "^0.2.1",
+    "@cloudflare/kumo": "^1.18.0",
+    "@cloudflare/puppeteer": "^1.0.6",
+    "@cloudflare/shell": "^0.1.0",
+    "@cloudflare/think": "^0.1.0",
+    "@cloudflare/voice": "^0.1.0",
+    "@modelcontextprotocol/sdk": "^1.25.0",
+    "agents": "^0.7.9",
+    "web-push": "^3.6.0",
+    "ai": "^6.0.158",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "workers-ai-provider": "^0.7.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.0.0",
+    "@cloudflare/workers-types": "^4.20260301.0",
+    "@tailwindcss/vite": "^4.2.0",
+    "@vitejs/plugin-react": "^4.0.0",
+    "tailwindcss": "^4.2.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.0.8",
+    "wrangler": "^4.80.0"
+  }
+}

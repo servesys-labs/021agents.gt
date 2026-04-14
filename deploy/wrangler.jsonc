@@ -166,6 +166,15 @@
     }
   ],
 
+  // ── Composable building blocks — service bindings to sibling workers ──
+  // Zero-latency, same-thread calls. Each block deploys independently.
+  "services": [
+    { "binding": "CHANNELS", "service": "agentos-channels" },
+    { "binding": "SIGNALS_WORKER", "service": "agentos-signals" },
+    { "binding": "COMPUTE", "service": "agentos-compute" },
+    { "binding": "MEMORY", "service": "agentos-memory" }
+  ],
+
   // Email Routing — configured in CF Dashboard (Email Routing → catch-all → Worker "agentos")
   // Emails to agent-name@yourdomain.com → agent DO "agent-name"
 

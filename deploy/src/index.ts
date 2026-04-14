@@ -1,21 +1,24 @@
 /**
- * AgentOS — Cloudflare Agents Deployment (Modernized)
+ * AgentOS — Cloudflare Agents Deployment
  *
- * Uses Cloudflare Agents SDK patterns:
+ * Aligned with Cloudflare Agents SDK patterns:
  *   - @callable() methods for type-safe RPC
- *   - Dedicated MCP server agent for MCP protocol support
- *   - this.schedule() / this.queue() for job orchestration
+ *   - McpAgent for MCP protocol support
+ *   - this.scheduleEvery() for recurring job orchestration
  *   - this.sql`` for persistent state
+ *   - this.keepAliveWhile() to prevent mid-operation eviction
+ *   - isAutoReplyEmail() for email safety
  *   - routeAgentRequest for URL-based agent dispatch
  */
 
 import {
   Agent,
-  AgentNamespace,
   Connection,
   callable,
   routeAgentRequest,
 } from "agents";
+import { isAutoReplyEmail } from "agents/email";
+import { getSchedulePrompt, scheduleSchema } from "agents/schedule";
 import { getSandbox, Sandbox } from "@cloudflare/sandbox";
 // @ts-expect-error — ContainerProxy exists at runtime but may not be in type defs
 import { ContainerProxy } from "@cloudflare/containers";
@@ -680,13 +683,13 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       console.warn(`[DO:onStart] workspace recovery failed: ${err instanceof Error ? err.message : err}`);
     }
 
-    // ── Initiate checkpoint schedule ────────────────────────────────
-    // Kick off the self-rescheduling checkpoint chain. Without this,
-    // checkpointWorkspace() is never called (it relies on being scheduled).
-    // Skipped when harness.enable_checkpoints === false (synced from DB on first run).
+    // ── Initiate recurring checkpoint schedule ──────────────────────
+    // SDK scheduleEvery() creates a recurring schedule that survives hibernation.
+    // Replaces the self-rescheduling chain (this.schedule → callback → this.schedule)
+    // which was fragile: if the callback threw, the chain broke silently.
     if (this.state.config.enableWorkspaceCheckpoints !== false) {
       try {
-        await this.schedule(Date.now() + 30_000, "checkpointWorkspace");
+        await this.scheduleEvery(30, "checkpointWorkspace");
       } catch {}
     }
 
@@ -718,7 +721,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   /**
    * Scheduled callback: save workspace + state to DO SQLite every 30 seconds.
    * If the DO hibernates between checkpoints, SQLite retains the last one.
-   * Called via `this.schedule(Date.now() + 30_000, "checkpointWorkspace")`.
+   * Called every 30s via `this.scheduleEvery(30, "checkpointWorkspace")` from onStart().
    */
   async checkpointWorkspace() {
     if (this.state.config.enableWorkspaceCheckpoints === false) {
@@ -798,11 +801,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       console.warn(`[DO:alarm] checkpoint failed: ${err instanceof Error ? err.message : err}`);
     }
 
-    // Re-schedule for next checkpoint (30 seconds)
-    // (enableWorkspaceCheckpoints === false already returned above)
-    try {
-      await this.schedule(Date.now() + 30_000, "checkpointWorkspace");
-    } catch {}
+    // No manual re-scheduling needed — scheduleEvery() in onStart() handles recurrence.
   }
 
   /** Load harness.enable_checkpoints from Supabase and update DO state. Cached 5 minutes. */
@@ -830,7 +829,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
 
   // ── Callable Methods (RPC from client) ──────────────────────────
 
-  @callable()
+  @callable({ description: "Run the agent on a task input. Returns turn results with output, cost, and trace." })
   async run(
     input: string,
     opts?: {
@@ -874,6 +873,16 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
 
     // ── Workflow path (primary) ──
     if (this.env.AGENT_RUN_WORKFLOW) {
+      // SDK keepAliveWhile(): prevent eviction during RPC poll.
+      // Uses AbortController so the keep-alive ends when the run returns,
+      // allowing the DO to hibernate instead of sleeping the full 5 minutes.
+      const keepAliveAc = new AbortController();
+      this.keepAliveWhile(async () => {
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 300_000);
+          keepAliveAc.signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); });
+        });
+      }).catch(() => {});
       const history = this._loadConversationHistory(24);
       const progressKey = `rpc:${this.name}:${Date.now()}`;
       const instance = await this.env.AGENT_RUN_WORKFLOW.create({
@@ -906,43 +915,47 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         },
       });
 
-      // Poll for completion
-      const maxWait = 300_000;
-      const pollStart = Date.now();
-      while (Date.now() - pollStart < maxWait) {
-        await new Promise(r => setTimeout(r, 2000));
-        const status = await instance.status().catch(() => ({ status: "unknown" as const }));
-        if (status.status === "complete") {
-          const out = (status as any).output as RunOutput | undefined;
-          this._appendConversationMessage("user", input, "rpc");
-          this._appendConversationMessage("assistant", out?.output || "", "rpc");
-          return [{
-            output: out?.output || "",
-            session_id: out?.session_id || "",
-            trace_id: out?.trace_id || "",
-            tool_calls: out?.tool_calls || 0,
-            cost_usd: out?.cost_usd || 0,
-            stop_reason: "complete",
-            wall_clock_ms: Date.now() - started,
-          }] as any;
+      // Poll for completion — wrapped in try/finally to cancel keepAlive on exit
+      try {
+        const maxWait = 300_000;
+        const pollStart = Date.now();
+        while (Date.now() - pollStart < maxWait) {
+          await new Promise(r => setTimeout(r, 2000));
+          const status = await instance.status().catch(() => ({ status: "unknown" as const }));
+          if (status.status === "complete") {
+            const out = (status as any).output as RunOutput | undefined;
+            this._appendConversationMessage("user", input, "rpc");
+            this._appendConversationMessage("assistant", out?.output || "", "rpc");
+            return [{
+              output: out?.output || "",
+              session_id: out?.session_id || "",
+              trace_id: out?.trace_id || "",
+              tool_calls: out?.tool_calls || 0,
+              cost_usd: out?.cost_usd || 0,
+              stop_reason: "complete",
+              wall_clock_ms: Date.now() - started,
+            }] as any;
+          }
+          if (status.status === "errored" || status.status === "terminated") {
+            throw new Error((status as any).error?.message || "Workflow failed");
+          }
         }
-        if (status.status === "errored" || status.status === "terminated") {
-          throw new Error((status as any).error?.message || "Workflow failed");
-        }
+        throw new Error("Workflow timed out");
+      } finally {
+        keepAliveAc.abort(); // release keep-alive so DO can hibernate
       }
-      throw new Error("Workflow timed out");
     }
 
     // Workflow unavailable
     throw new Error("AGENT_RUN_WORKFLOW binding not configured. Deploy with Workflows enabled.");
   }
 
-  @callable()
+  @callable({ description: "Get the current agent configuration." })
   getConfig(): AgentConfig {
     return this.state.config;
   }
 
-  @callable()
+  @callable({ description: "Update agent configuration. Returns the merged config." })
   setConfig(config: Partial<AgentConfig>): AgentConfig {
     const before = this.state.config;
     const plan = normalizePlan(config.plan ?? before.plan ?? this.env.DEFAULT_PLAN);
@@ -972,15 +985,120 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     return updated;
   }
 
-  @callable()
+  @callable({ description: "Get the agent's working memory (ephemeral key-value store)." })
   getWorkingMemory(): Record<string, unknown> {
     return this.state.working;
   }
 
-  @callable()
+  @callable({ description: "Set a key in the agent's working memory." })
   setWorkingMemory(key: string, value: unknown): void {
     const working = { ...this.state.working, [key]: value };
     this.setState({ ...this.state, working });
+  }
+
+  // ── MCP Client: dynamic tool discovery from external MCP servers ──
+  // Uses SDK's this.mcp to connect to external services and discover their tools.
+  // Connected servers persist across hibernation via the SDK's built-in MCP state.
+
+  @callable({ description: "Connect to an external MCP server for dynamic tool discovery." })
+  async connectMcpServer(name: string, url: string, transport: "sse" | "streamable-http" = "sse"): Promise<{ connected: boolean; tools: string[] }> {
+    try {
+      // SDK signature: addMcpServer(serverName, url, options?)
+      // url must be a string, transport type goes in options
+      await this.addMcpServer(name, url, { transport: { type: transport } } as any);
+      // Discover tools from all connected MCP servers via this.mcp
+      const tools = await this.mcp.getAITools();
+      const toolNames = Object.keys(tools || {});
+      return { connected: true, tools: toolNames };
+    } catch (err: any) {
+      console.error(`[MCP-client] Failed to connect to ${name} at ${url}:`, err);
+      return { connected: false, tools: [] };
+    }
+  }
+
+  @callable({ description: "List all connected MCP servers and their discovered tools." })
+  async listMcpServers(): Promise<{ servers: Array<{ name: string; tools: string[] }> }> {
+    try {
+      // this.mcp.getAITools() returns Record<string, CoreTool> (flat map of all tools)
+      const tools = await this.mcp.getAITools();
+      const toolNames = Object.keys(tools || {});
+      // The SDK's mcpServers state tracks connected servers
+      const mcpState = this.state as any;
+      const serverNames = Array.isArray(mcpState?._mcpServers)
+        ? mcpState._mcpServers.map((s: any) => s.name || "unknown")
+        : ["default"];
+      return {
+        servers: serverNames.map((name: string) => ({ name, tools: toolNames })),
+      };
+    } catch {
+      return { servers: [] };
+    }
+  }
+
+  // ── SDK Schedule: natural language scheduling ──
+  // Uses SDK's getSchedulePrompt() and scheduleSchema for parsing
+  // user-friendly schedule descriptions into cron/delay/date schedules.
+
+  @callable({ description: "Get the prompt for parsing natural language schedule requests." })
+  getScheduleParsingPrompt(userInput: string): { prompt: string; schema: unknown } {
+    // SDK expects { date: Date } — Date object, not ISO string
+    return {
+      prompt: getSchedulePrompt({ date: new Date() }),
+      schema: scheduleSchema,
+    };
+  }
+
+  @callable({ description: "Create a scheduled agent run from a parsed schedule." })
+  async createScheduledRun(
+    schedule: { type: "scheduled"; date: string } | { type: "delayed"; delaySeconds: number } | { type: "cron"; expression: string },
+    input: string,
+  ): Promise<{ scheduled: boolean; id?: string }> {
+    try {
+      if (schedule.type === "scheduled") {
+        await this.schedule(new Date(schedule.date).getTime(), "run", input);
+      } else if (schedule.type === "delayed") {
+        await this.schedule(Date.now() + schedule.delaySeconds * 1000, "run", input);
+      } else if (schedule.type === "cron") {
+        // scheduleEvery doesn't support arbitrary cron, so use schedule for next occurrence
+        // For true cron, the control-plane cron trigger handles it
+        await this.schedule(Date.now() + 60_000, "run", input);
+      }
+      return { scheduled: true };
+    } catch (err: any) {
+      console.error("[schedule] Failed:", err);
+      return { scheduled: false };
+    }
+  }
+
+  @callable({ description: "List all active schedules for this agent." })
+  async listSchedules(): Promise<{ schedules: unknown[] }> {
+    try {
+      const schedules = await this.getSchedules();
+      return { schedules: schedules || [] };
+    } catch {
+      return { schedules: [] };
+    }
+  }
+
+  @callable({ description: "Cancel a scheduled task by ID." })
+  async cancelScheduledTask(scheduleId: string): Promise<{ cancelled: boolean }> {
+    try {
+      await this.cancelSchedule(scheduleId);
+      return { cancelled: true };
+    } catch {
+      return { cancelled: false };
+    }
+  }
+
+  @callable({ description: "Disconnect an external MCP server." })
+  async disconnectMcpServer(name: string): Promise<{ disconnected: boolean }> {
+    try {
+      await this.removeMcpServer(name);
+      return { disconnected: true };
+    } catch (err: any) {
+      console.error(`[MCP-client] Failed to disconnect ${name}:`, err);
+      return { disconnected: false };
+    }
   }
 
   private _getConversationCount(): number {
@@ -1092,18 +1210,47 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   //   Server → { type: "done", output, turns, cost_usd }  — run complete
   //   Server → { type: "error", message }                 — error
 
+  // ── SDK onStateChanged: react to state updates server-side ───────
+  // Called whenever setState() is invoked. SDK signature passes
+  // (state | undefined, source) — state can be undefined on reset.
+  onStateChanged(state: AgentState | undefined, source: Connection | "server") {
+    if (!state) return; // state can be undefined on reset
+    // Broadcast budget warnings to all connected clients
+    if (state.totalCostUsd > 0 && state.config.budgetLimitUsd > 0) {
+      const budgetPct = state.totalCostUsd / state.config.budgetLimitUsd;
+      if (budgetPct >= 0.9) {
+        this.broadcast(JSON.stringify({
+          type: "budget_warning",
+          cost_usd: state.totalCostUsd,
+          limit_usd: state.config.budgetLimitUsd,
+          pct: Math.round(budgetPct * 100),
+        }));
+      }
+    }
+  }
+
   async onConnect(connection: Connection) {
     // Use DO name as the source of truth — this.state.config may still be the
     // default initialState if the DO was just created and hasn't run yet.
     const agentName = this.state.config.agentName !== "agentos"
       ? this.state.config.agentName
       : this.name; // DO name encodes org-agent-user, always accurate
+
+    // Send connection info to the connecting client
     connection.send(JSON.stringify({
       type: "connected",
       agent: agentName,
       instance_id: this.name,
       session_affinity: true,
       history_count: this._getConversationCount(),
+    }));
+
+    // Broadcast to all OTHER clients that a new client connected
+    // (useful for multi-tab or multi-user visibility)
+    this.broadcast(JSON.stringify({
+      type: "peer_connected",
+      instance_id: this.name,
+      ts: Date.now(),
     }));
 
     // ── Deliver missed run result on reconnect ──────────────────────
@@ -1322,6 +1469,17 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       }
 
       this._activeRun = true;
+
+      // SDK keepAliveWhile(): prevent DO eviction during the entire run.
+      // Without this, a long-running workflow poll can be interrupted by
+      // hibernation, requiring the complex orphaned-workflow recovery path.
+      // Timeout guard: exit after 5 minutes even if _activeRun is stuck.
+      this.keepAliveWhile(async () => {
+        const deadline = Date.now() + 300_000; // 5 min max
+        while (this._activeRun && Date.now() < deadline) {
+          await new Promise(r => setTimeout(r, 5000));
+        }
+      }).catch(() => {}); // non-blocking — just prevents eviction
 
       const config = this.state.config;
       const inputText = rawInput;
@@ -1602,6 +1760,9 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   // Stop polling loop and attempt to terminate the active workflow
   // to avoid wasting tokens when the client disconnects.
   async onClose(connection: Connection, code: number, reason: string, wasClean: boolean) {
+    // Notify other clients that a peer disconnected
+    this.broadcast(JSON.stringify({ type: "peer_disconnected", ts: Date.now() }));
+
     if (this._activeWorkflow) {
       this._activeWorkflow.abortPoll = true;
       try { await (this._activeWorkflow.instance as any).terminate?.(); } catch {}
@@ -1755,6 +1916,14 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   // and replies to the sender with the agent's response.
 
   async onEmail(email: ForwardableEmailMessage) {
+    // SDK safety: reject auto-reply emails (OOO, vacation, mailing-list) to prevent infinite loops.
+    // Convert Web API Headers to the EmailHeader[] format the SDK expects.
+    const headerArray = [...email.headers].map(([key, value]) => ({ key, value }));
+    if (isAutoReplyEmail(headerArray)) {
+      console.log(`[onEmail] Skipping auto-reply from ${email.from}`);
+      return;
+    }
+
     await this._syncCheckpointFlagFromDb(this.name);
     const from = email.from;
     const to = email.to;
@@ -2588,7 +2757,18 @@ function extractBearerToken(request: Request): string {
 }
 
 async function authorizeAgentIngress(request: Request, env: Env): Promise<Response | null> {
-  const token = extractBearerToken(request);
+  // Try Authorization header first (works for HTTP, SSE, MCP, service bindings)
+  let token = extractBearerToken(request);
+
+  // For WebSocket upgrades: browsers CANNOT set custom headers on WebSocket
+  // connections (the new WebSocket(url) API has no headers parameter).
+  // Accept the token as a query parameter instead: ?token=eyJ...
+  // Defense-in-depth: onMessage also validates auth post-connect.
+  if (!token && request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
+    const url = new URL(request.url);
+    token = url.searchParams.get("token") || null;
+  }
+
   if (!token) return Response.json({ error: "unauthorized" }, { status: 401 });
 
   const serviceToken = String(env.SERVICE_TOKEN || "").trim();
@@ -2602,24 +2782,118 @@ async function authorizeAgentIngress(request: Request, env: Env): Promise<Respon
 
 // ---------------------------------------------------------------------------
 // MCP Server Agent — exposes tools via Model Context Protocol
+//
+// Uses SDK's McpAgent base class for full MCP protocol compliance:
+// - SSE + HTTP streaming transports (handled by SDK)
+// - Proper capability negotiation
+// - Resources + prompts support (beyond just tools)
+// - Lifecycle management (initialize, notifications)
 // ---------------------------------------------------------------------------
 
-export class AgentOSMcpServer extends Agent<Env> {
+import { McpAgent } from "agents/mcp";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+
+export class AgentOSMcpServer extends McpAgent<Env, {}, {}> {
   // Cached agent config loaded from Supabase
   private _agentConfig: Record<string, unknown> | null = null;
-  private _agentTools: Array<{ name: string; description: string; inputSchema: Record<string, unknown> }> = [];
+  private _orgId: string = "";
 
-  async onStart() {
-    // Load agent config from Supabase via Hyperdrive on startup
+  server = new McpServer({
+    name: "agentos-mcp",
+    version: "0.2.0",
+  });
+
+  /** Delegate a request to the main agent DO. Handles errors gracefully for MCP. */
+  private async _delegateToAgent(doNameSuffix: string, body: Record<string, unknown>): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
+    try {
+      const orgPrefix = this._orgId ? `${this._orgId}-` : "";
+      const agentId = this.env.AGENTOS_AGENT.idFromName(`${orgPrefix}${doNameSuffix}`);
+      const agent = this.env.AGENTOS_AGENT.get(agentId);
+      const resp = await agent.fetch(new Request("http://internal/run", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }));
+      const result = await resp.json() as Record<string, unknown>;
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (err: any) {
+      return { content: [{ type: "text" as const, text: `Error: ${err?.message || String(err)}` }], isError: true };
+    }
+  }
+
+  async init() {
+    // Load agent config from Supabase to discover tools
     await this._loadAgentConfig();
+
+    // ── Core tools: always available ──
+
+    this.server.tool(
+      "run-agent",
+      "Run an AgentOS agent on a task. Returns the agent's output.",
+      { task: z.string().describe("Task to execute"), agent_name: z.string().optional().describe("Agent name (defaults to this agent)") },
+      async ({ task, agent_name }) => {
+        return this._delegateToAgent(agent_name || this.name || "default", { input: task });
+      },
+    );
+
+    this.server.tool(
+      "search-knowledge",
+      "Search the agent's knowledge base for relevant information.",
+      { query: z.string().min(1).describe("Search query") },
+      async ({ query }) => {
+        return this._delegateToAgent(this.name || "default", { input: `Use knowledge search for: ${query}` });
+      },
+    );
+
+    // ── Dynamic tools: loaded from agent config ──
+
+    const configuredTools = Array.isArray(this._agentConfig?.tools)
+      ? (this._agentConfig!.tools as string[])
+      : [];
+
+    const schemaMap = await this._loadToolSchemas(configuredTools);
+
+    for (const toolName of configuredTools) {
+      const registered = schemaMap.get(toolName);
+      const description = registered?.description || `Execute the '${toolName}' tool via AgentOS`;
+
+      this.server.tool(
+        toolName,
+        description,
+        { input: z.string().describe("Input for the tool"), parameters: z.record(z.unknown()).optional().describe("Additional parameters") },
+        async ({ input, parameters }) => {
+          return this._delegateToAgent(this.name || "default", {
+            input: `Execute tool '${toolName}' with input: ${input}`,
+            tool_override: toolName,
+            tool_args: { input, ...parameters },
+          });
+        },
+      );
+    }
+
+    // ── Resources: expose agent info ──
+
+    this.server.resource(
+      "agent-config",
+      "agentos://agent/config",
+      async (uri) => ({
+        contents: [{
+          uri: uri.href,
+          text: JSON.stringify({
+            name: this.name || "default",
+            org_id: this._orgId,
+            tools: configuredTools,
+            config: this._agentConfig,
+          }, null, 2),
+          mimeType: "application/json",
+        }],
+      }),
+    );
   }
 
   /**
-   * Load agent configuration and tool definitions from Supabase.
-   * The agent name is derived from this DO's name (set via idFromName).
+   * Load agent configuration from Supabase.
    */
-  private _orgId: string = "";
-
   private async _loadAgentConfig(orgId?: string): Promise<void> {
     if (orgId) this._orgId = orgId;
     if (!this.env.HYPERDRIVE) return;
@@ -2642,249 +2916,35 @@ export class AgentOSMcpServer extends Agent<Env> {
           `;
       if (rows.length === 0) return;
 
-      let config: Record<string, unknown> = {};
-      config = parseJsonColumn(rows[0].config);
-      this._agentConfig = config;
-
-      // Ensure org_id from the agents table flows into the DO state and config
+      this._agentConfig = parseJsonColumn(rows[0].config);
       const dbOrgId = rows[0].org_id || "";
-      if (dbOrgId) {
-        this._orgId = dbOrgId;
-        // Merge into state.config so all code paths (REST, WS, billing) can find it
-        const st = this.state as AgentState;
-        if (!st.config.orgId) {
-          this.setState({ ...st, config: { ...st.config, orgId: dbOrgId } });
-        }
-      }
-
-      // Build MCP tool definitions from agent's configured tools
-      const configuredTools = Array.isArray(config.tools) ? (config.tools as string[]) : [];
-      this._agentTools = [
-        // Always include the built-in run-agent tool
-        {
-          name: "run-agent",
-          description: `Run the ${agentName} agent on a task`,
-          inputSchema: {
-            type: "object",
-            properties: {
-              agent_name: { type: "string", description: "Agent name (defaults to this agent)" },
-              task: { type: "string", description: "Task to execute" },
-            },
-            required: ["task"],
-          },
-        },
-        // Always include knowledge search
-        {
-          name: "search-knowledge",
-          description: "Search the agent's knowledge base",
-          inputSchema: {
-            type: "object",
-            properties: {
-              query: { type: "string", description: "Search query" },
-            },
-            required: ["query"],
-          },
-        },
-        // Expose each configured tool as an MCP tool
-        ...configuredTools.map((toolName: string) => ({
-          name: toolName,
-          description: `Execute the '${toolName}' tool via AgentOS`,
-          inputSchema: {
-            type: "object" as const,
-            properties: {
-              input: { type: "string", description: "Input for the tool" },
-              parameters: { type: "object", description: "Additional parameters" },
-            },
-            required: ["input"],
-          },
-        })),
-      ];
-
-      // Load detailed tool schemas from tool_registry if available.
-      // IN ${sql(array)} (no parens) — see control-plane/routes/dashboard.ts
-      // for why ANY(${array}) breaks under Hyperdrive's prepare:false.
-      if (configuredTools.length > 0) {
-        try {
-          const toolRows = await sql`
-            SELECT name, description, schema FROM tool_registry
-            WHERE name IN ${sql(configuredTools)}
-          `;
-          const schemaMap = new Map<string, { description: string; schema: Record<string, unknown> }>();
-          for (const row of toolRows) {
-            let schema: Record<string, unknown> = {};
-            schema = parseJsonColumn(row.schema);
-            schemaMap.set(String(row.name), {
-              description: String(row.description || ""),
-              schema,
-            });
-          }
-          // Enrich tool definitions with proper schemas
-          for (const tool of this._agentTools) {
-            const registered = schemaMap.get(tool.name);
-            if (registered) {
-              if (registered.description) tool.description = registered.description;
-              if (Object.keys(registered.schema).length > 0) tool.inputSchema = registered.schema;
-            }
-          }
-        } catch { /* tool_registry may not exist — use defaults */ }
-      }
+      if (dbOrgId) this._orgId = dbOrgId;
     } catch (err) {
       console.error("[MCP] Failed to load agent config:", err);
     }
   }
 
-  async onRequest(request: Request): Promise<Response> {
-    // Extract org_id from query params for scoped agent lookups
-    const url = new URL(request.url);
-    const reqOrgId = url.searchParams.get("org_id") || "";
-    if (reqOrgId && !this._orgId) this._orgId = reqOrgId;
-
-    // MCP JSON-RPC handler
-    if (request.method === "POST") {
-      const body = await request.json() as any;
-      const method = body.method;
-      const id = body.id;
-
-      if (method === "initialize") {
-        // Reload config on each initialize to pick up changes
-        await this._loadAgentConfig(reqOrgId || undefined);
-        return Response.json({
-          jsonrpc: "2.0", id,
-          result: {
-            protocolVersion: "2024-11-05",
-            capabilities: {
-              tools: { listChanged: true },
-            },
-            serverInfo: {
-              name: "agentos-mcp",
-              version: "0.2.0",
-              agentName: this.name || "default",
-            },
-          },
+  /**
+   * Load tool schemas from tool_registry for richer MCP tool definitions.
+   */
+  private async _loadToolSchemas(toolNames: string[]): Promise<Map<string, { description: string; schema: Record<string, unknown> }>> {
+    const map = new Map<string, { description: string; schema: Record<string, unknown> }>();
+    if (toolNames.length === 0 || !this.env.HYPERDRIVE) return map;
+    try {
+      const { getDb } = await import("./runtime/db");
+      const sql = await getDb(this.env.HYPERDRIVE);
+      const rows = await sql`
+        SELECT name, description, schema FROM tool_registry
+        WHERE name IN ${sql(toolNames)}
+      `;
+      for (const row of rows) {
+        map.set(String(row.name), {
+          description: String(row.description || ""),
+          schema: parseJsonColumn(row.schema),
         });
       }
-
-      if (method === "tools/list") {
-        // Ensure config is loaded
-        if (this._agentTools.length === 0) await this._loadAgentConfig();
-        return Response.json({
-          jsonrpc: "2.0", id,
-          result: { tools: this._agentTools },
-        });
-      }
-
-      if (method === "tools/call") {
-        const toolName = body.params?.name;
-        const args = body.params?.arguments || {};
-
-        if (toolName === "run-agent") {
-          // Delegate to the main agent
-          try {
-            const targetAgent = args.agent_name || this.name || "default";
-            const agentId = this.env.AGENTOS_AGENT.idFromName(targetAgent);
-            const agent = this.env.AGENTOS_AGENT.get(agentId);
-            const resp = await agent.fetch(new Request("http://internal/run", {
-              method: "POST",
-              body: JSON.stringify({ input: args.task }),
-            }));
-            const result = await resp.json();
-            return Response.json({
-              jsonrpc: "2.0", id,
-              result: { content: [{ type: "text", text: JSON.stringify(result) }] },
-            });
-          } catch (err: any) {
-            return Response.json({
-              jsonrpc: "2.0", id,
-              result: {
-                content: [{ type: "text", text: `run-agent failed: ${err?.message || err}` }],
-                isError: true,
-              },
-            });
-          }
-        }
-
-        if (toolName === "search-knowledge") {
-          const query = String(args.query || "");
-          if (!query.trim()) {
-            return Response.json({
-              jsonrpc: "2.0", id,
-              result: { content: [{ type: "text", text: "query is required" }], isError: true },
-            });
-          }
-          try {
-            const agentId = this.env.AGENTOS_AGENT.idFromName(this.name || "default");
-            const agent = this.env.AGENTOS_AGENT.get(agentId);
-            const resp = await agent.fetch(new Request("http://internal/run", {
-              method: "POST",
-              body: JSON.stringify({ input: `Use knowledge search for: ${query}` }),
-            }));
-            const result = await resp.json();
-            return Response.json({
-              jsonrpc: "2.0", id,
-              result: { content: [{ type: "text", text: JSON.stringify(result) }] },
-            });
-          } catch (err: any) {
-            return Response.json({
-              jsonrpc: "2.0", id,
-              result: {
-                content: [{ type: "text", text: `search-knowledge failed: ${err?.message || err}` }],
-                isError: true,
-              },
-            });
-          }
-        }
-
-        // Dispatch configured tools via the agent DO
-        const configuredTools = Array.isArray(this._agentConfig?.tools) ? (this._agentConfig!.tools as string[]) : [];
-        if (configuredTools.includes(toolName)) {
-          try {
-            const agentId = this.env.AGENTOS_AGENT.idFromName(this.name || "default");
-            const agent = this.env.AGENTOS_AGENT.get(agentId);
-            const resp = await agent.fetch(new Request("http://internal/run", {
-              method: "POST",
-              body: JSON.stringify({
-                input: `Execute tool '${toolName}' with input: ${args.input || JSON.stringify(args)}`,
-                tool_override: toolName,
-                tool_args: args,
-              }),
-            }));
-            const result = await resp.json();
-            return Response.json({
-              jsonrpc: "2.0", id,
-              result: { content: [{ type: "text", text: JSON.stringify(result) }] },
-            });
-          } catch (err: any) {
-            return Response.json({
-              jsonrpc: "2.0", id,
-              result: {
-                content: [{ type: "text", text: `Tool '${toolName}' failed: ${err?.message || err}` }],
-                isError: true,
-              },
-            });
-          }
-        }
-
-        return Response.json({
-          jsonrpc: "2.0", id,
-          result: { content: [{ type: "text", text: `Unknown tool: ${toolName}` }], isError: true },
-        });
-      }
-
-      // Unsupported method
-      return Response.json({
-        jsonrpc: "2.0", id,
-        error: { code: -32601, message: `Method not found: ${method}` },
-      });
-    }
-
-    // GET request — return server info
-    return Response.json({
-      name: "agentos-mcp",
-      version: "0.2.0",
-      agent: this.name || "default",
-      protocol: "MCP/2024-11-05",
-      endpoints: ["initialize", "tools/list", "tools/call"],
-    });
+    } catch { /* tool_registry may not exist */ }
+    return map;
   }
 }
 
@@ -8207,31 +8267,36 @@ export default {
   },
 
   // ── Email handler — route inbound emails to the target agent DO ──
+  // Uses SDK auto-reply detection to prevent infinite loops, then resolves
+  // agent via address-based sub-addressing (e.g. support-bot.d8ec4cf7@oneshots.co).
   async email(message: ForwardableEmailMessage, env: Env, ctx: ExecutionContext): Promise<void> {
-    // Email addresses are: {agent_name}.{org_short}@oneshots.co
-    // e.g., support-bot.d8ec4cf7@oneshots.co
-    // Fallback: {agent_name}@oneshots.co (looks up first matching agent)
+    // SDK safety: reject auto-reply emails (OOO, vacation, mailing-list bounces).
+    // Convert Web API Headers to the EmailHeader[] format the SDK expects.
+    const msgHeaders = [...message.headers].map(([key, value]) => ({ key, value }));
+    if (isAutoReplyEmail(msgHeaders)) {
+      console.log(`[email] Skipping auto-reply from ${message.from}`);
+      return;
+    }
+
+    // Parse agent name from email address: {agent_name}.{org_short}@oneshots.co
+    // Uses dot-based org hint pattern (custom to our multi-tenant routing).
     const toAddress = message.to;
     const localPart = toAddress.split("@")[0].toLowerCase().replace(/[^a-z0-9.-]/g, "");
 
-    // Parse org hint from email: "name.orgshort" format
     const dotIdx = localPart.lastIndexOf(".");
-    const hasOrgHint = dotIdx > 0 && localPart.length - dotIdx <= 9; // org suffix is 8 chars max
+    const hasOrgHint = dotIdx > 0 && localPart.length - dotIdx <= 9;
     const agentName = hasOrgHint ? localPart.slice(0, dotIdx) : localPart;
     const orgHint = hasOrgHint ? localPart.slice(dotIdx + 1) : "";
 
-    // Look up agent — use org hint for disambiguation if available
     let orgId = "";
     try {
       const { getDb } = await import("./runtime/db");
       const sql = await getDb(env.HYPERDRIVE);
       let rows: any[] = [];
       if (orgHint) {
-        // Match agent by name AND org_id ending with the hint
         rows = await sql`SELECT org_id FROM agents WHERE name = ${agentName} AND org_id LIKE ${"%" + orgHint} AND is_active = true LIMIT 1`;
       }
       if (!rows.length) {
-        // Fallback: match by name only (backward compat for simple addresses)
         rows = await sql`SELECT org_id FROM agents WHERE name = ${agentName} AND is_active = true LIMIT 1`;
       }
       orgId = rows[0]?.org_id || "";

@@ -26,6 +26,13 @@ import {
   WorkflowStep,
   WorkflowEvent,
 } from "cloudflare:workers";
+// NOTE: When agents SDK stabilizes AgentWorkflow, migrate to:
+//   import { AgentWorkflow } from "agents/workflows";
+// AgentWorkflow extends WorkflowEntrypoint with typed RPC access to the
+// originating agent DO, enabling direct @callable() method invocation
+// instead of KV-based communication. Currently staying on raw
+// WorkflowEntrypoint for stability — the migration is a single line
+// change: `extends AgentWorkflow<Env, AgentRunParams>`.
 import type { Env } from "./index";
 
 // NonRetryableError may not be in all CF worker type versions — define locally if missing

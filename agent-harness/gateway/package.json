@@ -1,0 +1,23 @@
+{
+  "name": "agent-harness-gateway",
+  "description": "Lighter control-plane — Hono + hono-agents + CF-native primitives",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
+  "dependencies": {
+    "hono": "^4.7.0",
+    "hono-agents": "^0.1.0",
+    "postgres": "^3.4.9",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260413.1",
+    "typescript": "^6.0.2",
+    "wrangler": "^4.82.1"
+  }
+}
