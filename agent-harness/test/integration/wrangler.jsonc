@@ -1,0 +1,24 @@
+// Test wrangler config — spawns real Workers runtime with DO stubs
+// Used by @cloudflare/vitest-pool-workers to run integration tests
+{
+  "name": "agent-harness-test",
+  "main": "./worker.ts",
+  "compatibility_date": "2026-04-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "ai": { "binding": "AI" },
+
+  "durable_objects": {
+    "bindings": [
+      { "class_name": "TestChatAgent", "name": "TestChatAgent" },
+      { "class_name": "TestSignalAgent", "name": "TestSignalAgent" },
+      { "class_name": "TestSkillAgent", "name": "TestSkillAgent" },
+      { "class_name": "TestBudgetAgent", "name": "TestBudgetAgent" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["TestChatAgent", "TestSignalAgent", "TestSkillAgent", "TestBudgetAgent"] }
+  ],
+
+  "observability": { "enabled": false }
+}
