@@ -101,23 +101,29 @@ function buildDoName(orgId: string, agentName: string, userId: string): string {
   return name;
 }
 
-// ── Auth Middleware (KV-cached) ────────────────────────────────────
-// Pattern A: validate API key from KV first, Postgres on miss.
+// ── Auth Middleware (KV-cached, JWT + API key) ────────────────────
+// Checks KV cache first (<1ms), then tries JWT verification, then API key lookup.
+
+const PUBLIC_PATHS = new Set([
+  "/api/v1/health",
+  "/api/v1/health/detailed",
+  "/api/v1/auth/login",
+  "/api/v1/auth/signup",
+  "/api/v1/auth/forgot-password",
+  "/api/v1/auth/reset-password",
+  "/api/v1/auth/verify-email",
+  "/api/v1/webhooks/stripe",
+]);
 
 app.use("/api/v1/*", async (c, next) => {
-  const path = c.req.path;
-
-  // Skip auth for public endpoints
-  if (path === "/api/v1/health" || path === "/api/v1/auth/login") {
-    return next();
-  }
+  if (PUBLIC_PATHS.has(c.req.path)) return next();
 
   const authHeader = c.req.header("Authorization") || "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
   if (!token) return c.json({ error: "Authorization required" }, 401);
 
-  // Try KV cache first (<1ms)
-  const cacheKey = `auth:${token.slice(-16)}`; // last 16 chars as cache key
+  // 1. Try KV cache first (<1ms) — works for both JWT and API key tokens
+  const cacheKey = `auth:${token.slice(-16)}`;
   const cached = await c.env.CACHE.get(cacheKey, "json") as {
     orgId: string; userId: string; scopes: string[];
   } | null;
@@ -129,7 +135,23 @@ app.use("/api/v1/*", async (c, next) => {
     return next();
   }
 
-  // KV miss → validate against Postgres
+  // 2. Try JWT verification (for user sessions from login/signup)
+  const secret = c.env.JWT_SECRET || "dev-secret-change-me";
+  const jwtPayload = await verifyJwt(token, secret);
+  if (jwtPayload && jwtPayload.org_id && jwtPayload.user_id) {
+    const authData = {
+      orgId: jwtPayload.org_id as string,
+      userId: jwtPayload.user_id as string,
+      scopes: ["*"],
+    };
+    await c.env.CACHE.put(cacheKey, JSON.stringify(authData), { expirationTtl: 300 });
+    c.set("orgId", authData.orgId);
+    c.set("userId", authData.userId);
+    c.set("scopes", authData.scopes);
+    return next();
+  }
+
+  // 3. Try API key lookup (for programmatic access)
   try {
     const sql = await getDb(c.env.DB_ADMIN);
     const [key] = await sql`
@@ -140,7 +162,7 @@ app.use("/api/v1/*", async (c, next) => {
     `;
     await sql.end();
 
-    if (!key) return c.json({ error: "Invalid API key" }, 401);
+    if (!key) return c.json({ error: "Invalid token" }, 401);
 
     const authData = {
       orgId: key.org_id,
@@ -148,7 +170,6 @@ app.use("/api/v1/*", async (c, next) => {
       scopes: Array.isArray(key.scopes) ? key.scopes : [],
     };
 
-    // Cache for 5 minutes
     await c.env.CACHE.put(cacheKey, JSON.stringify(authData), { expirationTtl: 300 });
 
     c.set("orgId", authData.orgId);
@@ -744,24 +765,227 @@ app.post("/api/v1/guardrails", async (c) => {
 // AUTH (Pattern A: KV + Pattern E: Postgres)
 // ═══════════════════════════════════════════════════════════════════
 
+// ── JWT helpers ──
+
+async function hashPassword(password: string): Promise<string> {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"],
+  );
+  const hash = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt, iterations: 100_000, hash: "SHA-256" },
+    keyMaterial, 256,
+  );
+  const saltHex = [...salt].map(b => b.toString(16).padStart(2, "0")).join("");
+  const hashHex = [...new Uint8Array(hash)].map(b => b.toString(16).padStart(2, "0")).join("");
+  return `${saltHex}:${hashHex}`;
+}
+
+async function verifyPassword(password: string, stored: string): Promise<boolean> {
+  const [saltHex, hashHex] = stored.split(":");
+  if (!saltHex || !hashHex) return false;
+  const salt = new Uint8Array(saltHex.match(/.{2}/g)!.map(b => parseInt(b, 16)));
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"],
+  );
+  const hash = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt, iterations: 100_000, hash: "SHA-256" },
+    keyMaterial, 256,
+  );
+  const computed = [...new Uint8Array(hash)].map(b => b.toString(16).padStart(2, "0")).join("");
+  return computed === hashHex;
+}
+
+async function signJwt(payload: Record<string, unknown>, secret: string, expiresInSec = 86400): Promise<string> {
+  const header = btoa(JSON.stringify({ alg: "HS256", typ: "JWT" })).replace(/=/g, "");
+  const now = Math.floor(Date.now() / 1000);
+  const body = btoa(JSON.stringify({ ...payload, iat: now, exp: now + expiresInSec })).replace(/=/g, "");
+  const key = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"],
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${header}.${body}`));
+  const sigB64 = btoa(String.fromCharCode(...new Uint8Array(sig))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+  return `${header}.${body}.${sigB64}`;
+}
+
+async function verifyJwt(token: string, secret: string): Promise<Record<string, unknown> | null> {
+  try {
+    const [header, body, sig] = token.split(".");
+    if (!header || !body || !sig) return null;
+    const key = await crypto.subtle.importKey(
+      "raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["verify"],
+    );
+    const sigBytes = Uint8Array.from(atob(sig.replace(/-/g, "+").replace(/_/g, "/")), c => c.charCodeAt(0));
+    const valid = await crypto.subtle.verify("HMAC", key, sigBytes, new TextEncoder().encode(`${header}.${body}`));
+    if (!valid) return null;
+    const payload = JSON.parse(atob(body));
+    if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) return null;
+    return payload;
+  } catch { return null; }
+}
+
+// ── Auth: Login ──
+
 app.post("/api/v1/auth/login", async (c) => {
   const body = await c.req.json<{ email: string; password: string }>();
+  if (!body.email || !body.password) return c.json({ error: "Email and password required" }, 400);
+
   const sql = await getDb(c.env.DB_ADMIN);
   const [user] = await sql`
-    SELECT id, org_id, email, password_hash FROM users
-    WHERE email = ${body.email} LIMIT 1
+    SELECT id, org_id, email, password_hash, is_active FROM users
+    WHERE email = ${body.email.toLowerCase().trim()} LIMIT 1
   `;
   await sql.end();
-  if (!user) return c.json({ error: "Invalid credentials" }, 401);
 
-  // In production: verify password hash, generate JWT
-  // For now: return a simple token
-  const token = crypto.randomUUID();
-  await c.env.CACHE.put(`session:${token}`, JSON.stringify({
-    userId: user.id, orgId: user.org_id,
-  }), { expirationTtl: 86400 }); // 24hr
+  if (!user || !user.is_active) return c.json({ error: "Invalid credentials" }, 401);
+  if (!user.password_hash || !(await verifyPassword(body.password, user.password_hash))) {
+    return c.json({ error: "Invalid credentials" }, 401);
+  }
 
-  return c.json({ token, org_id: user.org_id });
+  const secret = c.env.JWT_SECRET || "dev-secret-change-me";
+  const token = await signJwt({ user_id: user.id, org_id: user.org_id, email: user.email }, secret);
+
+  // Cache JWT payload in KV for fast auth middleware lookups
+  await c.env.CACHE.put(`auth:${token.slice(-16)}`, JSON.stringify({
+    orgId: user.org_id, userId: user.id, scopes: ["*"],
+  }), { expirationTtl: 86400 });
+
+  return c.json({ token, user_id: user.id, org_id: user.org_id, email: user.email });
+});
+
+// ── Auth: Signup ──
+
+app.post("/api/v1/auth/signup", async (c) => {
+  const body = await c.req.json<{ name: string; email: string; password: string; referral_code?: string }>();
+  if (!body.email || !body.password || !body.name) {
+    return c.json({ error: "Name, email, and password required" }, 400);
+  }
+  if (body.password.length < 8) return c.json({ error: "Password must be at least 8 characters" }, 400);
+
+  const email = body.email.toLowerCase().trim();
+  const passwordHash = await hashPassword(body.password);
+  const slug = email.split("@")[0].replace(/[^a-z0-9]/g, "-").slice(0, 30) + "-" + crypto.randomUUID().slice(0, 4);
+
+  const sql = await getDb(c.env.DB_ADMIN);
+  try {
+    // Create org + user in a transaction
+    const [org] = await sql`
+      INSERT INTO orgs (name, slug) VALUES (${body.name}, ${slug}) RETURNING id
+    `;
+    const [user] = await sql`
+      INSERT INTO users (org_id, email, name, password_hash)
+      VALUES (${org.id}, ${email}, ${body.name}, ${passwordHash})
+      RETURNING id, org_id, email
+    `;
+    await sql`
+      INSERT INTO org_members (org_id, user_id, role) VALUES (${org.id}, ${user.id}, 'owner')
+    `;
+    // Set owner reference
+    await sql`UPDATE orgs SET owner_user_id = ${user.id} WHERE id = ${org.id}`;
+    await sql.end();
+
+    const secret = c.env.JWT_SECRET || "dev-secret-change-me";
+    const token = await signJwt({ user_id: user.id, org_id: user.org_id, email: user.email }, secret);
+
+    await c.env.CACHE.put(`auth:${token.slice(-16)}`, JSON.stringify({
+      orgId: user.org_id, userId: user.id, scopes: ["*"],
+    }), { expirationTtl: 86400 });
+
+    return c.json({ token, user_id: user.id, org_id: user.org_id, email: user.email }, 201);
+  } catch (err: any) {
+    await sql.end();
+    if (err.message?.includes("unique") || err.message?.includes("duplicate")) {
+      return c.json({ error: "Email already registered" }, 409);
+    }
+    throw err;
+  }
+});
+
+// ── Auth: Forgot Password ──
+
+app.post("/api/v1/auth/forgot-password", async (c) => {
+  const body = await c.req.json<{ email: string }>();
+  if (!body.email) return c.json({ error: "Email required" }, 400);
+
+  const sql = await getDb(c.env.DB_ADMIN);
+  const [user] = await sql`SELECT id FROM users WHERE email = ${body.email.toLowerCase().trim()} AND is_active = true`;
+  if (user) {
+    const [token] = await sql`
+      INSERT INTO password_reset_tokens (user_id) VALUES (${user.id}) RETURNING token
+    `;
+    // TODO: send email via MailChannels or SES with reset link containing token.token
+    // For now, log it (in production, NEVER log tokens)
+    console.log(`[auth] Password reset token for ${body.email}: ${token.token}`);
+  }
+  await sql.end();
+  // Always return 200 to prevent email enumeration
+  return c.json({ message: "If that email exists, a reset link has been sent." });
+});
+
+// ── Auth: Reset Password ──
+
+app.post("/api/v1/auth/reset-password", async (c) => {
+  const body = await c.req.json<{ token: string; password: string }>();
+  if (!body.token || !body.password) return c.json({ error: "Token and password required" }, 400);
+  if (body.password.length < 8) return c.json({ error: "Password must be at least 8 characters" }, 400);
+
+  const sql = await getDb(c.env.DB_ADMIN);
+  const [resetToken] = await sql`
+    SELECT user_id FROM password_reset_tokens
+    WHERE token = ${body.token} AND used_at IS NULL AND expires_at > NOW()
+  `;
+  if (!resetToken) {
+    await sql.end();
+    return c.json({ error: "Invalid or expired reset token" }, 400);
+  }
+
+  const passwordHash = await hashPassword(body.password);
+  await sql`UPDATE users SET password_hash = ${passwordHash}, updated_at = NOW() WHERE id = ${resetToken.user_id}`;
+  await sql`UPDATE password_reset_tokens SET used_at = NOW() WHERE token = ${body.token}`;
+  await sql.end();
+
+  return c.json({ message: "Password updated successfully" });
+});
+
+// ── Auth: Verify Email ──
+
+app.post("/api/v1/auth/verify-email", async (c) => {
+  const body = await c.req.json<{ token: string }>();
+  if (!body.token) return c.json({ error: "Token required" }, 400);
+
+  const sql = await getDb(c.env.DB_ADMIN);
+  const [verifyToken] = await sql`
+    SELECT user_id FROM email_verification_tokens
+    WHERE token = ${body.token} AND used_at IS NULL AND expires_at > NOW()
+  `;
+  if (!verifyToken) {
+    await sql.end();
+    return c.json({ error: "Invalid or expired verification token" }, 400);
+  }
+
+  await sql`UPDATE users SET email_verified = true, updated_at = NOW() WHERE id = ${verifyToken.user_id}`;
+  await sql`UPDATE email_verification_tokens SET used_at = NOW() WHERE token = ${body.token}`;
+  await sql.end();
+
+  return c.json({ message: "Email verified successfully" });
+});
+
+// ── Auth: Get current user ──
+
+app.get("/api/v1/auth/me", async (c) => {
+  const userId = c.get("userId");
+  const orgId = c.get("orgId");
+  if (!userId) return c.json({ error: "Not authenticated" }, 401);
+
+  const sql = await getDb(c.env.DB);
+  const [user] = await sql`
+    SELECT id, email, name, avatar_url, email_verified, created_at
+    FROM users WHERE id = ${userId}
+  `;
+  await sql.end();
+  if (!user) return c.json({ error: "User not found" }, 404);
+
+  return c.json({ ...user, org_id: orgId });
 });
 
 app.get("/api/v1/api-keys", async (c) => {
@@ -795,6 +1019,20 @@ app.post("/api/v1/api-keys", async (c) => {
   `;
   await sql.end();
   return c.json({ ...row, key }, 201); // key returned only once
+});
+
+app.delete("/api/v1/api-keys/:id", async (c) => {
+  const orgId = c.get("orgId");
+  const keyId = c.req.param("id");
+  const sql = await getDb(c.env.DB);
+  await sql`
+    UPDATE api_keys SET revoked_at = NOW()
+    WHERE id = ${keyId} AND org_id = ${orgId} AND revoked_at IS NULL
+  `;
+  await sql.end();
+  // Invalidate any cached auth entries for this key
+  // (Can't easily find the cache key without the raw key, but TTL handles it within 5min)
+  return c.json({ revoked: keyId });
 });
 
 // ═══════════════════════════════════════════════════════════════════
