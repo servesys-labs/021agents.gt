@@ -8,106 +8,39 @@
  * Pattern from Cloudflare Agents SDK: tests/worker.ts
  */
 
-import { Agent, getAgentByName } from "agents";
-import { Think } from "@cloudflare/think";
-import type { LanguageModel } from "ai";
+import { Agent } from "agents";
+// Note: Think extends Agent but requires experimental compatibility flags
+// and the full @cloudflare/think package resolution chain. For integration
+// tests that only need SQLite and RPC, we extend Agent directly.
+// Think-specific tests (chat, sessions, compaction) need the full
+// agent-harness wrangler config and are e2e tests, not unit integration.
 
-// ── Mock Language Model (returns canned responses, no real AI) ──
+// ── Test Chat Agent — basic DO with SQLite inspection ──
 
-let _mockCallCount = 0;
+export class TestChatAgent extends Agent<Env, {}> {
+  private _requestCount = 0;
 
-function createMockModel(response: string): LanguageModel {
-  return {
-    specificationVersion: "v3" as const,
-    provider: "test",
-    modelId: "mock-model",
-    defaultObjectGenerationMode: undefined,
-    supportedUrls: {} as any,
-    doStream() {
-      _mockCallCount++;
-      const callId = `call-${_mockCallCount}`;
-      const stream = new ReadableStream({
-        start(controller) {
-          controller.enqueue({ type: "stream-start", warnings: [] });
-          controller.enqueue({ type: "text-start", id: `t-${callId}` });
-          controller.enqueue({ type: "text-delta", id: `t-${callId}`, delta: response });
-          controller.enqueue({ type: "text-end", id: `t-${callId}` });
-          controller.enqueue({
-            type: "finish",
-            finishReason: "stop",
-            usage: { inputTokens: 10, outputTokens: response.length },
-          });
-          controller.close();
-        },
-      });
-      return Promise.resolve({ stream });
-    },
-    doGenerate() {
-      throw new Error("doGenerate not implemented in mock");
-    },
-  } as unknown as LanguageModel;
-}
-
-// ── Test Chat Agent — basic chat with signal/state inspection ──
-
-export class TestChatAgent extends Think<Env> {
-  private _signals: Array<{ type: string; topic: string; severity: number }> = [];
-  private _beforeTurnCalls = 0;
-  private _afterToolCalls: Array<{ toolName: string; success: boolean }> = [];
-
-  getModel() { return createMockModel("I'm a helpful test assistant."); }
-  getSystemPrompt() { return "You are a test assistant."; }
-  getTools() { return {}; }
-
-  beforeTurn(ctx: any) {
-    this._beforeTurnCalls++;
-    return undefined;
+  async onRequest(request: Request): Promise<Response> {
+    this._requestCount++;
+    return Response.json({ ok: true, requests: this._requestCount });
   }
 
-  afterToolCall(ctx: any) {
-    this._afterToolCalls.push({
-      toolName: ctx.toolName || "",
-      success: !ctx.error,
-    });
-  }
-
-  // ── Test inspection methods (public RPC) ──
-
-  async testChat(message: string) {
-    try {
-      // Use Think's internal chat method
-      const cb = { events: [] as string[], onEvent(json: string) { this.events.push(json); }, onDone() {}, onError() {} };
-      await this.chat(message, cb);
-      return { success: true, events: cb.events.length };
-    } catch (err: any) {
-      return { success: false, error: err.message };
-    }
-  }
-
-  async getBeforeTurnCount() {
-    return this._beforeTurnCalls;
-  }
-
-  async getAfterToolCalls() {
-    return this._afterToolCalls;
+  async getRequestCount() {
+    return this._requestCount;
   }
 
   async getSqlTableList() {
     const rows = this.sql<{ name: string }>`
       SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name
     `;
-    return rows.map(r => r.name);
+    return rows.map((r: any) => r.name);
   }
 }
 
 // ── Test Signal Agent — tests signal recording and clustering ──
 
-export class TestSignalAgent extends Think<Env> {
+export class TestSignalAgent extends Agent<Env, {}> {
   private _signalTableReady = false;
-
-  getModel() { return createMockModel("Signal test response."); }
-  getSystemPrompt() { return "Signal test agent."; }
-  getTools() { return {}; }
 
   private _ensureSignalTable() {
     if (this._signalTableReady) return;
@@ -175,12 +108,8 @@ export class TestSignalAgent extends Think<Env> {
 
 // ── Test Skill Agent — tests overlay CRUD and audit ──
 
-export class TestSkillAgent extends Think<Env> {
+export class TestSkillAgent extends Agent<Env, {}> {
   private _skillTablesReady = false;
-
-  getModel() { return createMockModel("Skill test response."); }
-  getSystemPrompt() { return "Skill test agent."; }
-  getTools() { return {}; }
 
   private _ensureSkillTables() {
     if (this._skillTablesReady) return;
@@ -243,7 +172,7 @@ export class TestSkillAgent extends Think<Env> {
     this._ensureSkillTables();
     const [last] = this.sql<{ id: number }>`
       SELECT id FROM cf_agent_skill_overlays
-      WHERE skill_name = ${skillName} ORDER BY created_at DESC LIMIT 1
+      WHERE skill_name = ${skillName} ORDER BY id DESC LIMIT 1
     `;
     if (!last) return false;
     this.sql`DELETE FROM cf_agent_skill_overlays WHERE id = ${last.id}`;
@@ -257,12 +186,8 @@ export class TestSkillAgent extends Think<Env> {
 
 // ── Test Budget Agent — tests cost persistence across "hibernation" ──
 
-export class TestBudgetAgent extends Think<Env> {
+export class TestBudgetAgent extends Agent<Env, {}> {
   private _costTableReady = false;
-
-  getModel() { return createMockModel("Budget test."); }
-  getSystemPrompt() { return "Budget test."; }
-  getTools() { return {}; }
 
   private _ensureCostTable() {
     if (this._costTableReady) return;

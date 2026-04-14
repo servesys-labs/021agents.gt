@@ -7,6 +7,7 @@ export default defineConfig({
   test: {
     name: "agent-harness",
     include: [path.join(testsDir, "**/*.test.ts")],
+    exclude: [path.join(testsDir, "integration/**")],
     testTimeout: 15000,
   },
 });
