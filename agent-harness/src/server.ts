@@ -1012,8 +1012,8 @@ function sandboxTools(env: Env) {
   };
 }
 
-// ── Browser Rendering tools (Puppeteer via Workers Browser API) ──────────────
-
+// ── LEGACY Browser tools — replaced by SDK createBrowserTools() in ChatAgent.getTools()
+// Kept as fallback for ResearchSpecialist which doesn't use Think 0.2.2 browser tools.
 function browserTools(env: Env) {
   return {
     // Take a screenshot of any URL
@@ -1357,10 +1357,13 @@ export class CodingSpecialist extends Think<Env> {
 // Dynamic import: Think is experimental, import at module level
 // so it fails fast if the package isn't available.
 import { Think } from "@cloudflare/think";
+import { createBrowserTools } from "@cloudflare/think/tools/browser";
+import { createExecuteTool } from "@cloudflare/think/tools/execute";
+import { createExtensionTools } from "@cloudflare/think/tools/extensions";
 import { AgentSearchProvider, R2SkillProvider } from "agents/experimental/memory/session";
 // Workspace and Session are re-exported by Think in source but not in published dist.
 // Import from their source packages directly.
-import { Workspace, WorkspaceFileSystem, STATE_SYSTEM_PROMPT, STATE_TYPES } from "@cloudflare/shell";
+import { Workspace, WorkspaceFileSystem, STATE_SYSTEM_PROMPT, STATE_TYPES, createWorkspaceStateBackend } from "@cloudflare/shell";
 import { createGit, gitTools } from "@cloudflare/shell/git";
 import { stateTools } from "@cloudflare/shell/workers";
 import { resolveProvider } from "@cloudflare/codemode";
@@ -1416,16 +1419,15 @@ export class ChatAgent extends Think<Env> {
   }
 
   // ── Workspace with R2 spillover (SDK pattern from Think docs) ──
-  // Files < 1.5MB stay in SQLite (fast, local), larger files spill to R2.
-  // Think auto-creates workspace tools (read, write, edit, find, grep, delete).
-  // Workspace with R2 spillover — name/r2Prefix use lazy lambdas
-  // because this.name isn't set until after routeAgentRequest (workerd #2240)
   override workspace = new Workspace({
     sql: this.ctx.storage.sql,
     r2: this.env.STORAGE,
-    r2Prefix: "workspaces/",  // prefix is just the base — name() provides the full path
+    r2Prefix: "workspaces/",
     name: () => this.name,
   });
+
+  // ── Extensions: LLM can create tools at runtime ──
+  extensionLoader = this.env.LOADER;
 
   // ── Think overrides ──
 
@@ -1481,18 +1483,27 @@ export class ChatAgent extends Think<Env> {
       ...mcpTools,
       ...sharedTools(),
       ...webSearchTools(),
-      ...browserTools(this.env),
+      // SDK browser tools: browser_search (CDP spec query) + browser_execute (CDP commands)
+      // Replaces old puppeteer browserScreenshot/browserGetContent with full CDP access
+      ...createBrowserTools({ browser: this.env.MYBROWSER, loader: this.env.LOADER }),
       ...(config.enableSandbox ? sandboxTools(this.env) : {}),
       ...structuredInputTools(),
-      // Meta Agent gets agent management tools
-      // Meta-agent tools available to ALL agents (personal agent = one agent does everything)
-      // When user says "create an agent", the personal agent uses these tools directly.
-      // No separate meta-agent needed — it's a skill, not a separate conversation.
       ...metaAgentToolSet({ AGENT_CORE: this.env.AGENT_CORE || this.env as any, AI: this.env.AI, ANALYTICS: this.env.ANALYTICS }),
     };
 
-    // Wrap all tools with CodeMode — model writes JS to orchestrate tools.
-    // We wrap the executor to capture CodeMode failures in telemetry.
+    // SDK execute tool: sandboxed JS with codemode.* (tools) + state.* (workspace filesystem)
+    const execute = createExecuteTool({
+      tools: allTools,
+      state: createWorkspaceStateBackend(this.workspace),
+      loader: this.env.LOADER,
+    });
+
+    // SDK extension tools: LLM can create + load tools at runtime
+    const extTools = this.extensionManager
+      ? { ...createExtensionTools({ manager: this.extensionManager }), ...this.extensionManager.getTools() }
+      : {};
+
+    // Wrap codemode with telemetry tracking
     const rawExecutor = new DynamicWorkerExecutor({ loader: this.env.LOADER });
     const trackedExecutor = {
       execute: async (code: string, providers: any[]) => {
@@ -2025,8 +2036,8 @@ export class ChatAgent extends Think<Env> {
     } : {};
 
     // Think 0.2.2 auto-merges: workspaceTools + contextTools + mcpTools + getTools()
-    // We only return OUR custom tools here — Think adds workspace/context/MCP automatically.
-    return { codemode, ...allTools, ...delegationTools, ...dataSourceTools, ...sandboxGaTools };
+    // We return custom tools + SDK tools (execute, browser, extensions).
+    return { execute, ...extTools, codemode, ...allTools, ...delegationTools, ...dataSourceTools, ...sandboxGaTools };
   }
 
   getMaxSteps() { return 10; }
