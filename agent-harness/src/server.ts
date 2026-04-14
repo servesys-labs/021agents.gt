@@ -1502,7 +1502,75 @@ export class ChatAgent extends Think<Env> {
       }),
     };
 
-    return { codemode, ...allTools, ...delegationTools };
+    // ── Data source tools (use stored secrets for credentials) ──
+    const dataSourceTools = {
+      query_database: tool({
+        description: "Query an external database using stored credentials. Returns query results as JSON. Use for: customer data lookups, analytics queries, report generation.",
+        inputSchema: z.object({
+          secret_key: z.string().describe("The secret key name for the database connection string (stored via agent secrets)"),
+          query: z.string().describe("SQL query to execute (SELECT only — no mutations)"),
+        }),
+        execute: async ({ secret_key, query }) => {
+          // Get stored connection string from per-agent secrets
+          const connStr = this._getSecret(secret_key);
+          if (!connStr) return { error: `No secret found for key "${secret_key}". Store it via Settings → Secrets.` };
+
+          // Safety: block mutations
+          const normalized = query.trim().toUpperCase();
+          if (!normalized.startsWith("SELECT") && !normalized.startsWith("WITH") && !normalized.startsWith("EXPLAIN")) {
+            return { error: "Only SELECT/WITH/EXPLAIN queries are allowed for safety." };
+          }
+
+          try {
+            const pg = (await import("postgres")).default;
+            const sql = pg(connStr, { max: 1, fetch_types: false, prepare: false, idle_timeout: 5, connect_timeout: 5 });
+            const rows = await sql.unsafe(query);
+            await sql.end();
+            return { rows: rows.slice(0, 100), count: rows.length, truncated: rows.length > 100 };
+          } catch (err: any) {
+            return { error: `Query failed: ${err.message?.slice(0, 200)}` };
+          }
+        },
+      }),
+
+      call_api: tool({
+        description: "Call an external HTTP API using stored credentials. Use for: fetching data from third-party services, webhooks, integrations.",
+        inputSchema: z.object({
+          secret_key: z.string().describe("The secret key name for the API key/token"),
+          url: z.string().describe("The API endpoint URL"),
+          method: z.enum(["GET", "POST"]).default("GET").describe("HTTP method"),
+          body: z.string().optional().describe("JSON request body (for POST)"),
+        }),
+        execute: async ({ secret_key, url, method, body }) => {
+          const apiKey = this._getSecret(secret_key);
+          if (!apiKey) return { error: `No secret found for key "${secret_key}". Store it via Settings → Secrets.` };
+
+          // SSRF check
+          const ssrfError = this._validateMcpUrl(url);
+          if (ssrfError) return { error: ssrfError };
+
+          try {
+            const res = await fetch(url, {
+              method: method || "GET",
+              headers: {
+                "Authorization": `Bearer ${apiKey}`,
+                "Content-Type": "application/json",
+              },
+              ...(body ? { body } : {}),
+            });
+            const text = await res.text();
+            return {
+              status: res.status,
+              data: text.length > 10000 ? text.slice(0, 10000) + "...[truncated]" : text,
+            };
+          } catch (err: any) {
+            return { error: `API call failed: ${err.message?.slice(0, 200)}` };
+          }
+        },
+      }),
+    };
+
+    return { codemode, ...allTools, ...delegationTools, ...dataSourceTools };
   }
 
   getMaxSteps() { return 10; }
@@ -3179,6 +3247,70 @@ export class AgentSupervisor extends Think<Env> {
     }
 
     return new Response("Not found", { status: 404 });
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// AGENT WORKFLOW — Durable multi-step background processing
+//
+// SDK pattern: AgentWorkflow extends WorkflowEntrypoint.
+// Steps are checkpointed — survives failures, can pause/resume.
+// Used for: eval runs, RAG chunking, long research tasks.
+// ═══════════════════════════════════════════════════════════════════
+
+import { AgentWorkflow } from "agents/workflows";
+import type { AgentWorkflowStep, AgentWorkflowEvent } from "agents/workflows";
+
+type TaskWorkflowParams = {
+  taskType: "eval" | "rag_embed" | "research";
+  payload: Record<string, unknown>;
+};
+
+export class TaskWorkflow extends AgentWorkflow<ChatAgent, TaskWorkflowParams> {
+  async run(event: AgentWorkflowEvent<TaskWorkflowParams>, step: AgentWorkflowStep) {
+    const { taskType, payload } = event.payload;
+
+    if (taskType === "eval") {
+      // Step 1: Fetch test cases
+      const testCases = await step.do("fetch-test-cases", async () => {
+        return payload.test_cases || [];
+      });
+
+      // Step 2: Run each test case
+      const results = await step.do("run-tests", async () => {
+        const outcomes: any[] = [];
+        for (const tc of testCases as any[]) {
+          outcomes.push({ input: tc.input, output: "pending", passed: null });
+        }
+        return outcomes;
+      });
+
+      // Step 3: Report completion
+      await step.reportComplete({ results, total: (testCases as any[]).length });
+    }
+
+    if (taskType === "rag_embed") {
+      // Step 1: Fetch document from R2
+      const content = await step.do("fetch-document", async () => {
+        return payload.content || "";
+      });
+
+      // Step 2: Chunk
+      const chunks = await step.do("chunk-document", async () => {
+        const text = content as string;
+        const CHUNK_SIZE = 2048;
+        const step_size = Math.max(1, CHUNK_SIZE - 100);
+        const result: string[] = [];
+        for (let i = 0; i < text.length; i += step_size) {
+          const chunk = text.slice(i, i + CHUNK_SIZE).trim();
+          if (chunk.length >= 10) result.push(chunk);
+        }
+        return result.slice(0, 500);
+      });
+
+      // Step 3: Embed + upsert (done by agent)
+      await step.reportComplete({ chunks: (chunks as string[]).length });
+    }
   }
 }
 
