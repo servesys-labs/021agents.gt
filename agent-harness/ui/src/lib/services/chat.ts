@@ -214,9 +214,11 @@ export async function runAgent(
     const { orgId, userId } = parseJwtClaims();
     const instanceName = buildDoName(orgId, agentName, userId);
 
+    const wsHost = typeof window !== "undefined" ? window.location.host : "app.021agents.ai";
     const client = new AgentClient({
       agent: "chat-agent",
       name: instanceName,
+      host: wsHost,
       query: api.token ? { token: api.token } : undefined,
       onOpen: () => {
         // Send message via Think chat protocol
