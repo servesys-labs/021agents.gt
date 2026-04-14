@@ -1005,6 +1005,11 @@ export class ChatAgent extends Think<Env> {
   // Wait for MCP connections to restore after hibernation
   waitForMcpConnections = true;
 
+  // ── Durability: wrap chat turns in runFiber for crash recovery ──
+  // If the DO is evicted mid-turn, onChatRecovery() fires on restart
+  // and can resume streaming or persist partial results.
+  override unstable_chatRecovery = true;
+
   // ── Workspace with R2 spillover (SDK pattern from Think docs) ──
   // Files < 1.5MB stay in SQLite (fast, local), larger files spill to R2.
   // Think auto-creates workspace tools (read, write, edit, find, grep, delete).
@@ -1557,6 +1562,37 @@ export class ChatAgent extends Think<Env> {
     }
 
     return error; // propagate
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // onChatRecovery — runs when DO restarts after eviction mid-turn
+  //
+  // [6] Durability checkpoints — Think's runFiber() stashes streaming
+  //     state. On recovery, we can persist partial results and notify
+  //     the client to reconnect.
+  // [7] Abort — Think's keepAliveWhile() and AbortRegistry handle
+  //     abort propagation natively. We just need to clean up state.
+  // ═══════════════════════════════════════════════════════════════════
+
+  async onChatRecovery(ctx: any) {
+    const partialText = ctx.partialText || "";
+    const streamId = ctx.streamId || "";
+
+    emit(this.env as TelemetryBindings, {
+      type: "session.recovered",
+      agentName: this.name,
+      streamId,
+      partialTextLength: partialText.length,
+      sessionCost: this._sessionCostUsd,
+    });
+
+    // Persist partial results so they're not lost
+    if (partialText.length > 0) {
+      return { persist: true, continue: false };
+    }
+
+    // No partial text — nothing to save, don't continue
+    return { persist: false, continue: false };
   }
 
   // ── @callable methods (unchanged interface, Think-compatible) ──
