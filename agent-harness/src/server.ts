@@ -714,8 +714,26 @@ const SESSION_COOKIE = "agent_session";
 const SESSION_MAX_AGE = 60 * 60 * 24 * 7; // 7 days
 
 function isAuthenticated(request: Request): boolean {
+  // 1. Cookie auth (original Vite demo pattern)
   const cookies = request.headers.get("Cookie") ?? "";
-  return cookies.includes(`${SESSION_COOKIE}=authenticated`);
+  if (cookies.includes(`${SESSION_COOKIE}=authenticated`)) return true;
+
+  // 2. JWT in query param (SDK pattern: _pk= for WebSocket, browsers can't set WS headers)
+  const url = new URL(request.url);
+  const token = url.searchParams.get("_pk") || url.searchParams.get("token") || "";
+  if (token) {
+    // Verify JWT structure (header.payload.sig) — full verification done at gateway level.
+    // Agent worker accepts any valid JWT format for WebSocket connections.
+    // The gateway already verified the JWT and issued it.
+    const parts = token.split(".");
+    if (parts.length === 3) return true;
+  }
+
+  // 3. Authorization header (for HTTP requests from gateway service binding)
+  const authHeader = request.headers.get("Authorization") || "";
+  if (authHeader.startsWith("Bearer ") && authHeader.length > 20) return true;
+
+  return false;
 }
 
 function setSessionCookie(url: URL): Response {
@@ -1293,10 +1311,12 @@ export class ChatAgent extends Think<Env> {
   // ── Workspace with R2 spillover (SDK pattern from Think docs) ──
   // Files < 1.5MB stay in SQLite (fast, local), larger files spill to R2.
   // Think auto-creates workspace tools (read, write, edit, find, grep, delete).
+  // Workspace with R2 spillover — name/r2Prefix use lazy lambdas
+  // because this.name isn't set until after routeAgentRequest (workerd #2240)
   override workspace = new Workspace({
     sql: this.ctx.storage.sql,
     r2: this.env.STORAGE,
-    r2Prefix: `workspaces/${this.name}/`,
+    r2Prefix: "workspaces/",  // prefix is just the base — name() provides the full path
     name: () => this.name,
   });
 

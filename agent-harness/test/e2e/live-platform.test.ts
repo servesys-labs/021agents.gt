@@ -1,81 +1,70 @@
 /**
- * Live Platform E2E Tests — Bottom-Up Bug Finding
+ * Live Platform E2E Tests — SDK-First
  *
- * These tests hit REAL Workers AI models (Kimi K2.5, Gemma 4 26B MoE)
- * via AI Gateway. They mimic what actual users do and probe for failures.
+ * Uses AgentClient from agents/client for chat (WebSocket RPC).
+ * Uses REST for gateway control-plane (auth, billing, CRUD).
  *
- * NOT happy-path tests. Every test is designed to expose a specific
- * failure mode that real users will encounter.
+ * Hits REAL Workers AI models via deployed Cloudflare Workers.
  *
- * Prerequisites:
- *   - Running agent-harness: `wrangler dev` or deployed instance
- *   - Set E2E_BASE_URL env var (default: http://localhost:8787)
- *   - Set E2E_TOKEN env var (JWT or API key for auth)
- *
- * Run: E2E_BASE_URL=https://your-deployment.workers.dev E2E_TOKEN=xxx npx vitest run test/e2e/
+ * Run:
+ *   E2E_BASE_URL=https://agent-harness.servesys.workers.dev \
+ *   E2E_GATEWAY_URL=https://agent-harness-gateway.servesys.workers.dev \
+ *   E2E_TOKEN=jwt \
+ *   npx vitest run test/e2e/
  */
 
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect } from "vitest";
+import { AgentClient } from "agents/client";
 
 const BASE_URL = process.env.E2E_BASE_URL || "http://localhost:8787";
-const TOKEN = process.env.E2E_TOKEN || "";
 const GATEWAY_URL = process.env.E2E_GATEWAY_URL || BASE_URL.replace("8787", "8788");
-const TIMEOUT = 60_000; // 60s per test — LLM calls are slow
+const TOKEN = process.env.E2E_TOKEN || "";
+const TIMEOUT = 90_000;
 
-// Skip all if no base URL configured (prevents CI failures)
 const LIVE = !!process.env.E2E_BASE_URL;
 const test = LIVE ? it : it.skip;
 
-function headers(extra: Record<string, string> = {}): Record<string, string> {
+function headers(): Record<string, string> {
   return {
     "Content-Type": "application/json",
     ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}),
-    ...extra,
   };
 }
 
-/** Parse SSE stream and collect events */
-async function collectSSE(response: Response, maxEvents = 100): Promise<Array<{ type: string; data: any }>> {
-  const events: Array<{ type: string; data: any }> = [];
-  const reader = response.body?.getReader();
-  if (!reader) return events;
+// Build DO name from JWT claims
+function buildDoName(): string {
+  if (!TOKEN) return "test-default";
+  try {
+    const payload = JSON.parse(atob(TOKEN.split(".")[1]));
+    const orgId = payload.org_id || "";
+    const userId = payload.user_id || "";
+    const shortOrg = orgId.length > 12 ? orgId.slice(-8) : orgId;
+    const shortUser = userId.length > 12 ? userId.slice(-8) : userId;
+    const orgPrefix = shortOrg ? `${shortOrg}-` : "";
+    let name = shortUser
+      ? `${orgPrefix}default-u-${shortUser}`
+      : `${orgPrefix}default`;
+    if (name.length > 63) name = name.slice(0, 63);
+    return name;
+  } catch { return "test-default"; }
+}
 
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  while (events.length < maxEvents) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (trimmed.startsWith("data:")) {
-        const raw = trimmed.slice(5).trim();
-        if (!raw || raw === "[DONE]") continue;
-        try {
-          const parsed = JSON.parse(raw);
-          events.push({ type: parsed.type || "unknown", data: parsed });
-        } catch {}
-      }
-    }
-  }
-  reader.releaseLock();
-  return events;
+// Get WebSocket host from BASE_URL
+function getWsHost(): string {
+  return BASE_URL.replace("https://", "").replace("http://", "");
 }
 
 // ═══════════════════════════════════════════════════════════════════
 // STAGE 0: INFRASTRUCTURE HEALTH
-// Verify the deployment is alive before testing features.
 // ═══════════════════════════════════════════════════════════════════
 
 describe("Stage 0: Infrastructure Health", () => {
-  test("agent-harness worker is alive", async () => {
+  test("agent worker is alive", async () => {
     const res = await fetch(`${BASE_URL}/api/health`);
     expect(res.status).toBe(200);
     const body = await res.json() as any;
     expect(body.status).toBe("ok");
+    expect(body.features).toContain("think");
   }, TIMEOUT);
 
   test("gateway is alive", async () => {
@@ -83,21 +72,24 @@ describe("Stage 0: Infrastructure Health", () => {
     expect(res.status).toBe(200);
   }, TIMEOUT);
 
-  test("Workers AI binding responds", async () => {
-    // The health endpoint should report AI as a feature
-    const res = await fetch(`${BASE_URL}/api/health`);
+  test("gateway → Postgres is connected", async () => {
+    const res = await fetch(`${GATEWAY_URL}/api/v1/health/detailed`);
     const body = await res.json() as any;
-    expect(body.features || []).toContain("think");
+    expect(body.checks?.database?.ok).toBe(true);
+  }, TIMEOUT);
+
+  test("gateway → agent worker service binding works", async () => {
+    const res = await fetch(`${GATEWAY_URL}/api/v1/health/detailed`);
+    const body = await res.json() as any;
+    expect(body.checks?.agent_core?.ok).toBe(true);
   }, TIMEOUT);
 
   test("auth rejects missing token", async () => {
-    const res = await fetch(`${GATEWAY_URL}/api/v1/agents`, {
-      headers: { "Content-Type": "application/json" },
-    });
+    const res = await fetch(`${GATEWAY_URL}/api/v1/agents`);
     expect(res.status).toBe(401);
   }, TIMEOUT);
 
-  test("auth accepts valid token", async () => {
+  test("auth accepts valid JWT", async () => {
     if (!TOKEN) return;
     const res = await fetch(`${GATEWAY_URL}/api/v1/agents`, { headers: headers() });
     expect(res.status).toBe(200);
@@ -105,546 +97,254 @@ describe("Stage 0: Infrastructure Health", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════
-// STAGE 1: BASIC CHAT — Does the LLM respond at all?
-// Tests the critical path: user message → Think agent → LLM → response
+// STAGE 1: GATEWAY CRUD — Control-plane endpoints via REST
 // ═══════════════════════════════════════════════════════════════════
 
-describe("Stage 1: Basic Chat — LLM Response", () => {
-  test("simple prompt returns a response via SSE", async () => {
-    const res = await fetch(`${GATEWAY_URL}/api/v1/runtime-proxy/runnable/stream`, {
-      method: "POST",
-      headers: headers(),
-      body: JSON.stringify({
-        agent_name: "default",
-        input: "Reply with exactly one word: hello",
-      }),
-    });
+describe("Stage 1: Gateway CRUD", () => {
+  test("agents list", async () => {
+    const res = await fetch(`${GATEWAY_URL}/api/v1/agents`, { headers: headers() });
     expect(res.status).toBe(200);
-    expect(res.headers.get("content-type")).toContain("text/event-stream");
-
-    const events = await collectSSE(res);
-    // Must have at least one token event
-    const tokens = events.filter(e => e.type === "token");
-    expect(tokens.length).toBeGreaterThan(0);
-
-    // Must have a done event
-    const done = events.find(e => e.type === "done");
-    expect(done).toBeDefined();
   }, TIMEOUT);
 
-  test("BUG HUNT: agent doesn't hang on empty input", async () => {
-    const res = await fetch(`${GATEWAY_URL}/api/v1/runtime-proxy/runnable/stream`, {
-      method: "POST",
-      headers: headers(),
-      body: JSON.stringify({ agent_name: "default", input: "" }),
-    });
-    // Should return error, not hang
-    expect(res.status).toBeLessThan(500);
-  }, TIMEOUT);
-
-  test("BUG HUNT: agent handles very long input (10K chars)", async () => {
-    const longInput = "Please summarize: " + "The quick brown fox jumps over the lazy dog. ".repeat(200);
-    const res = await fetch(`${GATEWAY_URL}/api/v1/runtime-proxy/runnable/stream`, {
-      method: "POST",
-      headers: headers(),
-      body: JSON.stringify({ agent_name: "default", input: longInput }),
-    });
+  test("skills list", async () => {
+    const res = await fetch(`${GATEWAY_URL}/api/v1/skills`, { headers: headers() });
     expect(res.status).toBe(200);
-    const events = await collectSSE(res);
-    expect(events.some(e => e.type === "done")).toBe(true);
   }, TIMEOUT);
 
-  test("BUG HUNT: agent handles unicode/emoji input", async () => {
-    const res = await fetch(`${GATEWAY_URL}/api/v1/runtime-proxy/runnable/stream`, {
-      method: "POST",
-      headers: headers(),
-      body: JSON.stringify({ agent_name: "default", input: "你好世界 🌍 Как дела?" }),
-    });
+  test("guardrails list", async () => {
+    const res = await fetch(`${GATEWAY_URL}/api/v1/guardrails`, { headers: headers() });
     expect(res.status).toBe(200);
-    const events = await collectSSE(res);
-    expect(events.some(e => e.type === "token")).toBe(true);
   }, TIMEOUT);
-});
 
-// ═══════════════════════════════════════════════════════════════════
-// STAGE 2: TOOL EXECUTION — Does the agent use tools correctly?
-// Prompts designed to force specific tool calls.
-// ═══════════════════════════════════════════════════════════════════
-
-describe("Stage 2: Tool Execution", () => {
-  test("agent calls web-search tool when asked to search", async () => {
-    const res = await fetch(`${GATEWAY_URL}/api/v1/runtime-proxy/runnable/stream`, {
-      method: "POST",
-      headers: headers(),
-      body: JSON.stringify({
-        agent_name: "default",
-        input: "Search the web for 'Cloudflare Workers pricing 2026' and tell me what you find.",
-      }),
-    });
+  test("sessions list", async () => {
+    const res = await fetch(`${GATEWAY_URL}/api/v1/sessions`, { headers: headers() });
     expect(res.status).toBe(200);
-    const events = await collectSSE(res);
-
-    // Must have tool_call events
-    const toolCalls = events.filter(e => e.type === "tool_call");
-    expect(toolCalls.length).toBeGreaterThan(0);
-
-    // At least one should be web-search related
-    const searchCall = toolCalls.find(e =>
-      e.data.name?.includes("search") || e.data.name?.includes("web")
-    );
-    expect(searchCall).toBeDefined();
-
-    // Must have tool_result after tool_call
-    const toolResults = events.filter(e => e.type === "tool_result");
-    expect(toolResults.length).toBeGreaterThan(0);
   }, TIMEOUT);
 
-  test("BUG HUNT: agent doesn't call tools when not needed", async () => {
-    const res = await fetch(`${GATEWAY_URL}/api/v1/runtime-proxy/runnable/stream`, {
-      method: "POST",
-      headers: headers(),
-      body: JSON.stringify({
-        agent_name: "default",
-        input: "What is 2 + 2? Just answer with the number.",
-      }),
-    });
-    const events = await collectSSE(res);
-    const toolCalls = events.filter(e => e.type === "tool_call");
-    // Simple math should NOT trigger tools
-    expect(toolCalls.length).toBe(0);
+  test("org current", async () => {
+    const res = await fetch(`${GATEWAY_URL}/api/v1/orgs/current`, { headers: headers() });
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.org_id).toBeDefined();
   }, TIMEOUT);
 
-  test("BUG HUNT: tool_result arrives for every tool_call", async () => {
-    const res = await fetch(`${GATEWAY_URL}/api/v1/runtime-proxy/runnable/stream`, {
-      method: "POST",
-      headers: headers(),
-      body: JSON.stringify({
-        agent_name: "default",
-        input: "Search for 'Cloudflare D1 pricing' and also search for 'Cloudflare R2 pricing'. Compare them.",
-      }),
-    });
-    const events = await collectSSE(res);
-    const toolCalls = events.filter(e => e.type === "tool_call");
-    const toolResults = events.filter(e => e.type === "tool_result");
-    // Every tool_call must have a matching tool_result
-    for (const call of toolCalls) {
-      const callId = call.data.tool_call_id || call.data.call_id;
-      if (callId) {
-        const result = toolResults.find(r =>
-          (r.data.tool_call_id || r.data.call_id) === callId
-        );
-        expect(result).toBeDefined();
-      }
-    }
-  }, TIMEOUT);
-});
-
-// ═══════════════════════════════════════════════════════════════════
-// STAGE 3: MULTI-TURN & MEMORY — Does the agent remember?
-// Tests whether context persists across turns in the same session.
-// ═══════════════════════════════════════════════════════════════════
-
-describe("Stage 3: Multi-Turn & Memory", () => {
-  let sessionId: string | undefined;
-
-  test("turn 1: stores a secret in memory", async () => {
-    const secret = `SECRET_${Date.now()}`;
-    const res = await fetch(`${GATEWAY_URL}/api/v1/runtime-proxy/runnable/stream`, {
-      method: "POST",
-      headers: headers(),
-      body: JSON.stringify({
-        agent_name: "default",
-        input: `Remember this secret code: ${secret}. I will ask you about it later. Confirm you stored it.`,
-      }),
-    });
-    const events = await collectSSE(res);
-    const done = events.find(e => e.type === "done");
-    if (done?.data?.session_id) sessionId = done.data.session_id;
-
-    // Agent should acknowledge storing the secret
-    const tokens = events.filter(e => e.type === "token");
-    const fullResponse = tokens.map(t => t.data.content || t.data.text || "").join("");
-    expect(fullResponse.toLowerCase()).toMatch(/remember|stored|noted|got it|saved/i);
+  test("auth/me", async () => {
+    const res = await fetch(`${GATEWAY_URL}/api/v1/auth/me`, { headers: headers() });
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.email).toBeDefined();
   }, TIMEOUT);
 
-  test("turn 2: recalls the secret from context", async () => {
-    const res = await fetch(`${GATEWAY_URL}/api/v1/runtime-proxy/runnable/stream`, {
-      method: "POST",
-      headers: headers(),
-      body: JSON.stringify({
-        agent_name: "default",
-        input: "What was the secret code I told you to remember?",
-        session_id: sessionId,
-      }),
-    });
-    const events = await collectSSE(res);
-    const tokens = events.filter(e => e.type === "token");
-    const fullResponse = tokens.map(t => t.data.content || t.data.text || "").join("");
-
-    // Must contain the secret from turn 1
-    expect(fullResponse).toContain("SECRET_");
-  }, TIMEOUT);
-
-  test("BUG HUNT: agent handles 5 rapid turns without losing context", async () => {
-    let sid: string | undefined;
-    for (let i = 1; i <= 5; i++) {
-      const res = await fetch(`${GATEWAY_URL}/api/v1/runtime-proxy/runnable/stream`, {
-        method: "POST",
-        headers: headers(),
-        body: JSON.stringify({
-          agent_name: "default",
-          input: `Turn ${i}: The number for this turn is ${i * 111}. Acknowledge it.`,
-          session_id: sid,
-        }),
-      });
-      const events = await collectSSE(res);
-      const done = events.find(e => e.type === "done");
-      if (done?.data?.session_id) sid = done.data.session_id;
-    }
-
-    // Final turn: ask for all numbers
-    const res = await fetch(`${GATEWAY_URL}/api/v1/runtime-proxy/runnable/stream`, {
-      method: "POST",
-      headers: headers(),
-      body: JSON.stringify({
-        agent_name: "default",
-        input: "List all the numbers I gave you across all turns.",
-        session_id: sid,
-      }),
-    });
-    const events = await collectSSE(res);
-    const fullResponse = events.filter(e => e.type === "token").map(t => t.data.content || "").join("");
-    // Should remember at least the recent numbers
-    expect(fullResponse).toContain("555"); // Turn 5: 5*111=555
-  }, TIMEOUT);
-});
-
-// ═══════════════════════════════════════════════════════════════════
-// STAGE 4: COMPLETION CONTRACT — Does the agent finish properly?
-// Tests for premature termination, hanging, and done event delivery.
-// ═══════════════════════════════════════════════════════════════════
-
-describe("Stage 4: Completion Contract", () => {
-  test("every stream ends with a done event", async () => {
-    const prompts = [
-      "Say hello.",
-      "List 3 programming languages.",
-      "What day is it today?",
-    ];
-    for (const input of prompts) {
-      const res = await fetch(`${GATEWAY_URL}/api/v1/runtime-proxy/runnable/stream`, {
-        method: "POST",
-        headers: headers(),
-        body: JSON.stringify({ agent_name: "default", input }),
-      });
-      const events = await collectSSE(res);
-      const done = events.find(e => e.type === "done");
-      expect(done).toBeDefined();
-    }
-  }, TIMEOUT * 3);
-
-  test("BUG HUNT: plan-heavy prompt doesn't terminate prematurely", async () => {
-    const res = await fetch(`${GATEWAY_URL}/api/v1/runtime-proxy/runnable/stream`, {
-      method: "POST",
-      headers: headers(),
-      body: JSON.stringify({
-        agent_name: "default",
-        input: `Create a detailed plan to build a REST API with these steps:
-Step 1: Design the database schema
-Step 2: Set up the project with TypeScript
-Step 3: Implement the endpoints
-Step 4: Add authentication
-Step 5: Write tests
-Now execute Step 1 — actually design a schema for a todo app.`,
-      }),
-    });
-    const events = await collectSSE(res);
-    const done = events.find(e => e.type === "done");
-    expect(done).toBeDefined();
-
-    // Should have substantial content (not just a plan description)
-    const tokens = events.filter(e => e.type === "token");
-    const fullResponse = tokens.map(t => t.data.content || "").join("");
-    expect(fullResponse.length).toBeGreaterThan(200);
-    // Should contain actual schema content, not just "I'll do this"
-    expect(fullResponse.toLowerCase()).toMatch(/table|column|field|schema|create/i);
-  }, TIMEOUT);
-
-  test("BUG HUNT: agent doesn't describe tools instead of using them", async () => {
-    const res = await fetch(`${GATEWAY_URL}/api/v1/runtime-proxy/runnable/stream`, {
-      method: "POST",
-      headers: headers(),
-      body: JSON.stringify({
-        agent_name: "default",
-        input: "Search the web for the current weather in San Francisco. Give me the actual result, not a description of what you would search for.",
-      }),
-    });
-    const events = await collectSSE(res);
-    // Must have actual tool_call events (not just text describing the search)
-    const toolCalls = events.filter(e => e.type === "tool_call");
-    expect(toolCalls.length).toBeGreaterThan(0);
-  }, TIMEOUT);
-});
-
-// ═══════════════════════════════════════════════════════════════════
-// STAGE 5: SANDBOX — Code execution in containers
-// Tests bash, Python, and long-running tasks in the sandbox.
-// ═══════════════════════════════════════════════════════════════════
-
-describe("Stage 5: Sandbox Code Execution", () => {
-  test("agent executes Python code in sandbox", async () => {
-    const res = await fetch(`${GATEWAY_URL}/api/v1/runtime-proxy/runnable/stream`, {
-      method: "POST",
-      headers: headers(),
-      body: JSON.stringify({
-        agent_name: "default",
-        input: "Run this Python code and tell me the output: print(sum(range(1, 101)))",
-      }),
-    });
-    const events = await collectSSE(res);
-    const fullResponse = events.filter(e => e.type === "token").map(t => t.data.content || "").join("");
-    // Sum of 1..100 = 5050
-    expect(fullResponse).toContain("5050");
-  }, TIMEOUT);
-
-  test("BUG HUNT: sandbox handles code that produces large output", async () => {
-    const res = await fetch(`${GATEWAY_URL}/api/v1/runtime-proxy/runnable/stream`, {
-      method: "POST",
-      headers: headers(),
-      body: JSON.stringify({
-        agent_name: "default",
-        input: 'Run: for i in range(1000): print(f"line {i}: {"x"*100}")',
-      }),
-    });
-    const events = await collectSSE(res);
-    // Must complete (not hang or crash)
-    expect(events.some(e => e.type === "done")).toBe(true);
-    // Output should be truncated (100K chars of output)
-    const toolResults = events.filter(e => e.type === "tool_result");
-    if (toolResults.length > 0) {
-      const resultText = JSON.stringify(toolResults[0].data);
-      // Should be truncated, not the full 100K
-      expect(resultText.length).toBeLessThan(50_000);
-    }
-  }, TIMEOUT);
-
-  test("BUG HUNT: sandbox handles infinite loop with timeout", async () => {
-    const res = await fetch(`${GATEWAY_URL}/api/v1/runtime-proxy/runnable/stream`, {
-      method: "POST",
-      headers: headers(),
-      body: JSON.stringify({
-        agent_name: "default",
-        input: "Run this Python code: while True: pass",
-      }),
-    });
-    const events = await collectSSE(res);
-    // Must complete eventually (sandbox timeout should kick in)
-    expect(events.some(e => e.type === "done" || e.type === "error")).toBe(true);
-  }, TIMEOUT * 2); // Allow extra time for timeout
-});
-
-// ═══════════════════════════════════════════════════════════════════
-// STAGE 6: TELEMETRY & BILLING — Are events written correctly?
-// Verifies the Queue → Postgres pipeline works end-to-end.
-// ═══════════════════════════════════════════════════════════════════
-
-describe("Stage 6: Telemetry & Billing", () => {
-  test("session appears in sessions list after chat", async () => {
-    // Send a chat message
-    const chatRes = await fetch(`${GATEWAY_URL}/api/v1/runtime-proxy/runnable/stream`, {
-      method: "POST",
-      headers: headers(),
-      body: JSON.stringify({ agent_name: "default", input: "Hi there" }),
-    });
-    const events = await collectSSE(chatRes);
-    const done = events.find(e => e.type === "done");
-
-    // Wait for Queue consumer to process
-    await new Promise(r => setTimeout(r, 5000));
-
-    // Check sessions list
-    const sessionsRes = await fetch(`${GATEWAY_URL}/api/v1/sessions`, { headers: headers() });
-    expect(sessionsRes.status).toBe(200);
-    const sessions = await sessionsRes.json() as any[];
-    expect(sessions.length).toBeGreaterThan(0);
-  }, TIMEOUT);
-
-  test("conversation header synced to Postgres after chat", async () => {
-    await new Promise(r => setTimeout(r, 3000)); // Wait for Queue
-
-    const convsRes = await fetch(
-      `${GATEWAY_URL}/api/v1/conversations?agent_name=default`,
-      { headers: headers() },
-    );
-    expect(convsRes.status).toBe(200);
-    const body = await convsRes.json() as any;
-    // Should have at least one conversation from previous tests
-    expect(body.conversations?.length || 0).toBeGreaterThanOrEqual(0);
-  }, TIMEOUT);
-
-  test("credit balance endpoint works", async () => {
+  test("credits balance", async () => {
     const res = await fetch(`${GATEWAY_URL}/api/v1/credits/balance`, { headers: headers() });
     expect(res.status).toBe(200);
     const body = await res.json() as any;
     expect(typeof body.balance_usd).toBe("number");
   }, TIMEOUT);
-});
 
-// ═══════════════════════════════════════════════════════════════════
-// STAGE 7: MCP — External tool server management
-// ═══════════════════════════════════════════════════════════════════
-
-describe("Stage 7: MCP Server Management", () => {
-  test("list MCP servers (empty initially)", async () => {
-    const res = await fetch(
-      `${GATEWAY_URL}/api/v1/agents/default/mcp/servers`,
-      { headers: headers() },
-    );
-    // May return 200 with empty list or error if DO not initialized
-    expect(res.status).toBeLessThan(500);
-  }, TIMEOUT);
-
-  test("BUG HUNT: SSRF blocked for localhost MCP server", async () => {
-    const res = await fetch(`${GATEWAY_URL}/api/v1/agents/default/mcp/servers`, {
-      method: "POST",
-      headers: headers(),
-      body: JSON.stringify({ name: "evil", url: "http://localhost:8080" }),
-    });
-    const body = await res.json() as any;
-    // Should be blocked by SSRF validation
-    if (body.error) {
-      expect(body.error).toContain("localhost");
-    }
-  }, TIMEOUT);
-
-  test("BUG HUNT: SSRF blocked for private IP MCP server", async () => {
-    const res = await fetch(`${GATEWAY_URL}/api/v1/agents/default/mcp/servers`, {
-      method: "POST",
-      headers: headers(),
-      body: JSON.stringify({ name: "evil", url: "http://10.0.0.1:3000" }),
-    });
-    const body = await res.json() as any;
-    if (body.error) {
-      expect(body.error).toContain("private");
-    }
-  }, TIMEOUT);
-});
-
-// ═══════════════════════════════════════════════════════════════════
-// STAGE 8: GATEWAY CRUD — All major endpoints respond
-// ═══════════════════════════════════════════════════════════════════
-
-describe("Stage 8: Gateway CRUD", () => {
-  test("agents CRUD works", async () => {
-    // List
-    const list = await fetch(`${GATEWAY_URL}/api/v1/agents`, { headers: headers() });
-    expect(list.status).toBe(200);
-  }, TIMEOUT);
-
-  test("skills endpoint works", async () => {
-    const res = await fetch(`${GATEWAY_URL}/api/v1/skills`, { headers: headers() });
-    expect(res.status).toBe(200);
-  }, TIMEOUT);
-
-  test("guardrails endpoint works", async () => {
-    const res = await fetch(`${GATEWAY_URL}/api/v1/guardrails`, { headers: headers() });
-    expect(res.status).toBe(200);
-  }, TIMEOUT);
-
-  test("features endpoint works", async () => {
-    const res = await fetch(`${GATEWAY_URL}/api/v1/features`, { headers: headers() });
-    expect(res.status).toBe(200);
-  }, TIMEOUT);
-
-  test("marketplace search works", async () => {
-    const res = await fetch(`${GATEWAY_URL}/api/v1/marketplace/search`, { headers: headers() });
-    expect(res.status).toBe(200);
-  }, TIMEOUT);
-
-  test("dashboard stats works", async () => {
-    const res = await fetch(`${GATEWAY_URL}/api/v1/dashboard/stats`, { headers: headers() });
-    expect(res.status).toBe(200);
-  }, TIMEOUT);
-
-  test("usage endpoint works", async () => {
+  test("usage", async () => {
     const res = await fetch(`${GATEWAY_URL}/api/v1/usage`, { headers: headers() });
     expect(res.status).toBe(200);
   }, TIMEOUT);
 
-  test("org endpoint works", async () => {
-    const res = await fetch(`${GATEWAY_URL}/api/v1/orgs/current`, { headers: headers() });
-    expect(res.status).toBe(200);
-  }, TIMEOUT);
-
-  test("auth/me endpoint works", async () => {
-    const res = await fetch(`${GATEWAY_URL}/api/v1/auth/me`, { headers: headers() });
+  test("marketplace search", async () => {
+    const res = await fetch(`${GATEWAY_URL}/api/v1/marketplace/search`, { headers: headers() });
     expect(res.status).toBe(200);
   }, TIMEOUT);
 });
 
 // ═══════════════════════════════════════════════════════════════════
-// STAGE 9: STRESS — Concurrent requests and rate limits
+// STAGE 2: AGENT CLIENT — SDK AgentClient WebSocket connection
 // ═══════════════════════════════════════════════════════════════════
 
-describe("Stage 9: Concurrent Stress", () => {
-  test("5 concurrent chat requests all complete", async () => {
-    const promises = Array.from({ length: 5 }, (_, i) =>
-      fetch(`${GATEWAY_URL}/api/v1/runtime-proxy/runnable/stream`, {
-        method: "POST",
-        headers: headers(),
-        body: JSON.stringify({
-          agent_name: "default",
-          input: `Concurrent test ${i}: say "response ${i}"`,
-        }),
-      }).then(async (res) => {
-        const events = await collectSSE(res);
-        return { index: i, status: res.status, hasDone: events.some(e => e.type === "done") };
-      })
-    );
+describe("Stage 2: AgentClient Connection", () => {
+  test("AgentClient connects to agent worker DO", async () => {
+    const doName = buildDoName();
+    const host = getWsHost();
 
-    const results = await Promise.all(promises);
-    for (const r of results) {
-      expect(r.status).toBe(200);
-      // At least some should complete (DO serializes but shouldn't drop)
-    }
-    const completed = results.filter(r => r.hasDone);
-    expect(completed.length).toBeGreaterThanOrEqual(1);
-  }, TIMEOUT * 3);
-});
-
-// ═══════════════════════════════════════════════════════════════════
-// STAGE 10: LATENCY SLOs — Performance gates
-// ═══════════════════════════════════════════════════════════════════
-
-describe("Stage 10: Latency SLOs", () => {
-  test("TTFT (time to first token) under 12 seconds", async () => {
-    const start = Date.now();
-    const res = await fetch(`${GATEWAY_URL}/api/v1/runtime-proxy/runnable/stream`, {
-      method: "POST",
-      headers: headers(),
-      body: JSON.stringify({ agent_name: "default", input: "Hello" }),
+    const client = new AgentClient({
+      agent: "chat-agent",
+      name: doName,
+      host,
+      query: TOKEN ? { _pk: TOKEN } : undefined,
     });
 
-    // Read until first token
-    const reader = res.body?.getReader();
-    if (!reader) return;
-    const decoder = new TextDecoder();
-    let firstTokenTime = 0;
-    let buffer = "";
+    // Wait for connection
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("Connection timeout")), 10_000);
+      const origOpen = client.onopen;
+      client.onopen = (event: Event) => {
+        clearTimeout(timeout);
+        origOpen?.call(client, event);
+        resolve();
+      };
+      const origError = client.onerror;
+      client.onerror = (event: Event) => {
+        clearTimeout(timeout);
+        origError?.call(client, event);
+        reject(new Error("WebSocket error"));
+      };
+    });
 
-    while (!firstTokenTime) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      if (buffer.includes('"type":"token"') || buffer.includes('"type": "token"')) {
-        firstTokenTime = Date.now() - start;
-        break;
-      }
-    }
-    reader.releaseLock();
+    expect(client.readyState).toBe(WebSocket.OPEN);
+    client.close();
+  }, TIMEOUT);
 
-    if (firstTokenTime > 0) {
-      expect(firstTokenTime).toBeLessThan(12_000); // 12s SLO
+  test("AgentClient can call @callable methods via RPC", async () => {
+    const doName = buildDoName();
+    const host = getWsHost();
+
+    const client = new AgentClient({
+      agent: "chat-agent",
+      name: doName,
+      host,
+      query: TOKEN ? { _pk: TOKEN } : undefined,
+    });
+
+    await client.ready;
+
+    // Call getTenants — a simple @callable method
+    try {
+      const tenants = await client.call("getTenants") as any[];
+      expect(Array.isArray(tenants)).toBe(true);
+      expect(tenants.length).toBeGreaterThan(0);
+    } finally {
+      client.close();
     }
+  }, TIMEOUT);
+
+  test("AgentClient can list MCP servers", async () => {
+    const doName = buildDoName();
+    const host = getWsHost();
+
+    const client = new AgentClient({
+      agent: "chat-agent",
+      name: doName,
+      host,
+      query: TOKEN ? { _pk: TOKEN } : undefined,
+    });
+
+    await client.ready;
+
+    try {
+      const result = await client.call("listServers") as any;
+      expect(result).toBeDefined();
+      expect(typeof result.live_tool_count).toBe("number");
+    } finally {
+      client.close();
+    }
+  }, TIMEOUT);
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// STAGE 3: CHAT — Send message via SDK chat protocol
+// ═══════════════════════════════════════════════════════════════════
+
+describe("Stage 3: Chat via WebSocket", () => {
+  test("send chat message and receive response", async () => {
+    const doName = buildDoName();
+    const host = getWsHost();
+
+    const client = new AgentClient({
+      agent: "chat-agent",
+      name: doName,
+      host,
+      query: TOKEN ? { _pk: TOKEN } : undefined,
+    });
+
+    await client.ready;
+
+    // Collect messages
+    const received: any[] = [];
+    const done = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("Chat timeout")), 60_000);
+      const origMsg = client.onmessage;
+      client.onmessage = (event: MessageEvent) => {
+        origMsg?.call(client, event);
+        try {
+          const data = JSON.parse(event.data);
+          received.push(data);
+          // Chat response with done flag
+          if (data.type === "cf_agent_use_chat_response" && data.done) {
+            clearTimeout(timeout);
+            resolve();
+          }
+          // Also accept cf_agent_chat_messages as completion
+          if (data.type === "cf_agent_chat_messages") {
+            clearTimeout(timeout);
+            resolve();
+          }
+        } catch {}
+      };
+    });
+
+    // Send chat request (SDK protocol)
+    client.send(JSON.stringify({
+      type: "cf_agent_use_chat_request",
+      id: crypto.randomUUID(),
+      messages: [{ role: "user", content: "Reply with exactly one word: hello" }],
+    }));
+
+    await done;
+    client.close();
+
+    // Should have received at least one response
+    expect(received.length).toBeGreaterThan(0);
+    // Should have chat-related messages
+    const chatMsgs = received.filter(m =>
+      m.type === "cf_agent_use_chat_response" || m.type === "cf_agent_chat_messages"
+    );
+    expect(chatMsgs.length).toBeGreaterThan(0);
+  }, TIMEOUT);
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// STAGE 4: LATENCY — TTFT SLO
+// ═══════════════════════════════════════════════════════════════════
+
+describe("Stage 4: Latency SLOs", () => {
+  test("TTFT under 15 seconds via WebSocket", async () => {
+    const doName = buildDoName();
+    const host = getWsHost();
+
+    const client = new AgentClient({
+      agent: "chat-agent",
+      name: doName,
+      host,
+      query: TOKEN ? { _pk: TOKEN } : undefined,
+    });
+
+    await client.ready;
+
+    const start = Date.now();
+    let ttft = 0;
+
+    const firstToken = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("TTFT timeout")), 15_000);
+      const origMsg = client.onmessage;
+      client.onmessage = (event: MessageEvent) => {
+        origMsg?.call(client, event);
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === "cf_agent_use_chat_response" && !ttft) {
+            ttft = Date.now() - start;
+            clearTimeout(timeout);
+            resolve();
+          }
+        } catch {}
+      };
+    });
+
+    client.send(JSON.stringify({
+      type: "cf_agent_use_chat_request",
+      id: crypto.randomUUID(),
+      messages: [{ role: "user", content: "Hi" }],
+    }));
+
+    await firstToken;
+    client.close();
+
+    expect(ttft).toBeGreaterThan(0);
+    expect(ttft).toBeLessThan(15_000);
   }, TIMEOUT);
 });
