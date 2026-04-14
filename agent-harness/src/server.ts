@@ -1520,6 +1520,13 @@ export class ChatAgent extends Think<Env> {
   private _lastToolCall: { name: string; argsHash: string } | null = null;
   private _consecutiveDups = 0;                            // loop detection
   private _sessionCostUsd = 0;                             // cost accumulator
+  // ── Reliability signal state ──
+  private _turnLatencies: number[] = [];                   // rolling window for latency spike detection
+  private _sessionTokensUsed = 0;                          // context pressure tracking
+  private _refusalCount = 0;                               // refusal spike tracking
+  private _activeSkills = new Set<string>();                // skill effectiveness tracking
+  private _userCorrectionCount = 0;                        // user correction tracking
+  private _mcpLatencies = new Map<string, number[]>();     // MCP degradation tracking
 
   private static readonly CIRCUIT_BREAKER_THRESHOLD = 3;
   private static readonly LOOP_DETECTION_THRESHOLD = 3;
@@ -1588,6 +1595,34 @@ export class ChatAgent extends Think<Env> {
     if (ctx.continuation && !config.model) {
       const workersai = createWorkersAI({ binding: this.env.AI });
       config.model = workersai("@cf/moonshotai/kimi-k2.5" as any);
+    }
+
+    // ── Reliability signals: user_correction detection ──
+    // Scan the latest user message for correction patterns.
+    // These indicate the agent gave a wrong answer — triggers learning.
+    if (!ctx.continuation) {
+      const msgs = ctx.messages || [];
+      const lastUser = [...msgs].reverse().find((m: any) => m.role === "user");
+      const text = typeof lastUser?.content === "string" ? lastUser.content : "";
+      if (text && /\b(no|wrong|incorrect|that'?s not|you'?re wrong|actually|I said|I meant|not what I asked|try again)\b/i.test(text)) {
+        this._userCorrectionCount++;
+        this._recordSignal("user_correction", text.slice(0, 100), 2, {
+          correctionNumber: this._userCorrectionCount,
+        });
+      }
+    }
+
+    // ── Reliability signal: context_pressure ──
+    // Warn when approaching compaction threshold (8000 tokens)
+    const totalTokens = (ctx.messages || []).reduce((sum: number, m: any) => {
+      const content = typeof m.content === "string" ? m.content : JSON.stringify(m.content || "");
+      return sum + Math.ceil(content.length / 4); // rough token estimate
+    }, 0);
+    this._sessionTokensUsed = totalTokens;
+    if (totalTokens > 5600) { // 70% of 8000 compaction threshold
+      this._recordSignal("context_pressure", `${totalTokens} tokens (~${Math.round(totalTokens / 80)}% of threshold)`, 1, {
+        tokens: totalTokens, threshold: 8000,
+      });
     }
 
     return Object.keys(config).length > 0 ? config : undefined;
@@ -1689,6 +1724,21 @@ export class ChatAgent extends Think<Env> {
       // [6] Circuit breaker: reset on success
       this._toolFailures.delete(ctx.toolName);
       this._trackToolSequence(ctx.toolName, true);
+
+      // ── Reliability signal: mcp_degradation ──
+      // Track latency per MCP tool. Signal when >5s or error rate >20%
+      if (ctx.toolName?.startsWith("mcp_") && ctx.duration > 0) {
+        const latencies = this._mcpLatencies.get(ctx.toolName) || [];
+        latencies.push(ctx.duration);
+        if (latencies.length > 20) latencies.shift(); // rolling window of 20
+        this._mcpLatencies.set(ctx.toolName, latencies);
+
+        if (ctx.duration > 5000) {
+          this._recordSignal("mcp_degradation", ctx.toolName, 2, {
+            latencyMs: ctx.duration, avgMs: latencies.reduce((a, b) => a + b, 0) / latencies.length,
+          });
+        }
+      }
     }
 
     // [4] Output budgeting — truncate oversized tool results
@@ -1754,9 +1804,42 @@ export class ChatAgent extends Think<Env> {
       cacheWriteTokens: usage.cacheCreationInputTokens || 0,
     });
 
-    // Detect refusals
+    // ── Reliability signal: refusal_spike ──
     if (ctx.finishReason === "content_filter" || ctx.refusal) {
       this._telemetry.turnRefusal(ctx.sessionId || this.name, ctx.stepNumber || 0);
+      this._refusalCount++;
+      if (this._refusalCount >= 2) {
+        this._recordSignal("refusal_spike", ctx.model || "unknown", 3, {
+          refusalCount: this._refusalCount,
+          finishReason: ctx.finishReason,
+        });
+      }
+    }
+
+    // ── Reliability signal: latency_spike ──
+    const latencyMs = ctx.duration || 0;
+    if (latencyMs > 0) {
+      this._turnLatencies.push(latencyMs);
+      if (this._turnLatencies.length > 10) this._turnLatencies.shift(); // rolling window
+      if (this._turnLatencies.length >= 3) {
+        const avg = this._turnLatencies.reduce((a, b) => a + b, 0) / this._turnLatencies.length;
+        if (latencyMs > avg * 3 && latencyMs > 5000) { // >3x average AND >5s absolute
+          this._recordSignal("latency_spike", `${latencyMs}ms (avg: ${Math.round(avg)}ms)`, 2, {
+            latencyMs, avgMs: Math.round(avg), model: ctx.model,
+          });
+        }
+      }
+    }
+
+    // ── Reliability signal: cost_runaway ──
+    // Detect when cost is accelerating (current turn cost > 2x average turn cost)
+    if (costUsd > 0 && (ctx.stepNumber || 0) >= 2) {
+      const avgCostPerTurn = this._sessionCostUsd / (ctx.stepNumber || 1);
+      if (costUsd > avgCostPerTurn * 2 && costUsd > 0.01) {
+        this._recordSignal("cost_runaway", `$${costUsd.toFixed(4)} (avg: $${avgCostPerTurn.toFixed(4)})`, 2, {
+          turnCost: costUsd, avgCost: avgCostPerTurn, sessionTotal: this._sessionCostUsd,
+        });
+      }
     }
   }
 
@@ -1812,6 +1895,19 @@ export class ChatAgent extends Think<Env> {
           }
         } catch {} // never block on fact extraction
       }
+
+      // ── Reliability signal: skill_ineffective ──
+      // If a skill was loaded during this turn but the user had previously corrected,
+      // the skill didn't help enough. Track for potential overlay or deactivation.
+      if (this._activeSkills.size > 0 && this._userCorrectionCount > 0) {
+        for (const skillName of this._activeSkills) {
+          this._recordSignal("skill_ineffective", skillName, 1, {
+            corrections: this._userCorrectionCount,
+          });
+        }
+      }
+      // Reset per-turn correction counter (keep cumulative for the session)
+      this._activeSkills.clear();
     } else if (result.status === "error") {
       this._telemetry.sessionFailed(this.name, (result as any).error || "unknown");
     }
@@ -1850,6 +1946,26 @@ export class ChatAgent extends Think<Env> {
     }
 
     return error; // propagate
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // onClose — runs when a WebSocket client disconnects
+  //
+  // Reliability signal: session_abandonment
+  // If the user disconnects very quickly after the agent started
+  // responding, it indicates the agent wasn't helpful.
+  // ═══════════════════════════════════════════════════════════════════
+
+  onClose(connection: any, code: number, reason: string) {
+    // Track session duration — if very short (<30s) and agent had started
+    // responding (sessionCostUsd > 0), this is likely an abandonment.
+    if (this._sessionCostUsd > 0 && this._turnLatencies.length <= 2) {
+      this._recordSignal("session_abandonment", `code:${code}`, 1, {
+        turnsCompleted: this._turnLatencies.length,
+        sessionCost: this._sessionCostUsd,
+        reason: reason || "",
+      });
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -2025,6 +2141,71 @@ export class ChatAgent extends Think<Env> {
         );
       }
 
+      // ── Corrective actions for reliability signals ──
+
+      if (cluster.signal_type === "user_correction" && cluster.count >= 3) {
+        // Users have corrected the agent 3+ times on this topic
+        // Store as a memory fact so the agent learns
+        this.appendSkillRule(
+          "planning",
+          `Users frequently correct responses about "${cluster.topic}". Double-check facts, ask for clarification, and verify before asserting.`,
+          "auto",
+          `auto-fire: ${cluster.count} user corrections on ${cluster.topic}`,
+        );
+      }
+
+      if (cluster.signal_type === "refusal_spike" && cluster.count >= 2) {
+        // Model is refusing valid requests — broadcast for ops awareness
+        this.broadcast(JSON.stringify({
+          type: "reliability_alert",
+          signal: "refusal_spike",
+          model: cluster.topic,
+          count: cluster.count,
+          action: "Consider switching to a different model for this agent.",
+        }));
+      }
+
+      if (cluster.signal_type === "mcp_degradation" && cluster.count >= 3) {
+        // MCP tool is consistently slow — auto-disconnect and notify
+        this.broadcast(JSON.stringify({
+          type: "reliability_alert",
+          signal: "mcp_degradation",
+          tool: cluster.topic,
+          count: cluster.count,
+          action: "MCP server performance degraded. Consider disconnecting.",
+        }));
+      }
+
+      if (cluster.signal_type === "skill_ineffective" && cluster.count >= 3) {
+        // Skill isn't helping — reduce its auto-activation confidence
+        this.appendSkillRule(
+          cluster.topic, // the ineffective skill name
+          `This skill has not been effective recently (${cluster.count} uses without improvement). Consider whether a different approach would be better before loading this skill.`,
+          "auto",
+          `auto-fire: skill "${cluster.topic}" ineffective ${cluster.count} times`,
+        );
+      }
+
+      if (cluster.signal_type === "session_abandonment" && cluster.count >= 3) {
+        // Users keep leaving — agent may have a fundamental quality issue
+        this.broadcast(JSON.stringify({
+          type: "reliability_alert",
+          signal: "session_abandonment",
+          count: cluster.count,
+          action: "Users are frequently disconnecting early. Review agent quality.",
+        }));
+      }
+
+      if (cluster.signal_type === "cost_runaway" && cluster.count >= 2) {
+        // Costs accelerating — broadcast warning for ops
+        this.broadcast(JSON.stringify({
+          type: "reliability_alert",
+          signal: "cost_runaway",
+          count: cluster.count,
+          action: "Session costs accelerating. Agent may be in an expensive loop.",
+        }));
+      }
+
       // Mark as fired (cooldown)
       this.sql`
         UPDATE cf_agent_signal_clusters SET last_fired_at = datetime('now')
@@ -2037,6 +2218,12 @@ export class ChatAgent extends Think<Env> {
 
     // Decay unused procedures (not used in 30 days)
     this.sql`DELETE FROM cf_agent_procedures WHERE last_used_at < datetime('now', '-30 days')`;
+
+    // Reset cluster counts for low-severity signals that resolved
+    this.sql`
+      DELETE FROM cf_agent_signal_clusters
+      WHERE count < 3 AND updated_at < datetime('now', '-1 hours')
+    `;
   }
 
   /** Get learned procedures for injection into system context. */
