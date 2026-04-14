@@ -146,27 +146,34 @@
               scheduleMessageFlush(true);
             }
 
-            if (chunk.type === "tool-call") {
-              const tc: ToolCall = {
-                name: chunk.toolName || "tool",
-                input: typeof chunk.args === "string" ? chunk.args : JSON.stringify(chunk.args || {}),
-                call_id: chunk.toolCallId || crypto.randomUUID(),
-              };
-              last.toolCalls = [...(last.toolCalls || []), tc];
-              // Add to segments
-              const lastSeg = last.segments?.[last.segments.length - 1];
-              if (lastSeg?.type === "tool_calls") {
-                lastSeg.calls.push(tc);
-              } else {
-                last.segments = [...(last.segments || []), { type: "tool_calls", calls: [tc] }];
+            // Tool call start — Think sends tool-input-start then tool-input-available
+            if (chunk.type === "tool-input-start" || chunk.type === "tool-input-available") {
+              // Only create on start, update args on available
+              let existing = last.toolCalls?.find((t: ToolCall) => t.call_id === chunk.toolCallId);
+              if (!existing) {
+                const tc: ToolCall = {
+                  name: chunk.toolName || "tool",
+                  input: chunk.input ? JSON.stringify(chunk.input) : "{}",
+                  call_id: chunk.toolCallId || crypto.randomUUID(),
+                };
+                last.toolCalls = [...(last.toolCalls || []), tc];
+                const lastSeg = last.segments?.[last.segments.length - 1];
+                if (lastSeg?.type === "tool_calls") {
+                  lastSeg.calls.push(tc);
+                } else {
+                  last.segments = [...(last.segments || []), { type: "tool_calls", calls: [tc] }];
+                }
+              } else if (chunk.input) {
+                existing.input = JSON.stringify(chunk.input);
               }
               scheduleMessageFlush(true);
             }
 
-            if (chunk.type === "tool-result") {
+            // Tool result — Think sends tool-output-available
+            if (chunk.type === "tool-output-available") {
               const existing = last.toolCalls?.find((t: ToolCall) => t.call_id === chunk.toolCallId);
               if (existing) {
-                existing.output = typeof chunk.result === "string" ? chunk.result : JSON.stringify(chunk.result || "");
+                existing.output = typeof chunk.output === "string" ? chunk.output : JSON.stringify(chunk.output || "");
                 scheduleMessageFlush(true);
 
                 // ── Computer Panel: extract workspace data from completed tool calls ──
