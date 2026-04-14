@@ -2,7 +2,7 @@
   import { page } from "$app/stores";
   import { agentStore as agentListStore } from "$lib/stores/agents.svelte";
   import { agentStore as agentRpc } from "$lib/stores/agent.svelte";
-  import { streamAgent, type ChatEvent } from "$lib/services/chat";
+  // SDK-first: AgentClient for WebSocket RPC, no SSE streaming
   import { conversationStore } from "$lib/stores/conversations.svelte";
   import { createAutoScrollController } from "$lib/utils/auto-scroll";
   import ChatHeader from "$lib/components/chat/ChatHeader.svelte";
@@ -53,13 +53,94 @@
   // REST (api.ts) is still used for control-plane: auth, billing, org, marketplace.
   let rpcConnected = $derived(agentRpc.connected);
 
+  // ── Connect to Agent DO via SDK AgentClient (WebSocket) ──
   $effect(() => {
-    if (agentName) {
-      agentRpc.connect(agentName);
-    }
-    return () => {
-      // Don't disconnect on effect cleanup — the store manages lifecycle
-    };
+    if (!agentName) return;
+    agentRpc.connect(agentName);
+
+    // Listen for SDK chat protocol messages from the Agent DO.
+    // These feed the same UI state (messages, segments, toolCalls, thinking)
+    // that ToolCallInline, ToolCallGroup, and ChatMessage render.
+    const unsubscribe = agentRpc.onMessage((data: any) => {
+      // cf_agent_chat_messages — full message list sync from server
+      if (data.type === "cf_agent_chat_messages") {
+        // Server sends complete message history — reconcile with local
+        // For now, use server as source of truth on reconnect
+        if (!streaming && data.messages) {
+          // TODO: convert UIMessage parts to our Message shape
+        }
+        return;
+      }
+
+      // cf_agent_use_chat_response — streaming response chunks
+      if (data.type === "cf_agent_use_chat_response") {
+        const last = messages[messages.length - 1];
+        if (!last || last.role !== "assistant") return;
+
+        // The server streams UIMessage[] updates — extract text + tool parts
+        if (data.messages) {
+          const serverMsgs = data.messages as any[];
+          const lastServer = serverMsgs[serverMsgs.length - 1];
+          if (lastServer?.parts) {
+            // Rebuild content + segments from UIMessage parts
+            let textContent = "";
+            const newToolCalls: ToolCall[] = [];
+            const newSegments: Segment[] = [];
+
+            for (const part of lastServer.parts) {
+              if (part.type === "text" && part.text) {
+                textContent += part.text;
+              }
+              if (part.type === "reasoning" && part.text) {
+                const lastSeg = newSegments[newSegments.length - 1];
+                if (lastSeg?.type === "thinking") {
+                  (lastSeg as any).content += part.text;
+                } else {
+                  newSegments.push({ type: "thinking", content: part.text });
+                }
+              }
+              if (part.type === "tool-invocation") {
+                const tc: ToolCall = {
+                  name: part.toolName || "tool",
+                  input: JSON.stringify(part.args || {}),
+                  call_id: part.toolCallId || crypto.randomUUID(),
+                  output: part.result ? JSON.stringify(part.result) : undefined,
+                };
+                newToolCalls.push(tc);
+                // Add to segments
+                const lastSeg = newSegments[newSegments.length - 1];
+                if (lastSeg?.type === "tool_calls") {
+                  lastSeg.calls.push(tc);
+                } else {
+                  newSegments.push({ type: "tool_calls", calls: [tc] });
+                }
+              }
+            }
+
+            last.content = textContent;
+            last.toolCalls = newToolCalls.length > 0 ? newToolCalls : last.toolCalls;
+            last.segments = newSegments.length > 0 ? newSegments : last.segments;
+            scheduleMessageFlush(true);
+          }
+        }
+
+        // Check if streaming is done
+        if (data.done) {
+          streaming = false;
+          abortFn = null;
+          if (workspaceOpen && workspacePanelRef) workspacePanelRef.refresh();
+        }
+        return;
+      }
+
+      // streaming_done broadcast from agent
+      if (data.type === "streaming_done") {
+        streaming = false;
+        abortFn = null;
+      }
+    });
+
+    return () => { unsubscribe(); };
   });
 
   let messages = $state<Message[]>([]);
@@ -251,11 +332,11 @@
   }
 
   function sendMessage(text: string, replaceFromIndex?: number) {
-    // If replaceFromIndex is provided, truncate messages from that point
     if (replaceFromIndex !== undefined) {
       messages = messages.slice(0, replaceFromIndex);
     }
 
+    // Add user message optimistically
     messages = [...messages, { role: "user", content: text }];
     const assistantMsg: Message = {
       role: "assistant",
@@ -266,177 +347,31 @@
     };
     messages = [...messages, assistantMsg];
     streaming = true;
-
-    // Tell auto-scroll to re-enable and scroll down
     autoScroll.onNewMessage();
 
-    // History is only needed as cold-start fallback when there is no stable
-    // server-side thread yet. Sending it every turn inflates request size.
-    const shouldSendHistory = !sessionId && !conversationId;
+    // SDK pattern: send chat request via AgentClient WebSocket RPC.
+    // The agent DO (Think) processes this via its chat protocol and
+    // streams responses back as cf_agent_use_chat_response messages.
+    const client = agentRpc.client;
+    if (!client) {
+      const last = messages[messages.length - 1];
+      if (last) last.content = "**Error:** Not connected to agent. Please refresh.";
+      streaming = false;
+      messages = [...messages];
+      return;
+    }
 
-    const eventHandler = (event: ChatEvent) => {
-        const last = messages[messages.length - 1];
-        if (!last || last.role !== "assistant") return;
-
-        const d = event.data;
-
-        switch (event.type) {
-          case "turn_start": {
-            const model = (d as { model?: string }).model;
-            if (model) last.model = model;
-            scheduleMessageFlush();
-            break;
-          }
-          case "token": {
-            const text = (d as { content?: string; text?: string }).content ??
-                         (d as { text?: string }).text ?? "";
-            last.content += text;
-            scheduleMessageFlush(true);
-            break;
-          }
-          case "thinking": {
-            const content = (d as { content?: string }).content ?? "";
-            last.thinking = (last.thinking || "") + content;
-            // Append to segments — always reassign for Svelte reactivity
-            const prevSegs = last.segments ?? [];
-            const lastSeg = prevSegs[prevSegs.length - 1];
-            if (lastSeg && lastSeg.type === "thinking") {
-              // Create new segment object (immutable update)
-              last.segments = [
-                ...prevSegs.slice(0, -1),
-                { type: "thinking" as const, content: lastSeg.content + content },
-              ];
-            } else {
-              last.segments = [...prevSegs, { type: "thinking" as const, content }];
-            }
-            scheduleMessageFlush();
-            break;
-          }
-          case "tool_call": {
-            const tc = d as {
-              name: string;
-              tool_call_id?: string;
-              call_id?: string;
-              args_preview?: string;
-              input?: Record<string, unknown>;
-            };
-            const callId = tc.tool_call_id ?? tc.call_id ?? crypto.randomUUID();
-            const inputStr = tc.args_preview ??
-              (tc.input ? JSON.stringify(tc.input, null, 2) : "{}");
-            const newTc: ToolCall = { name: tc.name, input: inputStr, call_id: callId };
-            last.toolCalls = [...(last.toolCalls ?? []), newTc];
-            // Append to segments — always reassign for Svelte reactivity
-            const prevSegs2 = last.segments ?? [];
-            const lastSeg2 = prevSegs2[prevSegs2.length - 1];
-            if (lastSeg2 && lastSeg2.type === "tool_calls") {
-              last.segments = [
-                ...prevSegs2.slice(0, -1),
-                { type: "tool_calls" as const, calls: [...lastSeg2.calls, newTc] },
-              ];
-            } else {
-              last.segments = [...prevSegs2, { type: "tool_calls" as const, calls: [newTc] }];
-            }
-            scheduleMessageFlush(true);
-            break;
-          }
-          case "tool_result": {
-            const tr = d as {
-              tool_call_id?: string;
-              call_id?: string;
-              result?: string;
-              output?: string;
-              latency_ms?: number;
-              error?: string;
-            };
-            const callId = tr.tool_call_id ?? tr.call_id;
-
-            // Update toolCalls — immutable reassign for Svelte reactivity
-            last.toolCalls = (last.toolCalls ?? []).map((t) =>
-              t.call_id === callId
-                ? { ...t, output: tr.result ?? tr.output ?? "", latency_ms: tr.latency_ms, error: tr.error }
-                : t
-            );
-
-            // Update segments — the segment holds its own copy of the calls array
-            if (last.segments) {
-              last.segments = last.segments.map((seg) => {
-                if (seg.type !== "tool_calls") return seg;
-                const updatedCalls = seg.calls.map((t) =>
-                  t.call_id === callId
-                    ? { ...t, output: tr.result ?? tr.output ?? "", latency_ms: tr.latency_ms, error: tr.error }
-                    : t
-                );
-                return { ...seg, calls: updatedCalls };
-              });
-            }
-
-            scheduleMessageFlush();
-            break;
-          }
-          case "done": {
-            const done = d as {
-              cost_usd?: number;
-              session_id?: string;
-              output?: string;
-              input_tokens?: number;
-              output_tokens?: number;
-              latency_ms?: number;
-              conversation_id?: string;
-            };
-            if (done.cost_usd !== undefined) last.cost_usd = done.cost_usd;
-            if (done.session_id) sessionId = done.session_id;
-            if (done.input_tokens) last.input_tokens = done.input_tokens;
-            if (done.output_tokens) last.output_tokens = done.output_tokens;
-            if (done.latency_ms) last.latency_ms = done.latency_ms;
-            if (done.output && !last.content) last.content = done.output;
-            // Capture conversation_id from server and update URL
-            if (done.conversation_id) {
-              conversationId = done.conversation_id;
-              conversationStore.setActiveId(done.conversation_id);
-              if (typeof window !== "undefined") {
-                window.history.pushState({}, "", `/chat/${agentName}?c=${done.conversation_id}`);
-              }
-              // Refresh sidebar conversation list
-              conversationStore.fetchConversations(agentName);
-            }
-            scheduleMessageFlush();
-            streaming = false;
-            abortFn = null;
-            // Refresh workspace files if panel is open
-            if (workspaceOpen && workspacePanelRef) {
-              workspacePanelRef.refresh();
-            }
-            break;
-          }
-          case "error": {
-            const err = (d as { message?: string }).message ?? "Unknown error";
-            last.content += `\n\n**Error:** ${err}`;
-            scheduleMessageFlush();
-            streaming = false;
-            abortFn = null;
-            break;
-          }
-        }
-      };
-
-    const historyPayload = shouldSendHistory
-      ? messages.slice(0, -1).map(m => ({ role: m.role, content: m.content }))
-      : undefined;
-
-    const { abort } = streamAgent(
-      agentName,
-      text,
-      eventHandler,
-      sessionId,
-      selectedPlan,
-      historyPayload,
-      conversationId,
-    );
-    abortFn = abort;
+    // Send as SDK chat protocol message
+    client.send(JSON.stringify({
+      type: "cf_agent_use_chat_request",
+      id: crypto.randomUUID(),
+      messages: [{ role: "user", content: text }],
+    }));
   }
 
   function handleStop() {
-    abortFn?.();
+    // SDK pattern: send cancel message via WebSocket
+    agentRpc.client?.send(JSON.stringify({ type: "cf_agent_chat_request_cancel" }));
     streaming = false;
     abortFn = null;
   }
