@@ -274,6 +274,8 @@ function mapToQueueEvent(event: TelemetryEvent, ts: string): { type: string; pay
           output: event.toolOutput || {},
           latency_ms: event.latencyMs || 0,
           error: event.toolError || event.error || null,
+          // CodeMode failures include code preview for debugging
+          ...(event.metadata?.codePreview ? { code_preview: String(event.metadata.codePreview).slice(0, 500) } : {}),
         },
       };
 
