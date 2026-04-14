@@ -151,6 +151,58 @@
   let safeOutputTokens = $derived(toFiniteNumber(message.output_tokens));
   let safeLatencyMs = $derived(toFiniteNumber(message.latency_ms));
   let safeCostUsd = $derived(toFiniteNumber(message.cost_usd));
+
+  // ── Streaming phase detection ──
+  // Determines what the agent is currently doing for richer UX feedback
+  type StreamPhase = "thinking" | "calling_tools" | "generating" | "idle";
+
+  let streamPhase = $derived.by((): StreamPhase => {
+    if (!streaming || message.role !== "assistant") return "idle";
+    const segs = message.segments || [];
+    const lastSeg = segs[segs.length - 1];
+    if (lastSeg?.type === "thinking") return "thinking";
+    if (lastSeg?.type === "tool_calls") {
+      const calls = lastSeg.calls || [];
+      const hasRunning = calls.some(tc => !tc.output);
+      if (hasRunning) return "calling_tools";
+    }
+    if (message.content && message.content.length > 0) return "generating";
+    return "thinking"; // default during streaming
+  });
+
+  let phaseLabel = $derived.by(() => {
+    switch (streamPhase) {
+      case "thinking": return "Thinking";
+      case "calling_tools": return "Running tools";
+      case "generating": return "Writing";
+      default: return streamVerb;
+    }
+  });
+
+  let phaseIcon = $derived.by(() => {
+    switch (streamPhase) {
+      case "thinking": return "🧠";
+      case "calling_tools": return "⚡";
+      case "generating": return "✍️";
+      default: return "✦";
+    }
+  });
+
+  // Token-per-second estimate (rough: ~4 chars per token)
+  let tokensPerSec = $derived.by(() => {
+    if (!streaming || streamElapsed < 2000) return 0;
+    const chars = (message.content || "").length;
+    const estimatedTokens = Math.floor(chars / 4);
+    return Math.round(estimatedTokens / (streamElapsed / 1000));
+  });
+
+  // Tool progress: completed / total
+  let toolProgress = $derived.by(() => {
+    const calls = message.toolCalls || [];
+    if (calls.length === 0) return null;
+    const completed = calls.filter(tc => tc.output || tc.error).length;
+    return { completed, total: calls.length };
+  });
 </script>
 
 {#if message.role === "user"}
@@ -186,7 +238,7 @@
             {#if seg.type === "thinking"}
               <p class="whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground/70 italic">{seg.content}</p>
             {:else if seg.type === "tool_calls"}
-              <ToolCallGroup toolCalls={seg.calls} {agentName} />
+              <ToolCallGroup toolCalls={seg.calls} {agentName} compact={seg.calls.length > 1} />
             {/if}
           {/each}
         </div>
@@ -198,7 +250,7 @@
         {#if toolTurns.length > 0}
           <div class="mb-3 space-y-1.5">
             {#each toolTurns as turn}
-              <ToolCallGroup toolCalls={turn.toolCalls} {agentName} />
+              <ToolCallGroup toolCalls={turn.toolCalls} {agentName} compact={turn.toolCalls.length > 1} />
             {/each}
           </div>
         {/if}
@@ -216,16 +268,43 @@
         </div>
       {/if}
 
-      <!-- Streaming progress (bottom of message, Claude Code style) -->
+      <!-- Streaming progress (enhanced with phase + tokens/sec + tool progress) -->
       {#if streaming}
-        <div class="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
-          <span class="text-primary">*</span>
-          <span class="bg-gradient-to-r from-muted-foreground via-foreground to-muted-foreground bg-[length:200%_100%] bg-clip-text font-medium text-transparent animate-shimmer">
-            {streamVerb}...
-          </span>
-          <span class="text-[10px] text-muted-foreground/50">
-            ({streamElapsedLabel}{inlineTokenCount ? ` \u00B7 ${inlineTokenCount}` : ""})
-          </span>
+        <div class="mt-3 space-y-2">
+          <!-- Phase indicator -->
+          <div class="flex items-center gap-2">
+            <span class="text-sm">{phaseIcon}</span>
+            <span class="bg-gradient-to-r from-muted-foreground via-foreground to-muted-foreground bg-[length:200%_100%] bg-clip-text text-xs font-medium text-transparent animate-shimmer">
+              {phaseLabel}...
+            </span>
+            <span class="text-[10px] text-muted-foreground/40">{streamElapsedLabel}</span>
+            {#if tokensPerSec > 0}
+              <span class="text-[10px] text-muted-foreground/40">{tokensPerSec} tok/s</span>
+            {/if}
+          </div>
+
+          <!-- Tool progress bar (if tools are running) -->
+          {#if toolProgress && toolProgress.total > 0}
+            <div class="flex items-center gap-2">
+              <div class="h-1 flex-1 rounded-full bg-muted overflow-hidden">
+                <div
+                  class="h-full rounded-full bg-primary transition-all duration-300"
+                  style="width: {(toolProgress.completed / toolProgress.total) * 100}%"
+                ></div>
+              </div>
+              <span class="text-[10px] text-muted-foreground/50">
+                {toolProgress.completed}/{toolProgress.total} tools
+              </span>
+            </div>
+          {/if}
+        </div>
+
+        <div class="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+          <!-- Keep the rotating verb for variety -->
+          <span class="text-[10px] text-muted-foreground/30 italic">{streamVerb}</span>
+          {#if inlineTokenCount}
+            <span class="text-[10px] text-muted-foreground/30">{inlineTokenCount}</span>
+          {/if}
         </div>
       {/if}
 
