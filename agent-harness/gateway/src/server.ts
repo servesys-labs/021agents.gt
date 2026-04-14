@@ -2033,6 +2033,40 @@ app.get("/api/v1/agents/:name/skills/:skillName/audit", async (c) => {
   return new Response(resp.body, { status: resp.status, headers: resp.headers });
 });
 
+// ── Agent Secrets (proxy to DO @callable) ──
+
+// List secrets (keys only, not values — values never leave the DO)
+app.get("/api/v1/agents/:name/secrets", async (c) => {
+  const orgId = c.get("orgId");
+  const userId = c.get("userId");
+  const agentName = c.req.param("name");
+  const resp = await callAgentMethod(c.env, orgId, agentName, userId, "listSecrets", []);
+  return new Response(resp.body, { status: resp.status, headers: resp.headers });
+});
+
+// Store a secret (value goes to DO SQLite, encrypted, never returns to client)
+app.post("/api/v1/agents/:name/secrets", async (c) => {
+  const orgId = c.get("orgId");
+  const userId = c.get("userId");
+  const agentName = c.req.param("name");
+  const body = await c.req.json<{ key: string; value: string; category?: string; description?: string; expires_in?: number }>();
+  if (!body.key || !body.value) return c.json({ error: "key and value required" }, 400);
+  const resp = await callAgentMethod(c.env, orgId, agentName, userId, "storeSecret", [
+    body.key, body.value, body.category || "api_key", body.description || "", body.expires_in,
+  ]);
+  return new Response(resp.body, { status: resp.status, headers: resp.headers });
+});
+
+// Delete a secret
+app.delete("/api/v1/agents/:name/secrets/:key", async (c) => {
+  const orgId = c.get("orgId");
+  const userId = c.get("userId");
+  const agentName = c.req.param("name");
+  const key = c.req.param("key");
+  const resp = await callAgentMethod(c.env, orgId, agentName, userId, "deleteSecret", [key]);
+  return new Response(resp.body, { status: resp.status, headers: resp.headers });
+});
+
 // Get learned procedures (proxy to DO)
 app.get("/api/v1/agents/:name/procedures", async (c) => {
   const orgId = c.get("orgId");
