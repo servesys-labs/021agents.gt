@@ -39,23 +39,30 @@ interface RPCRequest {
   args: unknown[];
 }
 
+// SDK RPC response uses "done" (not "success") to distinguish streaming.
+// - "done" absent: non-streaming response, result is final
+// - done: false: streaming chunk, more to come
+// - done: true: streaming complete, result is final
+// - error present: call failed
 interface RPCResponse {
   type: typeof MessageType.RPC;
   id: string;
-  success: boolean;
   result?: unknown;
   error?: string;
-  done?: boolean; // for streaming
+  done?: boolean;
 }
 
-// ── Chat protocol message types (matches SDK) ──
+// ── Chat protocol message types (exact match with SDK chat/protocol.ts) ──
 
 export const CHAT_TYPES = {
   MESSAGES: "cf_agent_chat_messages",
   REQUEST: "cf_agent_use_chat_request",
   RESPONSE: "cf_agent_use_chat_response",
   CLEAR: "cf_agent_chat_clear",
+  REQUEST_CANCEL: "cf_agent_chat_request_cancel",
   STREAM_RESUMING: "cf_agent_stream_resuming",
+  STREAM_RESUME_ACK: "cf_agent_stream_resume_ack",
+  STREAM_RESUME_REQUEST: "cf_agent_stream_resume_request",
   STREAM_RESUME_NONE: "cf_agent_stream_resume_none",
   TOOL_RESULT: "cf_agent_tool_result",
   TOOL_APPROVAL: "cf_agent_tool_approval",
@@ -68,13 +75,17 @@ export interface AgentOptions<State = unknown> {
   /** Agent class name (kebab-case, e.g., "chat-agent") */
   agent: string;
   /** DO instance name (e.g., orgId-agentName-u-userId) */
-  name: string;
+  name?: string;
+  /** Full URL path — bypasses agent/name construction (for server-side routing) */
+  basePath?: string;
   /** WebSocket host (defaults to window.location.host) */
   host?: string;
-  /** Called when agent state is updated (push from server) */
-  onStateUpdate?: (state: State) => void;
-  /** Called when agent identity is confirmed */
+  /** Called when agent state is updated (push from server). Source: "server" or "client". */
+  onStateUpdate?: (state: State, source: "server" | "client") => void;
+  /** Called when agent identity is confirmed on first connect */
   onIdentity?: (name: string, agent: string) => void;
+  /** Called when identity changes on reconnect (different DO instance) */
+  onIdentityChange?: (oldName: string, newName: string, oldAgent: string, newAgent: string) => void;
   /** Called on any message (for chat protocol handling) */
   onMessage?: (data: unknown) => void;
   /** Called on connection open */
@@ -112,6 +123,15 @@ export interface SvelteAgentClient<State = unknown> {
   /** Send a chat message (SDK chat protocol) */
   sendChatMessage(message: string, options?: { id?: string }): void;
 
+  /** Approve or reject a tool call (SDK tool approval protocol) */
+  respondToToolApproval(toolCallId: string, approved: boolean): void;
+
+  /** Cancel the current streaming request */
+  cancelStream(requestId?: string): void;
+
+  /** Request stream resume after reconnect */
+  requestStreamResume(): void;
+
   /** Push state update to server */
   setState(state: State): void;
 
@@ -123,8 +143,9 @@ export interface SvelteAgentClient<State = unknown> {
 }
 
 /** Build the WebSocket URL for an agent DO (matches SDK routeAgentRequest pattern) */
-function buildAgentUrl(host: string, agent: string, name: string): string {
+function buildAgentUrl(host: string, agent: string, name: string, basePath?: string): string {
   const protocol = host.startsWith("localhost") ? "ws" : "wss";
+  if (basePath) return `${protocol}://${host}/${basePath.replace(/^\//, "")}`;
   return `${protocol}://${host}/agents/${agent}/${encodeURIComponent(name)}`;
 }
 
@@ -177,6 +198,10 @@ export function createAgent<State = unknown>(
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let closed = false;
 
+  // Identity tracking for change detection (SDK pattern)
+  let previousIdentityName: string | null = null;
+  let previousIdentityAgent: string | null = null;
+
   // Pending RPC calls
   const pendingCalls = new Map<string, {
     resolve: (value: unknown) => void;
@@ -187,8 +212,9 @@ export function createAgent<State = unknown>(
   function connect() {
     if (closed) return;
 
-    const url = buildAgentUrl(host, options.agent, options.name);
-    // Pass JWT as query param (browsers can't set WebSocket headers)
+    const instanceName = options.name || "default";
+    const url = buildAgentUrl(host, options.agent, instanceName, options.basePath);
+    // Pass JWT as query param (browsers can't set WebSocket headers — SDK pattern)
     const urlWithAuth = token ? `${url}?_pk=${encodeURIComponent(token)}` : url;
 
     try {
@@ -212,30 +238,69 @@ export function createAgent<State = unknown>(
         if (data.type === MessageType.CF_AGENT_IDENTITY) {
           identified = true;
           readyResolve?.();
+
+          // Detect identity change on reconnect (SDK pattern from client.ts:328-380)
+          if (previousIdentityName !== null && previousIdentityAgent !== null &&
+              (previousIdentityName !== data.name || previousIdentityAgent !== data.agent)) {
+            if (options.onIdentityChange) {
+              options.onIdentityChange(
+                previousIdentityName, data.name,
+                previousIdentityAgent, data.agent,
+              );
+            } else {
+              console.warn(
+                `[agents] Identity changed on reconnect: ` +
+                `agent "${previousIdentityAgent}" → "${data.agent}", ` +
+                `instance "${previousIdentityName}" → "${data.name}"`,
+              );
+            }
+          }
+          previousIdentityName = data.name;
+          previousIdentityAgent = data.agent;
+
           options.onIdentity?.(data.name, data.agent);
           return;
         }
 
-        // State sync — push from server
+        // State sync — push from server (with source tracking)
         if (data.type === MessageType.CF_AGENT_STATE) {
           agentState = data.state as State;
-          options.onStateUpdate?.(agentState);
+          options.onStateUpdate?.(agentState, "server");
           return;
         }
 
-        // RPC response
+        if (data.type === MessageType.CF_AGENT_STATE_ERROR) {
+          console.warn("[agents] State update error:", data.error);
+          return;
+        }
+
+        // RPC response — SDK uses "done" presence (not "success") to distinguish streaming
+        // See SDK client.ts:392-416
         if (data.type === MessageType.RPC && data.id) {
           const pending = pendingCalls.get(data.id);
           if (pending) {
-            if (data.done === false && pending.stream) {
-              // Streaming chunk
-              pending.stream.onChunk?.(data.result);
-            } else if (data.success) {
-              if (pending.stream?.onDone) pending.stream.onDone(data.result);
-              pending.resolve(data.result);
+            // Error check first
+            if (data.error) {
+              pending.reject(new Error(data.error));
+              pending.stream?.onError?.(data.error);
               pendingCalls.delete(data.id);
+              return;
+            }
+
+            // Streaming: "done" property determines if stream is over
+            if ("done" in data) {
+              if (data.done) {
+                // Final chunk — resolve the promise
+                pending.resolve(data.result);
+                pendingCalls.delete(data.id);
+                pending.stream?.onDone?.(data.result);
+              } else {
+                // Intermediate chunk
+                pending.stream?.onChunk?.(data.result);
+              }
             } else {
-              pending.reject(new Error(data.error || "RPC call failed"));
+              // Non-streaming response — result is final
+              pending.resolve(data.result);
               pendingCalls.delete(data.id);
             }
           }
@@ -340,9 +405,29 @@ export function createAgent<State = unknown>(
       });
     },
 
+    respondToToolApproval(toolCallId: string, approved: boolean) {
+      send({
+        type: CHAT_TYPES.TOOL_APPROVAL,
+        toolCallId,
+        approved,
+      });
+    },
+
+    cancelStream(requestId?: string) {
+      send({
+        type: CHAT_TYPES.REQUEST_CANCEL,
+        ...(requestId ? { id: requestId } : {}),
+      });
+    },
+
+    requestStreamResume() {
+      send({ type: CHAT_TYPES.STREAM_RESUME_REQUEST });
+    },
+
     setState(state: State) {
       agentState = state;
       send({ type: MessageType.CF_AGENT_STATE, state });
+      options.onStateUpdate?.(state, "client");
     },
 
     close() {
