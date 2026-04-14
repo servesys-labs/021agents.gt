@@ -41,6 +41,7 @@ import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 import puppeteer from "@cloudflare/puppeteer";
 import webpush from "web-push";
 import { metaAgentTools as metaAgentToolSet, META_AGENT_SYSTEM_PROMPT } from "./meta-agent";
+import { createAgentEmitter, emit, type TelemetryBindings } from "./telemetry";
 
 // Env type is declared globally in env.d.ts via Cloudflare.Env.
 // LOADER, AgentSupervisor, GITHUB_TOKEN, OPENAI_API_KEY, ANTHROPIC_API_KEY
@@ -1019,27 +1020,102 @@ export class ChatAgent extends Think<Env> {
     return s;
   }
 
-  // ── Lifecycle hooks ──
+  // ── Lifecycle hooks (comprehensive OTEL) ──
 
-  // After each tool call: telemetry
-  onStepFinish(ctx: any) {
-    if (this.env.ANALYTICS) {
-      try {
-        this.env.ANALYTICS.writeDataPoint({
-          blobs: [ctx.toolName || "llm_turn", this.name],
-          doubles: [ctx.usage?.totalTokens || 0],
-          indexes: [this.name],
-        });
-      } catch {} // non-blocking
+  // Telemetry emitter — bound to this agent's context
+  private get _telemetry() {
+    return createAgentEmitter(this.env as TelemetryBindings, this.name);
+  }
+
+  // Before each turn: emit turn start
+  beforeTurn(ctx: any) {
+    this._telemetry.llmRequest(ctx.sessionId || this.name, ctx.model || "");
+    return undefined; // use Think defaults
+  }
+
+  // Before each tool call: emit tool.called
+  beforeToolCall(ctx: any) {
+    this._telemetry.toolCalled(ctx.sessionId || this.name, ctx.toolName || "");
+    return undefined; // proceed with execution
+  }
+
+  // After each tool call: emit tool.completed or tool.failed + metrics
+  afterToolCall(ctx: any) {
+    if (ctx.error) {
+      this._telemetry.toolFailed(
+        ctx.sessionId || this.name,
+        ctx.toolName || "",
+        String(ctx.error),
+      );
+    } else {
+      this._telemetry.toolCompleted(
+        ctx.sessionId || this.name,
+        ctx.toolName || "",
+        { latencyMs: ctx.duration || 0, costUsd: ctx.cost || 0 },
+      );
     }
   }
 
-  // Post-turn: broadcast completion, refresh context blocks
+  // After each step (turn or tool): emit comprehensive turn metrics
+  onStepFinish(ctx: any) {
+    const usage = ctx.usage || {};
+    this._telemetry.turnCompleted(ctx.sessionId || this.name, {
+      turnNumber: ctx.stepNumber || 0,
+      model: ctx.model || "",
+      inputTokens: usage.promptTokens || usage.inputTokens || 0,
+      outputTokens: usage.completionTokens || usage.outputTokens || 0,
+      latencyMs: ctx.duration || 0,
+      costUsd: ctx.cost || 0,
+      stopReason: ctx.finishReason || "",
+      cacheReadTokens: usage.cacheReadInputTokens || 0,
+      cacheWriteTokens: usage.cacheCreationInputTokens || 0,
+    });
+
+    // Detect refusals
+    if (ctx.finishReason === "content_filter" || ctx.refusal) {
+      this._telemetry.turnRefusal(ctx.sessionId || this.name, ctx.stepNumber || 0);
+    }
+  }
+
+  // Post-turn: emit session completion + billing + broadcast
   protected async onChatResponse(result: ChatResponseResult) {
     if (result.status === "completed") {
+      const usage = (result as any).usage || {};
+      const costUsd = (result as any).cost || 0;
+      const model = (result as any).model || "";
+
+      // Session completion telemetry
+      this._telemetry.sessionCompleted(this.name, {
+        costUsd,
+        latencyMs: (result as any).duration || 0,
+        turnNumber: (result as any).steps || 0,
+        stopReason: (result as any).finishReason || "completed",
+        model,
+      });
+
+      // Billing telemetry
+      if (costUsd > 0) {
+        this._telemetry.billingDeducted(this.name, costUsd, model);
+      }
+
+      // Broadcast to connected clients
       this.broadcast(JSON.stringify({ type: "streaming_done" }));
+
+      // Refresh context blocks (memory may have been updated)
       try { await (this as any).session?.refreshSystemPrompt?.(); } catch {}
+    } else if (result.status === "error") {
+      this._telemetry.sessionFailed(this.name, (result as any).error || "unknown");
     }
+  }
+
+  // Error handler: emit session failure
+  onChatError(error: Error) {
+    emit(this.env as TelemetryBindings, {
+      type: "session.failed",
+      agentName: this.name,
+      error: error.message,
+    });
+    return error; // propagate
   }
 
   // ── @callable methods (unchanged interface, Think-compatible) ──

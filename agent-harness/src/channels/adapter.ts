@@ -36,10 +36,28 @@ export interface ChannelResponse {
 
 // ── Agent runner: calls the Think DO via fetch ─────────────────────
 
+/**
+ * Run an agent and emit telemetry for the channel interaction.
+ * Emits: channel.message_received (before), channel.message_sent (after),
+ *        channel.error (on failure).
+ */
 export async function runAgent(
   agentCore: Fetcher,
   msg: ChannelMessage,
+  telemetryEnv?: { ANALYTICS?: AnalyticsEngineDataset; TELEMETRY_QUEUE?: Queue },
 ): Promise<ChannelResponse> {
+  // Emit inbound event
+  if (telemetryEnv?.ANALYTICS) {
+    try {
+      telemetryEnv.ANALYTICS.writeDataPoint({
+        blobs: ["channel.message_received", msg.agentName, msg.channel, msg.userId],
+        doubles: [msg.text.length, 0, 0, 0, 0, 0],
+        indexes: [msg.orgId || msg.agentName],
+      });
+    } catch {}
+  }
+
+  const started = Date.now();
   const doName = `${msg.orgId}-${msg.agentName}-u-${msg.userId}`.slice(0, 63);
 
   const resp = await agentCore.fetch(
@@ -58,12 +76,33 @@ export async function runAgent(
 
   if (!resp.ok) {
     const errText = await resp.text().catch(() => resp.statusText);
+    // Emit channel error
+    if (telemetryEnv?.ANALYTICS) {
+      try {
+        telemetryEnv.ANALYTICS.writeDataPoint({
+          blobs: ["channel.error", msg.agentName, msg.channel, errText.slice(0, 100)],
+          doubles: [Date.now() - started, 0, 0, 0, 0, 0],
+          indexes: [msg.orgId || msg.agentName],
+        });
+      } catch {}
+    }
     return { text: "Sorry, I couldn't process that. Please try again." };
   }
 
   // For non-streaming channels: collect the full response
   const result = await resp.json() as Record<string, unknown>;
   const output = String(result.output || result.text || result.content || "I didn't generate a response.");
+
+  // Emit outbound event with latency
+  if (telemetryEnv?.ANALYTICS) {
+    try {
+      telemetryEnv.ANALYTICS.writeDataPoint({
+        blobs: ["channel.message_sent", msg.agentName, msg.channel, msg.userId],
+        doubles: [Date.now() - started, output.length, 0, 0, 0, 0],
+        indexes: [msg.orgId || msg.agentName],
+      });
+    } catch {}
+  }
 
   return { text: output };
 }
