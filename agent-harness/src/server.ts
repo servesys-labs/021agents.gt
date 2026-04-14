@@ -2445,6 +2445,51 @@ export class ChatAgent extends Think<Env> {
       }
     }
 
+    // [10] Destructive tool protection — ALWAYS_REQUIRE_APPROVAL for dangerous operations
+    // SDK primitive: return block to force user confirmation via tool approval flow.
+    const DESTRUCTIVE_TOOLS = new Set([
+      "deleteAgent", "deleteSkill", "bulkUpdateAgents",
+      "deploy_to_pages", "deploy_to_workers",
+      "github_create_repo", "github_create_pr",
+    ]);
+    const DESTRUCTIVE_PATTERNS = [
+      /DELETE\s+FROM/i, /DROP\s+TABLE/i, /TRUNCATE/i, // SQL destructive
+      /rm\s+-rf/i, /rmdir/i, // Shell destructive
+    ];
+
+    if (DESTRUCTIVE_TOOLS.has(ctx.toolName)) {
+      // Block and let Think's tool approval flow handle it
+      // (model sees "needs confirmation" → pauses for user)
+      return {
+        action: "block" as const,
+        reason: `Tool "${ctx.toolName}" requires confirmation. This is a destructive or irreversible action.`,
+      };
+    }
+
+    // Check args for destructive SQL/shell patterns
+    const argsStr = JSON.stringify(ctx.args || {});
+    for (const pattern of DESTRUCTIVE_PATTERNS) {
+      if (pattern.test(argsStr)) {
+        return {
+          action: "block" as const,
+          reason: `Blocked: destructive pattern detected in args (${pattern.source}). Use a safer approach.`,
+        };
+      }
+    }
+
+    // [11] Cost budget enforcement — block tools when session cost exceeds limit
+    const budgetLimit = (tenantConfig as any).budgetLimitUsd ?? 1.00; // default $1 per session
+    if (this._sessionCostUsd > budgetLimit) {
+      this._recordSignal("cost_runaway", ctx.toolName, 3, {
+        sessionCost: this._sessionCostUsd,
+        budgetLimit,
+      });
+      return {
+        action: "block" as const,
+        reason: `Session cost ($${this._sessionCostUsd.toFixed(4)}) exceeds budget limit ($${budgetLimit.toFixed(2)}). Summarize what you've done so far and stop making tool calls.`,
+      };
+    }
+
     return undefined; // proceed
   }
 
