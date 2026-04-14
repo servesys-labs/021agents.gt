@@ -1528,6 +1528,274 @@ app.get("/api/v1/features", async (c) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════
+// MARKETPLACE (Pattern E: Postgres)
+// ═══════════════════════════════════════════════════════════════════
+
+app.get("/api/v1/marketplace/search", async (c) => {
+  const category = c.req.query("category") || "";
+  const query = c.req.query("q") || "";
+  const sort = c.req.query("sort") || "quality_score";
+  const limit = Math.min(Number(c.req.query("limit")) || 20, 50);
+  const offset = Number(c.req.query("offset")) || 0;
+
+  const sql = await getDb(c.env.DB);
+  const rows = await sql`
+    SELECT id, org_id, agent_name, title, description, category,
+           price_usd, is_free, quality_score, install_count, created_at
+    FROM marketplace_listings
+    WHERE status = 'published'
+      AND (${category} = '' OR category = ${category})
+      AND (${query} = '' OR title ILIKE ${"%" + query + "%"} OR description ILIKE ${"%" + query + "%"})
+    ORDER BY
+      CASE WHEN ${sort} = 'quality_score' THEN quality_score END DESC NULLS LAST,
+      CASE WHEN ${sort} = 'install_count' THEN install_count END DESC NULLS LAST,
+      CASE WHEN ${sort} = 'newest' THEN extract(epoch from created_at) END DESC NULLS LAST
+    LIMIT ${limit} OFFSET ${offset}
+  `;
+  await sql.end();
+  return c.json({ listings: rows, limit, offset });
+});
+
+app.get("/api/v1/marketplace/categories", (c) => {
+  return c.json([
+    "general", "research", "coding", "data-analysis", "customer-support",
+    "writing", "marketing", "sales", "legal", "finance", "education",
+    "devops", "design", "productivity",
+  ]);
+});
+
+app.get("/api/v1/marketplace/:id", async (c) => {
+  const listingId = c.req.param("id");
+  const sql = await getDb(c.env.DB);
+  const [listing] = await sql`
+    SELECT l.*, COALESCE(AVG(r.score), 0) as avg_rating, COUNT(r.id) as rating_count
+    FROM marketplace_listings l
+    LEFT JOIN marketplace_ratings r ON r.listing_id = l.id
+    WHERE l.id = ${listingId} AND l.status = 'published'
+    GROUP BY l.id
+  `;
+  await sql.end();
+  if (!listing) return c.json({ error: "Listing not found" }, 404);
+  return c.json(listing);
+});
+
+app.post("/api/v1/marketplace/publish", async (c) => {
+  const orgId = c.get("orgId");
+  const body = await c.req.json<{
+    agent_name: string; title: string; description?: string;
+    category?: string; price_usd?: number;
+  }>();
+  if (!body.agent_name || !body.title) return c.json({ error: "agent_name and title required" }, 400);
+
+  const sql = await getDb(c.env.DB);
+  // Verify agent exists and belongs to this org
+  const [agent] = await sql`
+    SELECT name, config FROM agents WHERE name = ${body.agent_name} AND org_id = ${orgId} AND is_active = true
+  `;
+  if (!agent) {
+    await sql.end();
+    return c.json({ error: "Agent not found" }, 404);
+  }
+
+  const [listing] = await sql`
+    INSERT INTO marketplace_listings (org_id, agent_name, title, description, category, price_usd, is_free, status, config)
+    VALUES (
+      ${orgId}, ${body.agent_name}, ${body.title}, ${body.description || ""},
+      ${body.category || "general"}, ${body.price_usd || 0}, ${!body.price_usd || body.price_usd === 0},
+      'published', ${JSON.stringify(agent.config || {})}
+    )
+    RETURNING *
+  `;
+  await sql.end();
+  return c.json(listing, 201);
+});
+
+app.post("/api/v1/marketplace/:id/rate", async (c) => {
+  const userId = c.get("userId");
+  const listingId = c.req.param("id");
+  const body = await c.req.json<{ score: number; review?: string }>();
+  if (!body.score || body.score < 1 || body.score > 5) {
+    return c.json({ error: "Score must be 1-5" }, 400);
+  }
+
+  const sql = await getDb(c.env.DB);
+  const [rating] = await sql`
+    INSERT INTO marketplace_ratings (listing_id, user_id, score, review)
+    VALUES (${listingId}, ${userId}, ${body.score}, ${body.review || ""})
+    ON CONFLICT (listing_id, user_id) DO UPDATE SET score = ${body.score}, review = ${body.review || ""}
+    RETURNING *
+  `;
+  // Update quality_score (rolling average)
+  await sql`
+    UPDATE marketplace_listings SET
+      quality_score = (SELECT AVG(score) FROM marketplace_ratings WHERE listing_id = ${listingId})
+    WHERE id = ${listingId}
+  `;
+  await sql.end();
+  return c.json(rating);
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// RAG DOCUMENTS (Pattern E: Postgres metadata + R2 storage)
+// ═══════════════════════════════════════════════════════════════════
+
+app.get("/api/v1/rag/:agent/documents", async (c) => {
+  const orgId = c.get("orgId");
+  const agentName = c.req.param("agent");
+  // RAG document metadata stored alongside agent config.
+  // Full documents live in R2 at: rag/{orgId}/{agentName}/{docId}
+  const prefix = `rag/${orgId}/${agentName}/`;
+  const listed = await c.env.STORAGE.list({ prefix, limit: 100 });
+  const docs = listed.objects.map(obj => ({
+    key: obj.key.replace(prefix, ""),
+    size: obj.size,
+    uploaded: obj.uploaded,
+  }));
+  return c.json({ documents: docs, agent_name: agentName });
+});
+
+app.post("/api/v1/rag/:agent/documents", async (c) => {
+  const orgId = c.get("orgId");
+  const agentName = c.req.param("agent");
+  const formData = await c.req.formData();
+  const file = formData.get("file") as File | null;
+  if (!file) return c.json({ error: "file field required" }, 400);
+
+  const docId = crypto.randomUUID().slice(0, 8);
+  const r2Key = `rag/${orgId}/${agentName}/${docId}-${file.name}`;
+
+  // Upload to R2
+  await c.env.STORAGE.put(r2Key, file.stream(), {
+    httpMetadata: { contentType: file.type },
+    customMetadata: { orgId, agentName, originalName: file.name },
+  });
+
+  // TODO: Queue a chunking + Vectorize embedding job
+  // For now, document is stored and listable but not yet searchable
+  // via semantic search. Chunking pipeline is a Queue consumer task.
+
+  return c.json({ key: r2Key, name: file.name, size: file.size }, 201);
+});
+
+app.delete("/api/v1/rag/:agent/documents/:key", async (c) => {
+  const orgId = c.get("orgId");
+  const agentName = c.req.param("agent");
+  const key = c.req.param("key");
+  const r2Key = `rag/${orgId}/${agentName}/${key}`;
+  await c.env.STORAGE.delete(r2Key);
+  // TODO: Remove corresponding Vectorize embeddings
+  return c.json({ deleted: key });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// EVAL (complete lifecycle — Pattern E: Postgres)
+// ═══════════════════════════════════════════════════════════════════
+
+app.get("/api/v1/eval/test-cases", async (c) => {
+  const orgId = c.get("orgId");
+  const agentName = c.req.query("agent_name") || "";
+  const sql = await getDb(c.env.DB);
+  const rows = agentName
+    ? await sql`
+        SELECT * FROM eval_test_cases WHERE org_id = ${orgId} AND agent_name = ${agentName}
+        ORDER BY created_at DESC
+      `
+    : await sql`
+        SELECT * FROM eval_test_cases WHERE org_id = ${orgId}
+        ORDER BY created_at DESC LIMIT 100
+      `;
+  await sql.end();
+  return c.json(rows);
+});
+
+app.post("/api/v1/eval/test-cases", async (c) => {
+  const orgId = c.get("orgId");
+  const body = await c.req.json<{
+    agent_name: string; name?: string; input: string; expected?: string;
+    rubric?: Record<string, unknown>; tags?: string[];
+  }>();
+  if (!body.agent_name || !body.input) return c.json({ error: "agent_name and input required" }, 400);
+
+  const sql = await getDb(c.env.DB);
+  const [tc] = await sql`
+    INSERT INTO eval_test_cases (org_id, agent_name, name, input, expected, rubric, tags)
+    VALUES (${orgId}, ${body.agent_name}, ${body.name || ""}, ${body.input},
+            ${body.expected || null}, ${JSON.stringify(body.rubric || {})}, ${JSON.stringify(body.tags || [])})
+    RETURNING *
+  `;
+  await sql.end();
+  return c.json(tc, 201);
+});
+
+app.get("/api/v1/eval/runs/:id/results", async (c) => {
+  const orgId = c.get("orgId");
+  const runId = c.req.param("id");
+  const sql = await getDb(c.env.DB);
+
+  const [run] = await sql`SELECT * FROM eval_runs WHERE id = ${runId} AND org_id = ${orgId}`;
+  if (!run) {
+    await sql.end();
+    return c.json({ error: "Run not found" }, 404);
+  }
+
+  const trials = await sql`
+    SELECT * FROM eval_trials WHERE run_id = ${runId} ORDER BY id
+  `;
+  await sql.end();
+
+  return c.json({
+    run,
+    trials,
+    summary: {
+      total: trials.length,
+      passed: trials.filter((t: any) => t.passed).length,
+      failed: trials.filter((t: any) => t.passed === false).length,
+      avg_score: trials.length > 0
+        ? trials.reduce((sum: number, t: any) => sum + (Number(t.score) || 0), 0) / trials.length
+        : 0,
+      total_cost: trials.reduce((sum: number, t: any) => sum + (Number(t.cost_usd) || 0), 0),
+    },
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// META-AGENT (Pattern D: proxy to Agent Core DO)
+// ═══════════════════════════════════════════════════════════════════
+
+app.post("/api/v1/agents/create-from-description", async (c) => {
+  const orgId = c.get("orgId");
+  const userId = c.get("userId");
+  const body = await c.req.json<{ description: string; plan?: string }>();
+  if (!body.description) return c.json({ error: "description required" }, 400);
+
+  // Route to the meta-agent DO instance for this org
+  const doName = buildDoName(orgId, "meta", userId);
+  const resp = await c.env.AGENT_CORE.fetch(
+    new Request(`http://internal/agents/chat-agent/${doName}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "run",
+        input: `Create an agent from this description: ${body.description}${body.plan ? `\n\nPlan: ${body.plan}` : ""}`,
+        agent_name: "meta",
+        org_id: orgId,
+        user_id: userId,
+      }),
+    }),
+  );
+
+  // Stream the meta-agent's response back
+  return new Response(resp.body, {
+    status: resp.status,
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Access-Control-Allow-Origin": "*",
+    },
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
 // BILLING DO (Pattern B: atomic balance at edge)
 // ═══════════════════════════════════════════════════════════════════
 

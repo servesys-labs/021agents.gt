@@ -56,13 +56,13 @@
   // AI for guardrail checks
   "ai": { "binding": "AI" },
 
-  // Vectorize for marketplace semantic search
+  // Vectorize — shared with agent-harness worker for semantic memory
   "vectorize": [
-    { "binding": "VECTORIZE", "index_name": "agentos-knowledge-v2" }
+    { "binding": "VECTORIZE", "index_name": "agent-harness-memory" }
   ],
 
-  // R2 for file storage
+  // R2 — shared with agent-harness worker for workspace/RAG/archives
   "r2_buckets": [
-    { "binding": "STORAGE", "bucket_name": "agentos-storage" }
+    { "binding": "STORAGE", "bucket_name": "agent-harness-storage" }
   ]
 }

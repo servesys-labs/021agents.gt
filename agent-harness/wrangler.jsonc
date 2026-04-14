@@ -61,6 +61,16 @@
     "enabled": true
   },
 
+  // R2 — workspace file spillover + RAG documents + conversation archives
+  "r2_buckets": [
+    { "binding": "STORAGE", "bucket_name": "agent-harness-storage" }
+  ],
+
+  // Vectorize — semantic memory (cross-session embeddings)
+  "vectorize": [
+    { "binding": "VECTORIZE", "index_name": "agent-harness-memory" }
+  ],
+
   // Hyperdrive — Railway Postgres for durable cross-org data
   // Agent-harness writes: session records, billing, OTEL events
   // Gateway also connects to the same Postgres for admin queries
