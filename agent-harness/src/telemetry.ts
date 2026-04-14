@@ -24,12 +24,13 @@ export type TelemetryEventType =
   | "session.completed"
   | "session.failed"
   | "session.timeout"
+  | "session.progress"       // progress %, stage — maps to session_progress
   // Turn lifecycle
   | "turn.started"
   | "turn.completed"
   | "turn.error"
   | "turn.refusal"
-  | "turn.compacted"
+  | "turn.compacted"         // compaction triggered — maps to compaction_count
   // Tool execution
   | "tool.called"
   | "tool.completed"
@@ -43,12 +44,16 @@ export type TelemetryEventType =
   | "llm.fallback"
   | "llm.cache_hit"
   | "llm.error"
+  | "llm.ttft"               // time to first token — maps to turns.ttft_ms
+  | "llm.tokens_per_sec"     // streaming throughput
   // Memory
   | "memory.context_loaded"
   | "memory.context_written"
   | "memory.compaction"
   | "memory.skill_activated"
   | "memory.skill_deactivated"
+  | "memory.fact_extracted"   // fact extraction — maps to facts table
+  | "memory.episode_stored"  // episodic memory — maps to episodes table
   // Channels
   | "channel.message_received"
   | "channel.message_sent"
@@ -62,18 +67,59 @@ export type TelemetryEventType =
   | "security.input_blocked"
   | "security.output_filtered"
   | "security.anomaly_detected"
+  | "security.scan_completed" // security scan — maps to security_scans
   // Billing
   | "billing.deducted"
   | "billing.insufficient"
   | "billing.hold_created"
   | "billing.hold_settled"
+  | "billing.exception"      // billing anomaly — maps to billing_exceptions
   // MCP
   | "mcp.server_connected"
   | "mcp.server_disconnected"
   | "mcp.tool_discovered"
+  | "mcp.tool_called"        // MCP tool invocation (not our tool, external)
   // Agent lifecycle
   | "agent.created"
   | "agent.updated"
+  | "agent.deleted"
+  | "agent.skill_added"
+  | "agent.skill_removed"
+  | "agent.channel_deployed"
+  | "agent.version_snapshot"  // agent version saved — maps to agent_versions
+  // Eval & Training
+  | "eval.run_started"       // eval run created — maps to eval_runs
+  | "eval.run_completed"
+  | "eval.trial_completed"   // individual trial — maps to eval_trials
+  | "training.job_started"   // training loop — maps to training_jobs
+  | "training.iteration"     // iteration result — maps to training_iterations
+  | "training.job_completed"
+  // Conversation quality (scored per-turn)
+  | "conversation.scored"    // quality metrics — maps to conversation_scores
+  | "conversation.feedback"  // user thumbs up/down — maps to session_feedback
+  // Voice
+  | "voice.call_started"     // voice call lifecycle — maps to voice_calls
+  | "voice.call_ended"
+  | "voice.call_event"       // mid-call events — maps to voice_call_events
+  // Workflow
+  | "workflow.started"       // durable workflow — maps to workflow_runs
+  | "workflow.step_completed"
+  | "workflow.completed"
+  | "workflow.approval_requested" // maps to workflow_approvals
+  | "workflow.approval_resolved"
+  // Autopilot
+  | "autopilot.session_started"  // autonomous run — maps to autopilot_sessions
+  | "autopilot.session_ended"
+  // Artifacts
+  | "artifact.created"       // generated file — maps to run_artifacts
+  | "artifact.accessed"
+  // API access
+  | "api.request"            // every API hit — maps to api_access_log
+  // Meta Agent
+  | "meta.suggestion_generated"
+  | "meta.eval_run"
+  | "meta.bulk_update"
+  | "meta.agent_improved";
   | "agent.deleted"
   | "agent.skill_added"
   | "agent.skill_removed"
@@ -92,6 +138,7 @@ export interface TelemetryEvent {
   orgId?: string;
   sessionId?: string;
   traceId?: string;
+  spanId?: string;
   turnNumber?: number;
   channel?: string;
   userId?: string;
@@ -112,17 +159,69 @@ export interface TelemetryEvent {
   refusal?: boolean;
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
+  ttftMs?: number;             // time to first token
+  tokensPerSec?: number;       // streaming throughput
+  llmRetryCount?: number;
+  gatewayLogId?: string;       // AI Gateway log correlation
   // Channel-specific
   platform?: string;
   messageLength?: number;
   // Security
   severity?: "critical" | "high" | "medium" | "low" | "info";
   ruleName?: string;
+  riskScore?: number;
   // Delegation
   parentSessionId?: string;
   childSessionId?: string;
   childAgentName?: string;
   depth?: number;
+  spawnMode?: "sync" | "async";
+  // Eval & Training
+  evalRunId?: string;
+  testInput?: string;
+  expectedOutput?: string;
+  actualOutput?: string;
+  passed?: boolean;
+  score?: number;
+  passRate?: number;
+  trainingJobId?: string;
+  iterationNumber?: number;
+  rewardScore?: number;
+  // Conversation quality (per-turn scoring)
+  sentiment?: string;
+  sentimentScore?: number;
+  relevanceScore?: number;
+  coherenceScore?: number;
+  helpfulnessScore?: number;
+  safetyScore?: number;
+  qualityOverall?: number;
+  topic?: string;
+  intent?: string;
+  hasToolFailure?: boolean;
+  hasHallucinationRisk?: boolean;
+  // Voice
+  callId?: string;
+  callDurationMs?: number;
+  callEvent?: string;
+  // Workflow
+  workflowId?: string;
+  workflowStepName?: string;
+  approvalStatus?: string;
+  // Artifacts
+  artifactName?: string;
+  artifactKind?: string;
+  artifactSizeBytes?: number;
+  storageKey?: string;
+  // Progress
+  progressPct?: number;
+  stage?: string;
+  // Session composition
+  stepCount?: number;
+  actionCount?: number;
+  wallClockSeconds?: number;
+  terminationReason?: string;
+  compactionCount?: number;
+  repairCount?: number;
   // Generic
   metadata?: Record<string, unknown>;
   error?: string;
@@ -193,15 +292,38 @@ export function emit(env: TelemetryBindings, event: TelemetryEvent): void {
  */
 function shouldQueueToPostgres(type: TelemetryEventType): boolean {
   const postgresEvents = new Set<TelemetryEventType>([
+    // Session lifecycle (→ sessions table)
     "session.started", "session.completed", "session.failed", "session.timeout",
+    // Turn lifecycle (→ turns table)
     "turn.completed", "turn.error", "turn.refusal",
+    // Tool execution (→ tool_executions table)
     "tool.completed", "tool.failed",
-    "billing.deducted", "billing.insufficient",
+    // Billing (→ billing_records, billing_exceptions)
+    "billing.deducted", "billing.insufficient", "billing.exception",
+    "billing.hold_created", "billing.hold_settled",
+    // Delegation (→ delegation_events table)
     "delegation.started", "delegation.completed", "delegation.failed",
-    "security.guardrail_triggered", "security.input_blocked", "security.anomaly_detected",
-    "agent.created", "agent.updated", "agent.deleted",
+    // Security (→ security_events, guardrail_events)
+    "security.guardrail_triggered", "security.input_blocked",
+    "security.anomaly_detected", "security.scan_completed",
+    // Agent lifecycle (→ agents table audit)
+    "agent.created", "agent.updated", "agent.deleted", "agent.version_snapshot",
+    // Channel errors (→ runtime_events)
     "channel.error",
-    "meta.eval_run",
+    // Eval & Training (→ eval_runs, eval_trials, training_jobs)
+    "eval.run_started", "eval.run_completed", "eval.trial_completed",
+    "training.job_started", "training.iteration", "training.job_completed",
+    // Conversation quality (→ conversation_scores)
+    "conversation.scored", "conversation.feedback",
+    // Voice (→ voice_calls, voice_call_events)
+    "voice.call_started", "voice.call_ended", "voice.call_event",
+    // Workflow (→ workflow_runs, workflow_approvals)
+    "workflow.started", "workflow.completed",
+    "workflow.approval_requested", "workflow.approval_resolved",
+    // Artifacts (→ run_artifacts)
+    "artifact.created",
+    // Meta Agent
+    "meta.eval_run", "meta.agent_improved",
   ]);
   return postgresEvents.has(type);
 }
@@ -356,6 +478,110 @@ function mapToQueueEvent(event: TelemetryEvent, ts: string): { type: string; pay
         },
       };
 
+    // ── Eval & Training ──
+    case "eval.run_started":
+    case "eval.run_completed":
+      return {
+        type: "event",
+        payload: { ...base, event_type: event.type, eval_run_id: event.evalRunId, pass_rate: event.passRate, score: event.score },
+      };
+    case "eval.trial_completed":
+      return {
+        type: "event",
+        payload: { ...base, event_type: event.type, eval_run_id: event.evalRunId, test_input: event.testInput?.slice(0, 500), expected_output: event.expectedOutput?.slice(0, 500), actual_output: event.actualOutput?.slice(0, 500), passed: event.passed, score: event.score },
+      };
+    case "training.job_started":
+    case "training.job_completed":
+      return {
+        type: "event",
+        payload: { ...base, event_type: event.type, training_job_id: event.trainingJobId },
+      };
+    case "training.iteration":
+      return {
+        type: "event",
+        payload: { ...base, event_type: event.type, training_job_id: event.trainingJobId, iteration_number: event.iterationNumber, reward_score: event.rewardScore, pass_rate: event.passRate },
+      };
+
+    // ── Conversation quality ──
+    case "conversation.scored":
+      return {
+        type: "event",
+        payload: { ...base, event_type: event.type, turn_number: event.turnNumber, sentiment: event.sentiment, sentiment_score: event.sentimentScore, relevance_score: event.relevanceScore, coherence_score: event.coherenceScore, helpfulness_score: event.helpfulnessScore, safety_score: event.safetyScore, quality_overall: event.qualityOverall, topic: event.topic, intent: event.intent, has_tool_failure: event.hasToolFailure, has_hallucination_risk: event.hasHallucinationRisk },
+      };
+    case "conversation.feedback":
+      return {
+        type: "feedback",
+        payload: { ...base, rating: event.score, feedback: event.error || "", user_id: event.userId },
+      };
+
+    // ── Voice ──
+    case "voice.call_started":
+    case "voice.call_ended":
+      return {
+        type: "event",
+        payload: { ...base, event_type: event.type, call_id: event.callId, call_duration_ms: event.callDurationMs, channel: "voice" },
+      };
+    case "voice.call_event":
+      return {
+        type: "event",
+        payload: { ...base, event_type: event.type, call_id: event.callId, call_event: event.callEvent },
+      };
+
+    // ── Workflow ──
+    case "workflow.started":
+    case "workflow.completed":
+      return {
+        type: "event",
+        payload: { ...base, event_type: event.type, workflow_id: event.workflowId },
+      };
+    case "workflow.approval_requested":
+    case "workflow.approval_resolved":
+      return {
+        type: "event",
+        payload: { ...base, event_type: event.type, workflow_id: event.workflowId, approval_status: event.approvalStatus },
+      };
+
+    // ── Artifacts ──
+    case "artifact.created":
+      return {
+        type: "event",
+        payload: { ...base, event_type: event.type, artifact_name: event.artifactName, artifact_kind: event.artifactKind, size_bytes: event.artifactSizeBytes, storage_key: event.storageKey },
+      };
+
+    // ── Billing extended ──
+    case "billing.exception":
+      return {
+        type: "event",
+        payload: { ...base, event_type: event.type, cost_usd: event.costUsd, error: event.error },
+      };
+    case "billing.hold_created":
+    case "billing.hold_settled":
+      return {
+        type: "event",
+        payload: { ...base, event_type: event.type, cost_usd: event.costUsd },
+      };
+
+    // ── Security extended ──
+    case "security.scan_completed":
+      return {
+        type: "event",
+        payload: { ...base, event_type: event.type, risk_score: event.riskScore, severity: event.severity },
+      };
+
+    // ── Agent lifecycle extended ──
+    case "agent.version_snapshot":
+      return {
+        type: "event",
+        payload: { ...base, event_type: event.type, ...event.metadata },
+      };
+
+    // ── Meta Agent ──
+    case "meta.agent_improved":
+      return {
+        type: "event",
+        payload: { ...base, event_type: event.type, ...event.metadata },
+      };
+
     default:
       return null;
   }
@@ -432,5 +658,119 @@ export function createAgentEmitter(
 
     billingDeducted: (sessionId: string, costUsd: number, model: string) =>
       emit(env, { type: "billing.deducted", agentName, orgId, sessionId, costUsd, model }),
+
+    // ── Eval & Training ──
+    evalRunStarted: (evalRunId: string) =>
+      emit(env, { type: "eval.run_started", agentName, orgId, evalRunId }),
+
+    evalRunCompleted: (evalRunId: string, passRate: number) =>
+      emit(env, { type: "eval.run_completed", agentName, orgId, evalRunId, passRate }),
+
+    evalTrialCompleted: (evalRunId: string, opts: { testInput: string; expectedOutput: string; actualOutput: string; passed: boolean; score: number }) =>
+      emit(env, { type: "eval.trial_completed", agentName, orgId, evalRunId, ...opts }),
+
+    trainingStarted: (trainingJobId: string) =>
+      emit(env, { type: "training.job_started", agentName, orgId, trainingJobId }),
+
+    trainingIteration: (trainingJobId: string, iterationNumber: number, rewardScore: number) =>
+      emit(env, { type: "training.iteration", agentName, orgId, trainingJobId, iterationNumber, rewardScore }),
+
+    trainingCompleted: (trainingJobId: string) =>
+      emit(env, { type: "training.job_completed", agentName, orgId, trainingJobId }),
+
+    // ── Conversation quality ──
+    conversationScored: (sessionId: string, opts: { turnNumber: number; sentiment: string; sentimentScore: number; relevanceScore: number; coherenceScore: number; helpfulnessScore: number; safetyScore: number; qualityOverall: number; topic: string; intent: string }) =>
+      emit(env, { type: "conversation.scored", agentName, orgId, sessionId, ...opts }),
+
+    conversationFeedback: (sessionId: string, rating: number, feedback: string) =>
+      emit(env, { type: "conversation.feedback", agentName, orgId, sessionId, score: rating, error: feedback }),
+
+    // ── Voice ──
+    voiceCallStarted: (callId: string) =>
+      emit(env, { type: "voice.call_started", agentName, orgId, callId, channel: "voice" }),
+
+    voiceCallEnded: (callId: string, durationMs: number) =>
+      emit(env, { type: "voice.call_ended", agentName, orgId, callId, callDurationMs: durationMs }),
+
+    voiceCallEvent: (callId: string, event: string) =>
+      emit(env, { type: "voice.call_event", agentName, orgId, callId, callEvent: event }),
+
+    // ── Workflow ──
+    workflowStarted: (workflowId: string) =>
+      emit(env, { type: "workflow.started", agentName, orgId, workflowId }),
+
+    workflowCompleted: (workflowId: string) =>
+      emit(env, { type: "workflow.completed", agentName, orgId, workflowId }),
+
+    workflowApproval: (workflowId: string, status: string) =>
+      emit(env, { type: "workflow.approval_requested", agentName, orgId, workflowId, approvalStatus: status }),
+
+    // ── Artifacts ──
+    artifactCreated: (sessionId: string, name: string, kind: string, sizeBytes: number) =>
+      emit(env, { type: "artifact.created", agentName, orgId, sessionId, artifactName: name, artifactKind: kind, artifactSizeBytes: sizeBytes }),
+
+    // ── Progress ──
+    sessionProgress: (sessionId: string, pct: number, stage: string) =>
+      emit(env, { type: "session.progress", agentName, orgId, sessionId, progressPct: pct, stage }),
+
+    // ── MCP ──
+    mcpConnected: (serverName: string) =>
+      emit(env, { type: "mcp.server_connected", agentName, orgId, metadata: { server: serverName } }),
+
+    mcpDisconnected: (serverName: string) =>
+      emit(env, { type: "mcp.server_disconnected", agentName, orgId, metadata: { server: serverName } }),
+
+    // ── Agent lifecycle ──
+    agentCreated: (agentId: string, name: string) =>
+      emit(env, { type: "agent.created", agentName: name, orgId, agentId }),
+
+    agentUpdated: (agentId: string, name: string, changes: Record<string, unknown>) =>
+      emit(env, { type: "agent.updated", agentName: name, orgId, agentId, metadata: changes }),
+
+    agentDeleted: (agentId: string, name: string) =>
+      emit(env, { type: "agent.deleted", agentName: name, orgId, agentId }),
+
+    // ── LLM extended ──
+    llmTtft: (sessionId: string, ttftMs: number) =>
+      emit(env, { type: "llm.ttft", agentName, orgId, sessionId, ttftMs }),
+
+    llmError: (sessionId: string, error: string, model: string) =>
+      emit(env, { type: "llm.error", agentName, orgId, sessionId, error, model }),
+
+    llmCacheHit: (sessionId: string, cacheReadTokens: number) =>
+      emit(env, { type: "llm.cache_hit", agentName, orgId, sessionId, cacheReadTokens }),
+
+    // ── Turn extended ──
+    turnStarted: (sessionId: string, turnNumber: number) =>
+      emit(env, { type: "turn.started", agentName, orgId, sessionId, turnNumber }),
+
+    turnError: (sessionId: string, turnNumber: number, error: string) =>
+      emit(env, { type: "turn.error", agentName, orgId, sessionId, turnNumber, error }),
+
+    turnCompacted: (sessionId: string, tokensBefore: number, tokensAfter: number) =>
+      emit(env, { type: "turn.compacted", agentName, orgId, sessionId, metadata: { tokensBefore, tokensAfter } }),
+
+    // ── Tool approval ──
+    toolApprovalRequested: (sessionId: string, toolName: string) =>
+      emit(env, { type: "tool.approval_requested", agentName, orgId, sessionId, toolName }),
+
+    toolApprovalGranted: (sessionId: string, toolName: string) =>
+      emit(env, { type: "tool.approval_granted", agentName, orgId, sessionId, toolName }),
+
+    toolApprovalDenied: (sessionId: string, toolName: string) =>
+      emit(env, { type: "tool.approval_denied", agentName, orgId, sessionId, toolName }),
+
+    // ── Security extended ──
+    securityScanCompleted: (scanId: string, riskScore: number) =>
+      emit(env, { type: "security.scan_completed", agentName, orgId, riskScore, metadata: { scanId } }),
+
+    inputBlocked: (sessionId: string, ruleName: string) =>
+      emit(env, { type: "security.input_blocked", agentName, orgId, sessionId, ruleName }),
+
+    outputFiltered: (sessionId: string, ruleName: string) =>
+      emit(env, { type: "security.output_filtered", agentName, orgId, sessionId, ruleName }),
+
+    anomalyDetected: (details: string, severity: TelemetryEvent["severity"]) =>
+      emit(env, { type: "security.anomaly_detected", agentName, orgId, error: details, severity }),
   };
 }
