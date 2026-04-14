@@ -29,8 +29,8 @@ export function timeAgo(date: string | Date | number | null | undefined): string
 /**
  * Duration formatting: "1.2s", "45s", "2m 30s"
  */
-export function formatDuration(seconds: number | null | undefined): string {
-  const s = seconds ?? 0;
+export function formatDuration(seconds: number | string | null | undefined): string {
+  const s = Number(seconds) || 0;
   if (s < 0) return "0s";
   if (s < 10) return `${s.toFixed(1)}s`;
   if (s < 60) return `${Math.round(s)}s`;
@@ -43,8 +43,8 @@ export function formatDuration(seconds: number | null | undefined): string {
 /**
  * Cost formatting: "$0.00", "$1.23", "$0.001"
  */
-export function formatCost(usd: number | null | undefined): string {
-  const v = usd ?? 0;
+export function formatCost(usd: number | string | null | undefined): string {
+  const v = Number(usd) || 0;
   if (v === 0) return "$0.00";
   if (v < 0.01) return `$${v.toFixed(3)}`;
   return `$${v.toFixed(2)}`;

@@ -779,13 +779,11 @@ function isAuthenticated(request: Request): boolean {
   const cookies = request.headers.get("Cookie") ?? "";
   if (cookies.includes(`${SESSION_COOKIE}=authenticated`)) return true;
 
-  // 2. JWT in query param (SDK pattern: _pk= for WebSocket, browsers can't set WS headers)
+  // 2. JWT in query param (SDK pattern: browsers can't set WS headers)
+  // Check 'token' first (explicit JWT), then '_pk' (PartySocket identity — may or may not be JWT)
   const url = new URL(request.url);
-  const token = url.searchParams.get("_pk") || url.searchParams.get("token") || "";
+  const token = url.searchParams.get("token") || url.searchParams.get("_pk") || "";
   if (token) {
-    // Verify JWT structure (header.payload.sig) — full verification done at gateway level.
-    // Agent worker accepts any valid JWT format for WebSocket connections.
-    // The gateway already verified the JWT and issued it.
     const parts = token.split(".");
     if (parts.length === 3) return true;
   }
