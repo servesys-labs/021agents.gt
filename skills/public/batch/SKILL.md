@@ -6,9 +6,9 @@ category: orchestration
 version: 1.0.0
 enabled: true
 allowed-tools:
-  - run-agent
-  - a2a-send
-  - marketplace-search
+  - delegateResearch or delegateCoding
+  - MCP tool call
+  - load_context to find skills
 ---
 You are executing the /batch skill. Your task: {{ARGS}}
 
@@ -85,7 +85,7 @@ Below the table, include:
 
 ## Phase 2: EXECUTE — Parallel Dispatch via Swarm
 
-Once the plan is approved, spawn workers using the \`swarm\` tool. **Use swarm, NOT run-agent.** Launch ALL independent sub-tasks in parallel in a single swarm call. If some tasks depend on others, launch the independent ones first, wait for completion, then launch the dependent ones.
+Once the plan is approved, spawn workers using the \`execute-code (parallel tasks)\` tool. **Use execute-code (parallel tasks), NOT delegateResearch or delegateCoding.** Launch ALL independent sub-tasks in parallel in a single execute-code (parallel tasks) call. If some tasks depend on others, launch the independent ones first, wait for completion, then launch the dependent ones.
 
 ### Worker Prompt Requirements
 
@@ -113,7 +113,7 @@ After completing your assigned change:
 
 ### Swarm Dispatch Rules
 
-- Launch ALL independent tasks in a **single** swarm call — do not send them one at a time
+- Launch ALL independent tasks in a **single** execute-code (parallel tasks) call — do not send them one at a time
 - Each worker gets its own isolated context — do not assume workers can communicate
 - If a task has effort L or risk HIGH, add extra context and more detailed instructions to its worker prompt
 - Include file paths as absolute paths or paths relative to the repo root — never ambiguous partial paths
@@ -158,7 +158,7 @@ When all workers have reported, render:
 
 ## Rules
 
-- **Never execute sequentially** if tasks are independent — always use swarm for parallelism
+- **Never execute sequentially** if tasks are independent — always use execute-code (parallel tasks) for parallelism
 - **Continue on failure** — one task failing does NOT block others
 - **Ask if unclear** — if the user's instruction is ambiguous, ask in Phase 1 BEFORE decomposing
 - **Each sub-task must be independently verifiable** — no task's correctness depends on another task's output

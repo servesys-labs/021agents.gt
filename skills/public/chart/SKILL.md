@@ -29,7 +29,7 @@ Reference the /design skill for color palettes and foundational design rules.
 | Part-to-whole | Stacked bar | Treemap (hierarchical), waffle chart |
 | Composition over time | Stacked area | 100% stacked bar (proportion focus) |
 | Distribution (single var) | Histogram | Box plot (group comparison), violin, KDE |
-| Distribution (group comparison) | Box plot | Violin (shape), strip/swarm (small N) |
+| Distribution (group comparison) | Box plot | Violin (shape), strip/execute-code (parallel) (small N) |
 | Correlation (2 vars) | Scatter | Bubble (3rd var as size), hexbin (large N) |
 | Correlation (many vars) | Heatmap (correlation matrix) | Pair plot (distributions + scatter) |
 | Multiple KPIs | Small multiples | Dashboard with separate charts |
