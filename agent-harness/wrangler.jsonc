@@ -27,7 +27,7 @@
   "assets": {
     "directory": "./ui/build",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/agents/*", "/api/*", "/.well-known/*", "/mcp", "/channels/*", "/webhook/*"]
+    "run_worker_first": ["/agents/*", "/api/*", "/.well-known/*", "/mcp", "/channels/*", "/webhook/*", "/sfu/*"]
   },
 
   // Durable Objects: ChatAgent (Think) + Sandbox + AgentSupervisor + ReminderAgent + McpElicitation
@@ -39,7 +39,8 @@
       { "class_name": "Sandbox", "name": "Sandbox" },
       { "class_name": "AgentSupervisor", "name": "AgentSupervisor" },
       { "class_name": "ReminderAgent", "name": "ReminderAgent" },
-      { "class_name": "McpElicitationServer", "name": "McpElicitationServer" }
+      { "class_name": "McpElicitationServer", "name": "McpElicitationServer" },
+      { "class_name": "VoiceAgent", "name": "VoiceAgent" }
     ]
   },
   "migrations": [
@@ -47,7 +48,8 @@
     { "tag": "v2", "new_sqlite_classes": ["Sandbox"] },
     { "tag": "v3", "new_sqlite_classes": ["AgentSupervisor"] },
     { "tag": "v4", "new_sqlite_classes": ["ReminderAgent", "McpElicitationServer"] },
-    { "tag": "v5", "new_sqlite_classes": ["ResearchSpecialist", "CodingSpecialist"] }
+    { "tag": "v5", "new_sqlite_classes": ["ResearchSpecialist", "CodingSpecialist"] },
+    { "tag": "v6", "new_sqlite_classes": ["VoiceAgent"] }
   ],
 
   // Analytics Engine for observability telemetry

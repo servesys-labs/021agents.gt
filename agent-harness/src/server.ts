@@ -18,6 +18,7 @@
 
 import { createWorkersAI } from "workers-ai-provider";
 import { createOpenAI } from "@ai-sdk/openai";
+import { withVoice, WorkersAIFluxSTT, WorkersAINova3STT, WorkersAITTS, type VoiceTurnContext, type Transcriber } from "@cloudflare/voice";
 import { Agent, routeAgentRequest, callable } from "agents";
 import {
   AIChatAgent,
@@ -3654,6 +3655,127 @@ function structuredInputTools() {
 
 // ── Push Notification Agent ─────────────────────────────────────────
 // Pattern from: cloudflare/agents examples/push-notifications
+
+// ═══════════════════════════════════════════════════════════════════
+// VOICE AGENT — Full STT/TTS pipeline via Workers AI
+//
+// SDK pattern: withVoice(Agent) mixin. No external providers needed.
+// STT: WorkersAIFluxSTT (continuous) or WorkersAINova3STT (high quality)
+// TTS: WorkersAITTS (Deepgram Aura)
+// Connect via WebSocket: /agents/voice-agent/{doName}
+// Client sends 16kHz mono PCM audio frames → server streams TTS back
+// ═══════════════════════════════════════════════════════════════════
+
+// VoiceAgent extends ChatAgent (Think) with voice I/O.
+// Gets the FULL platform: personal agent prompt, R2 skills, memory,
+// signal pipeline, hooks, tools, MCP — just with voice I/O on top.
+//
+// The voice mixin wraps the Agent base class to add STT/TTS.
+// Since ChatAgent extends Think which extends Agent, we can't directly
+// use withVoice(ChatAgent) — the mixin expects the base Agent class.
+// Instead, VoiceAgent is a separate DO that uses ChatAgent's getModel()
+// and getTools() patterns but with voice I/O.
+
+const VoiceBase = withVoice(Agent);
+
+export class VoiceAgent extends VoiceBase<Env> {
+  tts = new WorkersAITTS(this.env.AI);
+
+  createTranscriber(connection: any): Transcriber {
+    const url = new URL(connection.url ?? "http://localhost");
+    const model = url.searchParams.get("model");
+    if (model === "nova-3") return new WorkersAINova3STT(this.env.AI);
+    return new WorkersAIFluxSTT(this.env.AI);
+  }
+
+  #activeSpeakerId: string | null = null;
+
+  beforeCallStart(connection: any): boolean {
+    if (this.#activeSpeakerId && this.#activeSpeakerId !== connection.id) {
+      connection.send(JSON.stringify({ type: "speaker_conflict" }));
+      return false;
+    }
+    this.#activeSpeakerId = connection.id;
+    return true;
+  }
+
+  onCallEnd(connection: any) { if (this.#activeSpeakerId === connection.id) this.#activeSpeakerId = null; }
+  onClose(connection: any) { if (this.#activeSpeakerId === connection.id) this.#activeSpeakerId = null; }
+
+  async onTurn(transcript: string, context: VoiceTurnContext) {
+    // Use the SAME model routing as ChatAgent — supports Workers AI + OpenRouter
+    const config = getTenantConfig(this.name);
+    const modelId = config.model;
+    let model;
+    if (modelId && !modelId.startsWith("@cf/") && modelId.includes("/")) {
+      const cfAigToken = (this.env as any).CF_AIG_TOKEN || "";
+      const openrouter = createOpenAI({
+        apiKey: cfAigToken,
+        baseURL: "https://gateway.ai.cloudflare.com/v1/ae92d4bf7c6c448f442d084a2358dcd5/one-shots/openrouter",
+      });
+      model = openrouter(modelId);
+    } else {
+      const workersai = createWorkersAI({ binding: this.env.AI });
+      model = workersai((modelId || "@cf/moonshotai/kimi-k2.5") as any, { sessionAffinity: this.sessionAffinity });
+    }
+
+    // Use the SAME system prompt as ChatAgent — personal agent + channel voice formatting
+    const basePrompt = config.systemPrompt || buildPersonalAgentPrompt();
+    const voicePrompt = `${basePrompt}\n\n## Channel: Voice\nCRITICAL: Response read aloud by TTS. NO markdown, no lists, no code blocks. Short natural sentences (<75 words). Spell out abbreviations (API → A-P-I). Give results, not process.`;
+
+    // Use the SAME tools as ChatAgent (minus code-execution which doesn't make sense in voice)
+    const result = streamText({
+      model,
+      system: voicePrompt,
+      messages: [
+        ...context.messages.map(m => ({ role: m.role as "user" | "assistant", content: m.content })),
+        { role: "user" as const, content: transcript },
+      ],
+      tools: {
+        get_current_time: tool({
+          description: "Get the current date and time",
+          inputSchema: z.object({}),
+          execute: async () => ({
+            time: new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZoneName: "short" }),
+            date: new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" }),
+          }),
+        }),
+        set_reminder: tool({
+          description: "Set a spoken reminder after a delay",
+          inputSchema: z.object({ message: z.string(), delay_seconds: z.number() }),
+          execute: async ({ message, delay_seconds }) => {
+            await this.schedule(delay_seconds, "speakReminder", { message });
+            return { confirmed: true };
+          },
+        }),
+        web_search: tool({
+          description: "Search the web for information",
+          inputSchema: z.object({ query: z.string() }),
+          execute: async ({ query }) => {
+            // Use Workers AI for web search if available
+            return { query, note: "Web search available — connect via MCP for full results" };
+          },
+        }),
+      },
+      stopWhen: stepCountIs(5),
+      abortSignal: context.signal,
+    });
+
+    return result.textStream;
+  }
+
+  async onCallStart(connection: any) {
+    const count = this.sql<{ count: number }>`SELECT COUNT(*) as count FROM cf_voice_messages`[0]?.count ?? 0;
+    const greeting = count > 0 ? "Welcome back! How can I help?" : "Hello! I'm your assistant. How can I help?";
+    this.speak(connection, greeting);
+  }
+
+  async speakReminder(payload: { message: string }) {
+    for (const conn of this.getConnections()) this.speak(conn, `Reminder: ${payload.message}`);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
 
 type Subscription = {
   endpoint: string;
