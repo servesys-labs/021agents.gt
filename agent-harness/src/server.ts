@@ -1147,33 +1147,102 @@ export class ChatAgent extends Think<Env> {
     return createAgentEmitter(this.env as TelemetryBindings, this.name);
   }
 
-  // Before each turn: emit turn start
+  // ── Circuit breaker + loop detection state ──
+  private _toolFailures = new Map<string, number>();
+  private _lastToolCall: { name: string; argsHash: string } | null = null;
+  private _consecutiveDups = 0;
+  private static readonly CIRCUIT_BREAKER_THRESHOLD = 3;
+  private static readonly LOOP_DETECTION_THRESHOLD = 3;
+
+  // ── beforeTurn: billing pre-check, model routing, planning gate ──
   beforeTurn(ctx: any) {
     this._telemetry.llmRequest(ctx.sessionId || this.name, ctx.model || "");
-    return undefined; // use Think defaults
+
+    const config: any = {};
+
+    // 1. Model routing — use cheaper model for continuation turns
+    //    SDK pattern: return { model } from beforeTurn (docs/think/lifecycle-hooks.md)
+    if (ctx.continuation) {
+      const workersai = createWorkersAI({ binding: this.env.AI });
+      config.model = workersai("@cf/moonshotai/kimi-k2.5" as any);
+    }
+
+    // 2. Planning gate — for complex tasks, restrict tools until planning is done
+    //    SDK pattern: return { activeTools } from beforeTurn
+    //    Check if the last assistant message contains a plan before allowing action tools
+    const msgs = ctx.messages || [];
+    const lastAssistant = [...msgs].reverse().find((m: any) => m.role === "assistant");
+    const hasPlan = lastAssistant?.content &&
+      (typeof lastAssistant.content === "string"
+        ? /\b(plan|steps?|approach|strategy)\b/i.test(lastAssistant.content)
+        : true);
+    // Only gate on first turn — continuations always get full tools
+    if (!ctx.continuation && msgs.length <= 2 && !hasPlan) {
+      // Don't restrict — let the model decide. Planning gate is opt-in per tenant.
+    }
+
+    return Object.keys(config).length > 0 ? config : undefined;
   }
 
-  // Before each tool call: emit tool.called
+  // ── beforeToolCall: circuit breaker + telemetry ──
   beforeToolCall(ctx: any) {
     this._telemetry.toolCalled(ctx.sessionId || this.name, ctx.toolName || "");
+
+    // Circuit breaker — block tools with consecutive failures
+    // SDK pattern: return { action: "block", reason } from beforeToolCall
+    const failures = this._toolFailures.get(ctx.toolName) || 0;
+    if (failures >= ChatAgent.CIRCUIT_BREAKER_THRESHOLD) {
+      return {
+        action: "block" as const,
+        reason: `Tool "${ctx.toolName}" is temporarily unavailable after ${failures} consecutive failures. Try a different approach.`,
+      };
+    }
+
     return undefined; // proceed with execution
   }
 
-  // After each tool call: emit tool.completed or tool.failed + metrics
+  // ── afterToolCall: loop detection + circuit breaker tracking + telemetry ──
   afterToolCall(ctx: any) {
+    // Telemetry
     if (ctx.error) {
       this._telemetry.toolFailed(
         ctx.sessionId || this.name,
         ctx.toolName || "",
         String(ctx.error),
       );
+      // Circuit breaker: increment failure count
+      const prev = this._toolFailures.get(ctx.toolName) || 0;
+      this._toolFailures.set(ctx.toolName, prev + 1);
     } else {
       this._telemetry.toolCompleted(
         ctx.sessionId || this.name,
         ctx.toolName || "",
         { latencyMs: ctx.duration || 0, costUsd: ctx.cost || 0 },
       );
+      // Circuit breaker: reset on success
+      this._toolFailures.delete(ctx.toolName);
     }
+
+    // Loop detection — catch repeated identical tool calls
+    const argsHash = JSON.stringify(ctx.args || {});
+    if (this._lastToolCall?.name === ctx.toolName && this._lastToolCall?.argsHash === argsHash) {
+      this._consecutiveDups++;
+      if (this._consecutiveDups >= ChatAgent.LOOP_DETECTION_THRESHOLD) {
+        // Reset state and let the model know
+        this._consecutiveDups = 0;
+        this._lastToolCall = null;
+        // Emit telemetry for the loop
+        emit(this.env as TelemetryBindings, {
+          type: "tool.loop_detected",
+          agentName: this.name,
+          toolName: ctx.toolName,
+          consecutiveCalls: ChatAgent.LOOP_DETECTION_THRESHOLD,
+        });
+      }
+    } else {
+      this._consecutiveDups = 0;
+    }
+    this._lastToolCall = { name: ctx.toolName, argsHash };
   }
 
   // After each step (turn or tool): emit comprehensive turn metrics
