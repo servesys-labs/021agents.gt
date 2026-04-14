@@ -29,6 +29,8 @@ declare namespace Cloudflare {
 		/** Vectorize index for semantic memory search */
 		VECTORIZE: VectorizeIndex;
 		/** Optional API keys injected via outbound Workers — set as secrets */
+		/** OpenRouter API key — routes through AI Gateway for caching/logging */
+		OPENROUTER_API_KEY?: string;
 		GITHUB_TOKEN?: string;
 		OPENAI_API_KEY?: string;
 		ANTHROPIC_API_KEY?: string;
