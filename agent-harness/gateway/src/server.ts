@@ -909,6 +909,226 @@ app.get("/api/v1/conversations/agent/:agentName/live", async (c) => {
   return new Response(resp.body, { status: resp.status, headers: resp.headers });
 });
 
+// ═══════════════════════════════════════════════════════════════════
+// CONVERSATION EXPORT (JSON, Markdown, PDF)
+// ═══════════════════════════════════════════════════════════════════
+
+app.get("/api/v1/conversations/:id/export", async (c) => {
+  const orgId = c.get("orgId");
+  const userId = c.get("userId");
+  const conversationId = c.req.param("id");
+  const format = c.req.query("format") || "json";
+
+  // Get conversation header from Postgres
+  const sql = await getDb(c.env.DB);
+  const [conv] = await sql`
+    SELECT * FROM conversations
+    WHERE id = ${conversationId} AND org_id = ${orgId} AND is_deleted = false
+  `;
+  if (!conv) {
+    await sql.end();
+    return c.json({ error: "Conversation not found" }, 404);
+  }
+  await sql.end();
+
+  // Fetch messages from Agent Core DO (source of truth for message content)
+  const doName = buildDoName(orgId, conv.agent_name, userId);
+  const messagesResp = await c.env.AGENT_CORE.fetch(
+    new Request(`http://internal/agents/chat-agent/${doName}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "getConversationMessages", conversationId }),
+    }),
+  );
+
+  let messages: any[] = [];
+  try {
+    const data = await messagesResp.json() as any;
+    messages = data.messages || data || [];
+  } catch {
+    // If DO doesn't support this RPC yet, check if archived in R2
+    if (conv.r2_archive_key) {
+      const archived = await c.env.STORAGE.get(conv.r2_archive_key);
+      if (archived) {
+        const data = await archived.json() as any;
+        messages = data.messages || [];
+      }
+    }
+  }
+
+  if (format === "json") {
+    return c.json({
+      conversation: conv,
+      messages,
+      exported_at: new Date().toISOString(),
+    });
+  }
+
+  if (format === "markdown") {
+    const lines = [
+      `# ${conv.title || "Conversation"}`,
+      `**Agent:** ${conv.agent_name} | **Date:** ${conv.created_at} | **Cost:** $${Number(conv.total_cost_usd || 0).toFixed(4)}`,
+      "",
+      "---",
+      "",
+    ];
+    for (const msg of messages) {
+      const role = msg.role === "assistant" ? "**Assistant**" : msg.role === "user" ? "**You**" : `**${msg.role}**`;
+      lines.push(`### ${role}`);
+      lines.push("");
+      lines.push(msg.content || "");
+      lines.push("");
+    }
+    return new Response(lines.join("\n"), {
+      headers: {
+        "Content-Type": "text/markdown; charset=utf-8",
+        "Content-Disposition": `attachment; filename="${conv.title || conversationId}.md"`,
+      },
+    });
+  }
+
+  // PDF — generate structured HTML, return as downloadable
+  // Uses a simple HTML template that browsers/tools can convert to PDF
+  if (format === "pdf") {
+    const html = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>${conv.title || "Conversation"}</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 800px; margin: 0 auto; padding: 2rem; color: #1a1a1a; }
+  h1 { font-size: 1.5rem; border-bottom: 2px solid #e5e5e5; padding-bottom: 0.5rem; }
+  .meta { color: #666; font-size: 0.85rem; margin-bottom: 2rem; }
+  .message { margin-bottom: 1.5rem; padding: 1rem; border-radius: 8px; }
+  .user { background: #f0f4ff; border-left: 3px solid #3b82f6; }
+  .assistant { background: #f0fdf4; border-left: 3px solid #22c55e; }
+  .system { background: #fefce8; border-left: 3px solid #eab308; font-style: italic; }
+  .tool { background: #f5f5f5; border-left: 3px solid #a3a3a3; font-family: monospace; font-size: 0.85rem; }
+  .role { font-weight: 600; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.5rem; }
+  pre { white-space: pre-wrap; word-break: break-word; }
+</style></head><body>
+<h1>${conv.title || "Conversation"}</h1>
+<div class="meta">Agent: ${conv.agent_name} · ${conv.created_at} · Cost: $${Number(conv.total_cost_usd || 0).toFixed(4)} · ${messages.length} messages</div>
+${messages.map((msg: any) => `
+<div class="message ${msg.role}">
+  <div class="role">${msg.role}</div>
+  <pre>${(msg.content || "").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>
+</div>`).join("")}
+</body></html>`;
+    return new Response(html, {
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Content-Disposition": `attachment; filename="${conv.title || conversationId}.html"`,
+      },
+    });
+  }
+
+  return c.json({ error: "Format must be json, markdown, or pdf" }, 400);
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// TRACE VIEWER (detailed session debugging)
+// ═══════════════════════════════════════════════════════════════════
+
+app.get("/api/v1/sessions/:id/trace", async (c) => {
+  const orgId = c.get("orgId");
+  const sessionId = c.req.param("id");
+  const sql = await getDb(c.env.DB);
+
+  const [session] = await sql`
+    SELECT * FROM sessions WHERE id = ${sessionId} AND org_id = ${orgId}
+  `;
+  if (!session) {
+    await sql.end();
+    return c.json({ error: "Session not found" }, 404);
+  }
+
+  // Build timeline from session metadata (written by Queue consumer)
+  // The metadata JSONB contains structured events from the agent's lifecycle hooks
+  const metadata = session.metadata || {};
+  const events = metadata.events || [];
+
+  await sql.end();
+
+  return c.json({
+    session: {
+      id: session.id,
+      agent_name: session.agent_name,
+      model: session.model,
+      status: session.status,
+      turn_count: session.turn_count,
+      tool_call_count: session.tool_call_count,
+      input_tokens: session.input_tokens,
+      output_tokens: session.output_tokens,
+      cost_usd: session.cost_usd,
+      duration_ms: session.duration_ms,
+      error: session.error,
+      created_at: session.created_at,
+      completed_at: session.completed_at,
+    },
+    timeline: events,
+    // Cost breakdown by step
+    cost_breakdown: metadata.cost_breakdown || null,
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// VOICE CONFIG (Pattern E: Postgres + Agent Core DO)
+// ═══════════════════════════════════════════════════════════════════
+
+app.get("/api/v1/agents/:name/voice-config", async (c) => {
+  const orgId = c.get("orgId");
+  const agentName = c.req.param("name");
+  const sql = await getDb(c.env.DB);
+  const [agent] = await sql`
+    SELECT config FROM agents WHERE name = ${agentName} AND org_id = ${orgId} AND is_active = true
+  `;
+  await sql.end();
+  if (!agent) return c.json({ error: "Agent not found" }, 404);
+
+  const config = agent.config || {};
+  return c.json({
+    enabled: config.voice?.enabled || false,
+    stt_model: config.voice?.stt_model || "deepgram-nova-3",
+    tts_voice: config.voice?.tts_voice || "aura-asteria-en",
+    greeting: config.voice?.greeting || "",
+    phone_number: config.voice?.phone_number || null,
+    language: config.voice?.language || "en",
+    interrupt_enabled: config.voice?.interrupt_enabled ?? true,
+    silence_timeout_ms: config.voice?.silence_timeout_ms || 2000,
+  });
+});
+
+app.put("/api/v1/agents/:name/voice-config", async (c) => {
+  const orgId = c.get("orgId");
+  const agentName = c.req.param("name");
+  const body = await c.req.json<{
+    enabled?: boolean; stt_model?: string; tts_voice?: string;
+    greeting?: string; phone_number?: string; language?: string;
+    interrupt_enabled?: boolean; silence_timeout_ms?: number;
+  }>();
+
+  const sql = await getDb(c.env.DB);
+  // Read current config, merge voice section
+  const [agent] = await sql`
+    SELECT config FROM agents WHERE name = ${agentName} AND org_id = ${orgId} AND is_active = true
+  `;
+  if (!agent) {
+    await sql.end();
+    return c.json({ error: "Agent not found" }, 404);
+  }
+
+  const config = agent.config || {};
+  config.voice = { ...(config.voice || {}), ...body };
+
+  const [updated] = await sql`
+    UPDATE agents SET config = ${JSON.stringify(config)}::jsonb, updated_at = NOW()
+    WHERE name = ${agentName} AND org_id = ${orgId}
+    RETURNING config
+  `;
+  await sql.end();
+  await kvInvalidate(c.env.CACHE, `agent:${orgId}:${agentName}`, `agents:${orgId}`);
+
+  return c.json(updated.config.voice);
+});
+
 // ── Dashboard (Pattern C: Analytics Engine aggregations) ──
 
 app.get("/api/v1/dashboard/stats", async (c) => {
