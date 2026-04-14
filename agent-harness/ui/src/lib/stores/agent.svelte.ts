@@ -1,194 +1,119 @@
 /**
- * Svelte reactive agent store — bridges AgentClient to Svelte 5 reactivity.
+ * Svelte Agent Store — thin reactive wrapper around SDK's AgentClient.
  *
- * Usage in components:
- *   import { agentStore } from "$lib/stores/agent.svelte";
- *
- *   // Connect to an agent
- *   agentStore.connect("my-agent");
- *
- *   // Reactive state
- *   {#if agentStore.connected}
- *     <p>State: {JSON.stringify(agentStore.state)}</p>
- *   {/if}
- *
- *   // RPC calls
- *   const servers = await agentStore.call("listServers");
- *   await agentStore.stub.addServer("github", "https://...");
- *
- *   // Chat (SDK protocol)
- *   agentStore.sendChat("Hello!");
+ * Does NOT implement protocol logic. Uses AgentClient directly from
+ * the agents SDK package. Only adds Svelte 5 reactivity ($state).
  *
  * Architecture:
- *   This store handles AGENT-INTERACTIVE operations (chat, MCP, skills).
- *   Control-plane operations (auth, billing, org) still use REST via api.ts.
+ *   AgentClient (SDK) → WebSocket → Agent Worker DO (@callable + chat)
+ *   api.ts (REST) → Gateway → Postgres (control-plane only)
  */
 
-import {
-  createAgent,
-  buildDoName,
-  parseJwtClaims,
-  CHAT_TYPES,
-  type SvelteAgentClient,
-} from "$lib/services/agent-client";
+import { AgentClient } from "agents/client";
+import { api } from "$lib/services/api";
 
-// ── Reactive state (Svelte 5 runes) ──
+// ── DO name derivation (must match gateway + server) ──
+function buildDoName(orgId: string, agentName: string, userId: string): string {
+  const shortOrg = orgId.length > 12 ? orgId.slice(-8) : orgId;
+  const shortUser = userId.length > 12 ? userId.slice(-8) : userId;
+  const orgPrefix = shortOrg ? `${shortOrg}-` : "";
+  let name = shortUser
+    ? `${orgPrefix}${agentName}-u-${shortUser}`
+    : `${orgPrefix}${agentName}`;
+  if (name.length > 63) name = name.slice(0, 63);
+  return name;
+}
 
-let client: SvelteAgentClient | null = $state(null);
+function parseJwtClaims(): { orgId: string; userId: string } {
+  try {
+    const token = api.token;
+    if (!token) return { orgId: "", userId: "" };
+    const payload = JSON.parse(atob(token.split(".")[1]));
+    return { orgId: payload.org_id || "", userId: payload.user_id || payload.sub || "" };
+  } catch { return { orgId: "", userId: "" }; }
+}
+
+// ── Reactive state ──
+let client: AgentClient | null = $state(null);
 let connected = $state(false);
 let identified = $state(false);
 let agentState = $state<unknown>(undefined);
 let agentName = $state("");
-let chatMessages = $state<Array<{ id: string; role: string; content: string; parts?: unknown[] }>>([]);
-let isStreaming = $state(false);
-let currentStreamText = $state("");
 
-// ── Store API ──
+// Message listeners — chat page registers to receive protocol events
+let messageListeners: Array<(data: any) => void> = [];
 
 export const agentStore = {
-  // Reactive getters
   get connected() { return connected; },
   get identified() { return identified; },
   get state() { return agentState; },
   get agentName() { return agentName; },
-  get messages() { return chatMessages; },
-  get isStreaming() { return isStreaming; },
-  get streamText() { return currentStreamText; },
   get client() { return client; },
 
-  /** Connect to an agent DO via WebSocket RPC (SDK protocol). */
-  connect(name: string, opts?: { host?: string }) {
-    // Disconnect existing connection
+  /**
+   * Connect to an Agent DO via SDK's AgentClient.
+   * Builds DO instance name from JWT claims automatically.
+   */
+  connect(name: string) {
     if (client) client.close();
-
     agentName = name;
-    const { orgId, userId } = parseJwtClaims();
-    const doName = buildDoName(orgId, name, userId);
 
-    client = createAgent({
+    const { orgId, userId } = parseJwtClaims();
+    const instanceName = buildDoName(orgId, name, userId);
+
+    // SDK's AgentClient handles: WebSocket connection, identity,
+    // state sync, RPC, reconnection — all via the SDK protocol.
+    client = new AgentClient({
       agent: "chat-agent",
-      name: doName,
-      host: opts?.host,
-      onStateUpdate: (state) => {
-        agentState = state;
-      },
-      onIdentity: (_name, _agent) => {
-        identified = true;
-      },
-      onOpen: () => {
-        connected = true;
-      },
-      onClose: () => {
-        connected = false;
-        identified = false;
-      },
-      onMessage: (data: any) => {
-        // Handle SDK chat protocol messages
-        if (data.type === CHAT_TYPES.MESSAGES) {
-          // Full message list sync from server
-          chatMessages = data.messages || [];
-          isStreaming = false;
-        }
-        if (data.type === CHAT_TYPES.RESPONSE) {
-          // Streaming response chunk
-          isStreaming = true;
-          if (data.messages) {
-            chatMessages = data.messages;
-          }
-          // Extract text from the latest assistant message
-          const lastAssistant = [...(data.messages || [])].reverse().find((m: any) => m.role === "assistant");
-          if (lastAssistant) {
-            currentStreamText = typeof lastAssistant.content === "string"
-              ? lastAssistant.content
-              : "";
-          }
-        }
-        if (data.type === CHAT_TYPES.RESPONSE && data.done) {
-          isStreaming = false;
-        }
-        // Broadcast events (reliability alerts, streaming_done, etc.)
-        if (data.type === "streaming_done") {
-          isStreaming = false;
-        }
-        if (data.type === "reliability_alert" || data.type === "budget_warning" || data.type === "budget_exceeded") {
-          // These could be surfaced in the UI via a notification system
-          console.warn(`[agent] ${data.type}:`, data);
-        }
-      },
+      name: instanceName,
+      // Pass JWT token via query param (browsers can't set WS headers)
+      query: api.token ? { _pk: api.token } : undefined,
+      onStateUpdate: (state: unknown) => { agentState = state; },
+      onOpen: () => { connected = true; },
+      onClose: () => { connected = false; identified = false; },
+      onIdentity: () => { identified = true; },
     });
 
-    return client.ready;
+    // Forward WebSocket messages to registered listeners (chat protocol events)
+    const originalOnMessage = client.onmessage;
+    client.onmessage = (event: MessageEvent) => {
+      // Let SDK handle its own messages first
+      originalOnMessage?.call(client, event);
+      // Forward to listeners for chat protocol events
+      try {
+        const data = JSON.parse(event.data);
+        for (const listener of messageListeners) {
+          listener(data);
+        }
+      } catch {}
+    };
   },
 
-  /** Disconnect from the current agent. */
+  /** Register a listener for WebSocket messages (chat protocol events). */
+  onMessage(fn: (data: any) => void): () => void {
+    messageListeners.push(fn);
+    return () => {
+      messageListeners = messageListeners.filter(l => l !== fn);
+    };
+  },
+
   disconnect() {
-    if (client) {
-      client.close();
-      client = null;
-    }
+    client?.close();
+    client = null;
     connected = false;
     identified = false;
     agentState = undefined;
-    chatMessages = [];
-    isStreaming = false;
-    currentStreamText = "";
+    messageListeners = [];
   },
 
-  /** Call a @callable method on the agent DO (WebSocket RPC). */
   async call<T = unknown>(method: string, args?: unknown[]): Promise<T> {
-    if (!client) throw new Error("Not connected to an agent");
-    return client.call<T>(method, args);
-  },
-
-  /** Typed stub proxy for @callable methods. */
-  get stub(): Record<string, (...args: unknown[]) => Promise<unknown>> {
-    if (!client) {
-      return new Proxy({} as any, {
-        get: () => () => Promise.reject(new Error("Not connected")),
-      });
-    }
-    return client.stub;
-  },
-
-  /** Send a chat message via SDK protocol (not REST). */
-  sendChat(message: string) {
-    if (!client) throw new Error("Not connected to an agent");
-    // Add optimistic user message
-    chatMessages = [...chatMessages, {
-      id: crypto.randomUUID(),
-      role: "user",
-      content: message,
-    }];
-    isStreaming = true;
-    currentStreamText = "";
-    client.sendChatMessage(message);
-  },
-
-  /** Clear chat messages. */
-  clearChat() {
-    chatMessages = [];
-    if (client) {
-      // Tell server to clear via SDK protocol
-      (client as any).send?.({ type: CHAT_TYPES.CLEAR });
-    }
-  },
-
-  /** Approve or reject a tool call (SDK tool approval protocol). */
-  respondToToolApproval(toolCallId: string, approved: boolean) {
     if (!client) throw new Error("Not connected");
-    client.respondToToolApproval(toolCallId, approved);
+    return client.call(method, args) as Promise<T>;
   },
 
-  /** Cancel the current streaming response. */
-  cancelStream() {
-    if (!client) return;
-    client.cancelStream();
-    isStreaming = false;
-  },
-
-  /** Request stream resume after reconnect. */
-  requestStreamResume() {
-    if (!client) return;
-    client.requestStreamResume();
+  get stub() {
+    return client?.stub ?? new Proxy({}, {
+      get: () => () => Promise.reject(new Error("Not connected")),
+    });
   },
 };

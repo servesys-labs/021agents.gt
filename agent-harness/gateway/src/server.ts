@@ -312,103 +312,15 @@ app.delete("/api/v1/agents/:name", async (c) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════
-// AGENT EXECUTION (Pattern D: proxy to Agent Core DO)
+// AGENT EXECUTION — No proxy. Clients connect DIRECTLY to Agent Worker.
 //
-// Two transport modes:
-//   1. SSE: POST /runtime-proxy/runnable/stream → proxy to DO, SSE back
-//   2. WebSocket: client connects directly to DO via routeAgentRequest
-//      (handled by agent-harness server.ts, not this gateway)
+// The SDK pattern: UI → WebSocket → Agent Worker DO (routeAgentRequest)
+// URL: wss://agent-harness.servesys.workers.dev/agents/chat-agent/{doName}
 //
-// The SSE path is used by the Svelte UI's chat.ts streamAgent() function.
+// The gateway does NOT proxy agent traffic. It only serves control-plane
+// (auth, billing, CRUD, marketplace). All real-time agent communication
+// goes through the agent worker directly via SDK's AgentClient.
 // ═══════════════════════════════════════════════════════════════════
-
-// SSE streaming proxy — bridges Svelte UI to Agent Core DO
-app.post("/api/v1/runtime-proxy/runnable/stream", async (c) => {
-  const orgId = c.get("orgId");
-  const userId = c.get("userId");
-  const body = await c.req.json<{
-    agent_name: string;
-    input: string;
-    session_id?: string;
-    plan?: string;
-    conversation_id?: string;
-    history?: Array<{ role: string; content: string }>;
-  }>();
-
-  if (!body.agent_name || !body.input) {
-    return c.json({ error: "agent_name and input required" }, 400);
-  }
-
-  const doName = buildDoName(orgId, body.agent_name, userId);
-
-  // Forward to Agent Core DO as a chat request
-  const resp = await c.env.AGENT_CORE.fetch(
-    new Request(`http://internal/agents/chat-agent/${doName}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        type: "run",
-        input: body.input,
-        agent_name: body.agent_name,
-        org_id: orgId,
-        user_id: userId,
-        session_id: body.session_id,
-        plan: body.plan,
-        conversation_id: body.conversation_id,
-        history: body.history,
-      }),
-    }),
-  );
-
-  // Stream the response back as SSE
-  if (!resp.body) {
-    return c.json({ error: "No response from agent" }, 502);
-  }
-
-  return new Response(resp.body, {
-    status: resp.status,
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      "Connection": "keep-alive",
-      "Access-Control-Allow-Origin": "*",
-    },
-  });
-});
-
-// Single-shot (non-streaming) agent run
-app.post("/api/v1/runtime-proxy/agent/run", async (c) => {
-  const orgId = c.get("orgId");
-  const userId = c.get("userId");
-  const body = await c.req.json<{
-    agent_name: string;
-    message: string;
-    session_id?: string;
-  }>();
-
-  if (!body.agent_name || !body.message) {
-    return c.json({ error: "agent_name and message required" }, 400);
-  }
-
-  const doName = buildDoName(orgId, body.agent_name, userId);
-
-  const resp = await c.env.AGENT_CORE.fetch(
-    new Request(`http://internal/agents/chat-agent/${doName}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        type: "run",
-        input: body.message,
-        agent_name: body.agent_name,
-        org_id: orgId,
-        user_id: userId,
-        session_id: body.session_id,
-      }),
-    }),
-  );
-
-  return new Response(resp.body, { status: resp.status, headers: resp.headers });
-});
 
 // ── Agent live state (Pattern D: DO RPC via service binding) ──
 
