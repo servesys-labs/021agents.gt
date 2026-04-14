@@ -6,12 +6,13 @@ category: development
 version: 2.0.0
 enabled: true
 allowed-tools:
-  - readFile
-  - writeFile
-  - listDirectory
-  - deleteFile
-  - mkdir
-  - glob
+  - read
+  - write
+  - edit
+  - list
+  - find
+  - grep
+  - delete
   - runStateCode
   - gitInit
   - gitStatus
@@ -87,10 +88,15 @@ For trivial tasks (1-3 files), skip the plan and just build.
 
 ### Phase 2: Scaffold
 
-Use `runStateCode` to scaffold the project via shell commands, or `writeFile` to create files directly:
+Use the Think-provided `write` tool to create files, or `runStateCode` for batch operations:
 
+```
+write({ path: "/package.json", content: "{ ... }" })
+write({ path: "/src/index.ts", content: "export default { ... }" })
+```
+
+For batch scaffolding with many files, use `runStateCode`:
 ```javascript
-// runStateCode example:
 async () => {
   await state.writeFile("/package.json", JSON.stringify({ name: "my-app", ... }));
   await state.writeFile("/src/index.ts", "export default { ... }");
@@ -100,8 +106,8 @@ async () => {
 
 **Immediately after scaffolding:**
 1. `gitInit()` → `gitAdd({ filepath: "." })` → `gitCommit({ message: "initial scaffold" })`
-2. Write all project files via `writeFile`
-3. For projects that need a dev server, use `runStateCode` to run build commands
+2. Read files back with `read` to verify
+3. For projects that need builds, use `runStateCode` to run build commands
 
 The user should see working files within 60 seconds of asking.
 
