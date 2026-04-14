@@ -2786,19 +2786,20 @@ export class ChatAgent extends Think<Env> {
       this._activeSkills.clear();
 
       // ── Passive Memory Pipeline: fire-and-forget memory digest ──
-      // After each substantive turn (3+ messages), spawn MemorySpecialist
-      // sub-agent to extract facts and update long-term memory.
-      // Uses SDK subAgent() — runs in its own DO, doesn't block response.
-      const messages = this.messages || [];
-      if (messages.length >= 3) {
+      // After each substantive turn (3+ messages), spawn MemorySpecialist via
+      // getAgentByName (DO stub, no experimental flag needed).
+      const allMsgs = this.messages || [];
+      if (allMsgs.length >= 3 && this.env.MemorySpecialist) {
         void (async () => {
           try {
-            const memAgent = await this.subAgent(MemorySpecialist, "memory");
-            const transcript = messages
-              .slice(-6) // last 6 messages (3 turns)
+            const { getAgentByName } = await import("agents");
+            const memAgent = await getAgentByName(this.env.MemorySpecialist, `mem-${this.name}`);
+            const transcript = allMsgs
+              .slice(-6)
               .map((m: any) => `${m.role}: ${typeof m.content === "string" ? m.content.slice(0, 500) : JSON.stringify(m.parts?.[0]?.text || "").slice(0, 500)}`)
               .join("\n");
-            await memAgent.chat(
+            // Use chat() RPC on the MemorySpecialist DO
+            await (memAgent as any).chat(
               `/memory-digest\n\nSession transcript:\n${transcript}`,
               {
                 onEvent: () => {},
@@ -2808,28 +2809,30 @@ export class ChatAgent extends Think<Env> {
                 },
               },
             );
-          } catch {} // never block on memory digest
+          } catch (err) {
+            // Log but never block
+            console.error("[memory-digest] Failed:", (err as Error).message);
+          }
         })();
       }
 
       // ── L2 Eval Judge: automated quality scoring ──
-      // Fire-and-forget: EvalJudge scores the response on a separate DO.
-      // Results are emitted as telemetry events for observability.
-      // Only runs every 10th turn to avoid cost overhead.
-      const turnNumber = (result as any).steps || messages.length;
-      if (turnNumber > 0 && turnNumber % 10 === 0) {
+      // Every 10th turn, spawn EvalJudge via getAgentByName.
+      const turnNumber = (result as any).steps || allMsgs.length;
+      if (turnNumber > 0 && turnNumber % 10 === 0 && this.env.EvalJudge) {
         void (async () => {
           try {
-            const judge = await this.subAgent(EvalJudge, "eval-judge");
-            const lastAssistant = [...messages].reverse().find((m: any) => m.role === "assistant");
-            const lastUser = [...messages].reverse().find((m: any) => m.role === "user");
+            const { getAgentByName } = await import("agents");
+            const judge = await getAgentByName((this.env as any).EvalJudge, `eval-${this.name}`);
+            const lastAssistant = [...allMsgs].reverse().find((m: any) => m.role === "assistant");
+            const lastUser = [...allMsgs].reverse().find((m: any) => m.role === "user");
             if (!lastAssistant || !lastUser) return;
 
             const userText = typeof lastUser.content === "string" ? lastUser.content : lastUser.parts?.[0]?.text || "";
             const assistantText = typeof lastAssistant.content === "string" ? lastAssistant.content : lastAssistant.parts?.[0]?.text || "";
 
             let judgeResult = "";
-            await judge.chat(
+            await (judge as any).chat(
               `Evaluate this agent response:\n\nUser: ${userText.slice(0, 500)}\n\nAgent: ${assistantText.slice(0, 1000)}`,
               {
                 onEvent: (json: string) => {
@@ -2846,16 +2849,17 @@ export class ChatAgent extends Think<Env> {
                       agentName: this.name,
                       ...scores,
                     });
-                    // If quality is failing, record a signal
                     if (scores.pass === false || (scores.overall && scores.overall < 3)) {
                       this._recordSignal("user_correction", "l2_judge_fail", 2, scores);
                     }
-                  } catch {} // judge output wasn't valid JSON
+                  } catch {}
                 },
                 onError: () => {},
               },
             );
-          } catch {} // never block on eval
+          } catch (err) {
+            console.error("[eval-judge] Failed:", (err as Error).message);
+          }
         })();
       }
     } else if (result.status === "error") {
