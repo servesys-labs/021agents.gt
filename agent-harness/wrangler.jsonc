@@ -1,0 +1,101 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "agent-harness",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-04-01",
+  // Note: ctx.facets works in production without "experimental" flag
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Workers AI binding
+  "ai": { "binding": "AI" },
+
+  // Browser Rendering API — Puppeteer-powered headless browser
+  "browser": { "binding": "MYBROWSER" },
+
+  // Dynamic Worker loading — used by AgentSupervisor for facet code
+  "worker_loaders": [{ "binding": "LOADER" }],
+
+  // Vite-built React SPA served as static assets
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*", "/api/*", "/.well-known/*", "/mcp"]
+  },
+
+  // Durable Objects: ChatAgent (Think) + Sandbox + AgentSupervisor + ReminderAgent + McpElicitation
+  "durable_objects": {
+    "bindings": [
+      { "class_name": "ChatAgent", "name": "ChatAgent" },
+      { "class_name": "ResearchSpecialist", "name": "ResearchSpecialist" },
+      { "class_name": "CodingSpecialist", "name": "CodingSpecialist" },
+      { "class_name": "Sandbox", "name": "Sandbox" },
+      { "class_name": "AgentSupervisor", "name": "AgentSupervisor" },
+      { "class_name": "ReminderAgent", "name": "ReminderAgent" },
+      { "class_name": "McpElicitationServer", "name": "McpElicitationServer" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ChatAgent"] },
+    { "tag": "v2", "new_sqlite_classes": ["Sandbox"] },
+    { "tag": "v3", "new_sqlite_classes": ["AgentSupervisor"] },
+    { "tag": "v4", "new_sqlite_classes": ["ReminderAgent", "McpElicitationServer"] },
+    { "tag": "v5", "new_sqlite_classes": ["ResearchSpecialist", "CodingSpecialist"] }
+  ],
+
+  // Analytics Engine for observability telemetry
+  "analytics_engine_datasets": [
+    { "binding": "ANALYTICS", "dataset": "agent_harness_telemetry" }
+  ],
+
+  // Cloudflare Container for Sandbox (code execution environment)
+  "containers": [
+    {
+      "class_name": "Sandbox",
+      "image": "./Dockerfile",
+      "instance_type": "basic",
+      "max_instances": 3
+    }
+  ],
+
+  // Observability — built-in structured logging
+  "observability": {
+    "enabled": true
+  },
+
+  // Hyperdrive — Railway Postgres for durable cross-org data
+  // Agent-harness writes: session records, billing, OTEL events
+  // Gateway also connects to the same Postgres for admin queries
+  "hyperdrive": [
+    { "binding": "DB", "id": "PLACEHOLDER_HYPERDRIVE_ID" }
+  ],
+
+  // Queues — async writes to Postgres (non-blocking, with DLQ)
+  // Pattern: agent onChatResponse → TELEMETRY_QUEUE.send() → consumer → Hyperdrive → Postgres
+  // Failed messages retry 5x with backoff, then go to DLQ for manual replay
+  "queues": {
+    "producers": [
+      { "binding": "TELEMETRY_QUEUE", "queue": "harness-telemetry" }
+    ],
+    "consumers": [
+      {
+        "queue": "harness-telemetry",
+        "max_batch_size": 25,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "harness-telemetry-dlq",
+        "retry_delay": "exponential"
+      },
+      {
+        "queue": "harness-telemetry-dlq",
+        "max_batch_size": 10,
+        "max_batch_timeout": 10,
+        "max_retries": 0
+      }
+    ]
+  },
+
+  // Access code for login protection — set via: wrangler secret put ACCESS_CODE
+  // Optional API keys for outbound Workers — also set as secrets
+  "vars": {
+    "SANDBOX_TRANSPORT": "websocket"
+  }
+}

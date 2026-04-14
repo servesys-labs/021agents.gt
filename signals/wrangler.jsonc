@@ -1,0 +1,42 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "agentos-signals",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-03-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+
+  // Phase 1: Service binding to Agent Core (DO still hosted there)
+  // Phase 2: Move SignalCoordinatorDO here, remove service binding
+  "services": [
+    { "binding": "AGENT_CORE", "service": "agentos" }
+  ],
+
+  // Phase 2: Uncomment when moving DO here
+  // "durable_objects": {
+  //   "bindings": [
+  //     { "name": "SIGNAL_COORDINATOR", "class_name": "SignalCoordinatorDO" }
+  //   ]
+  // },
+  // "migrations": [
+  //   { "tag": "v1", "new_sqlite_classes": ["SignalCoordinatorDO"] }
+  // ],
+
+  "queues": {
+    "consumers": [
+      {
+        "queue": "agentos-signals",
+        "max_batch_size": 50,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "agentos-signals-dlq"
+      }
+    ]
+  },
+  "analytics_engine_datasets": [
+    { "binding": "SIGNAL_ANALYTICS", "dataset": "agentos_signals" }
+  ],
+  "hyperdrive": [
+    { "binding": "HYPERDRIVE", "id": "775f7e11ce8c479993855531f728770a" }
+  ]
+}
