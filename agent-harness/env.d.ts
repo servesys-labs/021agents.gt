@@ -12,12 +12,26 @@ declare namespace Cloudflare {
 		ChatAgent: DurableObjectNamespace<import("./src/server").ChatAgent>;
 		Sandbox: DurableObjectNamespace<import("./src/server").Sandbox>;
 		AgentSupervisor: DurableObjectNamespace<import("./src/server").AgentSupervisor>;
+		ReminderAgent: DurableObjectNamespace<import("./src/server").ReminderAgent>;
+		McpElicitationServer: DurableObjectNamespace<import("./src/server").McpElicitationServer>;
 		/** Browser Rendering API — headless Puppeteer browser */
 		MYBROWSER: Fetcher;
+		/** Dynamic Worker Loader for CodeMode + extensions */
+		LOADER: any;
+		/** Railway Postgres via Hyperdrive — durable cross-org data */
+		DB: Hyperdrive;
+		/** Async telemetry queue → Postgres */
+		TELEMETRY_QUEUE: Queue;
+		/** Analytics Engine for high-volume metrics */
+		ANALYTICS: AnalyticsEngineDataset;
 		/** Optional API keys injected via outbound Workers — set as secrets */
 		GITHUB_TOKEN?: string;
 		OPENAI_API_KEY?: string;
 		ANTHROPIC_API_KEY?: string;
+		/** Push notification VAPID keys */
+		VAPID_PUBLIC_KEY?: string;
+		VAPID_PRIVATE_KEY?: string;
+		VAPID_SUBJECT?: string;
 	}
 }
 interface Env extends Cloudflare.Env {}
