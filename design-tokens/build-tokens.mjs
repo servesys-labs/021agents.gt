@@ -6,7 +6,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
 
 const sourcePath = resolve(__dirname, "tokens.json");
-const outCssPath = resolve(ROOT, "ui/src/generated/tokens.css");
+const outCssPath = resolve(ROOT, "agent-harness/ui/src/generated/tokens.css");
 const outRnPath = resolve(ROOT, "mobile/src/theme/tokens.ts");
 
 const source = JSON.parse(readFileSync(sourcePath, "utf8"));
