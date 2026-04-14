@@ -251,6 +251,7 @@
 
           {#each [
             { href: "/marketplace", icon: "🏪", label: "Marketplace" },
+            { href: "/connectors", icon: "🔗", label: "Connectors" },
             { href: "/sessions", icon: "📊", label: "Activity" },
           ] as link}
             <a
