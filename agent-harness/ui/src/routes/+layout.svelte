@@ -7,6 +7,7 @@
   import { conversationStore } from "$lib/stores/conversations.svelte";
   import Button from "$lib/components/ui/button.svelte";
   import Badge from "$lib/components/ui/badge.svelte";
+  import { untrack } from "svelte";
   import { Toaster } from "svelte-sonner";
 
   let { children } = $props();
@@ -75,32 +76,25 @@
     // First-time visitors keep the existing default (dark)
   });
 
-  // Run auth init ONCE on mount — not reactively (avoids infinite effect loop)
+  // Run auth init ONCE on mount. Use untrack to prevent reactive cascades.
   let authInitDone = false;
   $effect(() => {
     if (authInitDone) return;
     authInitDone = true;
-    authStore.init().then(() => {
-      if (!authStore.loading && !authStore.isAuthenticated) {
-        const path = window.location.pathname;
-        if (path !== "/login") goto("/login");
-      }
-      if (authStore.isAuthenticated) {
-        agentStore.fetchAgents();
-      }
-    }).catch(() => {
-      connectionError = true;
-      authStore.loading = false;
+    untrack(() => {
+      authStore.init().then(() => {
+        if (!authStore.loading && !authStore.isAuthenticated) {
+          const path = window.location.pathname;
+          if (path !== "/login") goto("/login");
+        }
+        if (authStore.isAuthenticated) {
+          agentStore.fetchAgents();
+        }
+      }).catch(() => {
+        connectionError = true;
+        authStore.loading = false;
+      });
     });
-  });
-
-  // Re-fetch agents when auth state changes (e.g., after login redirect)
-  let agentsFetched = false;
-  $effect(() => {
-    if (authStore.isAuthenticated && agentStore.agents.length === 0 && !agentStore.loading && !agentsFetched) {
-      agentsFetched = true;
-      agentStore.fetchAgents();
-    }
   });
 
   $effect(() => {
