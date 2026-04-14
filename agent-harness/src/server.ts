@@ -341,6 +341,59 @@ function createSkillProvider(skill: SkillDefinition) {
   };
 }
 
+// ── Vectorize Search Provider (cross-session semantic memory) ─────
+//
+// Implements the SDK's SearchProvider interface backed by Cloudflare
+// Vectorize + Workers AI embeddings. This is the only custom code in
+// the memory stack — everything else uses SDK primitives (FTS5, Session).
+//
+// The provider:
+//   - get()    → returns a count of stored memories
+//   - search() → embeds query via Workers AI, queries Vectorize, returns matches
+//   - set()    → embeds content, upserts into Vectorize with metadata
+
+function createVectorizeSearchProvider(env: Env) {
+  return {
+    async get(): Promise<string | null> {
+      // Vectorize doesn't expose count — return a hint
+      return "Semantic memory available. Use search_context to find past knowledge.";
+    },
+
+    async search(query: string): Promise<string | null> {
+      try {
+        const embedding = await env.AI.run("@cf/baai/bge-base-en-v1.5", {
+          text: [query],
+        });
+        const results = await env.VECTORIZE.query(embedding.data[0], {
+          topK: 5,
+          returnMetadata: "all",
+        });
+        if (!results.matches?.length) return null;
+        return results.matches
+          .map((m: any) => `[${m.metadata?.key || m.id}] (score: ${m.score?.toFixed(2)})\n${m.metadata?.content || ""}`)
+          .join("\n\n");
+      } catch {
+        return null; // graceful degradation if Vectorize is unavailable
+      }
+    },
+
+    async set(key: string, content: string): Promise<void> {
+      try {
+        const embedding = await env.AI.run("@cf/baai/bge-base-en-v1.5", {
+          text: [content],
+        });
+        await env.VECTORIZE.upsert([{
+          id: key,
+          values: embedding.data[0],
+          metadata: { key, content, timestamp: Date.now() },
+        }]);
+      } catch {
+        // Fail silently — memory write shouldn't block chat
+      }
+    },
+  };
+}
+
 // ── Skill-aware Tenant Config ──────────────────────────────────────
 
 const TENANTS: TenantConfig[] = [
@@ -944,12 +997,23 @@ export class CodingSpecialist extends Think<Env> {
 
 // Dynamic import: Think is experimental, import at module level
 // so it fails fast if the package isn't available.
-import { Think } from "@cloudflare/think";
+import { Think, Workspace, Session } from "@cloudflare/think";
+import { AgentSearchProvider } from "agents/experimental/memory/session";
 import { createCompactFunction } from "agents/experimental/memory/utils";
 
 export class ChatAgent extends Think<Env> {
   // Wait for MCP connections to restore after hibernation
   waitForMcpConnections = true;
+
+  // ── Workspace with R2 spillover (SDK pattern from Think docs) ──
+  // Files < 1.5MB stay in SQLite (fast, local), larger files spill to R2.
+  // Think auto-creates workspace tools (read, write, edit, find, grep, delete).
+  override workspace = new Workspace({
+    sql: this.ctx.storage.sql,
+    r2: this.env.STORAGE,
+    r2Prefix: `workspaces/${this.name}/`,
+    name: () => this.name,
+  });
 
   // ── Think overrides ──
 
@@ -1121,6 +1185,26 @@ export class ChatAgent extends Think<Env> {
       s = s.withContext(`skill-${skill.name}`, {
         description: skill.description,
         provider: createSkillProvider(skill),
+      });
+    }
+
+    // ── Knowledge: FTS5-backed searchable knowledge base ──
+    // AgentSearchProvider uses DO SQLite FTS5 for full-text search.
+    // The LLM gets search_context and set_context tools automatically.
+    // Knowledge persists across turns and is searchable via natural language.
+    s = s.withContext("knowledge", {
+      description: "Persistent knowledge base. Use set_context to save important information (research findings, code snippets, reference data). Use search_context to recall saved knowledge.",
+      provider: new AgentSearchProvider(this as any),
+    });
+
+    // ── Vectorize: cross-session semantic memory ──
+    // Wraps Cloudflare Vectorize + Workers AI embeddings for semantic search.
+    // Falls back gracefully if VECTORIZE binding is not configured.
+    if (this.env.VECTORIZE && this.env.AI) {
+      const vectorizeProvider = createVectorizeSearchProvider(this.env);
+      s = s.withContext("semantic-memory", {
+        description: "Cross-session memory. Search recalls knowledge from past conversations. Set stores embeddings for future recall.",
+        provider: vectorizeProvider,
       });
     }
 
