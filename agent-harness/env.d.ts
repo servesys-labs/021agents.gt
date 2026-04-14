@@ -15,6 +15,8 @@ declare namespace Cloudflare {
 		ReminderAgent: DurableObjectNamespace<import("./src/server").ReminderAgent>;
 		McpElicitationServer: DurableObjectNamespace<import("./src/server").McpElicitationServer>;
 		VoiceAgent: DurableObjectNamespace<import("./src/server").VoiceAgent>;
+		MemorySpecialist: DurableObjectNamespace<import("./src/server").MemorySpecialist>;
+		EvalJudge: DurableObjectNamespace<import("./src/server").EvalJudge>;
 		/** Browser Rendering API — headless Puppeteer browser */
 		MYBROWSER: Fetcher;
 		/** Dynamic Worker Loader for CodeMode + extensions */
