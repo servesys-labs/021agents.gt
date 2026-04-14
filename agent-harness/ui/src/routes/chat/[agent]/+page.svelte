@@ -1,6 +1,7 @@
 <script lang="ts">
   import { page } from "$app/stores";
-  import { agentStore } from "$lib/stores/agents.svelte";
+  import { agentStore as agentListStore } from "$lib/stores/agents.svelte";
+  import { agentStore as agentRpc } from "$lib/stores/agent.svelte";
   import { streamAgent, type ChatEvent } from "$lib/services/chat";
   import { conversationStore } from "$lib/stores/conversations.svelte";
   import { createAutoScrollController } from "$lib/utils/auto-scroll";
@@ -41,7 +42,25 @@
   }
 
   let agentName = $derived($page.params.agent ?? "");
-  let agent = $derived(agentStore.agents.find((a) => a.name === agentName) ?? null);
+  let agent = $derived(agentListStore.agents.find((a) => a.name === agentName) ?? null);
+
+  // ── Connect to Agent DO via WebSocket RPC (SDK pattern) ──
+  // The agentRpc store maintains a persistent connection for:
+  //   - Chat streaming (SDK chat protocol)
+  //   - MCP management (addServer, removeServer, listServers)
+  //   - Skill overlays (appendSkillRule, getSkillOverlays)
+  //   - State sync (agent state pushed from server)
+  // REST (api.ts) is still used for control-plane: auth, billing, org, marketplace.
+  let rpcConnected = $derived(agentRpc.connected);
+
+  $effect(() => {
+    if (agentName) {
+      agentRpc.connect(agentName);
+    }
+    return () => {
+      // Don't disconnect on effect cleanup — the store manages lifecycle
+    };
+  });
 
   let messages = $state<Message[]>([]);
   let streaming = $state(false);
@@ -157,7 +176,7 @@
   let historyOpen = $state(false);
 
   $effect(() => {
-    if (agentName) agentStore.setActive(agentName);
+    if (agentName) agentListStore.setActive(agentName);
   });
 
   // Listen for "New Chat" from header
@@ -526,7 +545,7 @@
       class="relative flex-1 overflow-y-auto"
       onscroll={handleContainerScroll}
     >
-      {#if !agent && !agentStore.loading && agentStore.agents.length > 0}
+      {#if !agent && !agentListStore.loading && agentListStore.agents.length > 0}
         <div class="flex flex-1 flex-col items-center justify-center px-6 py-16">
           <svg xmlns="http://www.w3.org/2000/svg" class="mb-4 h-12 w-12 text-muted-foreground/40" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
             <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
