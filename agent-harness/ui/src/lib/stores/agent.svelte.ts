@@ -63,9 +63,14 @@ export const agentStore = {
 
     // SDK's AgentClient handles: WebSocket connection, identity,
     // state sync, RPC, reconnection — all via the SDK protocol.
+    // Derive host from current page — the agent Worker serves both
+    // the UI and the DO WebSocket endpoints on the same domain.
+    const wsHost = typeof window !== "undefined" ? window.location.host : "app.021agents.ai";
+
     client = new AgentClient({
       agent: "chat-agent",
       name: instanceName,
+      host: wsHost,
       // Pass JWT as 'token' query param (not _pk which becomes connection tag and has 256 char limit)
       query: api.token ? { token: api.token } : undefined,
       onStateUpdate: (state: unknown) => { agentState = state; },
