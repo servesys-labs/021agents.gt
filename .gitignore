@@ -138,3 +138,6 @@ mobile/ios/build/
 mobile/ios/Pods/
 portal/
 mvp/
+
+# Cloudflare Agents SDK — cloned reference, not our code
+agent-harness/cloudflare-agents-sdk/
