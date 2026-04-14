@@ -27,6 +27,7 @@ export interface ConversationMessage {
   session_id: string | null;
   tool_calls: unknown[];
   tool_results: unknown[];
+  metadata: Record<string, unknown>;
   created_at: string;
 }
 

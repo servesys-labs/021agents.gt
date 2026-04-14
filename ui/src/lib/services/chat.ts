@@ -1,6 +1,7 @@
 import { api } from "./api";
 
 export type ChatEventType =
+  | "connected"
   | "session_start"
   | "setup_done"
   | "governance_pass"
@@ -9,10 +10,14 @@ export type ChatEventType =
   | "thinking"
   | "tool_call"
   | "tool_result"
+  | "tool_heartbeat"
   | "token"
   | "turn_end"
   | "done"
-  | "error";
+  | "error"
+  | "system"
+  | "warning"
+  | "reconnect_complete";
 
 export interface ChatEvent {
   type: ChatEventType;

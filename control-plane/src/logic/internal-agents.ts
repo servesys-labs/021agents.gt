@@ -34,7 +34,7 @@ export function buildPersonalAssistantAgent(displayName: string): SeededInternal
         "create-schedule", "list-schedules", "delete-schedule",
       ],
       enabled_skills: [
-        "research", "debug", "remember", "batch", "verify", "build-app",
+        "research", "debug", "remember", "batch", "verify", "build-app", "plan",
       ],
       max_turns: 50,
       temperature: 0.7,

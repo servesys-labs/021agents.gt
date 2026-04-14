@@ -1,6 +1,6 @@
 <script lang="ts">
   import Badge from "$lib/components/ui/badge.svelte";
-  import ToolCallBlock from "$lib/components/chat/ToolCallBlock.svelte";
+  import ToolCallGroup from "$lib/components/chat/ToolCallGroup.svelte";
   import type { Session, Turn } from "$lib/services/sessions";
   import { formatDuration, formatCost, timeAgo } from "$lib/utils/time";
   import { renderMarkdown } from "$lib/markdown";
@@ -178,11 +178,10 @@
 
           <!-- Tool calls -->
           {#if turn.tool_calls?.length}
-            <div class="space-y-2">
-              {#each turn.tool_calls as tc, i (`${turn.turn_number}-${i}`)}
-                <ToolCallBlock toolCall={normalizeToolCall(tc, i)} expanded={false} agentName={session.agent_name} />
-              {/each}
-            </div>
+            <ToolCallGroup
+              toolCalls={turn.tool_calls.map((tc: unknown, i: number) => normalizeToolCall(tc, i))}
+              agentName={session.agent_name}
+            />
           {/if}
 
           <!-- Error -->
