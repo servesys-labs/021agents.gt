@@ -1979,6 +1979,113 @@ app.get("/api/v1/eval/runs/:id/results", async (c) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════
+// MCP SERVER MANAGEMENT (Pattern D: proxy @callable to Agent Core DO)
+//
+// The Svelte UI manages MCP servers via these REST endpoints.
+// Each call proxies to the ChatAgent DO's @callable methods:
+//   addServer, removeServer, listServers, storeConnectorToken
+// ═══════════════════════════════════════════════════════════════════
+
+// Helper: call a @callable method on the agent DO via service binding
+async function callAgentMethod(env: Env, orgId: string, agentName: string, userId: string, method: string, args: unknown[]) {
+  const doName = buildDoName(orgId, agentName, userId);
+  const resp = await env.AGENT_CORE.fetch(
+    new Request(`http://internal/agents/chat-agent/${doName}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "rpc", method, args }),
+    }),
+  );
+  return resp;
+}
+
+// List connected MCP servers for an agent
+app.get("/api/v1/agents/:name/mcp/servers", async (c) => {
+  const orgId = c.get("orgId");
+  const userId = c.get("userId");
+  const agentName = c.req.param("name");
+  const resp = await callAgentMethod(c.env, orgId, agentName, userId, "listServers", []);
+  return new Response(resp.body, { status: resp.status, headers: resp.headers });
+});
+
+// Connect a new MCP server
+app.post("/api/v1/agents/:name/mcp/servers", async (c) => {
+  const orgId = c.get("orgId");
+  const userId = c.get("userId");
+  const agentName = c.req.param("name");
+  const body = await c.req.json<{ name: string; url: string }>();
+  if (!body.name || !body.url) return c.json({ error: "name and url required" }, 400);
+  const resp = await callAgentMethod(c.env, orgId, agentName, userId, "addServer", [body.name, body.url]);
+  return new Response(resp.body, { status: resp.status, headers: resp.headers });
+});
+
+// Disconnect an MCP server
+app.delete("/api/v1/agents/:name/mcp/servers/:serverId", async (c) => {
+  const orgId = c.get("orgId");
+  const userId = c.get("userId");
+  const agentName = c.req.param("name");
+  const serverId = c.req.param("serverId");
+  const resp = await callAgentMethod(c.env, orgId, agentName, userId, "removeServer", [serverId]);
+  return new Response(resp.body, { status: resp.status, headers: resp.headers });
+});
+
+// Store OAuth token for a connector
+app.post("/api/v1/agents/:name/mcp/tokens", async (c) => {
+  const orgId = c.get("orgId");
+  const userId = c.get("userId");
+  const agentName = c.req.param("name");
+  const body = await c.req.json<{ connector_id: string; token: string; refresh_token?: string; expires_in?: number }>();
+  if (!body.connector_id || !body.token) return c.json({ error: "connector_id and token required" }, 400);
+  const resp = await callAgentMethod(c.env, orgId, agentName, userId, "storeConnectorToken", [
+    body.connector_id, body.token, body.refresh_token, body.expires_in,
+  ]);
+  return new Response(resp.body, { status: resp.status, headers: resp.headers });
+});
+
+// Get skill overlays for an agent (proxy to DO)
+app.get("/api/v1/agents/:name/skills/:skillName/overlays", async (c) => {
+  const orgId = c.get("orgId");
+  const userId = c.get("userId");
+  const agentName = c.req.param("name");
+  const skillName = c.req.param("skillName");
+  const resp = await callAgentMethod(c.env, orgId, agentName, userId, "getSkillOverlays", [skillName]);
+  return new Response(resp.body, { status: resp.status, headers: resp.headers });
+});
+
+// Append a skill overlay rule (proxy to DO)
+app.post("/api/v1/agents/:name/skills/:skillName/overlays", async (c) => {
+  const orgId = c.get("orgId");
+  const userId = c.get("userId");
+  const agentName = c.req.param("name");
+  const skillName = c.req.param("skillName");
+  const body = await c.req.json<{ rule: string; reason?: string }>();
+  if (!body.rule) return c.json({ error: "rule required" }, 400);
+  const resp = await callAgentMethod(c.env, orgId, agentName, userId, "appendSkillRule", [
+    skillName, body.rule, "human", body.reason || "",
+  ]);
+  return new Response(resp.body, { status: resp.status, headers: resp.headers });
+});
+
+// Get skill audit trail (proxy to DO)
+app.get("/api/v1/agents/:name/skills/:skillName/audit", async (c) => {
+  const orgId = c.get("orgId");
+  const userId = c.get("userId");
+  const agentName = c.req.param("name");
+  const skillName = c.req.param("skillName");
+  const resp = await callAgentMethod(c.env, orgId, agentName, userId, "getSkillAudit", [skillName]);
+  return new Response(resp.body, { status: resp.status, headers: resp.headers });
+});
+
+// Get learned procedures (proxy to DO)
+app.get("/api/v1/agents/:name/procedures", async (c) => {
+  const orgId = c.get("orgId");
+  const userId = c.get("userId");
+  const agentName = c.req.param("name");
+  const resp = await callAgentMethod(c.env, orgId, agentName, userId, "getLearnedProcedures", []);
+  return new Response(resp.body, { status: resp.status, headers: resp.headers });
+});
+
+// ═══════════════════════════════════════════════════════════════════
 // META-AGENT (Pattern D: proxy to Agent Core DO)
 // ═══════════════════════════════════════════════════════════════════
 

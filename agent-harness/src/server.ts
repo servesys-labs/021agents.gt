@@ -2514,14 +2514,162 @@ export class ChatAgent extends Think<Env> {
 
   // ── @callable methods (unchanged interface, Think-compatible) ──
 
-  @callable({ description: "Connect to an external MCP server" })
+  // ═══════════════════════════════════════════════════════════════════
+  // MCP SERVER MANAGEMENT — connect, disconnect, list, token storage
+  //
+  // SSRF validation blocks localhost/private IPs.
+  // Connector tokens persisted in DO SQLite for OAuth recovery.
+  // All via SDK's addMcpServer/removeMcpServer + this.sql.
+  // ═══════════════════════════════════════════════════════════════════
+
+  private _connectorTableReady = false;
+
+  private _ensureConnectorTable() {
+    if (this._connectorTableReady) return;
+    this._connectorTableReady = true;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agent_connectors (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        url TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'connected',
+        tool_count INTEGER NOT NULL DEFAULT 0,
+        oauth_token TEXT,
+        oauth_refresh_token TEXT,
+        oauth_expires_at TEXT,
+        connected_at TEXT DEFAULT (datetime('now')),
+        last_used_at TEXT
+      )
+    `;
+  }
+
+  /** SSRF validation — block private/internal URLs. */
+  private _validateMcpUrl(url: string): string | null {
+    try {
+      const parsed = new URL(url);
+      const host = parsed.hostname.toLowerCase();
+      // Block localhost and loopback
+      if (host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "0.0.0.0") {
+        return "Blocked: localhost connections are not allowed";
+      }
+      // Block private IP ranges
+      if (/^10\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host) || /^192\.168\./.test(host)) {
+        return "Blocked: private IP addresses are not allowed";
+      }
+      // Block internal metadata endpoints
+      if (host === "169.254.169.254" || host.endsWith(".internal")) {
+        return "Blocked: internal/metadata endpoints are not allowed";
+      }
+      // Must be HTTPS in production
+      if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+        return "Blocked: only HTTP/HTTPS URLs are allowed";
+      }
+      return null;
+    } catch {
+      return "Blocked: invalid URL";
+    }
+  }
+
+  @callable({ description: "Connect to an external MCP server (validates URL, discovers tools)" })
   async addServer(name: string, url: string) {
-    return await this.addMcpServer(name, url);
+    // SSRF validation
+    const ssrfError = this._validateMcpUrl(url);
+    if (ssrfError) return { error: ssrfError };
+
+    try {
+      const result = await this.addMcpServer(name, url);
+
+      // Persist connection in DO SQLite for recovery after hibernation
+      this._ensureConnectorTable();
+      const toolCount = Object.keys(this.mcp?.getAITools?.() || {}).length;
+      this.sql`
+        INSERT INTO cf_agent_connectors (id, name, url, status, tool_count)
+        VALUES (${name}, ${name}, ${url}, 'connected', ${toolCount})
+        ON CONFLICT(id) DO UPDATE SET
+          url = ${url}, status = 'connected', tool_count = ${toolCount},
+          connected_at = datetime('now')
+      `;
+
+      emit(this.env as TelemetryBindings, {
+        type: "mcp.server_connected",
+        agentName: this.name,
+        serverName: name,
+        url,
+        toolCount,
+      });
+
+      return result;
+    } catch (err: any) {
+      return { error: `Failed to connect: ${err.message || String(err)}` };
+    }
   }
 
   @callable({ description: "Disconnect an MCP server" })
   async removeServer(serverId: string) {
     await this.removeMcpServer(serverId);
+
+    // Update DO SQLite
+    this._ensureConnectorTable();
+    this.sql`UPDATE cf_agent_connectors SET status = 'disconnected' WHERE id = ${serverId}`;
+
+    emit(this.env as TelemetryBindings, {
+      type: "mcp.server_disconnected",
+      agentName: this.name,
+      serverId,
+    });
+  }
+
+  @callable({ description: "List all connected MCP servers and their tools" })
+  listServers() {
+    this._ensureConnectorTable();
+    const persisted = this.sql<{
+      id: string; name: string; url: string; status: string;
+      tool_count: number; connected_at: string; last_used_at: string | null;
+    }>`
+      SELECT id, name, url, status, tool_count, connected_at, last_used_at
+      FROM cf_agent_connectors
+      ORDER BY connected_at DESC
+    `;
+
+    // Also get live tool count from SDK
+    const liveTools = this.mcp?.getAITools?.() || {};
+    const liveToolNames = Object.keys(liveTools);
+
+    return {
+      servers: persisted,
+      live_tool_count: liveToolNames.length,
+      live_tools: liveToolNames.slice(0, 50), // cap for response size
+    };
+  }
+
+  @callable({ description: "Store an OAuth token for a connector (e.g., GitHub, Notion)" })
+  storeConnectorToken(connectorId: string, token: string, refreshToken?: string, expiresInSec?: number) {
+    this._ensureConnectorTable();
+    const expiresAt = expiresInSec
+      ? new Date(Date.now() + expiresInSec * 1000).toISOString()
+      : null;
+    this.sql`
+      UPDATE cf_agent_connectors SET
+        oauth_token = ${token},
+        oauth_refresh_token = ${refreshToken || null},
+        oauth_expires_at = ${expiresAt}
+      WHERE id = ${connectorId}
+    `;
+    return { stored: connectorId };
+  }
+
+  @callable({ description: "Get a stored OAuth token for a connector" })
+  getConnectorToken(connectorId: string) {
+    this._ensureConnectorTable();
+    const [row] = this.sql<{ oauth_token: string | null; oauth_expires_at: string | null }>`
+      SELECT oauth_token, oauth_expires_at FROM cf_agent_connectors WHERE id = ${connectorId}
+    `;
+    if (!row?.oauth_token) return { error: "No token stored" };
+    // Check expiry
+    if (row.oauth_expires_at && new Date(row.oauth_expires_at) < new Date()) {
+      return { error: "Token expired", expired_at: row.oauth_expires_at };
+    }
+    return { token: row.oauth_token };
   }
 
   @callable({ description: "List available tenants" })
