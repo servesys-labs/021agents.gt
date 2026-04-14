@@ -11,7 +11,7 @@
 
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { agentsMiddleware } from "hono-agents";
+// hono-agents removed — gateway doesn't serve DO WebSocket routes directly
 import { DurableObject } from "cloudflare:workers";
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -1383,9 +1383,13 @@ app.post("/api/v1/auth/login", async (c) => {
   if (!body.email || !body.password) return c.json({ error: "Email and password required" }, 400);
 
   const sql = await getDb(c.env.DB_ADMIN);
+  // Old schema: users has no org_id — join with org_members to get it
   const [user] = await sql`
-    SELECT id, org_id, email, password_hash, is_active FROM users
-    WHERE email = ${body.email.toLowerCase().trim()} LIMIT 1
+    SELECT u.user_id, u.email, u.password_hash, u.is_active, m.org_id
+    FROM users u
+    LEFT JOIN org_members m ON m.user_id = u.user_id
+    WHERE u.email = ${body.email.toLowerCase().trim()}
+    LIMIT 1
   `;
   await sql.end();
 
@@ -1395,14 +1399,13 @@ app.post("/api/v1/auth/login", async (c) => {
   }
 
   const secret = c.env.JWT_SECRET || "dev-secret-change-me";
-  const token = await signJwt({ user_id: user.id, org_id: user.org_id, email: user.email }, secret);
+  const token = await signJwt({ user_id: user.user_id, org_id: user.org_id || "", email: user.email }, secret);
 
-  // Cache JWT payload in KV for fast auth middleware lookups
   await c.env.CACHE.put(`auth:${token.slice(-16)}`, JSON.stringify({
-    orgId: user.org_id, userId: user.id, scopes: ["*"],
+    orgId: user.org_id || "", userId: user.user_id, scopes: ["*"],
   }), { expirationTtl: 86400 });
 
-  return c.json({ token, user_id: user.id, org_id: user.org_id, email: user.email });
+  return c.json({ token, user_id: user.user_id, org_id: user.org_id || "", email: user.email });
 });
 
 // ── Auth: Signup ──
@@ -1421,35 +1424,39 @@ app.post("/api/v1/auth/signup", async (c) => {
   const sql = await getDb(c.env.DB_ADMIN);
   try {
     // Create org + user in a transaction
+    // Old schema: users table has no org_id column.
+    // Org membership is in org_members join table.
     const [org] = await sql`
-      INSERT INTO orgs (name, slug) VALUES (${body.name}, ${slug}) RETURNING id
+      INSERT INTO orgs (name, slug) VALUES (${body.name}, ${slug}) RETURNING org_id
     `;
+    const orgId = org.org_id;
     const [user] = await sql`
-      INSERT INTO users (org_id, email, name, password_hash)
-      VALUES (${org.id}, ${email}, ${body.name}, ${passwordHash})
-      RETURNING id, org_id, email
+      INSERT INTO users (email, name, password_hash)
+      VALUES (${email}, ${body.name}, ${passwordHash})
+      RETURNING user_id, email
     `;
+    const userId = user.user_id;
     await sql`
-      INSERT INTO org_members (org_id, user_id, role) VALUES (${org.id}, ${user.id}, 'owner')
+      INSERT INTO org_members (org_id, user_id, role) VALUES (${orgId}, ${userId}, 'owner')
     `;
-    // Set owner reference
-    await sql`UPDATE orgs SET owner_user_id = ${user.id} WHERE id = ${org.id}`;
+    await sql`UPDATE orgs SET owner_user_id = ${userId} WHERE org_id = ${orgId}`;
     await sql.end();
 
     const secret = c.env.JWT_SECRET || "dev-secret-change-me";
-    const token = await signJwt({ user_id: user.id, org_id: user.org_id, email: user.email }, secret);
+    const token = await signJwt({ user_id: userId, org_id: orgId, email: user.email }, secret);
 
     await c.env.CACHE.put(`auth:${token.slice(-16)}`, JSON.stringify({
-      orgId: user.org_id, userId: user.id, scopes: ["*"],
+      orgId, userId, scopes: ["*"],
     }), { expirationTtl: 86400 });
 
-    return c.json({ token, user_id: user.id, org_id: user.org_id, email: user.email }, 201);
+    return c.json({ token, user_id: userId, org_id: orgId, email: user.email }, 201);
   } catch (err: any) {
     await sql.end();
     if (err.message?.includes("unique") || err.message?.includes("duplicate")) {
       return c.json({ error: "Email already registered" }, 409);
     }
-    throw err;
+    // Temporary: return error details for debugging signup issues
+    return c.json({ error: "Signup failed", detail: err.message?.slice(0, 500) || String(err) }, 500);
   }
 });
 

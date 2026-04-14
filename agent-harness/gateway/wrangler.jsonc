@@ -16,13 +16,13 @@
 
   // KV for edge caching (Pattern A): auth tokens, config, tools, features
   "kv_namespaces": [
-    { "binding": "CACHE", "id": "PLACEHOLDER_CACHE_KV_ID" }
+    { "binding": "CACHE", "id": "43f9f06e09654bfbb90ce11fb1b2799e" }
   ],
 
   // Postgres via Hyperdrive (Pattern E): relational admin data
   "hyperdrive": [
-    { "binding": "DB", "id": "PLACEHOLDER_HYPERDRIVE_ID" },
-    { "binding": "DB_ADMIN", "id": "PLACEHOLDER_HYPERDRIVE_ADMIN_ID" }
+    { "binding": "DB", "id": "775f7e11ce8c479993855531f728770a" },
+    { "binding": "DB_ADMIN", "id": "6f8984ddd503489895a7c97e6970f634" }
   ],
 
   // Analytics Engine (Pattern C): audit, telemetry, security events
