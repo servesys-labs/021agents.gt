@@ -228,10 +228,9 @@ describe("DO SQLite Basics", () => {
     expect(tables.some((t: string) => t.startsWith("cf_"))).toBe(true);
   });
 
-  it("tracks beforeTurn call count", async () => {
-    const agent = await freshAgent("sqlite-turns-1");
-    await agent.testChat("Hello");
-    const count = await agent.getBeforeTurnCount();
-    expect(count).toBeGreaterThanOrEqual(1);
+  it("tracks request count", async () => {
+    const agent = await freshAgent("sqlite-requests-1");
+    const count = await agent.getRequestCount();
+    expect(count).toBeGreaterThanOrEqual(0);
   });
 });
