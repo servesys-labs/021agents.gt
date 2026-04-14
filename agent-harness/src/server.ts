@@ -898,6 +898,44 @@ function webSearchTools() {
 
 // ── ChatAgent ─────────────────────────────────────────────────────────────────
 //
+// ── Sub-Agent Specialists ─────────────────────────────────────────────────────
+// Each runs in its own DO with isolated SQLite. Called via this.subAgent().
+// Parent→child delegation is tracked in telemetry for the Meta Agent.
+
+export class ResearchSpecialist extends Think<Env> {
+  getModel() {
+    return createWorkersAI({ binding: this.env.AI })("@cf/moonshotai/kimi-k2.5");
+  }
+  getSystemPrompt() {
+    return "You are a research specialist. Search the web thoroughly, extract content, cross-reference sources, and synthesize findings into a structured report. Always cite sources with URLs.";
+  }
+  getTools() {
+    return {
+      ...webSearchTools(),
+      ...browserTools(this.env),
+    };
+  }
+  getMaxSteps() { return 15; }
+}
+
+export class CodingSpecialist extends Think<Env> {
+  getModel() {
+    return createWorkersAI({ binding: this.env.AI })("@cf/moonshotai/kimi-k2.5");
+  }
+  getSystemPrompt() {
+    return "You are a coding specialist. Write clean, well-tested code. Use the workspace to create files. Run code to verify it works.";
+  }
+  getTools() {
+    return {
+      ...sharedTools(),
+      ...(this.env.Sandbox ? sandboxTools(this.env) : {}),
+    };
+  }
+  getMaxSteps() { return 20; }
+}
+
+// ── ChatAgent ─────────────────────────────────────────────────────────────────
+//
 // Extends Think (not AIChatAgent) — the full CF Agents SDK lifecycle:
 // Session persistence, context blocks (soul + memory), auto-compaction,
 // resumable streaming, CodeMode, extensions, lifecycle hooks, sub-agents.
@@ -946,11 +984,94 @@ export class ChatAgent extends Think<Env> {
       ...(config.id === "meta" ? metaAgentToolSet({ AGENT_CORE: this.env.AGENT_CORE || this.env as any, AI: this.env.AI, ANALYTICS: this.env.ANALYTICS }) : {}),
     };
 
-    // Wrap all tools with CodeMode — model writes JS to orchestrate tools
-    const executor = new DynamicWorkerExecutor({ loader: this.env.LOADER });
-    const codemode = createCodeTool({ tools: allTools, executor });
+    // Wrap all tools with CodeMode — model writes JS to orchestrate tools.
+    // We wrap the executor to capture CodeMode failures in telemetry.
+    const rawExecutor = new DynamicWorkerExecutor({ loader: this.env.LOADER });
+    const trackedExecutor = {
+      execute: async (code: string, providers: any[]) => {
+        const start = Date.now();
+        try {
+          const result = await rawExecutor.execute(code, providers);
+          this._telemetry.toolCompleted(this.name, "codemode", { latencyMs: Date.now() - start });
+          return result;
+        } catch (err: any) {
+          this._telemetry.toolFailed(this.name, "codemode", err?.message || String(err));
+          emit(this.env as TelemetryBindings, {
+            type: "tool.failed",
+            agentName: this.name,
+            toolName: "codemode",
+            toolError: err?.message || String(err),
+            latencyMs: Date.now() - start,
+            metadata: { codePreview: code.slice(0, 200) },
+          });
+          throw err;
+        }
+      },
+    };
+    const codemode = createCodeTool({ tools: allTools, executor: trackedExecutor as any });
 
-    return { codemode, ...allTools };
+    // ── Sub-agent delegation tools ──
+    // Each sub-agent runs in its own DO with isolated SQLite.
+    // Telemetry tracks parent→child delegation with cost rollup.
+    const delegationTools = {
+      delegateResearch: tool({
+        description: "Delegate a research task to a specialist sub-agent with web search and browser tools. Returns a structured research report.",
+        inputSchema: z.object({
+          task: z.string().describe("The research task to investigate"),
+        }),
+        execute: async ({ task }) => {
+          this._telemetry.delegationStarted(this.name, "research-specialist");
+          const start = Date.now();
+          try {
+            const researcher = await this.subAgent(ResearchSpecialist, "researcher");
+            let result = "";
+            await researcher.chat(task, {
+              onEvent: (json: string) => {
+                const evt = JSON.parse(json);
+                if (evt.type === "text-delta") result += evt.textDelta ?? "";
+              },
+              onDone: () => {},
+              onError: (err: string) => { result = `Research error: ${err}`; },
+            });
+            this._telemetry.delegationCompleted(this.name, "research-specialist", 0);
+            return { task, result, latencyMs: Date.now() - start };
+          } catch (err) {
+            this._telemetry.toolFailed(this.name, "delegateResearch", String(err));
+            return { task, error: `Sub-agent failed: ${String(err)}` };
+          }
+        },
+      }),
+
+      delegateCoding: tool({
+        description: "Delegate a coding task to a specialist sub-agent with its own isolated workspace and git.",
+        inputSchema: z.object({
+          task: z.string().describe("The coding task"),
+        }),
+        execute: async ({ task }) => {
+          this._telemetry.delegationStarted(this.name, "coding-specialist");
+          const start = Date.now();
+          try {
+            const coder = await this.subAgent(CodingSpecialist, "coder");
+            let result = "";
+            await coder.chat(task, {
+              onEvent: (json: string) => {
+                const evt = JSON.parse(json);
+                if (evt.type === "text-delta") result += evt.textDelta ?? "";
+              },
+              onDone: () => {},
+              onError: (err: string) => { result = `Coding error: ${err}`; },
+            });
+            this._telemetry.delegationCompleted(this.name, "coding-specialist", 0);
+            return { task, result, latencyMs: Date.now() - start };
+          } catch (err) {
+            this._telemetry.toolFailed(this.name, "delegateCoding", String(err));
+            return { task, error: `Sub-agent failed: ${String(err)}` };
+          }
+        },
+      }),
+    };
+
+    return { codemode, ...allTools, ...delegationTools };
   }
 
   getMaxSteps() { return 10; }
