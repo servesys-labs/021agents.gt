@@ -11,11 +11,13 @@
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
+    "@ai-sdk/openai": "^3.0.52",
     "@cloudflare/ai-chat": "^0.4.2",
     "@cloudflare/codemode": "^0.3.4",
     "@cloudflare/kumo": "^1.18.0",
     "@cloudflare/puppeteer": "^1.1.0",
     "@cloudflare/sandbox": "^0.8.10",
+    "@cloudflare/shell": "^0.3.2",
     "@cloudflare/think": "^0.1.0",
     "@cloudflare/voice": "^0.1.0",
     "@modelcontextprotocol/sdk": "^1.25.0",
@@ -32,6 +34,7 @@
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.32.1",
+    "@cloudflare/vitest-pool-workers": "^0.14.6",
     "@cloudflare/workers-types": "^4.20260413.1",
     "@tailwindcss/vite": "^4",
     "@types/react": "^19.2.14",
@@ -40,6 +43,7 @@
     "tailwindcss": "^4.2.2",
     "typescript": "^6.0.2",
     "vite": "^8.0.8",
-    "wrangler": "^4.82.1"
+    "vitest": "^4.1.4",
+    "wrangler": "^4.82.2"
   }
 }
