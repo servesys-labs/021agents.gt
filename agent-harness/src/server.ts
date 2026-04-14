@@ -942,7 +942,7 @@ export class ChatAgent extends Think<Env> {
       ...(config.enableSandbox ? sandboxTools(this.env) : {}),
       ...structuredInputTools(),
       // Meta Agent gets agent management tools
-      ...(config.id === "meta" ? metaAgentToolSet(this.env) : {}),
+      ...(config.id === "meta" ? metaAgentToolSet({ AGENT_CORE: this.env.AGENT_CORE || this.env as any, AI: this.env.AI, ANALYTICS: this.env.ANALYTICS }) : {}),
     };
 
     // Wrap all tools with CodeMode — model writes JS to orchestrate tools
