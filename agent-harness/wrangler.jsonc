@@ -6,6 +6,13 @@
   // Note: ctx.facets works in production without "experimental" flag
   "compatibility_flags": ["nodejs_compat"],
 
+  // Alias: shim for agents/experimental/forever (not exported from published agents package)
+  // @cloudflare/think 0.1.2 imports withFibers from this path, but Agent class already
+  // includes fiber support natively. The shim provides an identity passthrough.
+  "alias": {
+    "agents/experimental/forever": "./src/shims/agents-experimental-forever.ts"
+  },
+
   // Workers AI binding
   "ai": { "binding": "AI" },
 

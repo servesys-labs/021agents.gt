@@ -119,15 +119,12 @@ export type TelemetryEventType =
   | "meta.suggestion_generated"
   | "meta.eval_run"
   | "meta.bulk_update"
-  | "meta.agent_improved";
+  | "meta.agent_improved"
+  // Agent lifecycle
   | "agent.deleted"
   | "agent.skill_added"
   | "agent.skill_removed"
-  | "agent.channel_deployed"
-  // Meta Agent
-  | "meta.suggestion_generated"
-  | "meta.eval_run"
-  | "meta.bulk_update";
+  | "agent.channel_deployed";
 
 // ── Event Payload ────────────────────────────────────────────────
 
