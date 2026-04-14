@@ -154,166 +154,144 @@
         </div>
 
         <!-- Navigation -->
-        <nav class="flex-1 overflow-y-auto p-2">
-          <!-- Dashboard link -->
+        <nav class="flex-1 overflow-y-auto p-2 space-y-1">
+
+          <!-- ═══ PERSONAL AGENT — always first, prominent ═══ -->
           <a
-            href="/"
-            class="mb-2 flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm font-medium text-sidebar-foreground/80 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+            href="/chat/default"
+            class="flex items-center gap-2.5 rounded-lg px-2.5 py-2.5 text-sm font-semibold transition-colors
+              {$page.url?.pathname?.startsWith('/chat/default') ? 'bg-primary/10 text-primary' : 'text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'}"
             class:justify-center={sidebarCollapsed}
             onclick={() => (sidebarOpen = false)}
-            title={sidebarCollapsed ? "Dashboard" : undefined}
+            title={sidebarCollapsed ? "Personal Agent" : undefined}
           >
-            <span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
-              <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25a2.25 2.25 0 01-2.25-2.25v-2.25z" />
-              </svg>
+            <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-primary/30 to-primary/10 text-primary text-sm">
+              ✦
             </span>
             {#if !sidebarCollapsed}
-              <span>Dashboard</span>
+              <div class="flex-1 min-w-0">
+                <div class="truncate">Personal Agent</div>
+                <div class="text-[10px] text-muted-foreground font-normal">Chat, code, research, create agents</div>
+              </div>
             {/if}
           </a>
 
-          <!-- Agent list -->
+          <div class="my-2 border-t border-border/50"></div>
+
+          <!-- ═══ YOUR AGENTS — business agents you created ═══ -->
           {#if !sidebarCollapsed}
-            <p class="mb-1.5 px-2 text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
-              Agents
+            <p class="mb-1 px-2 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/70">
+              Your Agents
             </p>
           {/if}
-          {#each agentStore.agents as agent, i}
-            {@const colors = ['bg-blue-500/20 text-blue-400', 'bg-emerald-500/20 text-emerald-400', 'bg-amber-500/20 text-amber-400', 'bg-purple-500/20 text-purple-400', 'bg-rose-500/20 text-rose-400', 'bg-cyan-500/20 text-cyan-400']}
+
+          {#each agentStore.agents.filter(a => a.name !== 'default') as agent, i}
+            {@const colors = ['bg-blue-500/15 text-blue-400', 'bg-emerald-500/15 text-emerald-400', 'bg-amber-500/15 text-amber-400', 'bg-purple-500/15 text-purple-400', 'bg-rose-500/15 text-rose-400', 'bg-cyan-500/15 text-cyan-400']}
             {@const color = colors[i % colors.length]}
+            {@const isActive = $page.url?.pathname === `/chat/${agent.name}` || $page.url?.pathname?.startsWith(`/agent/${agent.name}`)}
             <a
               href="/chat/{agent.name}"
-              class="group flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm font-medium text-sidebar-foreground/80 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+              class="group flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-sm transition-colors
+                {isActive ? 'bg-sidebar-accent text-sidebar-accent-foreground' : 'text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'}"
               class:justify-center={sidebarCollapsed}
               onclick={() => (sidebarOpen = false)}
-              title={sidebarCollapsed ? agent.name : undefined}
+              title={sidebarCollapsed ? agent.display_name || agent.name : undefined}
             >
-              <span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-xs font-bold {color}">
-                {agent.name.charAt(0).toUpperCase()}
+              <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[10px] font-bold {color}">
+                {(agent.display_name || agent.name).charAt(0).toUpperCase()}
               </span>
               {#if !sidebarCollapsed}
-                <span class="truncate">{agent.name}</span>
-                <span class="ml-auto h-2 w-2 shrink-0 rounded-full {agent.is_active ? 'bg-success' : 'bg-muted-foreground/40'}"></span>
+                <span class="flex-1 truncate text-[13px]">{agent.display_name || agent.name}</span>
+                <span class="h-1.5 w-1.5 shrink-0 rounded-full {agent.is_active ? 'bg-green-500' : 'bg-muted-foreground/30'}"></span>
               {/if}
             </a>
+            <!-- Agent sub-pages (shown when active) -->
+            {#if isActive && !sidebarCollapsed}
+              <div class="ml-8 space-y-0.5 border-l border-border/30 pl-2">
+                {#each [
+                  { href: `/agent/${agent.name}/settings`, label: "Settings" },
+                  { href: `/agent/${agent.name}/tests`, label: "Tests" },
+                  { href: `/agent/${agent.name}/activity`, label: "Activity" },
+                  { href: `/agent/${agent.name}/channels`, label: "Channels" },
+                ] as sub}
+                  <a
+                    href={sub.href}
+                    class="block rounded px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors
+                      {$page.url?.pathname === sub.href ? 'text-foreground bg-muted/50' : ''}"
+                    onclick={() => (sidebarOpen = false)}
+                  >{sub.label}</a>
+                {/each}
+              </div>
+            {/if}
           {/each}
+
+          {#if agentStore.agents.filter(a => a.name !== 'default').length === 0 && !sidebarCollapsed}
+            <p class="px-3 py-2 text-[11px] text-muted-foreground/50 italic">No agents yet. Ask your Personal Agent to create one.</p>
+          {/if}
 
           <a
             href="/agent/new"
-            class="mt-2 flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"
+            class="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs text-muted-foreground/60 transition-colors hover:bg-sidebar-accent hover:text-foreground"
             class:justify-center={sidebarCollapsed}
             onclick={() => (sidebarOpen = false)}
-            title={sidebarCollapsed ? "New Agent" : undefined}
+            title={sidebarCollapsed ? "Create Agent" : undefined}
           >
-            <span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-dashed border-border text-muted-foreground">
-              <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-              </svg>
-            </span>
-            {#if !sidebarCollapsed}
-              <span>New Agent</span>
-            {/if}
+            <span class="flex h-5 w-5 shrink-0 items-center justify-center rounded border border-dashed border-border/50 text-[10px]">+</span>
+            {#if !sidebarCollapsed}<span>Create Agent</span>{/if}
           </a>
 
-          <!-- Conversations moved to chat page session picker (top-right) -->
+          <div class="my-2 border-t border-border/50"></div>
+
+          <!-- ═══ DISCOVER — marketplace + connectors ═══ -->
+          {#if !sidebarCollapsed}
+            <p class="mb-1 px-2 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/70">
+              Discover
+            </p>
+          {/if}
+
+          {#each [
+            { href: "/marketplace", icon: "🏪", label: "Marketplace" },
+            { href: "/sessions", icon: "📊", label: "Activity" },
+          ] as link}
+            <a
+              href={link.href}
+              class="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-[13px] text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+              class:justify-center={sidebarCollapsed}
+              onclick={() => (sidebarOpen = false)}
+              title={sidebarCollapsed ? link.label : undefined}
+            >
+              {#if sidebarCollapsed}
+                <span class="text-sm">{link.icon}</span>
+              {:else}
+                <span class="text-sm">{link.icon}</span>
+                <span>{link.label}</span>
+              {/if}
+            </a>
+          {/each}
         </nav>
 
-        <!-- Platform links -->
-        <div class="p-2 space-y-0.5">
-          {#if !sidebarCollapsed}
-            <p class="mb-1.5 px-2 text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
-              Platform
-            </p>
-          {/if}
-          <a
-            href="/sessions"
-            class="flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-            onclick={() => (sidebarOpen = false)}
-            title={sidebarCollapsed ? "Sessions" : undefined}
-          >
-            {#if sidebarCollapsed}
-              <svg xmlns="http://www.w3.org/2000/svg" class="mx-auto h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-            {:else}
-              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              <span>Sessions</span>
-            {/if}
-          </a>
-          <a
-            href="/evals"
-            class="flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-            onclick={() => (sidebarOpen = false)}
-            title={sidebarCollapsed ? "Evals" : undefined}
-          >
-            {#if sidebarCollapsed}
-              <svg xmlns="http://www.w3.org/2000/svg" class="mx-auto h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-            {:else}
-              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              <span>Evals</span>
-            {/if}
-          </a>
-          <a
-            href="/marketplace"
-            class="flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-            onclick={() => (sidebarOpen = false)}
-            title={sidebarCollapsed ? "Marketplace" : undefined}
-          >
-            {#if sidebarCollapsed}
-              <svg xmlns="http://www.w3.org/2000/svg" class="mx-auto h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z" />
-              </svg>
-            {:else}
-              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z" />
-              </svg>
-              <span>Marketplace</span>
-            {/if}
-          </a>
-          <a
-            href="/observability"
-            class="flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-            onclick={() => (sidebarOpen = false)}
-            title={sidebarCollapsed ? "Observability" : undefined}
-          >
-            {#if sidebarCollapsed}
-              <svg xmlns="http://www.w3.org/2000/svg" class="mx-auto h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
-              </svg>
-            {:else}
-              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
-              </svg>
-              <span>Observability</span>
-            {/if}
-          </a>
-        </div>
-
-        <!-- Settings links -->
-        <div class="p-2 space-y-0.5">
-          {#if !sidebarCollapsed}
-            <p class="mb-1.5 px-2 text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
-              Settings
-            </p>
-          {/if}
-          <a
-            href="/settings/account"
-            class="flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-            onclick={() => (sidebarOpen = false)}
-            title={sidebarCollapsed ? "Account" : undefined}
-          >
-            {#if sidebarCollapsed}
-              <svg xmlns="http://www.w3.org/2000/svg" class="mx-auto h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-              </svg>
-            {:else}
+        <!-- Bottom: Settings + Billing (compact) -->
+        <div class="p-2 space-y-0.5 border-t border-border/30">
+          {#each [
+            { href: "/settings/account", icon: "⚙️", label: "Settings" },
+            { href: "/settings/billing", icon: "💳", label: "Billing" },
+            { href: "/settings/api-keys", icon: "🔑", label: "API Keys" },
+          ] as link}
+            <a
+              href={link.href}
+              class="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-[13px] text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+              class:justify-center={sidebarCollapsed}
+              onclick={() => (sidebarOpen = false)}
+              title={sidebarCollapsed ? link.label : undefined}
+            >
+              {#if sidebarCollapsed}
+                <span class="text-sm">{link.icon}</span>
+              {:else}
+                <span class="text-sm">{link.icon}</span>
+                <span>{link.label}</span>
+              {/if}
+            </a>
+          {/each}
               <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
               </svg>
@@ -331,31 +309,6 @@
                 <path stroke-linecap="round" stroke-linejoin="round" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
               </svg>
             {:else}
-              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
-              </svg>
-              <span>API Keys</span>
-            {/if}
-          </a>
-          <a
-            href="/settings/billing"
-            class="flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-            onclick={() => (sidebarOpen = false)}
-            title={sidebarCollapsed ? "Billing" : undefined}
-          >
-            {#if sidebarCollapsed}
-              <svg xmlns="http://www.w3.org/2000/svg" class="mx-auto h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" />
-              </svg>
-            {:else}
-              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" />
-              </svg>
-              <span>Billing</span>
-            {/if}
-          </a>
-        </div>
-
         <!-- Bottom controls -->
         <div class="p-2 space-y-1">
           <button
