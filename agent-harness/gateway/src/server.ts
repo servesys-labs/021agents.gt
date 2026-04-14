@@ -706,6 +706,41 @@ app.get("/api/v1/sessions/active", async (c) => {
   return new Response(resp.body, { status: resp.status, headers: resp.headers });
 });
 
+// ── Session turn history (written by Queue from DO telemetry) ──
+
+app.get("/api/v1/sessions/:id/turns", async (c) => {
+  const sessionId = c.req.param("id");
+  const orgId = c.get("orgId");
+  const sql = await getDb(c.env.DB);
+
+  // Verify session belongs to this org
+  const [session] = await sql`
+    SELECT id FROM sessions WHERE id = ${sessionId} AND org_id = ${orgId}
+  `;
+  if (!session) {
+    await sql.end();
+    return c.json({ error: "Session not found" }, 404);
+  }
+
+  // Session metadata is in the sessions table; detailed turn-level data
+  // comes from the session's metadata JSONB (populated by Queue consumer).
+  // If detailed turn tracking is needed, the Queue consumer writes tool
+  // execution events which we can query from the telemetry tables.
+  // For now, return what we have from the session + any tool executions.
+  const [detail] = await sql`
+    SELECT * FROM sessions WHERE id = ${sessionId}
+  `;
+  await sql.end();
+
+  // The session metadata JSONB may contain turns array if the Queue consumer
+  // populates it. Return the full session with whatever detail is available.
+  return c.json({
+    session: detail,
+    // Tool execution history would come from Analytics Engine or a
+    // dedicated tool_executions table — defer to Tier 3 implementation
+  });
+});
+
 // ═══════════════════════════════════════════════════════════════════
 // CONVERSATIONS (Pattern E: Postgres — relational source of truth)
 //
@@ -957,6 +992,105 @@ app.post("/api/v1/guardrails", async (c) => {
   await sql.end();
   await kvInvalidate(c.env.CACHE, `guardrails:${orgId}`);
   return c.json(rule, 201);
+});
+
+app.put("/api/v1/guardrails/:id", async (c) => {
+  const orgId = c.get("orgId");
+  const ruleId = c.req.param("id");
+  const body = await c.req.json<{ name?: string; config?: Record<string, unknown>; is_active?: boolean }>();
+  const sql = await getDb(c.env.DB);
+  const [rule] = await sql`
+    UPDATE guardrail_rules SET
+      name = COALESCE(${body.name || null}, name),
+      config = COALESCE(${body.config ? JSON.stringify(body.config) : null}::jsonb, config),
+      is_active = COALESCE(${body.is_active ?? null}, is_active)
+    WHERE id = ${ruleId} AND org_id = ${orgId}
+    RETURNING *
+  `;
+  await sql.end();
+  if (!rule) return c.json({ error: "Rule not found" }, 404);
+  await kvInvalidate(c.env.CACHE, `guardrails:${orgId}`);
+  return c.json(rule);
+});
+
+app.delete("/api/v1/guardrails/:id", async (c) => {
+  const orgId = c.get("orgId");
+  const ruleId = c.req.param("id");
+  const sql = await getDb(c.env.DB);
+  await sql`DELETE FROM guardrail_rules WHERE id = ${ruleId} AND org_id = ${orgId}`;
+  await sql.end();
+  await kvInvalidate(c.env.CACHE, `guardrails:${orgId}`);
+  return c.json({ deleted: ruleId });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// SKILLS (Pattern E: Postgres + KV cache)
+// ═══════════════════════════════════════════════════════════════════
+
+app.get("/api/v1/skills", async (c) => {
+  const orgId = c.get("orgId");
+  const skills = await kvCached(c.env.CACHE, `skills:${orgId}`, 120, async () => {
+    const sql = await getDb(c.env.DB);
+    const rows = await sql`
+      SELECT id, name, description, version, is_builtin, is_active, created_at
+      FROM skills
+      WHERE (org_id = ${orgId} OR org_id IS NULL) AND is_active = true
+      ORDER BY is_builtin DESC, name
+    `;
+    await sql.end();
+    return rows;
+  });
+  return c.json(skills);
+});
+
+app.post("/api/v1/skills", async (c) => {
+  const orgId = c.get("orgId");
+  const body = await c.req.json<{ name: string; description: string; content: string }>();
+  if (!body.name || !body.content) return c.json({ error: "Name and content required" }, 400);
+  const sql = await getDb(c.env.DB);
+  const [skill] = await sql`
+    INSERT INTO skills (org_id, name, description, content)
+    VALUES (${orgId}, ${body.name}, ${body.description || ""}, ${body.content})
+    RETURNING id, name, description, version, is_active, created_at
+  `;
+  await sql.end();
+  await kvInvalidate(c.env.CACHE, `skills:${orgId}`);
+  return c.json(skill, 201);
+});
+
+app.put("/api/v1/skills/:id", async (c) => {
+  const orgId = c.get("orgId");
+  const skillId = c.req.param("id");
+  const body = await c.req.json<{ name?: string; description?: string; content?: string; is_active?: boolean }>();
+  const sql = await getDb(c.env.DB);
+  const [skill] = await sql`
+    UPDATE skills SET
+      name = COALESCE(${body.name || null}, name),
+      description = COALESCE(${body.description || null}, description),
+      content = COALESCE(${body.content || null}, content),
+      is_active = COALESCE(${body.is_active ?? null}, is_active),
+      version = version + 1,
+      updated_at = NOW()
+    WHERE id = ${skillId} AND org_id = ${orgId}
+    RETURNING id, name, description, version, is_active, created_at
+  `;
+  await sql.end();
+  if (!skill) return c.json({ error: "Skill not found" }, 404);
+  await kvInvalidate(c.env.CACHE, `skills:${orgId}`);
+  return c.json(skill);
+});
+
+app.delete("/api/v1/skills/:id", async (c) => {
+  const orgId = c.get("orgId");
+  const skillId = c.req.param("id");
+  const sql = await getDb(c.env.DB);
+  // Don't delete built-in skills
+  await sql`
+    DELETE FROM skills WHERE id = ${skillId} AND org_id = ${orgId} AND is_builtin = false
+  `;
+  await sql.end();
+  await kvInvalidate(c.env.CACHE, `skills:${orgId}`);
+  return c.json({ deleted: skillId });
 });
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1246,6 +1380,86 @@ app.get("/api/v1/orgs/current", async (c) => {
     return row;
   });
   return c.json(org);
+});
+
+app.put("/api/v1/orgs/current", async (c) => {
+  const orgId = c.get("orgId");
+  const body = await c.req.json<{ name?: string; settings?: Record<string, unknown> }>();
+  const sql = await getDb(c.env.DB);
+  const [org] = await sql`
+    UPDATE orgs SET
+      name = COALESCE(${body.name || null}, name),
+      settings = COALESCE(${body.settings ? JSON.stringify(body.settings) : null}::jsonb, settings),
+      updated_at = NOW()
+    WHERE id = ${orgId}
+    RETURNING *
+  `;
+  await sql.end();
+  await kvInvalidate(c.env.CACHE, `org:${orgId}`);
+  return c.json(org);
+});
+
+// ── Org Members (RBAC) ──
+
+app.get("/api/v1/orgs/current/members", async (c) => {
+  const orgId = c.get("orgId");
+  const sql = await getDb(c.env.DB);
+  const rows = await sql`
+    SELECT u.id, u.email, u.name, u.avatar_url, m.role, m.joined_at
+    FROM org_members m JOIN users u ON m.user_id = u.id
+    WHERE m.org_id = ${orgId}
+    ORDER BY m.joined_at
+  `;
+  await sql.end();
+  return c.json(rows);
+});
+
+app.post("/api/v1/orgs/current/members", async (c) => {
+  const orgId = c.get("orgId");
+  const body = await c.req.json<{ email: string; role?: string }>();
+  if (!body.email) return c.json({ error: "Email required" }, 400);
+
+  const role = body.role || "member";
+  if (!["admin", "member", "viewer"].includes(role)) {
+    return c.json({ error: "Role must be admin, member, or viewer" }, 400);
+  }
+
+  const sql = await getDb(c.env.DB);
+  // Find user by email
+  const [user] = await sql`SELECT id FROM users WHERE email = ${body.email.toLowerCase().trim()}`;
+  if (!user) {
+    await sql.end();
+    return c.json({ error: "User not found. They must sign up first." }, 404);
+  }
+
+  try {
+    await sql`
+      INSERT INTO org_members (org_id, user_id, role) VALUES (${orgId}, ${user.id}, ${role})
+      ON CONFLICT (org_id, user_id) DO UPDATE SET role = ${role}
+    `;
+    await sql.end();
+    return c.json({ user_id: user.id, role }, 201);
+  } catch (err: any) {
+    await sql.end();
+    throw err;
+  }
+});
+
+app.delete("/api/v1/orgs/current/members/:userId", async (c) => {
+  const orgId = c.get("orgId");
+  const targetUserId = c.req.param("userId");
+
+  // Prevent removing the org owner
+  const sql = await getDb(c.env.DB);
+  const [org] = await sql`SELECT owner_user_id FROM orgs WHERE id = ${orgId}`;
+  if (org?.owner_user_id === targetUserId) {
+    await sql.end();
+    return c.json({ error: "Cannot remove org owner" }, 403);
+  }
+
+  await sql`DELETE FROM org_members WHERE org_id = ${orgId} AND user_id = ${targetUserId}`;
+  await sql.end();
+  return c.json({ removed: targetUserId });
 });
 
 // ═══════════════════════════════════════════════════════════════════
