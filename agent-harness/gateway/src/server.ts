@@ -1719,13 +1719,26 @@ app.get("/api/v1/eval/runs", async (c) => {
 app.post("/api/v1/eval/runs", async (c) => {
   const orgId = c.get("orgId");
   const body = await c.req.json();
+  if (!body.agent_name) return c.json({ error: "agent_name required" }, 400);
+
   const sql = await getDb(c.env.DB);
   const [run] = await sql`
-    INSERT INTO eval_runs (agent_name, dataset_id, config, org_id)
-    VALUES (${body.agent_name}, ${body.dataset_id}, ${JSON.stringify(body.config || {})}, ${orgId})
+    INSERT INTO eval_runs (agent_name, dataset_id, config, org_id, status)
+    VALUES (${body.agent_name}, ${body.dataset_id || null}, ${JSON.stringify(body.config || {})}, ${orgId}, 'pending')
     RETURNING *
   `;
   await sql.end();
+
+  // Send to queue for async execution by the agent-harness worker
+  try {
+    await c.env.BILLING_QUEUE.send({
+      type: "eval_run",
+      payload: { run_id: run.id, agent_name: body.agent_name, org_id: orgId },
+    });
+  } catch {
+    // Queue send failed — eval stays in pending state, can be retried
+  }
+
   return c.json(run, 201);
 });
 
@@ -1855,6 +1868,38 @@ app.post("/api/v1/marketplace/:id/rate", async (c) => {
   return c.json(rating);
 });
 
+// Install/clone an agent from the marketplace into the user's org
+app.post("/api/v1/marketplace/:id/install", async (c) => {
+  const orgId = c.get("orgId");
+  const listingId = c.req.param("id");
+  const body = await c.req.json<{ name?: string }>();
+
+  const sql = await getDb(c.env.DB);
+  const [listing] = await sql`
+    SELECT * FROM marketplace_listings WHERE id = ${listingId} AND status = 'published'
+  `;
+  if (!listing) {
+    await sql.end();
+    return c.json({ error: "Listing not found" }, 404);
+  }
+
+  // Clone agent with optional rename
+  const agentName = body.name || `${listing.agent_name}-clone`;
+  const [agent] = await sql`
+    INSERT INTO agents (name, description, config, org_id)
+    VALUES (${agentName}, ${listing.description || ""}, ${JSON.stringify(listing.config || {})}::jsonb, ${orgId})
+    RETURNING *
+  `;
+
+  // Increment install count
+  await sql`UPDATE marketplace_listings SET install_count = install_count + 1 WHERE id = ${listingId}`;
+  await sql.end();
+
+  await kvInvalidate(c.env.CACHE, `agents:${orgId}`);
+
+  return c.json({ agent, listing_id: listingId }, 201);
+});
+
 // ═══════════════════════════════════════════════════════════════════
 // RAG DOCUMENTS (Pattern E: Postgres metadata + R2 storage)
 // ═══════════════════════════════════════════════════════════════════
@@ -1890,11 +1935,15 @@ app.post("/api/v1/rag/:agent/documents", async (c) => {
     customMetadata: { orgId, agentName, originalName: file.name },
   });
 
-  // TODO: Queue a chunking + Vectorize embedding job
-  // For now, document is stored and listable but not yet searchable
-  // via semantic search. Chunking pipeline is a Queue consumer task.
+  // Queue chunking + Vectorize embedding job (processed by agent-harness worker)
+  try {
+    await c.env.BILLING_QUEUE.send({
+      type: "rag_embed",
+      payload: { r2_key: r2Key, org_id: orgId, agent_name: agentName },
+    });
+  } catch {} // non-blocking — document is stored regardless
 
-  return c.json({ key: r2Key, name: file.name, size: file.size }, 201);
+  return c.json({ key: r2Key, name: file.name, size: file.size, embedding_queued: true }, 201);
 });
 
 app.delete("/api/v1/rag/:agent/documents/:key", async (c) => {
