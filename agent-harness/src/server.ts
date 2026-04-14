@@ -1303,7 +1303,11 @@ export class ResearchSpecialist extends Think<Env> {
 }
 
 export class CodingSpecialist extends Think<Env> {
-  // SDK pattern: Workspace (SQLite + R2 hybrid filesystem) — same as workspace-chat example
+  // SDK pattern: override workspace to add R2 spillover for large files.
+  // Think auto-creates a SQLite-only workspace if we don't override.
+  // Think also auto-provides read/write/edit/list/find/grep/delete tools
+  // from createWorkspaceTools(this.workspace) — we don't redefine those.
+  // @ts-ignore — Think source declares workspace but published .d.ts loses it via ThinkBaseConstructor
   workspace = new Workspace({
     sql: (this as any).ctx.storage.sql,
     r2: (this as any).env?.STORAGE,
@@ -1311,6 +1315,7 @@ export class CodingSpecialist extends Think<Env> {
     name: () => (this as any).name,
   });
 
+  // Git operations via @cloudflare/shell/git — isomorphic-git on the virtual filesystem.
   private _git: ReturnType<typeof createGit> | undefined;
   private git() {
     this._git ??= createGit(new WorkspaceFileSystem(this.workspace));
@@ -1324,69 +1329,23 @@ export class CodingSpecialist extends Think<Env> {
   getSystemPrompt() {
     return [
       "You are a coding specialist with a persistent virtual filesystem and git.",
-      "Direct tools: readFile, writeFile, listDirectory, deleteFile, mkdir, glob for file operations.",
-      "Git tools: gitInit, gitStatus, gitAdd, gitCommit, gitLog, gitDiff, gitClone, gitPush, gitBranch, gitCheckout.",
-      "For multi-file refactors, coordinated edits, or transactional updates, use the `runStateCode` tool.",
-      "The runStateCode sandbox has `state.*` (filesystem) and `git.*` available.",
-      "When creating projects, use tools to actually create files — don't just describe them.",
-      "After making changes, verify they work by reading the files back.",
+      "File tools (auto-provided by Think): read, write, edit, list, find, grep, delete.",
+      "Git tools: gitInit, gitStatus, gitAdd, gitCommit, gitLog, gitDiff, gitClone, gitPush, gitBranch, gitCheckout, gitRemote.",
+      "For multi-file refactors or transactional operations, use `runStateCode` (V8 sandbox with state.* and git.*).",
+      "When creating projects, use write tool to create files. Read files before editing.",
+      "After making changes, verify they work by reading files back.",
       STATE_SYSTEM_PROMPT.replace("{{types}}", STATE_TYPES),
     ].join("\n");
   }
 
+  // Think auto-merges: workspaceTools + getTools() + extensionTools + contextTools + mcpTools
+  // We only return tools that Think doesn't already provide: git + runStateCode.
   getTools() {
     const ws = this.workspace;
     const gitOps = this.git();
 
     return {
-      // ── SDK file operations (from workspace-chat pattern) ──
-      readFile: tool({
-        description: "Read the contents of a file at the given path",
-        inputSchema: z.object({ path: z.string().describe("Absolute file path, e.g. /src/index.ts") }),
-        execute: async ({ path }) => {
-          const content = await ws.readFile(path);
-          return content === null ? { error: `File not found: ${path}` } : { path, content };
-        },
-      }),
-      writeFile: tool({
-        description: "Write content to a file. Creates parent directories if needed.",
-        inputSchema: z.object({
-          path: z.string().describe("Absolute file path"),
-          content: z.string().describe("File content"),
-        }),
-        execute: async ({ path, content }) => {
-          await ws.writeFile(path, content);
-          return { path, bytesWritten: content.length };
-        },
-      }),
-      listDirectory: tool({
-        description: "List files and directories at the given path",
-        inputSchema: z.object({ path: z.string().describe("Absolute directory path") }),
-        execute: async ({ path }) => {
-          const entries = await ws.readDir(path);
-          return { path, entries: entries.map(e => ({ name: e.name, type: e.type, size: e.size })) };
-        },
-      }),
-      deleteFile: tool({
-        description: "Delete a file or empty directory",
-        inputSchema: z.object({ path: z.string().describe("Absolute path to delete") }),
-        execute: async ({ path }) => ({ path, deleted: await ws.deleteFile(path) }),
-      }),
-      mkdir: tool({
-        description: "Create a directory (and parent directories)",
-        inputSchema: z.object({ path: z.string().describe("Absolute directory path") }),
-        execute: async ({ path }) => { await ws.mkdir(path, { recursive: true }); return { path, created: true }; },
-      }),
-      glob: tool({
-        description: "Find files matching a glob pattern, e.g. **/*.ts",
-        inputSchema: z.object({ pattern: z.string().describe("Glob pattern") }),
-        execute: async ({ pattern }) => {
-          const files = await ws.glob(pattern);
-          return { pattern, matches: files.map(f => ({ path: f.path, type: f.type, size: f.size })) };
-        },
-      }),
-
-      // ── SDK git operations (from @cloudflare/shell/git) ──
+      // ── Git operations (not provided by Think, added by us) ──
       gitInit: tool({
         description: "Initialize a new git repository",
         inputSchema: z.object({ defaultBranch: z.string().optional() }),
@@ -1431,8 +1390,9 @@ export class CodingSpecialist extends Think<Env> {
           dir: z.string().optional().describe("Target directory"),
           branch: z.string().optional(),
           depth: z.number().optional(),
+          token: z.string().optional().describe("Auth token for private repos"),
         }),
-        execute: async ({ url, dir, branch, depth }) => gitOps.clone({ url, dir, branch, depth }),
+        execute: async ({ url, dir, branch, depth, token }) => gitOps.clone({ url, dir, branch, depth, token }),
       }),
       gitPush: tool({
         description: "Push commits to remote",
@@ -1471,11 +1431,11 @@ export class CodingSpecialist extends Think<Env> {
         execute: async (opts) => gitOps.remote(opts),
       }),
 
-      // ── SDK codemode (from @cloudflare/codemode) for multi-file operations ──
+      // ── Codemode: V8 sandbox with state.* (filesystem) and git.* ──
       runStateCode: tool({
-        description: "Run JavaScript in an isolated sandbox with state.* (filesystem) and git.* available. Use for multi-file refactors, coordinated edits, or transactional operations.",
+        description: "Run JavaScript in an isolated V8 sandbox with state.* (filesystem) and git.* available. Use for multi-file refactors, coordinated edits, batch operations, or transactional updates. Do NOT use TypeScript syntax.",
         inputSchema: z.object({
-          code: z.string().describe("Async arrow function: async () => { /* use state.* and git.* */ return result; }. Do NOT use TypeScript syntax."),
+          code: z.string().describe("Async arrow function: async () => { /* use state.* and git.* */ return result; }"),
         }),
         execute: async ({ code }) => {
           const executor = new DynamicWorkerExecutor({ loader: (this as any).env.LOADER });
