@@ -323,6 +323,18 @@
     return () => window.removeEventListener("chat:improve", onImprove);
   });
 
+  // Listen for follow-up suggestion clicks (from ChatMessage)
+  $effect(() => {
+    function onFollowUp(e: Event) {
+      const suggestion = (e as CustomEvent).detail;
+      if (suggestion && !streaming) {
+        handleSend(suggestion);
+      }
+    }
+    window.addEventListener("chat:followup", onFollowUp);
+    return () => window.removeEventListener("chat:followup", onFollowUp);
+  });
+
   // Auto-setup: when redirected from agent builder with ?setup=description,
   // open the Improve panel and send the description to the meta-agent in demo mode
   // so it configures the agent (system prompt, tools, eval cases, governance).

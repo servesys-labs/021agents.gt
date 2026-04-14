@@ -147,6 +147,27 @@
     (message.toolCalls ?? []).reduce((sum, tc) => sum + (tc.latency_ms ?? 0), 0)
   );
 
+  // ── Follow-up suggestion extraction ──
+  // Detects "## Follow-up" sections with bullet points and extracts them
+  // as clickable suggestions (rendered separately from markdown content)
+  let followUps = $derived.by(() => {
+    if (!message.content || streaming) return [];
+    const text = message.content;
+    // Match "## Follow-up" or "Follow-up:" sections
+    const followUpMatch = text.match(/(?:##\s*Follow-up|Follow-up:?)\s*\n((?:\s*[-*]\s+.+\n?)+)/i);
+    if (!followUpMatch) return [];
+    return followUpMatch[1]
+      .split("\n")
+      .map(line => line.replace(/^\s*[-*]\s+/, "").trim())
+      .filter(line => line.length > 10);
+  });
+
+  // Remove follow-up section from rendered content (we render it separately)
+  let contentWithoutFollowUps = $derived.by(() => {
+    if (followUps.length === 0) return message.content;
+    return (message.content || "").replace(/(?:##\s*Follow-up|Follow-up:?)\s*\n(?:\s*[-*]\s+.+\n?)+/i, "").trim();
+  });
+
   let safeInputTokens = $derived(toFiniteNumber(message.input_tokens));
   let safeOutputTokens = $derived(toFiniteNumber(message.output_tokens));
   let safeLatencyMs = $derived(toFiniteNumber(message.latency_ms));
@@ -256,8 +277,8 @@
         {/if}
       {/if}
 
-      <!-- Content -->
-      {#if message.content}
+      <!-- Content (without follow-up section — rendered separately below) -->
+      {#if contentWithoutFollowUps}
         <!-- svelte-ignore a11y_click_events_have_key_events -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
@@ -265,6 +286,25 @@
           onclick={handleContentClick}
         >
           {@html renderedHtml}
+        </div>
+      {/if}
+
+      <!-- Follow-up suggestions (clickable buttons that pre-fill chat input) -->
+      {#if followUps.length > 0}
+        <div class="mt-4 space-y-2">
+          <p class="text-xs font-semibold text-muted-foreground">Follow-up</p>
+          {#each followUps as suggestion}
+            <button
+              class="group flex w-full items-start gap-2 rounded-lg border border-border/50 bg-card/30 px-3 py-2.5 text-left text-sm text-primary/80 hover:border-primary/30 hover:bg-primary/5 hover:text-primary transition-all"
+              onclick={() => {
+                // Dispatch event to pre-fill chat input with this suggestion
+                window.dispatchEvent(new CustomEvent("chat:followup", { detail: suggestion }));
+              }}
+            >
+              <span class="mt-0.5 text-primary/40 group-hover:text-primary/70 transition-colors">↵</span>
+              <span>{suggestion}</span>
+            </button>
+          {/each}
         </div>
       {/if}
 
