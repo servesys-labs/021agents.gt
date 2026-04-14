@@ -15,10 +15,12 @@
   // Dynamic Worker loading — used by AgentSupervisor for facet code
   "worker_loaders": [{ "binding": "LOADER" }],
 
-  // Vite-built React SPA served as static assets
+  // SPA assets served via Cloudflare Pages or Workers static assets
+  // Build UI first: cd ui && npm run build
   "assets": {
+    "directory": "./ui/build",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/agents/*", "/api/*", "/.well-known/*", "/mcp"]
+    "run_worker_first": ["/agents/*", "/api/*", "/.well-known/*", "/mcp", "/channels/*", "/webhook/*"]
   },
 
   // Durable Objects: ChatAgent (Think) + Sandbox + AgentSupervisor + ReminderAgent + McpElicitation
@@ -92,7 +94,7 @@
         "max_batch_timeout": 5,
         "max_retries": 5,
         "dead_letter_queue": "harness-telemetry-dlq",
-        "retry_delay": "exponential"
+        "retry_delay": 10
       },
       {
         "queue": "harness-telemetry-dlq",
