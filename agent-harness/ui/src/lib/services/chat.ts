@@ -109,75 +109,93 @@ function parseJwtClaims(): { orgId: string; userId: string } {
  * tool-result, reasoning, and step-start/step-finish types.
  */
 function mapThinkResponse(data: any, onEvent: (event: ChatEvent) => void): void {
-  // Think sends cf_agent_use_chat_response with messages[]
+  // Think sends cf_agent_use_chat_response with a `body` field containing
+  // JSON-stringified streaming chunks (text-delta, reasoning-delta, tool-call, etc.)
   if (data.type === "cf_agent_use_chat_response") {
+    // Parse the streaming chunk from body
+    if (data.body) {
+      try {
+        const chunk = typeof data.body === "string" ? JSON.parse(data.body) : data.body;
+        switch (chunk.type) {
+          case "text-delta":
+            onEvent({ type: "token", data: { content: chunk.delta || chunk.textDelta || "" } });
+            break;
+          case "reasoning-delta":
+          case "reasoning":
+            onEvent({ type: "thinking", data: { content: chunk.delta || chunk.textDelta || "" } });
+            break;
+          case "tool-call":
+            onEvent({
+              type: "tool_call",
+              data: {
+                name: chunk.toolName || "tool",
+                tool_call_id: chunk.toolCallId || "",
+                args_preview: typeof chunk.args === "string"
+                  ? chunk.args.slice(0, 200)
+                  : JSON.stringify(chunk.args || {}).slice(0, 200),
+              },
+            });
+            break;
+          case "tool-result":
+            onEvent({
+              type: "tool_result",
+              data: {
+                name: chunk.toolName || "tool",
+                tool_call_id: chunk.toolCallId || "",
+                result: typeof chunk.result === "string"
+                  ? chunk.result.slice(0, 4000)
+                  : JSON.stringify(chunk.result || "").slice(0, 4000),
+              },
+            });
+            break;
+          case "start-step":
+            onEvent({ type: "turn_start", data: { turn: 1 } });
+            break;
+          case "finish-step":
+            onEvent({ type: "turn_end", data: {} });
+            break;
+          case "finish":
+            onEvent({
+              type: "done",
+              data: {
+                output: "",
+                cost_usd: chunk.usage?.totalTokens ? chunk.usage.totalTokens * 0.00001 : 0,
+                session_id: "",
+                turns: chunk.steps || 1,
+                tool_calls: 0,
+              },
+            });
+            break;
+        }
+      } catch {
+        // Non-JSON body — treat as raw text
+        onEvent({ type: "token", data: { content: String(data.body) } });
+      }
+      return;
+    }
+
+    // Fallback: older format with messages[].parts[] (AIChatAgent style)
     const messages = data.messages || [];
     for (const msg of messages) {
       if (!msg.parts) continue;
       for (const part of msg.parts) {
-        switch (part.type) {
-          case "text":
-            onEvent({ type: "token", data: { content: part.text || "" } });
-            break;
-          case "reasoning":
-            onEvent({ type: "thinking", data: { content: part.reasoning || "" } });
-            break;
-          case "tool-invocation":
-            if (part.state === "call" || part.state === "partial-call") {
-              onEvent({
-                type: "tool_call",
-                data: {
-                  name: part.toolName || "tool",
-                  tool_call_id: part.toolCallId || "",
-                  args_preview: typeof part.args === "string"
-                    ? part.args.slice(0, 200)
-                    : JSON.stringify(part.args || {}).slice(0, 200),
-                },
-              });
-            } else if (part.state === "result") {
-              onEvent({
-                type: "tool_result",
-                data: {
-                  name: part.toolName || "tool",
-                  tool_call_id: part.toolCallId || "",
-                  result: typeof part.result === "string"
-                    ? part.result.slice(0, 4000)
-                    : JSON.stringify(part.result || "").slice(0, 4000),
-                },
-              });
-            }
-            break;
-          case "step-start":
-            onEvent({ type: "turn_start", data: { turn: 1 } });
-            break;
-          case "step-finish":
-            onEvent({ type: "turn_end", data: {} });
-            break;
+        if (part.type === "text") onEvent({ type: "token", data: { content: part.text || "" } });
+        else if (part.type === "reasoning") onEvent({ type: "thinking", data: { content: part.reasoning || "" } });
+        else if (part.type === "tool-invocation") {
+          if (part.state === "call" || part.state === "partial-call") {
+            onEvent({ type: "tool_call", data: { name: part.toolName || "tool", tool_call_id: part.toolCallId || "", args_preview: JSON.stringify(part.args || {}).slice(0, 200) } });
+          } else if (part.state === "result") {
+            onEvent({ type: "tool_result", data: { name: part.toolName || "tool", tool_call_id: part.toolCallId || "", result: JSON.stringify(part.result || "").slice(0, 4000) } });
+          }
         }
       }
     }
     return;
   }
 
-  // Think sends cf_agent_use_chat_finish when complete
-  if (data.type === "cf_agent_use_chat_finish") {
-    onEvent({
-      type: "done",
-      data: {
-        output: data.result || "",
-        cost_usd: data.usage?.cost_usd || 0,
-        session_id: data.session_id || "",
-        turns: data.usage?.turns || 0,
-        tool_calls: data.usage?.tool_calls || 0,
-      },
-    });
-    return;
-  }
-
-  // Platform-level events forwarded through the WS (signals, session, etc.)
+  // Platform-level events forwarded through the WS
   if (data.type && typeof data.type === "string") {
-    const eventType = data.type as ChatEventType;
-    onEvent({ type: eventType, data: data });
+    onEvent({ type: data.type as ChatEventType, data });
   }
 }
 
