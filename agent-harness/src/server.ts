@@ -2628,7 +2628,8 @@ export class ChatAgent extends Think<Env> {
   private _validateMcpUrl(url: string): string | null {
     try {
       const parsed = new URL(url);
-      const host = parsed.hostname.toLowerCase();
+      // Strip IPv6 brackets: URL.hostname returns "[::1]" not "::1"
+      const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
       // Block localhost and loopback
       if (host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "0.0.0.0") {
         return "Blocked: localhost connections are not allowed";
