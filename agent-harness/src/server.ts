@@ -1468,6 +1468,142 @@ export default {
     // ── Everything else: Vite SPA (handled by wrangler assets config) ──
     return new Response("Not found", { status: 404 });
   },
+
+  // ── Queue consumer: telemetry → Postgres via Hyperdrive ────────
+  // Pattern: agent onChatResponse/onStepFinish → TELEMETRY_QUEUE.send(event)
+  //   → this consumer batches events → Hyperdrive → Postgres INSERT
+  // DLQ: failed messages after 5 retries go to harness-telemetry-dlq
+  //   → DLQ consumer logs them for manual investigation
+  async queue(batch: MessageBatch, env: Env): Promise<void> {
+    // DLQ messages: just log them — operator can replay manually
+    if (batch.queue === "harness-telemetry-dlq") {
+      for (const msg of batch) {
+        console.error("[dlq] Dead letter:", JSON.stringify(msg.body).slice(0, 500));
+        msg.ack(); // don't retry DLQ
+      }
+      return;
+    }
+
+    // Main queue: batch write to Postgres
+    let sql: any;
+    try {
+      const pg = (await import("postgres")).default;
+      sql = pg((env.DB as any).connectionString, {
+        max: 1, fetch_types: false, prepare: false,
+        idle_timeout: 5, connect_timeout: 3,
+      });
+
+      for (const msg of batch) {
+        const evt = msg.body as { type: string; payload: Record<string, unknown> };
+        try {
+          switch (evt.type) {
+            case "session": {
+              const p = evt.payload;
+              await sql`
+                INSERT INTO sessions (session_id, org_id, agent_name, model, status,
+                  input_text, output_text, cost_total_usd, wall_clock_seconds,
+                  step_count, action_count, channel, trace_id, termination_reason, created_at)
+                VALUES (${p.session_id}, ${p.org_id}, ${p.agent_name}, ${p.model},
+                  ${p.status}, ${String(p.input_text || "").slice(0, 2000)},
+                  ${String(p.output_text || "").slice(0, 4000)},
+                  ${p.cost_usd || 0}, ${p.wall_clock_seconds || 0},
+                  ${p.step_count || 0}, ${p.action_count || 0},
+                  ${p.channel || "web"}, ${p.trace_id || ""},
+                  ${p.termination_reason || ""}, ${p.created_at || new Date().toISOString()})
+                ON CONFLICT (session_id) DO UPDATE SET
+                  status = EXCLUDED.status,
+                  output_text = EXCLUDED.output_text,
+                  cost_total_usd = GREATEST(sessions.cost_total_usd, EXCLUDED.cost_total_usd),
+                  wall_clock_seconds = GREATEST(sessions.wall_clock_seconds, EXCLUDED.wall_clock_seconds),
+                  step_count = GREATEST(sessions.step_count, EXCLUDED.step_count),
+                  action_count = GREATEST(sessions.action_count, EXCLUDED.action_count),
+                  termination_reason = COALESCE(EXCLUDED.termination_reason, sessions.termination_reason),
+                  updated_at = now()
+              `;
+              break;
+            }
+            case "turn": {
+              const p = evt.payload;
+              await sql`
+                INSERT INTO turns (session_id, turn_number, model_used,
+                  input_tokens, output_tokens, latency_ms, cost_usd,
+                  tool_calls, stop_reason, refusal, cache_read_tokens, cache_write_tokens)
+                VALUES (${p.session_id}, ${p.turn_number}, ${p.model || ""},
+                  ${p.input_tokens || 0}, ${p.output_tokens || 0},
+                  ${p.latency_ms || 0}, ${p.cost_usd || 0},
+                  ${JSON.stringify(p.tool_calls || [])},
+                  ${p.stop_reason || ""}, ${p.refusal ? true : false},
+                  ${p.cache_read_tokens || 0}, ${p.cache_write_tokens || 0})
+                ON CONFLICT (session_id, turn_number) DO NOTHING
+              `;
+              break;
+            }
+            case "billing": {
+              const p = evt.payload;
+              await sql`
+                INSERT INTO billing_records (org_id, session_id, agent_name,
+                  model, provider, input_tokens, output_tokens,
+                  total_cost_usd, trace_id, created_at)
+                VALUES (${p.org_id}, ${p.session_id}, ${p.agent_name},
+                  ${p.model || ""}, ${p.provider || "workers-ai"},
+                  ${p.input_tokens || 0}, ${p.output_tokens || 0},
+                  ${p.cost_usd || 0}, ${p.trace_id || ""},
+                  ${p.created_at || new Date().toISOString()})
+              `;
+              break;
+            }
+            case "event": {
+              const p = evt.payload;
+              await sql`
+                INSERT INTO runtime_events (org_id, agent_name, event_type, event_data, created_at)
+                VALUES (${p.org_id || ""}, ${p.agent_name || ""}, ${p.event_type || ""},
+                  ${JSON.stringify(p)}, ${p.created_at || new Date().toISOString()})
+              `;
+              break;
+            }
+            case "tool_execution": {
+              const p = evt.payload;
+              await sql`
+                INSERT INTO tool_executions (org_id, session_id, tool_name,
+                  input, output, latency_ms, error, created_at)
+                VALUES (${p.org_id || ""}, ${p.session_id || ""}, ${p.tool_name || ""},
+                  ${JSON.stringify(p.input || {})}, ${JSON.stringify(p.output || {})},
+                  ${p.latency_ms || 0}, ${p.error || null},
+                  ${p.created_at || new Date().toISOString()})
+              `;
+              break;
+            }
+            case "feedback": {
+              const p = evt.payload;
+              await sql`
+                INSERT INTO session_feedback (session_id, org_id, agent_name,
+                  rating, feedback_text, user_id, created_at)
+                VALUES (${p.session_id}, ${p.org_id || ""}, ${p.agent_name || ""},
+                  ${p.rating || 0}, ${p.feedback || ""}, ${p.user_id || ""},
+                  ${p.created_at || new Date().toISOString()})
+              `;
+              break;
+            }
+            default:
+              console.warn(`[queue] Unknown event type: ${evt.type}`);
+          }
+          msg.ack();
+        } catch (err: any) {
+          // Permanent failures (constraint violations, bad data) — ack to avoid poison loop
+          if (err?.code === "23505" || err?.code === "23502" || err?.code === "42703") {
+            console.error(`[queue] PERMANENT: ${evt.type} ${err.code}: ${String(err.message).slice(0, 200)}`);
+            msg.ack();
+          } else {
+            // Transient failures (connection, timeout) — retry with backoff
+            console.error(`[queue] TRANSIENT: ${evt.type} attempt=${msg.attempts}: ${String(err.message).slice(0, 200)}`);
+            msg.retry();
+          }
+        }
+      }
+    } finally {
+      if (sql) try { await sql.end(); } catch {}
+    }
+  },
 } satisfies ExportedHandler<Env>;
 
 // ═══════════════════════════════════════════════════════════════════

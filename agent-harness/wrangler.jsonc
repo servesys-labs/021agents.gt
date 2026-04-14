@@ -65,10 +65,28 @@
     { "binding": "DB", "id": "PLACEHOLDER_HYPERDRIVE_ID" }
   ],
 
-  // Queues — async writes to Postgres (non-blocking)
+  // Queues — async writes to Postgres (non-blocking, with DLQ)
+  // Pattern: agent onChatResponse → TELEMETRY_QUEUE.send() → consumer → Hyperdrive → Postgres
+  // Failed messages retry 5x with backoff, then go to DLQ for manual replay
   "queues": {
     "producers": [
       { "binding": "TELEMETRY_QUEUE", "queue": "harness-telemetry" }
+    ],
+    "consumers": [
+      {
+        "queue": "harness-telemetry",
+        "max_batch_size": 25,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "harness-telemetry-dlq",
+        "retry_delay": "exponential"
+      },
+      {
+        "queue": "harness-telemetry-dlq",
+        "max_batch_size": 10,
+        "max_batch_timeout": 10,
+        "max_retries": 0
+      }
     ]
   },
 
