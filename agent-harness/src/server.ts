@@ -670,22 +670,12 @@ function createVectorizeSearchProvider(env: Env, ftsProvider?: { search(q: strin
 
 const TENANTS: TenantConfig[] = [
   {
-    id: "meta",
-    name: "Agent Builder",
-    icon: "🧠",
-    description: "I help you create, test, and improve your AI agents",
-    model: "@cf/moonshotai/kimi-k2.5",
-    systemPrompt: "", // Set dynamically from meta-agent.ts
-    skills: [
-      SKILL_LIBRARY.find(s => s.name === "planning")!,
-    ],
-  },
-  {
     id: "default",
-    name: "Personal Assistant",
+    name: "Personal Agent",
     icon: "✦",
-    description: "Autonomous AI agent with persistent memory, code sandbox, web access, and marketplace delegation",
+    description: "Your autonomous AI agent — research, code, create agents, manage data, browse the web, and more",
     model: "@cf/moonshotai/kimi-k2.5",
+    enableSandbox: true,
     systemPrompt: buildPersonalAgentPrompt(),  // Battle-tested 110-line prompt from old system
     skills: [
       SKILL_LIBRARY.find(s => s.name === "deep-research")!,
@@ -1411,8 +1401,6 @@ export class ChatAgent extends Think<Env> {
 
   getSystemPrompt() {
     const config = getTenantConfig(this.name);
-    // Meta Agent uses its own system prompt from meta-agent.ts
-    if (config.id === "meta") return META_AGENT_SYSTEM_PROMPT;
     return config.systemPrompt;
   }
 
@@ -1428,7 +1416,10 @@ export class ChatAgent extends Think<Env> {
       ...(config.enableSandbox ? sandboxTools(this.env) : {}),
       ...structuredInputTools(),
       // Meta Agent gets agent management tools
-      ...(config.id === "meta" ? metaAgentToolSet({ AGENT_CORE: this.env.AGENT_CORE || this.env as any, AI: this.env.AI, ANALYTICS: this.env.ANALYTICS }) : {}),
+      // Meta-agent tools available to ALL agents (personal agent = one agent does everything)
+      // When user says "create an agent", the personal agent uses these tools directly.
+      // No separate meta-agent needed — it's a skill, not a separate conversation.
+      ...metaAgentToolSet({ AGENT_CORE: this.env.AGENT_CORE || this.env as any, AI: this.env.AI, ANALYTICS: this.env.ANALYTICS }),
     };
 
     // Wrap all tools with CodeMode — model writes JS to orchestrate tools.
@@ -1803,12 +1794,12 @@ export class ChatAgent extends Think<Env> {
         }),
       })
 
-    // ── Meta skills (for meta-agent only) ──
-    if (config.id === "meta") {
-      s = s.withContext("meta-skills", {
-        provider: new R2SkillProvider(this.env.STORAGE, { prefix: "skills/meta/" }),
-      });
-    }
+    // ── Meta skills (agent management, testing, improvement) ──
+    // Available to ALL agents — personal agent is the unified interface.
+    // User says "create an agent" → personal agent loads meta skill → uses meta tools.
+    s = s.withContext("meta-skills", {
+      provider: new R2SkillProvider(this.env.STORAGE, { prefix: "skills/meta/" }),
+    });
 
     // ── Knowledge: FTS5-backed searchable knowledge base ──
     // AgentSearchProvider uses DO SQLite FTS5 for full-text search.
