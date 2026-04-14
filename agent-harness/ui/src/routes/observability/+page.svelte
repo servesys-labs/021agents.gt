@@ -70,7 +70,7 @@
         accentColor="chart-3"
       />
       <StatCard
-        value={`${summary.avg_latency_seconds.toFixed(1)}s`}
+        value={`${Number(summary.avg_latency_seconds || 0).toFixed(1)}s`}
         label="Avg Session Duration"
         accentColor="chart-4"
       />
@@ -79,7 +79,7 @@
     <!-- Stat cards row 2 -->
     <div class="mb-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
       <StatCard
-        value={`${(summary.success_rate * 100).toFixed(0)}%`}
+        value={`${Number((summary.success_rate || 0) * 100).toFixed(0)}%`}
         label="Success Rate"
         accentColor="chart-1"
       />
@@ -89,7 +89,7 @@
         accentColor="chart-5"
       />
       <StatCard
-        value={`${summary.avg_turn_latency_ms.toFixed(0)}ms`}
+        value={`${Number(summary.avg_turn_latency_ms || 0).toFixed(0)}ms`}
         label="Avg Turn Latency"
         accentColor="chart-3"
       />
@@ -167,7 +167,7 @@
                 <td class="px-4 py-3 font-medium">{a.agent}</td>
                 <td class="px-4 py-3 text-right text-muted-foreground">{a.sessions}</td>
                 <td class="px-4 py-3 text-right text-muted-foreground">{a.steps}</td>
-                <td class="px-4 py-3 text-right text-muted-foreground">{a.avg_latency.toFixed(1)}s</td>
+                <td class="px-4 py-3 text-right text-muted-foreground">{Number(a.avg_latency || 0).toFixed(1)}s</td>
               </tr>
             {/each}
           {/snippet}

@@ -1019,7 +1019,7 @@
                       class="h-2 w-full cursor-pointer appearance-none rounded-lg bg-muted accent-primary"
                       bind:value={speed}
                     />
-                    <span class="w-8 text-xs text-muted-foreground">{speed.toFixed(1)}x</span>
+                    <span class="w-8 text-xs text-muted-foreground">{Number(speed || 1).toFixed(1)}x</span>
                   </div>
                 </div>
 
@@ -1551,7 +1551,7 @@
                         </Badge>
                       </td>
                       <td class="px-4 py-3 text-right text-sm text-muted-foreground">
-                        {call.cost_usd != null ? `$${call.cost_usd.toFixed(2)}` : "--"}
+                        {call.cost_usd != null ? `$${Number(call.cost_usd || 0).toFixed(2)}` : "--"}
                       </td>
                     </tr>
                     {#if expandedCallId === call.id && call.summary}

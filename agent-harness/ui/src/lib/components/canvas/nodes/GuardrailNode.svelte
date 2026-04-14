@@ -13,7 +13,7 @@
 
   let budgetLabel = $derived(
     data.budgetEnabled && data.budgetLimit > 0
-      ? `$${data.budgetLimit.toFixed(2)}`
+      ? `$${Number(data.budgetLimit || 0).toFixed(2)}`
       : "Unlimited"
   );
 

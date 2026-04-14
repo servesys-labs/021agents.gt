@@ -194,7 +194,7 @@
               <p class="text-xs text-muted-foreground">Users Referred</p>
             </div>
             <div>
-              <p class="text-2xl font-bold">${referrals.earnings.total_earned_usd.toFixed(2)}</p>
+              <p class="text-2xl font-bold">${Number(referrals.earnings?.total_earned_usd || 0).toFixed(2)}</p>
               <p class="text-xs text-muted-foreground">Total Earned (credits)</p>
             </div>
             <div>

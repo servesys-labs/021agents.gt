@@ -130,7 +130,7 @@
               <div class="rounded-xl border border-border bg-card p-6 transition-all hover:border-primary/50 hover:shadow-sm">
                 <h3 class="text-lg font-semibold text-foreground">{pkg.name}</h3>
                 <div class="mt-2">
-                  <span class="text-3xl font-bold text-foreground">${pkg.price_usd.toFixed(2)}</span>
+                  <span class="text-3xl font-bold text-foreground">${Number(pkg.price_usd || 0).toFixed(2)}</span>
                 </div>
                 <p class="mt-1 text-sm text-muted-foreground">
                   {formatCost(pkg.credits_usd)} in credits

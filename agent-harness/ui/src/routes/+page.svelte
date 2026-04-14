@@ -83,7 +83,7 @@
       <StatCard
         value="{Math.round(stats.avg_latency_ms ?? 0)}ms"
         label="Avg Latency"
-        subtitle="{(stats.error_rate_pct ?? 0).toFixed(1)}% error rate"
+        subtitle="{Number(stats.error_rate_pct || 0).toFixed(1)}% error rate"
         accentColor="chart-4"
       />
     {:else}

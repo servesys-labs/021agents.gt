@@ -187,7 +187,7 @@
                   <span>Model: {run.model}</span>
                 {/if}
                 {#if run.cost_total_usd > 0}
-                  <span>Cost: ${run.cost_total_usd.toFixed(4)}</span>
+                  <span>Cost: ${Number(run.cost_total_usd || 0).toFixed(4)}</span>
                 {/if}
                 <span>{new Date(run.created_at).toLocaleString()}</span>
               </div>
