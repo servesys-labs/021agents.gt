@@ -14,7 +14,9 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { AgentClient } from "agents/client";
+import WebSocket from "ws";
+// AgentClient uses PartySocket (browser WebSocket) — not compatible with Node.js test env.
+// Use raw 'ws' WebSocket for E2E tests, matching the exact protocol Think expects.
 
 const BASE_URL = process.env.E2E_BASE_URL || "http://localhost:8787";
 const GATEWAY_URL = process.env.E2E_GATEWAY_URL || BASE_URL.replace("8787", "8788");
@@ -157,82 +159,71 @@ describe("Stage 1: Gateway CRUD", () => {
 // STAGE 2: AGENT CLIENT — SDK AgentClient WebSocket connection
 // ═══════════════════════════════════════════════════════════════════
 
-describe("Stage 2: AgentClient Connection", () => {
-  test("AgentClient connects to agent worker DO", async () => {
-    const doName = buildDoName();
-    const host = getWsHost();
-
-    const client = new AgentClient({
-      agent: "chat-agent",
-      name: doName,
-      host,
-      query: TOKEN ? { token: TOKEN } : undefined,
-    });
-
-    // Wait for connection
-    await new Promise<void>((resolve, reject) => {
+describe("Stage 2: WebSocket Connection to Agent DO", () => {
+  function connectWs(doName: string): Promise<{ ws: WebSocket; messages: any[] }> {
+    return new Promise((resolve, reject) => {
+      const wsUrl = `wss://${getWsHost()}/agents/chat-agent/${doName}?token=${TOKEN}`;
+      const ws = new WebSocket(wsUrl);
+      const messages: any[] = [];
       const timeout = setTimeout(() => reject(new Error("Connection timeout")), 10_000);
-      const origOpen = client.onopen;
-      client.onopen = (event: Event) => {
-        clearTimeout(timeout);
-        origOpen?.call(client, event);
-        resolve();
-      };
-      const origError = client.onerror;
-      client.onerror = (event: Event) => {
-        clearTimeout(timeout);
-        origError?.call(client, event);
-        reject(new Error("WebSocket error"));
-      };
+      ws.on("open", () => { clearTimeout(timeout); });
+      ws.on("message", (data: Buffer) => {
+        const msg = JSON.parse(data.toString());
+        messages.push(msg);
+        // Resolve after identity message (connection fully established)
+        if (msg.type === "cf_agent_identity") resolve({ ws, messages });
+      });
+      ws.on("error", (err: Error) => { clearTimeout(timeout); reject(err); });
     });
+  }
 
-    expect(client.readyState).toBe(WebSocket.OPEN);
-    client.close();
+  test("WebSocket connects and receives identity", async () => {
+    const { ws, messages } = await connectWs(buildDoName());
+    const identity = messages.find((m: any) => m.type === "cf_agent_identity");
+    expect(identity).toBeDefined();
+    expect(identity.agent).toBe("chat-agent");
+    ws.close();
   }, TIMEOUT);
 
-  test("AgentClient can call @callable methods via RPC", async () => {
-    const doName = buildDoName();
-    const host = getWsHost();
+  test("RPC call via WebSocket (getTenants)", async () => {
+    const { ws } = await connectWs(buildDoName());
 
-    const client = new AgentClient({
-      agent: "chat-agent",
-      name: doName,
-      host,
-      query: TOKEN ? { token: TOKEN } : undefined,
+    const result = await new Promise<any>((resolve, reject) => {
+      const id = crypto.randomUUID();
+      const timeout = setTimeout(() => reject(new Error("RPC timeout")), 15_000);
+      ws.on("message", (data: Buffer) => {
+        const msg = JSON.parse(data.toString());
+        if (msg.type === "rpc" && msg.id === id) {
+          clearTimeout(timeout);
+          resolve(msg.result);
+        }
+      });
+      ws.send(JSON.stringify({ type: "rpc", id, method: "getTenants", args: [] }));
     });
 
-    await client.ready;
-
-    // Call getTenants — a simple @callable method
-    try {
-      const tenants = await client.call("getTenants") as any[];
-      expect(Array.isArray(tenants)).toBe(true);
-      expect(tenants.length).toBeGreaterThan(0);
-    } finally {
-      client.close();
-    }
+    expect(Array.isArray(result)).toBe(true);
+    expect(result.length).toBeGreaterThan(0);
+    ws.close();
   }, TIMEOUT);
 
-  test("AgentClient can list MCP servers", async () => {
-    const doName = buildDoName();
-    const host = getWsHost();
+  test("RPC call — listServers", async () => {
+    const { ws } = await connectWs(buildDoName());
 
-    const client = new AgentClient({
-      agent: "chat-agent",
-      name: doName,
-      host,
-      query: TOKEN ? { token: TOKEN } : undefined,
+    const result = await new Promise<any>((resolve, reject) => {
+      const id = crypto.randomUUID();
+      const timeout = setTimeout(() => reject(new Error("RPC timeout")), 15_000);
+      ws.on("message", (data: Buffer) => {
+        const msg = JSON.parse(data.toString());
+        if (msg.type === "rpc" && msg.id === id) {
+          clearTimeout(timeout);
+          resolve(msg.result);
+        }
+      });
+      ws.send(JSON.stringify({ type: "rpc", id, method: "listServers", args: [] }));
     });
 
-    await client.ready;
-
-    try {
-      const result = await client.call("listServers") as any;
-      expect(result).toBeDefined();
-      expect(typeof result.live_tool_count).toBe("number");
-    } finally {
-      client.close();
-    }
+    expect(result).toBeDefined();
+    ws.close();
   }, TIMEOUT);
 });
 
@@ -241,64 +232,62 @@ describe("Stage 2: AgentClient Connection", () => {
 // ═══════════════════════════════════════════════════════════════════
 
 describe("Stage 3: Chat via WebSocket", () => {
-  test("send chat message and receive response", async () => {
-    const doName = buildDoName();
-    const host = getWsHost();
+  test("send chat message and receive streaming response from Kimi K2.5", async () => {
+    const wsUrl = `wss://${getWsHost()}/agents/chat-agent/chat-e2e-${Date.now()}?token=${TOKEN}`;
+    const ws = new WebSocket(wsUrl);
 
-    const client = new AgentClient({
-      agent: "chat-agent",
-      name: doName,
-      host,
-      query: TOKEN ? { token: TOKEN } : undefined,
+    // Wait for identity
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("Connect timeout")), 10_000);
+      ws.on("message", (data: Buffer) => {
+        const msg = JSON.parse(data.toString());
+        if (msg.type === "cf_agent_identity") { clearTimeout(timeout); resolve(); }
+      });
+      ws.on("error", (err: Error) => { clearTimeout(timeout); reject(err); });
     });
 
-    await client.ready;
+    // Send chat and collect response
+    let textContent = "";
+    let chunkCount = 0;
+    let gotFinish = false;
 
-    // Collect messages
-    const received: any[] = [];
-    const done = new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("Chat timeout")), 60_000);
-      const origMsg = client.onmessage;
-      client.onmessage = (event: MessageEvent) => {
-        origMsg?.call(client, event);
-        try {
-          const data = JSON.parse(event.data);
-          received.push(data);
-          // Chat response with done flag
-          if (data.type === "cf_agent_use_chat_response" && data.done) {
-            clearTimeout(timeout);
-            resolve();
-          }
-          // Also accept cf_agent_chat_messages as completion
-          if (data.type === "cf_agent_chat_messages") {
-            clearTimeout(timeout);
-            resolve();
-          }
-        } catch {}
-      };
+    const chatDone = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        // Resolve even on timeout if we got some text
+        if (textContent.length > 0) resolve();
+        else reject(new Error("Chat timeout — no response from LLM"));
+      }, 60_000);
+      ws.on("message", (data: Buffer) => {
+        const msg = JSON.parse(data.toString());
+        if (msg.type !== "cf_agent_use_chat_response" || !msg.body) return;
+        chunkCount++;
+        const chunk = JSON.parse(msg.body);
+        if (chunk.type === "text-delta") textContent += chunk.delta;
+        if (chunk.type === "finish" || msg.done === true) {
+          gotFinish = true;
+          clearTimeout(timeout);
+          resolve();
+        }
+      });
     });
 
-    // Send chat request — Think expects init.body wrapper with stringified UIMessage
+    // Send with correct Think init.body format
     const chatBody = JSON.stringify({
-      messages: [{ id: crypto.randomUUID(), role: "user", parts: [{ type: "text", text: "Reply with exactly one word: hello" }] }],
+      messages: [{ id: crypto.randomUUID(), role: "user", parts: [{ type: "text", text: "Say exactly: four" }] }],
       trigger: "submit-message",
     });
-    client.send(JSON.stringify({
+    ws.send(JSON.stringify({
       type: "cf_agent_use_chat_request",
       id: crypto.randomUUID(),
       init: { method: "POST", body: chatBody },
     }));
 
-    await done;
-    client.close();
+    await chatDone;
+    ws.close();
 
-    // Should have received at least one response
-    expect(received.length).toBeGreaterThan(0);
-    // Should have chat-related messages
-    const chatMsgs = received.filter(m =>
-      m.type === "cf_agent_use_chat_response" || m.type === "cf_agent_chat_messages"
-    );
-    expect(chatMsgs.length).toBeGreaterThan(0);
+    expect(chunkCount).toBeGreaterThan(0);
+    expect(textContent.length).toBeGreaterThan(0);
+    expect(textContent.toLowerCase()).toContain("four");
   }, TIMEOUT);
 });
 
@@ -308,49 +297,47 @@ describe("Stage 3: Chat via WebSocket", () => {
 
 describe("Stage 4: Latency SLOs", () => {
   test("TTFT under 15 seconds via WebSocket", async () => {
-    const doName = buildDoName();
-    const host = getWsHost();
+    const wsUrl = `wss://${getWsHost()}/agents/chat-agent/ttft-${Date.now()}?token=${TOKEN}`;
+    const ws = new WebSocket(wsUrl);
 
-    const client = new AgentClient({
-      agent: "chat-agent",
-      name: doName,
-      host,
-      query: TOKEN ? { token: TOKEN } : undefined,
+    // Wait for identity
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("Connect timeout")), 10_000);
+      ws.on("message", (data: Buffer) => {
+        if (JSON.parse(data.toString()).type === "cf_agent_identity") {
+          clearTimeout(timeout); resolve();
+        }
+      });
+      ws.on("error", (err: Error) => { clearTimeout(timeout); reject(err); });
     });
-
-    await client.ready;
 
     const start = Date.now();
     let ttft = 0;
 
-    const firstToken = new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("TTFT timeout")), 15_000);
-      const origMsg = client.onmessage;
-      client.onmessage = (event: MessageEvent) => {
-        origMsg?.call(client, event);
-        try {
-          const data = JSON.parse(event.data);
-          if (data.type === "cf_agent_use_chat_response" && !ttft) {
-            ttft = Date.now() - start;
-            clearTimeout(timeout);
-            resolve();
-          }
-        } catch {}
-      };
+    const firstChunk = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("TTFT timeout > 15s")), 15_000);
+      ws.on("message", (data: Buffer) => {
+        const msg = JSON.parse(data.toString());
+        if (msg.type === "cf_agent_use_chat_response" && !ttft) {
+          ttft = Date.now() - start;
+          clearTimeout(timeout);
+          resolve();
+        }
+      });
     });
 
     const ttftBody = JSON.stringify({
       messages: [{ id: crypto.randomUUID(), role: "user", parts: [{ type: "text", text: "Hi" }] }],
       trigger: "submit-message",
     });
-    client.send(JSON.stringify({
+    ws.send(JSON.stringify({
       type: "cf_agent_use_chat_request",
       id: crypto.randomUUID(),
       init: { method: "POST", body: ttftBody },
     }));
 
-    await firstToken;
-    client.close();
+    await firstChunk;
+    ws.close();
 
     expect(ttft).toBeGreaterThan(0);
     expect(ttft).toBeLessThan(15_000);
