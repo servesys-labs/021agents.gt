@@ -1293,7 +1293,7 @@ export class CodingSpecialist extends Think<Env> {
 // Dynamic import: Think is experimental, import at module level
 // so it fails fast if the package isn't available.
 import { Think } from "@cloudflare/think";
-import { AgentSearchProvider } from "agents/experimental/memory/session";
+import { AgentSearchProvider, R2SkillProvider } from "agents/experimental/memory/session";
 // Workspace and Session are re-exported by Think in source but not in published dist.
 // Import from their source packages directly.
 import { Workspace } from "@cloudflare/shell";
@@ -1521,53 +1521,20 @@ export class ChatAgent extends Think<Env> {
         description: "Important facts, preferences, and decisions learned during this conversation. Update proactively when you learn something new about the user, their project, or their preferences.",
         maxTokens: 2000,
       })
-      // ── Skills catalog: tells the LLM what skills are available ──
-      // This is a readonly block that lists available skills.
-      // The LLM uses load_context to activate a skill when needed.
-      .withContext("available-skills", {
-        provider: {
-          get: async () => {
-            const skills = config.skills || [];
-            if (skills.length === 0) return "No specialized skills available.";
+      // ── Skills: R2SkillProvider discovers all skills from R2 at runtime ──
+      // SDK pattern: R2SkillProvider.get() lists all skills in R2,
+      // model calls load_context to load a skill on-demand,
+      // unload_context to free context space.
+      // Skills are SKILL.md files uploaded to R2 at: skills/public/*
+      // Think auto-generates load_context/unload_context tools.
+      .withContext("skills", {
+        provider: new R2SkillProvider(this.env.STORAGE, { prefix: "skills/public/" }),
+      })
 
-            // Partition: auto-detect skills (have when_to_use) vs manual
-            const autoSkills = skills.filter(sk => sk.when_to_use);
-            const manualSkills = skills.filter(sk => !sk.when_to_use);
-
-            const lines = ["## Available Skills", ""];
-
-            if (autoSkills.length > 0) {
-              lines.push("### Auto-Activate (load when criteria match)");
-              for (const sk of autoSkills) {
-                lines.push(`- **${sk.name}**: ${sk.description}`);
-                lines.push(`  *Activate when:* ${sk.when_to_use}`);
-              }
-              lines.push("");
-            }
-
-            if (manualSkills.length > 0) {
-              lines.push("### On-Demand (load with load_context when needed)");
-              for (const sk of manualSkills) {
-                lines.push(`- **${sk.name}**: ${sk.description}`);
-              }
-              lines.push("");
-            }
-
-            lines.push("Skills expand into detailed protocols with learned rules. Only load what you need.");
-            return lines.join("\n");
-          },
-        },
-      });
-
-    // ── Register each skill as a loadable context block ──
-    // SkillProvider merges base content + DO SQLite overlays at runtime.
-    // The LLM sees them listed in available-skills and calls load_context("skill-name")
-    // to inject the full skill markdown + learned rules into the prompt.
-    for (const skill of (config.skills || [])) {
-      const overlayLoader = () => this._getSkillOverlays(skill.name);
-      s = s.withContext(`skill-${skill.name}`, {
-        description: skill.description,
-        provider: createSkillProvider(skill, overlayLoader),
+    // ── Meta skills (for meta-agent only) ──
+    if (config.id === "meta") {
+      s = s.withContext("meta-skills", {
+        provider: new R2SkillProvider(this.env.STORAGE, { prefix: "skills/meta/" }),
       });
     }
 
