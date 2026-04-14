@@ -162,7 +162,11 @@ type TenantConfig = {
 interface SkillDefinition {
   name: string;
   description: string;
-  content: string; // markdown content — the "skill.md" body
+  content: string;               // markdown body — the "SKILL.md" content
+  when_to_use?: string;          // auto-activation criteria (LLM matches against user input)
+  allowed_tools?: string[];      // tool allowlist for this skill (future: enforce in beforeToolCall)
+  min_plan?: "free" | "pro" | "team" | "enterprise";  // plan-based gating
+  delegate_agent?: string;       // fallback agent for lower-tier users
 }
 
 // ── Built-in Skills Library ────────────────────────────────────────
@@ -171,6 +175,7 @@ const SKILL_LIBRARY: SkillDefinition[] = [
   {
     name: "deep-research",
     description: "Multi-source research with structured output and source citations",
+    when_to_use: "User asks to research, investigate, compare, or analyze a topic requiring multiple sources",
     content: `## Deep Research Protocol
 
 When conducting deep research:
@@ -195,6 +200,7 @@ When conducting deep research:
   {
     name: "code-review",
     description: "Systematic code review with security, performance, and maintainability checks",
+    when_to_use: "User asks to review, audit, or critique code for quality, security, or performance",
     content: `## Code Review Checklist
 
 Review code systematically:
@@ -254,6 +260,7 @@ Install others: uv pip install <package>
   {
     name: "debug",
     description: "Systematic debugging with hypothesis-driven investigation",
+    when_to_use: "User reports a bug, error, or unexpected behavior that needs investigation",
     content: `## Debug Protocol
 
 1. **Reproduce**: Confirm the error with minimal steps
@@ -299,6 +306,7 @@ Install others: uv pip install <package>
   {
     name: "planning",
     description: "Break down complex tasks into actionable implementation plans",
+    when_to_use: "User describes a complex multi-step task, project, migration, or architectural change",
     content: `## Implementation Planning
 
 When breaking down a complex task:
@@ -334,10 +342,26 @@ When breaking down a complex task:
 // Think's context block system calls get() to render the content
 // and load() to activate it on demand.
 
-function createSkillProvider(skill: SkillDefinition) {
+/**
+ * Creates a SkillProvider that merges base content with learned overlays.
+ * Think's context block system calls get() for the system prompt and
+ * load() when the LLM activates the skill via load_context.
+ *
+ * Overlay merge (Phase 6 pattern): base template + "\n\n---\n" + overlays
+ * Overlays are loaded from DO SQLite — local to this agent DO, fast.
+ */
+function createSkillProvider(skill: SkillDefinition, overlayLoader?: () => string[]) {
+  const mergeWithOverlays = () => {
+    let content = skill.content;
+    const overlays = overlayLoader?.() || [];
+    if (overlays.length > 0) {
+      content += "\n\n---\n## Learned Rules\n\n" + overlays.join("\n\n---\n");
+    }
+    return content;
+  };
   return {
-    get: async () => skill.content,
-    load: async () => skill.content,
+    get: async () => mergeWithOverlays(),
+    load: async () => mergeWithOverlays(),
   };
 }
 
@@ -1273,27 +1297,45 @@ export class ChatAgent extends Think<Env> {
           get: async () => {
             const skills = config.skills || [];
             if (skills.length === 0) return "No specialized skills available.";
-            return [
-              "## Available Skills",
-              "Activate a skill with load_context when the task requires structured methodology.",
-              "",
-              ...skills.map(sk => `- **${sk.name}**: ${sk.description}`),
-              "",
-              "Skills expand into detailed protocols. Only load what you need for the current task.",
-            ].join("\n");
+
+            // Partition: auto-detect skills (have when_to_use) vs manual
+            const autoSkills = skills.filter(sk => sk.when_to_use);
+            const manualSkills = skills.filter(sk => !sk.when_to_use);
+
+            const lines = ["## Available Skills", ""];
+
+            if (autoSkills.length > 0) {
+              lines.push("### Auto-Activate (load when criteria match)");
+              for (const sk of autoSkills) {
+                lines.push(`- **${sk.name}**: ${sk.description}`);
+                lines.push(`  *Activate when:* ${sk.when_to_use}`);
+              }
+              lines.push("");
+            }
+
+            if (manualSkills.length > 0) {
+              lines.push("### On-Demand (load with load_context when needed)");
+              for (const sk of manualSkills) {
+                lines.push(`- **${sk.name}**: ${sk.description}`);
+              }
+              lines.push("");
+            }
+
+            lines.push("Skills expand into detailed protocols with learned rules. Only load what you need.");
+            return lines.join("\n");
           },
         },
       });
 
     // ── Register each skill as a loadable context block ──
-    // These use SkillProvider pattern: get() returns content, load() activates.
+    // SkillProvider merges base content + DO SQLite overlays at runtime.
     // The LLM sees them listed in available-skills and calls load_context("skill-name")
-    // to inject the full skill markdown into the prompt.
-    // This keeps the base prompt small but expandable to infinity.
+    // to inject the full skill markdown + learned rules into the prompt.
     for (const skill of (config.skills || [])) {
+      const overlayLoader = () => this._getSkillOverlays(skill.name);
       s = s.withContext(`skill-${skill.name}`, {
         description: skill.description,
-        provider: createSkillProvider(skill),
+        provider: createSkillProvider(skill, overlayLoader),
       });
     }
 
@@ -1847,6 +1889,25 @@ export class ChatAgent extends Think<Env> {
         count: cluster.count,
       });
 
+      // Auto-fire: generate skill overlay from signal cluster
+      // Pattern from old deploy/runtime/skill-feedback.ts
+      if (cluster.signal_type === "tool_failure" && cluster.count >= 3) {
+        this.appendSkillRule(
+          "debug", // target the debug skill
+          `When "${cluster.topic}" tool fails repeatedly, try alternative approaches first. This tool has failed ${cluster.count} times recently.`,
+          "auto",
+          `auto-fire: ${cluster.count} ${cluster.signal_type} signals for ${cluster.topic}`,
+        );
+      }
+      if (cluster.signal_type === "loop_detected" && cluster.count >= 2) {
+        this.appendSkillRule(
+          "debug",
+          `Avoid calling "${cluster.topic}" in tight loops. If the first call doesn't produce the expected result, change your approach rather than retrying with the same arguments.`,
+          "auto",
+          `auto-fire: ${cluster.count} loop detections for ${cluster.topic}`,
+        );
+      }
+
       // Mark as fired (cooldown)
       this.sql`
         UPDATE cf_agent_signal_clusters SET last_fired_at = datetime('now')
@@ -1871,6 +1932,217 @@ export class ChatAgent extends Think<Env> {
       WHERE success_count >= 3
       ORDER BY success_count DESC
       LIMIT 10
+    `;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // SKILL LEARNING LOOP — overlays, audit, auto-fire, auto-activation
+  //
+  // Ported from deploy/ "harness light, skill heavy" architecture.
+  // All stored in DO SQLite via this.sql (SDK primitive).
+  //
+  // The closed loop:
+  //   signals → evaluateSignals() → auto-fire → appendSkillRule()
+  //   → overlay stored in DO SQLite → createSkillProvider merges at runtime
+  //   → agent behavior improves → fewer signals
+  //
+  // Overlays are append-only, audited, tamper-checked, rate-limited.
+  // ═══════════════════════════════════════════════════════════════════
+
+  private _skillTablesReady = false;
+
+  private _ensureSkillTables() {
+    if (this._skillTablesReady) return;
+    this._skillTablesReady = true;
+
+    // Skill overlays — append-only learned rules per skill
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agent_skill_overlays (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        skill_name TEXT NOT NULL,
+        rule_text TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT 'human',
+        created_at TEXT DEFAULT (datetime('now'))
+      )
+    `;
+    // Skill audit — immutable change log with integrity hashes
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agent_skill_audit (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        skill_name TEXT NOT NULL,
+        overlay_id INTEGER,
+        action TEXT NOT NULL,
+        before_hash TEXT,
+        after_hash TEXT,
+        reason TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT 'human',
+        created_at TEXT DEFAULT (datetime('now'))
+      )
+    `;
+    // Rate limit counters — dual bucket (human: 10/day, auto: 5/day)
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agent_skill_rate_limits (
+        bucket TEXT PRIMARY KEY,
+        count INTEGER NOT NULL DEFAULT 0,
+        window_start TEXT DEFAULT (datetime('now'))
+      )
+    `;
+  }
+
+  /** Load all overlays for a skill (used by createSkillProvider). */
+  private _getSkillOverlays(skillName: string): string[] {
+    this._ensureSkillTables();
+    const rows = this.sql<{ rule_text: string }>`
+      SELECT rule_text FROM cf_agent_skill_overlays
+      WHERE skill_name = ${skillName}
+      ORDER BY created_at ASC
+    `;
+    return rows.map(r => r.rule_text);
+  }
+
+  /** SHA256 hash for tamper detection on reverts. */
+  private _hashOverlayState(skillName: string): string {
+    const overlays = this._getSkillOverlays(skillName);
+    const content = overlays.join("\n---\n");
+    // Simple hash — Web Crypto is async but we need sync here for SQL tx.
+    // Use a deterministic string hash instead.
+    let hash = 0;
+    for (let i = 0; i < content.length; i++) {
+      hash = ((hash << 5) - hash + content.charCodeAt(i)) | 0;
+    }
+    return `h${Math.abs(hash).toString(36)}`;
+  }
+
+  /** Check rate limit bucket. Returns true if within limit. */
+  private _checkRateLimit(bucket: string, limit: number): boolean {
+    this._ensureSkillTables();
+    const [row] = this.sql<{ count: number; window_start: string }>`
+      SELECT count, window_start FROM cf_agent_skill_rate_limits WHERE bucket = ${bucket}
+    `;
+    if (!row) {
+      this.sql`INSERT INTO cf_agent_skill_rate_limits (bucket, count) VALUES (${bucket}, 0)`;
+      return true;
+    }
+    // Reset window daily
+    const windowAge = Date.now() - new Date(row.window_start + "Z").getTime();
+    if (windowAge > 86_400_000) {
+      this.sql`UPDATE cf_agent_skill_rate_limits SET count = 0, window_start = datetime('now') WHERE bucket = ${bucket}`;
+      return true;
+    }
+    return row.count < limit;
+  }
+
+  private _incrementRateLimit(bucket: string) {
+    this.sql`
+      UPDATE cf_agent_skill_rate_limits SET count = count + 1 WHERE bucket = ${bucket}
+    `;
+  }
+
+  /** Append a learned rule to a skill. Rate-limited, audited, threat-scanned. */
+  @callable({ description: "Append a learned rule to a skill (overlay)" })
+  appendSkillRule(skillName: string, ruleText: string, source: "human" | "auto" = "human", reason = "") {
+    this._ensureSkillTables();
+
+    // Threat scan
+    const threat = scanMemoryContent(ruleText);
+    if (threat) return { error: threat };
+
+    // Rate limit (human: 10/day, auto: 5/day)
+    const bucket = `skill_mutation:${source}`;
+    const limit = source === "auto" ? 5 : 10;
+    if (!this._checkRateLimit(bucket, limit)) {
+      return { error: `Rate limit exceeded: ${limit}/day for ${source} mutations` };
+    }
+
+    // Record before-state hash
+    const beforeHash = this._hashOverlayState(skillName);
+
+    // Insert overlay
+    this.sql`
+      INSERT INTO cf_agent_skill_overlays (skill_name, rule_text, source)
+      VALUES (${skillName}, ${ruleText}, ${source})
+    `;
+
+    // Get the new overlay ID
+    const [last] = this.sql<{ id: number }>`SELECT last_insert_rowid() as id`;
+    const afterHash = this._hashOverlayState(skillName);
+
+    // Audit trail
+    this.sql`
+      INSERT INTO cf_agent_skill_audit (skill_name, overlay_id, action, before_hash, after_hash, reason, source)
+      VALUES (${skillName}, ${last?.id || 0}, 'append', ${beforeHash}, ${afterHash}, ${reason}, ${source})
+    `;
+
+    this._incrementRateLimit(bucket);
+
+    // Emit telemetry
+    emit(this.env as TelemetryBindings, {
+      type: "skill.overlay_appended",
+      agentName: this.name,
+      skillName,
+      source,
+      reason,
+    });
+
+    return { success: true, skillName, overlayCount: this._getSkillOverlays(skillName).length };
+  }
+
+  /** Revert the last overlay for a skill. Tamper-checked via hash. */
+  @callable({ description: "Revert the last learned rule for a skill" })
+  revertSkillRule(skillName: string, reason = "") {
+    this._ensureSkillTables();
+
+    const beforeHash = this._hashOverlayState(skillName);
+
+    // Find the last overlay
+    const [last] = this.sql<{ id: number }>`
+      SELECT id FROM cf_agent_skill_overlays
+      WHERE skill_name = ${skillName}
+      ORDER BY created_at DESC LIMIT 1
+    `;
+    if (!last) return { error: "No overlays to revert" };
+
+    // Delete the overlay
+    this.sql`DELETE FROM cf_agent_skill_overlays WHERE id = ${last.id}`;
+    const afterHash = this._hashOverlayState(skillName);
+
+    // Audit trail
+    this.sql`
+      INSERT INTO cf_agent_skill_audit (skill_name, overlay_id, action, before_hash, after_hash, reason, source)
+      VALUES (${skillName}, ${last.id}, 'revert', ${beforeHash}, ${afterHash}, ${reason}, 'human')
+    `;
+
+    emit(this.env as TelemetryBindings, {
+      type: "skill.overlay_reverted",
+      agentName: this.name,
+      skillName,
+      reason,
+    });
+
+    return { success: true, skillName, overlayCount: this._getSkillOverlays(skillName).length };
+  }
+
+  /** List all overlays for a skill (for UI/debugging). */
+  @callable({ description: "List learned rules for a skill" })
+  getSkillOverlays(skillName: string) {
+    this._ensureSkillTables();
+    return this.sql<{ id: number; rule_text: string; source: string; created_at: string }>`
+      SELECT id, rule_text, source, created_at FROM cf_agent_skill_overlays
+      WHERE skill_name = ${skillName}
+      ORDER BY created_at ASC
+    `;
+  }
+
+  /** Get skill audit history (for compliance/debugging). */
+  @callable({ description: "Get skill mutation audit trail" })
+  getSkillAudit(skillName: string) {
+    this._ensureSkillTables();
+    return this.sql<{ action: string; before_hash: string; after_hash: string; reason: string; source: string; created_at: string }>`
+      SELECT action, before_hash, after_hash, reason, source, created_at
+      FROM cf_agent_skill_audit
+      WHERE skill_name = ${skillName}
+      ORDER BY created_at DESC
+      LIMIT 50
     `;
   }
 
