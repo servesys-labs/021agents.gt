@@ -2785,41 +2785,111 @@ export class ChatAgent extends Think<Env> {
       // Reset per-turn correction counter (keep cumulative for the session)
       this._activeSkills.clear();
 
-      // ── Passive Memory Pipeline: fire-and-forget memory digest ──
-      // After each substantive turn (3+ messages), spawn MemorySpecialist via
-      // getAgentByName (DO stub, no experimental flag needed).
+      // ── Passive Memory Pipeline (Claude Code "dream" pattern) ──
+      // Gate-based, NOT nth-turn. Three gates checked cheapest-first:
+      //   1. Time gate: 6+ hours since last consolidation (one SQLite read)
+      //   2. Session gate: 5+ sessions accumulated since last consolidation
+      //   3. Lock gate: no other consolidation in progress
+      // Only when ALL three pass does MemorySpecialist fire.
+      // Inline fact extraction (extractFacts) still runs every turn (cheap, pattern-based).
       const allMsgs = this.messages || [];
-      if (allMsgs.length >= 3 && this.env.MemorySpecialist) {
+      if (this.env.MemorySpecialist) {
         void (async () => {
           try {
+            // Ensure config table exists
+            this.sql`CREATE TABLE IF NOT EXISTS cf_agent_config (key TEXT PRIMARY KEY, value TEXT NOT NULL)`;
+
+            // Gate 1: Time — read lastConsolidatedAt from DO SQLite
+            const CONSOLIDATION_MIN_HOURS = 6; // Claude Code uses 24h; we use 6h for faster iteration
+            const CONSOLIDATION_MIN_SESSIONS = 5;
+
+            const lastConsolidated = this.sql<{ value: string }>`
+              SELECT value FROM cf_agent_config WHERE key = '_last_consolidated_at'
+            `;
+            const lastAt = lastConsolidated[0]
+              ? parseInt(lastConsolidated[0].value, 10)
+              : 0;
+            const hoursSince = (Date.now() - lastAt) / 3_600_000;
+            if (hoursSince < CONSOLIDATION_MIN_HOURS) return; // Time gate closed
+
+            // Gate 2: Sessions — count distinct sessions since last consolidation
+            const sessionCount = this.sql<{ count: number }>`
+              SELECT COUNT(DISTINCT json_extract(content, '$.sessionId')) as count
+              FROM assistant_messages
+              WHERE created_at > datetime(${lastAt / 1000}, 'unixepoch')
+            `;
+            const sessions = sessionCount[0]?.count || 0;
+            if (sessions < CONSOLIDATION_MIN_SESSIONS) return; // Session gate closed
+
+            // Gate 3: Lock — check if another consolidation is running
+            const lock = this.sql<{ value: string }>`
+              SELECT value FROM cf_agent_config WHERE key = '_consolidation_lock'
+            `;
+            if (lock[0]?.value === "locked") return; // Lock gate closed
+
+            // All gates passed — acquire lock and fire
+            this.sql`
+              INSERT INTO cf_agent_config (key, value) VALUES ('_consolidation_lock', 'locked')
+              ON CONFLICT(key) DO UPDATE SET value = 'locked'
+            `;
+
+            emit(this.env as TelemetryBindings, {
+              type: "memory.dream_fired",
+              agentName: this.name,
+              hoursSince: Math.round(hoursSince),
+              sessionsSince: sessions,
+            });
+
             const { getAgentByName } = await import("agents");
             const memAgent = await getAgentByName(this.env.MemorySpecialist, `mem-${this.name}`);
             const transcript = allMsgs
-              .slice(-6)
+              .slice(-10) // more context for consolidation
               .map((m: any) => `${m.role}: ${typeof m.content === "string" ? m.content.slice(0, 500) : JSON.stringify(m.parts?.[0]?.text || "").slice(0, 500)}`)
               .join("\n");
-            // Use chat() RPC on the MemorySpecialist DO
+
             await (memAgent as any).chat(
-              `/memory-digest\n\nSession transcript:\n${transcript}`,
+              `/memory-digest\n\nSessions to review: ${sessions}\nHours since last: ${hoursSince.toFixed(1)}\n\nLatest transcript:\n${transcript}`,
               {
                 onEvent: () => {},
-                onDone: () => {},
+                onDone: () => {
+                  // Release lock + update lastConsolidatedAt
+                  this.sql`
+                    INSERT INTO cf_agent_config (key, value) VALUES ('_last_consolidated_at', ${String(Date.now())})
+                    ON CONFLICT(key) DO UPDATE SET value = ${String(Date.now())}
+                  `;
+                  this.sql`
+                    INSERT INTO cf_agent_config (key, value) VALUES ('_consolidation_lock', '')
+                    ON CONFLICT(key) DO UPDATE SET value = ''
+                  `;
+                  emit(this.env as TelemetryBindings, {
+                    type: "memory.dream_completed",
+                    agentName: this.name,
+                    sessionsSince: sessions,
+                  });
+                },
                 onError: (err: string) => {
+                  // Release lock on failure (rollback)
+                  this.sql`
+                    INSERT INTO cf_agent_config (key, value) VALUES ('_consolidation_lock', '')
+                    ON CONFLICT(key) DO UPDATE SET value = ''
+                  `;
                   this._recordSignal("tool_failure", "memory-digest", 1, { error: err });
                 },
               },
             );
           } catch (err) {
-            // Log but never block
-            console.error("[memory-digest] Failed:", (err as Error).message);
+            // Release lock on crash
+            try { this.sql`UPDATE cf_agent_config SET value = '' WHERE key = '_consolidation_lock'`; } catch {}
+            console.error("[memory-dream] Failed:", (err as Error).message);
           }
         })();
       }
 
-      // ── L2 Eval Judge: automated quality scoring ──
-      // Every 10th turn, spawn EvalJudge via getAgentByName.
-      const turnNumber = (result as any).steps || allMsgs.length;
-      if (turnNumber > 0 && turnNumber % 10 === 0 && this.env.EvalJudge) {
+      // ── L2 Eval Judge (sampled, not every turn) ──
+      // Fires on 1-in-20 turns (5% sample rate) to avoid cost overhead.
+      // Uses random sampling instead of nth-turn for unbiased evaluation.
+      const allMsgCount = allMsgs.length;
+      if (Math.random() < 0.05 && allMsgCount >= 4 && this.env.EvalJudge) {
         void (async () => {
           try {
             const { getAgentByName } = await import("agents");
