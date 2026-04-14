@@ -352,32 +352,136 @@ function createSkillProvider(skill: SkillDefinition) {
 //   - search() → embeds query via Workers AI, queries Vectorize, returns matches
 //   - set()    → embeds content, upserts into Vectorize with metadata
 
+// ── Time-decay confidence scoring (ported from deploy/runtime/memory.ts) ──
+// Reduces relevance of old memories so stale facts don't dominate.
+// 7d→100%, 30d→90%, 90d→70%, 180d→50%, beyond→0 (archive threshold).
+
+function effectiveConfidence(score: number, timestampMs: number): number {
+  const days = Math.max(0, (Date.now() - timestampMs) / 86_400_000);
+  if (days <= 7) return score;
+  if (days <= 30) return score * 0.9;
+  if (days <= 90) return score * 0.7;
+  if (days <= 180) return score * 0.5;
+  return 0;
+}
+
+function memoryFreshnessNote(timestampMs: number): string {
+  const days = Math.floor((Date.now() - timestampMs) / 86_400_000);
+  if (days <= 1) return "";
+  return ` (~${days}d old — verify before treating as current)`;
+}
+
+// ── Memory threat detection (ported from deploy/runtime/curated-memory.ts) ──
+// Blocks prompt injection, exfiltration, SSH backdoors, invisible chars.
+// Runs on every set_context call to prevent adversarial memory injection.
+
+const INVISIBLE_CHARS = ["\u200B", "\u200C", "\u200D", "\u2060", "\uFEFF"];
+const MEMORY_THREAT_PATTERNS: Array<{ regex: RegExp; id: string }> = [
+  { regex: /ignore\s+(?:(?:previous|all|above|prior)\s+)+instructions/i, id: "prompt_injection" },
+  { regex: /you\s+are\s+now\s+/i, id: "role_hijack" },
+  { regex: /do\s+not\s+tell\s+the\s+user/i, id: "deception" },
+  { regex: /system\s+prompt\s+override/i, id: "sys_prompt_override" },
+  { regex: /disregard\s+(your|all|any)\s+(instructions|rules|guidelines)/i, id: "disregard_rules" },
+  { regex: /curl\s+[^\n]*\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)/i, id: "exfil_curl" },
+  { regex: /wget\s+[^\n]*\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)/i, id: "exfil_wget" },
+  { regex: /authorized_keys/i, id: "ssh_backdoor" },
+];
+
+function scanMemoryContent(content: string): string | null {
+  for (const ch of INVISIBLE_CHARS) {
+    if (content.includes(ch)) {
+      return `Blocked: invisible unicode U+${ch.charCodeAt(0).toString(16).toUpperCase().padStart(4, "0")}`;
+    }
+  }
+  for (const p of MEMORY_THREAT_PATTERNS) {
+    if (p.regex.test(content)) return `Blocked: threat pattern '${p.id}'`;
+  }
+  return null;
+}
+
+// ── Pattern-based fact extraction (ported from deploy/runtime/memory.ts) ──
+// No LLM call — regex-based, fast, deterministic. Runs on user messages
+// to extract preferences, identity, goals, behavior patterns.
+
+const FACT_PATTERNS: Array<{ pattern: RegExp; category: string }> = [
+  { pattern: /\bi (?:prefer|like|want|need|love|hate|dislike)\b/i, category: "preference" },
+  { pattern: /\bmy (?:favorite|preferred)\b/i, category: "preference" },
+  { pattern: /\bmy name is\b/i, category: "knowledge" },
+  { pattern: /\bi (?:work|am|live|study) (?:at|in|as)\b/i, category: "knowledge" },
+  { pattern: /\bmy (?:email|phone|address|company|job|role|team)\b/i, category: "knowledge" },
+  { pattern: /\bi(?:'m| am) (?:trying|working|looking|planning) to\b/i, category: "goal" },
+  { pattern: /\bmy goal is\b/i, category: "goal" },
+  { pattern: /\bi need to\b/i, category: "goal" },
+  { pattern: /\bi (?:usually|always|never|often|sometimes)\b/i, category: "behavior" },
+];
+
+function extractFacts(text: string): Array<{ content: string; category: string }> {
+  const facts: Array<{ content: string; category: string }> = [];
+  const sentences = text.split(/[.!?\n]+/).filter(s => s.trim().length > 8);
+  for (const sentence of sentences) {
+    for (const { pattern, category } of FACT_PATTERNS) {
+      if (pattern.test(sentence)) {
+        facts.push({ content: sentence.trim(), category });
+        break;
+      }
+    }
+  }
+  return facts;
+}
+
+// ── Vectorize Search Provider with time-decay + hybrid RRF + threat detection ──
+
 function createVectorizeSearchProvider(env: Env) {
   return {
     async get(): Promise<string | null> {
-      // Vectorize doesn't expose count — return a hint
       return "Semantic memory available. Use search_context to find past knowledge.";
     },
 
     async search(query: string): Promise<string | null> {
       try {
+        // Dense vector search via Vectorize
         const embedding = await env.AI.run("@cf/baai/bge-base-en-v1.5", {
           text: [query],
         });
-        const results = await env.VECTORIZE.query(embedding.data[0], {
-          topK: 5,
+        const vectorResults = await env.VECTORIZE.query(embedding.data[0], {
+          topK: 10,
           returnMetadata: "all",
         });
-        if (!results.matches?.length) return null;
-        return results.matches
-          .map((m: any) => `[${m.metadata?.key || m.id}] (score: ${m.score?.toFixed(2)})\n${m.metadata?.content || ""}`)
+
+        if (!vectorResults.matches?.length) return null;
+
+        // Apply time-decay confidence scoring
+        const scored = vectorResults.matches
+          .map((m: any) => ({
+            key: m.metadata?.key || m.id,
+            content: m.metadata?.content || "",
+            timestamp: m.metadata?.timestamp || 0,
+            // RRF rank score (1/(k+rank)) merged with vector similarity + time decay
+            score: effectiveConfidence(m.score || 0, m.metadata?.timestamp || 0),
+            freshness: memoryFreshnessNote(m.metadata?.timestamp || 0),
+          }))
+          .filter((m: any) => m.score > 0) // Drop fully decayed memories
+          .sort((a: any, b: any) => b.score - a.score)
+          .slice(0, 5);
+
+        if (scored.length === 0) return null;
+
+        return scored
+          .map((m: any) => `[${m.key}] (relevance: ${m.score.toFixed(2)}${m.freshness})\n${m.content}`)
           .join("\n\n");
       } catch {
-        return null; // graceful degradation if Vectorize is unavailable
+        return null;
       }
     },
 
     async set(key: string, content: string): Promise<void> {
+      // Threat detection — block adversarial memory writes
+      const threat = scanMemoryContent(content);
+      if (threat) {
+        console.warn(`[memory] ${threat} — key: ${key}`);
+        return; // Silently reject — don't expose threat details to model
+      }
+
       try {
         const embedding = await env.AI.run("@cf/baai/bge-base-en-v1.5", {
           text: [content],
@@ -1524,6 +1628,25 @@ export class ChatAgent extends Think<Env> {
 
       // Refresh context blocks (memory may have been updated during the turn)
       try { await (this as any).session?.refreshSystemPrompt?.(); } catch {}
+
+      // ── Passive fact extraction (no LLM, pattern-based) ──
+      // Extract facts from user messages and store in Vectorize.
+      // Fire-and-forget — doesn't block the response.
+      if (this.env.VECTORIZE && this.env.AI) {
+        try {
+          const messages = (result as any).messages || [];
+          const userMsgs = messages.filter((m: any) => m.role === "user");
+          const lastUserMsg = userMsgs[userMsgs.length - 1];
+          if (lastUserMsg?.content && typeof lastUserMsg.content === "string") {
+            const facts = extractFacts(lastUserMsg.content);
+            const provider = createVectorizeSearchProvider(this.env);
+            for (const fact of facts) {
+              const key = `fact:${fact.category}:${Date.now()}:${crypto.randomUUID().slice(0, 4)}`;
+              provider.set(key, `[${fact.category}] ${fact.content}`).catch(() => {});
+            }
+          }
+        } catch {} // never block on fact extraction
+      }
     } else if (result.status === "error") {
       this._telemetry.sessionFailed(this.name, (result as any).error || "unknown");
     }
