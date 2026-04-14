@@ -2774,7 +2774,7 @@ export class ChatAgent extends Think<Env> {
   storeSecret(key: string, value: string, category = "api_key", description = "", expiresInSec?: number) {
     this._ensureSecretsTable();
     // Threat scan the key name (not the value — that's the actual secret)
-    if (/[<>"';\-\-]/.test(key)) return { error: "Invalid key name" };
+    if (/[<>"';]/.test(key) || key.includes("--")) return { error: "Invalid key name" };
 
     const expiresAt = expiresInSec
       ? new Date(Date.now() + expiresInSec * 1000).toISOString()

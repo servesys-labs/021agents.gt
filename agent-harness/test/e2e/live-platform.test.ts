@@ -259,12 +259,21 @@ describe("Stage 3: Chat via WebSocket", () => {
       }, 60_000);
       ws.on("message", (data: Buffer) => {
         const msg = JSON.parse(data.toString());
-        if (msg.type !== "cf_agent_use_chat_response" || !msg.body) return;
-        chunkCount++;
-        const chunk = JSON.parse(msg.body);
-        if (chunk.type === "text-delta") textContent += chunk.delta;
-        if (chunk.type === "finish" || msg.done === true) {
-          gotFinish = true;
+        // Stream chunks
+        if (msg.type === "cf_agent_use_chat_response" && msg.body) {
+          chunkCount++;
+          try {
+            const chunk = JSON.parse(msg.body);
+            if (chunk.type === "text-delta") textContent += chunk.delta;
+            if (chunk.type === "finish" || msg.done === true) {
+              gotFinish = true;
+              clearTimeout(timeout);
+              resolve();
+            }
+          } catch {}
+        }
+        // Message list sync = turn complete
+        if (msg.type === "cf_agent_chat_messages" && chunkCount > 0) {
           clearTimeout(timeout);
           resolve();
         }
