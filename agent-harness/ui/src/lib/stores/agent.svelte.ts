@@ -172,4 +172,23 @@ export const agentStore = {
       (client as any).send?.({ type: CHAT_TYPES.CLEAR });
     }
   },
+
+  /** Approve or reject a tool call (SDK tool approval protocol). */
+  respondToToolApproval(toolCallId: string, approved: boolean) {
+    if (!client) throw new Error("Not connected");
+    client.respondToToolApproval(toolCallId, approved);
+  },
+
+  /** Cancel the current streaming response. */
+  cancelStream() {
+    if (!client) return;
+    client.cancelStream();
+    isStreaming = false;
+  },
+
+  /** Request stream resume after reconnect. */
+  requestStreamResume() {
+    if (!client) return;
+    client.requestStreamResume();
+  },
 };
