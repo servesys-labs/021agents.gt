@@ -131,6 +131,11 @@ export const AgentCreateBody = z.object({
   budget_limit_usd: z.number().min(0).max(10000).default(10),
   tags: z.array(z.string()).default([]),
   reasoning_strategy: z.enum(VALID_REASONING_STRATEGIES).optional(),
+  /**
+   * When true, collapses tool exposure to execute-code + discover-api only.
+   * Explicit false is important to disable legacy code-mode configs.
+   */
+  use_code_mode: z.boolean().optional(),
   /** Execution profile — controls fast-path vs full pipeline behavior. */
   execution_profile: ExecutionProfileSchema.optional(),
   /** Per-channel overrides (greeting, prompt suffix, execution profile). */

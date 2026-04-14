@@ -481,6 +481,9 @@ agentRoutes.openapi(createAgentRoute, async (c): Promise<any> => {
     if (req.reasoning_strategy) {
       configJson.reasoning_strategy = req.reasoning_strategy;
     }
+    if (typeof req.use_code_mode === "boolean") {
+      configJson.use_code_mode = req.use_code_mode;
+    }
 
     // Eval config
     if (req.eval_config) {
@@ -636,6 +639,7 @@ agentRoutes.openapi(updateAgentRoute, async (c): Promise<any> => {
     }
     if (req.max_turns != null) existingConfig.max_turns = req.max_turns;
     if (req.timeout_seconds != null) existingConfig.timeout_seconds = req.timeout_seconds;
+    if (typeof req.use_code_mode === "boolean") existingConfig.use_code_mode = req.use_code_mode;
     if (req.deploy_policy) {
       existingConfig.deploy_policy = req.deploy_policy;
     }

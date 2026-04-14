@@ -1,79 +1,9 @@
 <script lang="ts">
   import { renderStreamingMarkdown, wrapCodeBlocksWithHeader } from "$lib/markdown";
   import { cn } from "$lib/utils";
-  import ToolCallBlock from "./ToolCallBlock.svelte";
-  import CollapsibleBlock from "./CollapsibleBlock.svelte";
+  import ToolCallGroup from "./ToolCallGroup.svelte";
   import ChatMessageActions from "./ChatMessageActions.svelte";
-
-  const SPINNER_VERBS = [
-    "Accomplishing",
-    "Architecting",
-    "Baking",
-    "Beaming",
-    "Boondoggling",
-    "Booping",
-    "Brewing",
-    "Calculating",
-    "Cerebrating",
-    "Churning",
-    "Clauding",
-    "Coalescing",
-    "Cogitating",
-    "Concocting",
-    "Considering",
-    "Contemplating",
-    "Cooking",
-    "Crafting",
-    "Crunching",
-    "Deciphering",
-    "Deliberating",
-    "Discombobulating",
-    "Doodling",
-    "Dreaming",
-    "Enchanting",
-    "Envisioning",
-    "Fermenting",
-    "Frolicking",
-    "Generating",
-    "Harmonizing",
-    "Hashing",
-    "Hyperspacing",
-    "Ideating",
-    "Imagining",
-    "Incubating",
-    "Inferring",
-    "Marinating",
-    "Meandering",
-    "Mulling",
-    "Musing",
-    "Noodling",
-    "Orbiting",
-    "Orchestrating",
-    "Percolating",
-    "Pondering",
-    "Pontificating",
-    "Processing",
-    "Puzzling",
-    "Reticulating",
-    "Ruminating",
-    "Simmering",
-    "Sketching",
-    "Spinning",
-    "Stewing",
-    "Synthesizing",
-    "Tempering",
-    "Thinking",
-    "Tinkering",
-    "Transmuting",
-    "Vibing",
-    "Wandering",
-    "Whirring",
-    "Whisking",
-    "Wibbling",
-    "Working",
-    "Wrangling",
-    "Zesting",
-  ] as const;
+  import { SPINNER_VERBS, randomVerbIndex } from "$lib/data/spinner-verbs";
 
   interface ToolCall {
     name: string;
@@ -84,11 +14,16 @@
     error?: string;
   }
 
+  type Segment =
+    | { type: "thinking"; content: string }
+    | { type: "tool_calls"; calls: ToolCall[] };
+
   interface MessageData {
     role: "user" | "assistant";
     content: string;
     toolCalls?: ToolCall[];
     thinking?: string;
+    segments?: Segment[];
     model?: string;
     cost_usd?: number;
     input_tokens?: number;
@@ -118,7 +53,43 @@
   }
 
   let renderedHtml = $state("");
-  let spinnerVerbIndex = $state(Math.floor(Math.random() * SPINNER_VERBS.length));
+
+  // ── Spinning verb + timer for streaming state ──
+  let verbIdx = $state(randomVerbIndex());
+  let streamStart = $state(Date.now());
+  let streamElapsed = $state(0);
+
+  $effect(() => {
+    if (!streaming || message.role !== "assistant") return;
+    streamStart = Date.now();
+    streamElapsed = 0;
+    verbIdx = randomVerbIndex();
+
+    const timer = setInterval(() => {
+      streamElapsed = Date.now() - streamStart;
+    }, 100);
+    const verbRotator = setInterval(() => {
+      verbIdx = randomVerbIndex();
+    }, 3000);
+
+    return () => { clearInterval(timer); clearInterval(verbRotator); };
+  });
+
+  let streamElapsedLabel = $derived.by(() => {
+    if (streamElapsed < 1000) return "0s";
+    return `${Math.floor(streamElapsed / 1000)}s`;
+  });
+
+  let streamVerb = $derived(SPINNER_VERBS[verbIdx]);
+
+  // Token count for inline display
+  let inlineTokenCount = $derived.by(() => {
+    const inTok = toFiniteNumber(message.input_tokens);
+    const outTok = toFiniteNumber(message.output_tokens);
+    if (!outTok) return "";
+    const label = outTok >= 1000 ? `${(outTok / 1000).toFixed(1)}k` : `${outTok}`;
+    return `\u2193 ${label} tokens`;
+  });
 
   // Render markdown reactively
   $effect(() => {
@@ -126,13 +97,6 @@
       renderStreamingMarkdown(message.content).then((html) => {
         renderedHtml = wrapCodeBlocksWithHeader(html);
       });
-    }
-  });
-
-  // One random verb per turn — pick once when streaming starts, don't rotate
-  $effect(() => {
-    if (streaming && message.role === "assistant" && !message.content) {
-      spinnerVerbIndex = Math.floor(Math.random() * SPINNER_VERBS.length);
     }
   });
 
@@ -163,7 +127,6 @@
   // Group tool calls into "turns" - a turn = consecutive tool calls before text
   interface ToolTurn {
     toolCalls: ToolCall[];
-    totalLatencyMs: number;
   }
 
   let toolTurns = $derived.by((): ToolTurn[] => {
@@ -171,26 +134,8 @@
     if (calls.length === 0) return [];
     // For now, group all tool calls into a single turn (we only have one assistant message)
     // Multi-turn grouping would require message-level turn boundaries
-    const totalMs = calls.reduce((sum, tc) => sum + (tc.latency_ms ?? 0), 0);
-    return [{ toolCalls: calls, totalLatencyMs: totalMs }];
+    return [{ toolCalls: calls }];
   });
-
-  let showCursor = $derived(
-    streaming &&
-    message.role === "assistant" &&
-    !message.content &&
-    (!message.toolCalls || message.toolCalls.length === 0) &&
-    !message.thinking
-  );
-
-  let isProcessing = $derived(
-    streaming &&
-    message.role === "assistant" &&
-    !message.content &&
-    (message.toolCalls?.some(tc => !tc.output && !tc.error) || false)
-  );
-
-  let spinnerLabel = $derived(`${SPINNER_VERBS[spinnerVerbIndex]}...`);
 
   // Statistics
   let hasStats = $derived(
@@ -234,66 +179,29 @@
         onDelete={onDelete ? () => onDelete!(index) : undefined}
       />
 
-      <!-- Thinking / Reasoning -->
-      {#if message.thinking}
-        <div class="mb-3">
-          <CollapsibleBlock
-            title={streaming ? "Reasoning..." : "Reasoning"}
-            icon="brain"
-            isStreaming={streaming && !message.content}
-          >
-            <div class="px-3 py-2.5">
-              <pre class="whitespace-pre-wrap font-mono text-xs leading-relaxed text-muted-foreground">{message.thinking}</pre>
-            </div>
-          </CollapsibleBlock>
-        </div>
-      {/if}
-
-      <!-- Tool calls grouped by turn -->
-      {#if toolTurns.length > 0}
-        <div class="mb-3 space-y-2">
-          {#each toolTurns as turn, turnIdx}
-            {#if toolTurns.length > 1}
-              <div class="relative my-3 rounded-xl border border-dashed border-muted-foreground/30 p-3 pt-5">
-                <span class="absolute -top-2.5 left-3 bg-background px-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-                  Turn {turnIdx + 1}
-                </span>
-                {#each turn.toolCalls as tc}
-                  <div class="mb-2 last:mb-0">
-                    <ToolCallBlock
-                      toolCall={tc}
-                      expanded={!tc.output && streaming}
-                      {agentName}
-                    />
-                  </div>
-                {/each}
-                <div class="mt-2 flex items-center gap-3 border-t border-border/50 pt-2 text-[10px] text-muted-foreground">
-                  <span>{turn.toolCalls.length} tool call{turn.toolCalls.length > 1 ? "s" : ""}</span>
-                  {#if turn.totalLatencyMs > 0}
-                    <span>{turn.totalLatencyMs < 1000 ? `${turn.totalLatencyMs}ms` : `${(turn.totalLatencyMs / 1000).toFixed(1)}s`}</span>
-                  {/if}
-                </div>
-              </div>
-            {:else}
-              {#each turn.toolCalls as tc}
-                <ToolCallBlock
-                  toolCall={tc}
-                  expanded={!tc.output && streaming}
-                  {agentName}
-                />
-              {/each}
+      <!-- Interleaved segments: reasoning + tool calls in order -->
+      {#if message.segments && message.segments.length > 0}
+        <div class="mb-3 space-y-1.5">
+          {#each message.segments as seg}
+            {#if seg.type === "thinking"}
+              <p class="whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground/70 italic">{seg.content}</p>
+            {:else if seg.type === "tool_calls"}
+              <ToolCallGroup toolCalls={seg.calls} {agentName} />
             {/if}
           {/each}
         </div>
-      {/if}
-
-      <!-- Processing shimmer animation -->
-      {#if isProcessing}
-        <div class="mb-3">
-          <span class="inline-block bg-gradient-to-r from-muted-foreground via-foreground to-muted-foreground bg-[length:200%_100%] bg-clip-text text-sm font-medium text-transparent animate-shimmer">
-            {spinnerLabel}
-          </span>
-        </div>
+      {:else}
+        <!-- Fallback for messages loaded from history (no segments) -->
+        {#if message.thinking}
+          <p class="mb-3 whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground/70 italic">{message.thinking}</p>
+        {/if}
+        {#if toolTurns.length > 0}
+          <div class="mb-3 space-y-1.5">
+            {#each toolTurns as turn}
+              <ToolCallGroup toolCalls={turn.toolCalls} {agentName} />
+            {/each}
+          </div>
+        {/if}
       {/if}
 
       <!-- Content -->
@@ -308,14 +216,16 @@
         </div>
       {/if}
 
-      <!-- Blinking cursor while waiting for first token -->
-      {#if showCursor}
-        <div class="mb-1 flex items-center gap-2 text-sm text-muted-foreground">
-          <span class="inline-block h-2 w-2 animate-pulse rounded-full bg-muted-foreground"></span>
-          <span class="inline-block bg-gradient-to-r from-muted-foreground via-foreground to-muted-foreground bg-[length:200%_100%] bg-clip-text font-medium text-transparent animate-shimmer">
-            {spinnerLabel}
+      <!-- Streaming progress (bottom of message, Claude Code style) -->
+      {#if streaming}
+        <div class="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+          <span class="text-primary">*</span>
+          <span class="bg-gradient-to-r from-muted-foreground via-foreground to-muted-foreground bg-[length:200%_100%] bg-clip-text font-medium text-transparent animate-shimmer">
+            {streamVerb}...
           </span>
-          <span class="inline-block h-4 w-0.5 animate-pulse bg-foreground"></span>
+          <span class="text-[10px] text-muted-foreground/50">
+            ({streamElapsedLabel}{inlineTokenCount ? ` \u00B7 ${inlineTokenCount}` : ""})
+          </span>
         </div>
       {/if}
 

@@ -2,7 +2,7 @@
   import { metaAgentStore, type MetaAgentMessage } from "$lib/stores/meta-agent.svelte";
   import type { MetaModelPath } from "$lib/services/meta-agent";
   import { renderMarkdown } from "$lib/markdown";
-  import ToolCallBlock from "$lib/components/chat/ToolCallBlock.svelte";
+  import ToolCallGroup from "$lib/components/chat/ToolCallGroup.svelte";
   import TrainingStream from "./TrainingStream.svelte";
   import Button from "$lib/components/ui/button.svelte";
   import { SPINNER_VERBS, randomVerbIndex } from "$lib/data/spinner-verbs";
@@ -71,13 +71,33 @@
   let streaming = $derived(metaAgentStore.streaming);
   let statusText = $derived(metaAgentStore.statusText);
 
-  // One random verb per turn, not rotating — matches Claude Code style
-  let spinnerLabel = $state(`${SPINNER_VERBS[randomVerbIndex()]}...`);
+  // Rotating verb + timer for streaming state
+  let verbIdx = $state(randomVerbIndex());
+  let streamStart = $state(Date.now());
+  let streamElapsed = $state(0);
+
   $effect(() => {
-    if (streaming) {
-      spinnerLabel = `${SPINNER_VERBS[randomVerbIndex()]}...`;
-    }
+    if (!streaming) return;
+    streamStart = Date.now();
+    streamElapsed = 0;
+    verbIdx = randomVerbIndex();
+
+    const timer = setInterval(() => {
+      streamElapsed = Date.now() - streamStart;
+    }, 100);
+    const verbRotator = setInterval(() => {
+      verbIdx = randomVerbIndex();
+    }, 3000);
+
+    return () => { clearInterval(timer); clearInterval(verbRotator); };
   });
+
+  let streamElapsedLabel = $derived.by(() => {
+    if (streamElapsed < 1000) return "0s";
+    return `${Math.floor(streamElapsed / 1000)}s`;
+  });
+
+  let streamVerb = $derived(SPINNER_VERBS[verbIdx]);
 
   function scrollToBottom() {
     if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -240,25 +260,14 @@
                 </div>
               </div>
             {:else}
-              <!-- Thinking / reasoning block -->
+              <!-- Thinking — bare inline text -->
               {#if msg.thinking}
-                <details class="group rounded-lg bg-muted/30 text-xs">
-                  <summary class="cursor-pointer px-3 py-1.5 text-muted-foreground select-none">
-                    Reasoning <span class="text-muted-foreground/50">({msg.thinking.length} chars)</span>
-                  </summary>
-                  <div class="whitespace-pre-wrap px-3 pb-2 text-muted-foreground/70 font-mono text-[11px]">
-                    {msg.thinking}
-                  </div>
-                </details>
+                <p class="whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground/70 italic">{msg.thinking}</p>
               {/if}
 
-              <!-- Tool calls -->
+              <!-- Tool calls — bare inline -->
               {#if msg.toolCalls?.length}
-                <div class="space-y-2">
-                  {#each msg.toolCalls as tc}
-                    <ToolCallBlock toolCall={tc} expanded={false} />
-                  {/each}
-                </div>
+                <ToolCallGroup toolCalls={msg.toolCalls} />
               {/if}
 
               <!-- Training stream -->
@@ -303,13 +312,14 @@
                 </div>
               {/if}
 
-              <!-- Streaming indicator with rotating verbs -->
+              <!-- Streaming progress — verb + timer -->
               {#if streaming && i === messages.length - 1}
-                <div class="flex items-center gap-2 mt-1">
-                  <span class="inline-block h-2 w-2 animate-pulse rounded-full bg-muted-foreground"></span>
-                  <span class="inline-block bg-gradient-to-r from-muted-foreground via-foreground to-muted-foreground bg-[length:200%_100%] bg-clip-text text-sm font-medium text-transparent animate-shimmer">
-                    {statusText || spinnerLabel}
+                <div class="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+                  <span class="text-primary">*</span>
+                  <span class="bg-gradient-to-r from-muted-foreground via-foreground to-muted-foreground bg-[length:200%_100%] bg-clip-text font-medium text-transparent animate-shimmer">
+                    {statusText || `${streamVerb}...`}
                   </span>
+                  <span class="text-[10px] text-muted-foreground/50">({streamElapsedLabel})</span>
                 </div>
               {/if}
             {/if}

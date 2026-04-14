@@ -9,6 +9,7 @@
   import ChatInput from "$lib/components/chat/ChatInput.svelte";
   import EmptyChat from "$lib/components/chat/EmptyChat.svelte";
   import MetaAgentPanel from "$lib/components/meta-agent/MetaAgentPanel.svelte";
+  import WorkspacePanel from "$lib/components/chat/WorkspacePanel.svelte";
   import { metaAgentStore } from "$lib/stores/meta-agent.svelte";
 
   interface ToolCall {
@@ -20,11 +21,18 @@
     error?: string;
   }
 
+  /** Ordered segment types for interleaved rendering */
+  type Segment =
+    | { type: "thinking"; content: string }
+    | { type: "tool_calls"; calls: ToolCall[] };
+
   interface Message {
     role: "user" | "assistant";
     content: string;
     toolCalls?: ToolCall[];
     thinking?: string;
+    /** Ordered segments for interleaved thinking + tool call rendering */
+    segments?: Segment[];
     model?: string;
     cost_usd?: number;
     input_tokens?: number;
@@ -42,6 +50,9 @@
   let sessionId = $state<string | undefined>(undefined);
   let conversationId = $state<string | undefined>(undefined);
   let improveOpen = $state(false);
+  let workspaceOpen = $state(false);
+  let workspacePanelRef: WorkspacePanel | undefined = $state();
+
   let messageFlushScheduled = $state(false);
   let messageFlushNeedsScroll = $state(false);
 
@@ -59,6 +70,14 @@
       }
     });
   }
+
+  // Clean up WS connection on page destroy
+  $effect(() => {
+    return () => {
+      // Don't close the connection — let it stay alive for reconnection
+      // Only close on explicit navigation away
+    };
+  });
 
   // On mount: check URL for ?c=<conversation_id> and load from server
   $effect(() => {
@@ -82,9 +101,27 @@
       const converted: Message[] = [];
       for (const sm of serverMsgs) {
         if (sm.role === "user" || sm.role === "assistant") {
+          // Map persisted tool_calls back to ToolCall[]
+          const rawToolCalls = Array.isArray(sm.tool_calls) ? sm.tool_calls : [];
+          const toolCalls: ToolCall[] = rawToolCalls.map((tc: any, idx: number) => ({
+            name: String(tc.name || "tool"),
+            input: typeof tc.input === "string" ? tc.input : JSON.stringify(tc.input ?? {}),
+            output: tc.output ? String(tc.output) : undefined,
+            call_id: String(tc.call_id || tc.tool_call_id || `tc-${idx}`),
+            latency_ms: typeof tc.latency_ms === "number" ? tc.latency_ms : undefined,
+            error: tc.error ? String(tc.error) : undefined,
+          }));
+
+          // Extract thinking from metadata
+          const meta = (sm as any).metadata;
+          const thinking = meta && typeof meta === "object" && typeof meta.thinking === "string"
+            ? meta.thinking : undefined;
+
           converted.push({
             role: sm.role,
             content: sm.content,
+            toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+            thinking,
             model: sm.model || undefined,
             cost_usd: sm.cost_usd ? Number(sm.cost_usd) : undefined,
           });
@@ -206,6 +243,7 @@
       content: "",
       toolCalls: [],
       thinking: "",
+      segments: [],
     };
     messages = [...messages, assistantMsg];
     streaming = true;
@@ -217,10 +255,7 @@
     // server-side thread yet. Sending it every turn inflates request size.
     const shouldSendHistory = !sessionId && !conversationId;
 
-    const { abort } = streamAgent(
-      agentName,
-      text,
-      (event: ChatEvent) => {
+    const eventHandler = (event: ChatEvent) => {
         const last = messages[messages.length - 1];
         if (!last || last.role !== "assistant") return;
 
@@ -243,6 +278,18 @@
           case "thinking": {
             const content = (d as { content?: string }).content ?? "";
             last.thinking = (last.thinking || "") + content;
+            // Append to segments — always reassign for Svelte reactivity
+            const prevSegs = last.segments ?? [];
+            const lastSeg = prevSegs[prevSegs.length - 1];
+            if (lastSeg && lastSeg.type === "thinking") {
+              // Create new segment object (immutable update)
+              last.segments = [
+                ...prevSegs.slice(0, -1),
+                { type: "thinking" as const, content: lastSeg.content + content },
+              ];
+            } else {
+              last.segments = [...prevSegs, { type: "thinking" as const, content }];
+            }
             scheduleMessageFlush();
             break;
           }
@@ -257,10 +304,19 @@
             const callId = tc.tool_call_id ?? tc.call_id ?? crypto.randomUUID();
             const inputStr = tc.args_preview ??
               (tc.input ? JSON.stringify(tc.input, null, 2) : "{}");
-            last.toolCalls = [
-              ...(last.toolCalls ?? []),
-              { name: tc.name, input: inputStr, call_id: callId },
-            ];
+            const newTc: ToolCall = { name: tc.name, input: inputStr, call_id: callId };
+            last.toolCalls = [...(last.toolCalls ?? []), newTc];
+            // Append to segments — always reassign for Svelte reactivity
+            const prevSegs2 = last.segments ?? [];
+            const lastSeg2 = prevSegs2[prevSegs2.length - 1];
+            if (lastSeg2 && lastSeg2.type === "tool_calls") {
+              last.segments = [
+                ...prevSegs2.slice(0, -1),
+                { type: "tool_calls" as const, calls: [...lastSeg2.calls, newTc] },
+              ];
+            } else {
+              last.segments = [...prevSegs2, { type: "tool_calls" as const, calls: [newTc] }];
+            }
             scheduleMessageFlush(true);
             break;
           }
@@ -274,12 +330,27 @@
               error?: string;
             };
             const callId = tr.tool_call_id ?? tr.call_id;
-            const tc = last.toolCalls?.find((t) => t.call_id === callId);
-            if (tc) {
-              tc.output = tr.result ?? tr.output ?? "";
-              tc.latency_ms = tr.latency_ms;
-              if (tr.error) tc.error = tr.error;
+
+            // Update toolCalls — immutable reassign for Svelte reactivity
+            last.toolCalls = (last.toolCalls ?? []).map((t) =>
+              t.call_id === callId
+                ? { ...t, output: tr.result ?? tr.output ?? "", latency_ms: tr.latency_ms, error: tr.error }
+                : t
+            );
+
+            // Update segments — the segment holds its own copy of the calls array
+            if (last.segments) {
+              last.segments = last.segments.map((seg) => {
+                if (seg.type !== "tool_calls") return seg;
+                const updatedCalls = seg.calls.map((t) =>
+                  t.call_id === callId
+                    ? { ...t, output: tr.result ?? tr.output ?? "", latency_ms: tr.latency_ms, error: tr.error }
+                    : t
+                );
+                return { ...seg, calls: updatedCalls };
+              });
             }
+
             scheduleMessageFlush();
             break;
           }
@@ -312,6 +383,10 @@
             scheduleMessageFlush();
             streaming = false;
             abortFn = null;
+            // Refresh workspace files if panel is open
+            if (workspaceOpen && workspacePanelRef) {
+              workspacePanelRef.refresh();
+            }
             break;
           }
           case "error": {
@@ -323,15 +398,21 @@
             break;
           }
         }
-      },
+      };
+
+    const historyPayload = shouldSendHistory
+      ? messages.slice(0, -1).map(m => ({ role: m.role, content: m.content }))
+      : undefined;
+
+    const { abort } = streamAgent(
+      agentName,
+      text,
+      eventHandler,
       sessionId,
       selectedPlan,
-      shouldSendHistory
-        ? messages.slice(0, -1).map(m => ({ role: m.role, content: m.content }))
-        : undefined,
+      historyPayload,
       conversationId,
     );
-
     abortFn = abort;
   }
 
@@ -378,7 +459,17 @@
 
     <!-- History dropdown (server-backed conversations) -->
     <div class="relative">
-      <div class="flex items-center justify-end px-4 py-1.5 sm:px-6">
+      <div class="flex items-center justify-end gap-1 px-4 py-1.5 sm:px-6">
+        <button
+          type="button"
+          class="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          onclick={() => { workspaceOpen = !workspaceOpen; }}
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+          </svg>
+          Files
+        </button>
         <button
           type="button"
           class="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
@@ -502,4 +593,21 @@
       onClose={() => (improveOpen = false)}
     />
   {/if}
+
+  <WorkspacePanel
+    bind:this={workspacePanelRef}
+    {agentName}
+    open={workspaceOpen}
+    onClose={() => (workspaceOpen = false)}
+  />
 </div>
+
+<style>
+  @keyframes shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+  :global(.animate-shimmer) {
+    animation: shimmer 2s linear infinite;
+  }
+</style>
