@@ -1410,6 +1410,7 @@ import { Think } from "@cloudflare/think";
 import { createBrowserTools } from "@cloudflare/think/tools/browser";
 import { createExecuteTool } from "@cloudflare/think/tools/execute";
 import { createExtensionTools } from "@cloudflare/think/tools/extensions";
+import { codeMcpServer } from "@cloudflare/codemode/mcp";
 import { AgentSearchProvider, R2SkillProvider } from "agents/experimental/memory/session";
 // Workspace and Session are re-exported by Think in source but not in published dist.
 // Import from their source packages directly.
@@ -3575,7 +3576,8 @@ export class ChatAgent extends Think<Env> {
         oauth_refresh_token TEXT,
         oauth_expires_at TEXT,
         connected_at TEXT DEFAULT (datetime('now')),
-        last_used_at TEXT
+        last_used_at TEXT,
+        portal_mode INTEGER NOT NULL DEFAULT 0
       )
     `;
   }
@@ -3791,8 +3793,8 @@ export class ChatAgent extends Think<Env> {
     }
   }
 
-  @callable({ description: "Connect to an external MCP server (validates URL, discovers tools)" })
-  async addServer(name: string, url: string) {
+  @callable({ description: "Connect to an external MCP server. Set portal=true for Enterprise MCP Portal mode (collapses all tools into a single code tool — 94% token reduction for servers with many tools)." })
+  async addServer(name: string, url: string, portal = false) {
     // SSRF validation
     const ssrfError = this._validateMcpUrl(url);
     if (ssrfError) return { error: ssrfError };
@@ -3804,11 +3806,11 @@ export class ChatAgent extends Think<Env> {
       this._ensureConnectorTable();
       const toolCount = Object.keys(this.mcp?.getAITools?.() || {}).length;
       this.sql`
-        INSERT INTO cf_agent_connectors (id, name, url, status, tool_count)
-        VALUES (${name}, ${name}, ${url}, 'connected', ${toolCount})
+        INSERT INTO cf_agent_connectors (id, name, url, status, tool_count, portal_mode)
+        VALUES (${name}, ${name}, ${url}, 'connected', ${toolCount}, ${portal ? 1 : 0})
         ON CONFLICT(id) DO UPDATE SET
           url = ${url}, status = 'connected', tool_count = ${toolCount},
-          connected_at = datetime('now')
+          portal_mode = ${portal ? 1 : 0}, connected_at = datetime('now')
       `;
 
       emit(this.env as TelemetryBindings, {
@@ -3817,12 +3819,18 @@ export class ChatAgent extends Think<Env> {
         serverName: name,
         url,
         toolCount,
+        portal,
       });
 
-      return result;
+      return { ...result as any, portal, toolCount };
     } catch (err: any) {
       return { error: `Failed to connect: ${err.message || String(err)}` };
     }
+  }
+
+  @callable({ description: "Connect an MCP server in Enterprise Portal mode — wraps all server tools into a single 'code' tool. The LLM writes JavaScript to chain tool calls. 94% token reduction for servers with many tools (e.g. Cloudflare API, GitHub, Stripe)." })
+  async addPortalServer(name: string, url: string) {
+    return this.addServer(name, url, true);
   }
 
   @callable({ description: "Disconnect an MCP server" })
@@ -3846,8 +3854,9 @@ export class ChatAgent extends Think<Env> {
     const persisted = this.sql<{
       id: string; name: string; url: string; status: string;
       tool_count: number; connected_at: string; last_used_at: string | null;
+      portal_mode: number;
     }>`
-      SELECT id, name, url, status, tool_count, connected_at, last_used_at
+      SELECT id, name, url, status, tool_count, connected_at, last_used_at, portal_mode
       FROM cf_agent_connectors
       ORDER BY connected_at DESC
     `;
