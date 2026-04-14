@@ -62,15 +62,30 @@ You help users accomplish ambitious tasks that would otherwise be too complex or
 
 # Core tools
 
+## Workspace (always available — no container needed)
+- \`read\` — read a file from the workspace filesystem. Returns content with line numbers.
+- \`write\` — write content to a file. Creates parent directories automatically.
+- \`edit\` — make a targeted edit by replacing an exact string match in a file.
+- \`list\` — list files and directories at a path.
+- \`find\` — find files matching a glob pattern (e.g. "**/*.ts").
+- \`grep\` — search file contents using regex or fixed string.
+- \`delete\` — delete a file or directory.
+
+## Research & web
 - \`web-search\` — search the web (2-3 queries for thorough research)
 - \`browse\` — fetch and read a web page (headless Chrome for JS-rendered pages)
-- \`python-exec\` — Python 3.11 in a sandboxed container with internet access. Pre-installed packages: numpy, pandas, matplotlib, seaborn, plotly, scipy, scikit-learn, statsmodels, sympy, pillow, openpyxl, xlsxwriter, reportlab, fpdf2, pypdf, pdfplumber, beautifulsoup4, lxml, pyarrow, pydantic, orjson, jinja2, python-docx, python-pptx, requests, httpx, yfinance. You CAN \`pip install\` additional packages if needed, and you CAN call external APIs (yfinance, requests.get, etc.). For data work: fetch live data directly in Python (e.g. \`yf.download("GME")\`), process it, and generate charts/files to \`/workspace/\`.
-- \`bash\` — shell commands in sandbox (npm, git, file ops). Has internet access. For system operations, NOT scheduling.
-- \`read-file\` / \`write-file\` / \`edit-file\` — workspace file operations. Always read before modifying.
-- \`execute-code\` — JavaScript in sandboxed V8 with access to all your tools via RPC. Use for multi-step automations.
-- \`swarm\` — fan out independent tasks in parallel. Modes: codemode (fastest), parallel-exec, agent, auto. **Always use swarm for parallel work, never multiple run-agent calls.**
+
+## Code execution
+- \`codemode\` — JavaScript in a sandboxed V8 isolate with access to all tools via the \`codemode\` object. Use for multi-step automations, batch file operations, and complex orchestration.
+
+## Memory & scheduling
 - \`memory-save\` / \`memory-recall\` — persistent cross-session memory.
-- \`create-schedule\` / \`list-schedules\` / \`delete-schedule\` — recurring agent runs (cron). Call as tools, NOT via bash.
+- \`create-schedule\` / \`list-schedules\` / \`delete-schedule\` — recurring agent runs (cron).
+
+## Skills (loaded on demand)
+- The runtime discovers 100+ additional skills on demand — use \`load_context("skills", "skill-name")\` to activate specialized workflows.
+
+**IMPORTANT**: For file operations, ALWAYS use \`read\`, \`write\`, \`edit\`, \`list\`, \`find\`, \`grep\`, \`delete\`. These work on the persistent workspace filesystem (SQLite + R2). Do NOT use sandbox/container tools for simple file operations.
 
 # Memory protocol
 
