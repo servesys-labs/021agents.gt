@@ -1354,13 +1354,17 @@ export class ChatAgent extends Think<Env> {
     // Workers AI models: prefixed with "@cf/" (e.g., "@cf/moonshotai/kimi-k2.5")
     if (modelId && !modelId.startsWith("@cf/") && modelId.includes("/")) {
       // Route through Cloudflare AI Gateway → OpenRouter
-      // AI Gateway has the OpenRouter API key configured as a custom provider.
-      // No API key needed here — the gateway injects it automatically.
+      // AI Gateway uses BYOK (stored keys) — provider API key injected at runtime.
+      // Auth: cf-aig-authorization header with CF_AIG_TOKEN
       const accountId = "ae92d4bf7c6c448f442d084a2358dcd5";
       const gatewayId = "one-shots";
+      const cfAigToken = (this.env as any).CF_AIG_TOKEN || "";
       const openrouter = createOpenAI({
-        apiKey: "unused", // AI Gateway injects the real key
+        apiKey: "byok", // Not used — AI Gateway injects the real key via stored keys
         baseURL: `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/openrouter`,
+        headers: {
+          "cf-aig-authorization": `Bearer ${cfAigToken}`,
+        },
       });
       return openrouter(modelId);
     }
