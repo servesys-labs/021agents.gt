@@ -4047,6 +4047,40 @@ export default {
       return new Response(null, { status: 204, headers: A2A_CORS });
     }
 
+    // ── Public Agent Pages: /a/[slug] and /a/[slug]/[file] ──
+    // Serves agent-built pages directly from workspace (R2/SQLite).
+    // If the agent created a storefront via the /storefront skill,
+    // it lives in the workspace filesystem — no deploy needed.
+    const agentPageMatch = url.pathname.match(/^\/a\/([^/]+)(?:\/(.+))?$/);
+    if (agentPageMatch && request.method === "GET") {
+      const agentSlug = agentPageMatch[1];
+      const filePath = agentPageMatch[2] || "index.html";
+
+      // Check R2 for agent workspace files at: workspaces/[agentSlug]/storefront/[filePath]
+      if (env.STORAGE) {
+        const r2Key = `workspaces/${agentSlug}/storefront/${filePath}`;
+        const obj = await env.STORAGE.get(r2Key);
+        if (obj) {
+          const contentType = filePath.endsWith(".html") ? "text/html"
+            : filePath.endsWith(".css") ? "text/css"
+            : filePath.endsWith(".js") ? "application/javascript"
+            : filePath.endsWith(".svg") ? "image/svg+xml"
+            : filePath.endsWith(".json") ? "application/json"
+            : filePath.endsWith(".png") ? "image/png"
+            : filePath.endsWith(".jpg") || filePath.endsWith(".jpeg") ? "image/jpeg"
+            : "text/plain";
+          return new Response(obj.body, {
+            headers: {
+              "Content-Type": contentType,
+              "Cache-Control": "public, max-age=300",
+              "X-Agent": agentSlug,
+            },
+          });
+        }
+      }
+      // No custom page found — fall through to SPA which shows the shell profile
+    }
+
     // MCP Elicitation Server
     if (url.pathname.startsWith("/mcp")) {
       return McpElicitationServer.serve("/mcp", { binding: "McpElicitationServer" })
