@@ -41,7 +41,9 @@
       { "class_name": "AgentSupervisor", "name": "AgentSupervisor" },
       { "class_name": "ReminderAgent", "name": "ReminderAgent" },
       { "class_name": "McpElicitationServer", "name": "McpElicitationServer" },
-      { "class_name": "VoiceAgent", "name": "VoiceAgent" }
+      { "class_name": "VoiceAgent", "name": "VoiceAgent" },
+      { "class_name": "MemorySpecialist", "name": "MemorySpecialist" },
+      { "class_name": "EvalJudge", "name": "EvalJudge" }
     ]
   },
   "migrations": [
@@ -50,7 +52,8 @@
     { "tag": "v3", "new_sqlite_classes": ["AgentSupervisor"] },
     { "tag": "v4", "new_sqlite_classes": ["ReminderAgent", "McpElicitationServer"] },
     { "tag": "v5", "new_sqlite_classes": ["ResearchSpecialist", "CodingSpecialist"] },
-    { "tag": "v6", "new_sqlite_classes": ["VoiceAgent"] }
+    { "tag": "v6", "new_sqlite_classes": ["VoiceAgent"] },
+    { "tag": "v7", "new_sqlite_classes": ["MemorySpecialist", "EvalJudge"] }
   ],
 
   // Analytics Engine for observability telemetry
