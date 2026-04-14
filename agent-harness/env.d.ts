@@ -24,6 +24,10 @@ declare namespace Cloudflare {
 		TELEMETRY_QUEUE: Queue;
 		/** Analytics Engine for high-volume metrics */
 		ANALYTICS: AnalyticsEngineDataset;
+		/** R2 bucket for workspace file spillover (large files beyond SQLite inline threshold) */
+		STORAGE: R2Bucket;
+		/** Vectorize index for semantic memory search */
+		VECTORIZE: VectorizeIndex;
 		/** Optional API keys injected via outbound Workers — set as secrets */
 		GITHUB_TOKEN?: string;
 		OPENAI_API_KEY?: string;
