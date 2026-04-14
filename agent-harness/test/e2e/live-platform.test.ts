@@ -166,7 +166,7 @@ describe("Stage 2: AgentClient Connection", () => {
       agent: "chat-agent",
       name: doName,
       host,
-      query: TOKEN ? { _pk: TOKEN } : undefined,
+      query: TOKEN ? { token: TOKEN } : undefined,
     });
 
     // Wait for connection
@@ -198,7 +198,7 @@ describe("Stage 2: AgentClient Connection", () => {
       agent: "chat-agent",
       name: doName,
       host,
-      query: TOKEN ? { _pk: TOKEN } : undefined,
+      query: TOKEN ? { token: TOKEN } : undefined,
     });
 
     await client.ready;
@@ -221,7 +221,7 @@ describe("Stage 2: AgentClient Connection", () => {
       agent: "chat-agent",
       name: doName,
       host,
-      query: TOKEN ? { _pk: TOKEN } : undefined,
+      query: TOKEN ? { token: TOKEN } : undefined,
     });
 
     await client.ready;
@@ -249,7 +249,7 @@ describe("Stage 3: Chat via WebSocket", () => {
       agent: "chat-agent",
       name: doName,
       host,
-      query: TOKEN ? { _pk: TOKEN } : undefined,
+      query: TOKEN ? { token: TOKEN } : undefined,
     });
 
     await client.ready;
@@ -278,11 +278,15 @@ describe("Stage 3: Chat via WebSocket", () => {
       };
     });
 
-    // Send chat request (SDK protocol)
+    // Send chat request — Think expects init.body wrapper with stringified UIMessage
+    const chatBody = JSON.stringify({
+      messages: [{ id: crypto.randomUUID(), role: "user", parts: [{ type: "text", text: "Reply with exactly one word: hello" }] }],
+      trigger: "submit-message",
+    });
     client.send(JSON.stringify({
       type: "cf_agent_use_chat_request",
       id: crypto.randomUUID(),
-      messages: [{ role: "user", content: "Reply with exactly one word: hello" }],
+      init: { method: "POST", body: chatBody },
     }));
 
     await done;
@@ -311,7 +315,7 @@ describe("Stage 4: Latency SLOs", () => {
       agent: "chat-agent",
       name: doName,
       host,
-      query: TOKEN ? { _pk: TOKEN } : undefined,
+      query: TOKEN ? { token: TOKEN } : undefined,
     });
 
     await client.ready;
@@ -335,10 +339,14 @@ describe("Stage 4: Latency SLOs", () => {
       };
     });
 
+    const ttftBody = JSON.stringify({
+      messages: [{ id: crypto.randomUUID(), role: "user", parts: [{ type: "text", text: "Hi" }] }],
+      trigger: "submit-message",
+    });
     client.send(JSON.stringify({
       type: "cf_agent_use_chat_request",
       id: crypto.randomUUID(),
-      messages: [{ role: "user", content: "Hi" }],
+      init: { method: "POST", body: ttftBody },
     }));
 
     await firstToken;

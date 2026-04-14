@@ -361,11 +361,20 @@
       return;
     }
 
-    // Send as SDK chat protocol message
+    // SDK chat protocol: Think expects init.body wrapper with stringified JSON
+    // and UIMessage format with parts[] instead of content
+    const requestBody = JSON.stringify({
+      messages: [{
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text }],
+      }],
+      trigger: "submit-message",
+    });
     client.send(JSON.stringify({
       type: "cf_agent_use_chat_request",
       id: crypto.randomUUID(),
-      messages: [{ role: "user", content: text }],
+      init: { method: "POST", body: requestBody },
     }));
   }
 
