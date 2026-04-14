@@ -3346,6 +3346,59 @@ export class ChatAgent extends Think<Env> {
     return { deleted: skillName };
   }
 
+  @callable({ description: "Save a bundled resource (script, reference, or template) alongside a skill in R2" })
+  async saveSkillResource(skillName: string, resourcePath: string, content: string, scope: "public" | "agent" = "agent") {
+    const orgId = this._getOrgId();
+    const agentHandle = this._getAgentHandle();
+    const prefix = scope === "public"
+      ? `skills/public/${skillName}`
+      : `skills/orgs/${orgId}/agents/${agentHandle}/${skillName}`;
+    const r2Key = `${prefix}/${resourcePath}`;
+
+    const contentType = resourcePath.endsWith(".py") ? "text/x-python"
+      : resourcePath.endsWith(".ts") || resourcePath.endsWith(".tsx") ? "text/typescript"
+      : resourcePath.endsWith(".md") ? "text/markdown"
+      : "text/plain";
+
+    await this.env.STORAGE.put(r2Key, content, {
+      httpMetadata: { contentType },
+      customMetadata: { skillName, resourcePath },
+    });
+
+    return { saved: r2Key };
+  }
+
+  @callable({ description: "Read a bundled resource (script, reference, template) from a skill in R2" })
+  async readSkillResource(skillName: string, resourcePath: string, scope: "public" | "agent" = "public") {
+    const orgId = this._getOrgId();
+    const agentHandle = this._getAgentHandle();
+    const prefix = scope === "public"
+      ? `skills/public/${skillName}`
+      : `skills/orgs/${orgId}/agents/${agentHandle}/${skillName}`;
+    const r2Key = `${prefix}/${resourcePath}`;
+
+    const obj = await this.env.STORAGE.get(r2Key);
+    if (!obj) return { error: `Resource not found: ${r2Key}` };
+    const text = await obj.text();
+    return { path: resourcePath, content: text.slice(0, 20000), size: text.length };
+  }
+
+  @callable({ description: "List bundled resources for a skill (scripts, references, templates)" })
+  async listSkillResources(skillName: string, scope: "public" | "agent" = "public") {
+    const orgId = this._getOrgId();
+    const agentHandle = this._getAgentHandle();
+    const prefix = scope === "public"
+      ? `skills/public/${skillName}/`
+      : `skills/orgs/${orgId}/agents/${agentHandle}/${skillName}/`;
+
+    const list = await this.env.STORAGE.list({ prefix, limit: 100 });
+    const resources = list.objects
+      .map(o => ({ path: o.key.replace(prefix, ""), size: o.size }))
+      .filter(r => r.path !== "SKILL.md" && r.path.length > 0);
+
+    return { skillName, scope, resources, total: resources.length };
+  }
+
   @callable({ description: "List all skills for this agent (public + org-scoped)" })
   async listSkillsFromR2() {
     const orgId = this._getOrgId();
