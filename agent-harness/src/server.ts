@@ -1520,12 +1520,16 @@ export class ChatAgent extends Think<Env> {
       // [6] Circuit breaker: increment failure count
       const prev = this._toolFailures.get(ctx.toolName) || 0;
       this._toolFailures.set(ctx.toolName, prev + 1);
+      // Signal: tool failure
+      this._recordSignal("tool_failure", ctx.toolName, 2, { error: String(ctx.error) });
+      this._trackToolSequence(ctx.toolName, false);
     } else {
       this._telemetry.toolCompleted(ctx.sessionId || this.name, ctx.toolName || "", {
         latencyMs: ctx.duration || 0, costUsd: ctx.cost || 0,
       });
       // [6] Circuit breaker: reset on success
       this._toolFailures.delete(ctx.toolName);
+      this._trackToolSequence(ctx.toolName, true);
     }
 
     // [4] Output budgeting — truncate oversized tool results
@@ -1555,6 +1559,8 @@ export class ChatAgent extends Think<Env> {
           toolName: ctx.toolName,
           consecutiveCalls: ChatAgent.LOOP_DETECTION_THRESHOLD,
         });
+        // Signal: loop detected
+        this._recordSignal("loop_detected", ctx.toolName, 3, { consecutiveCalls: ChatAgent.LOOP_DETECTION_THRESHOLD });
       }
     } else {
       this._consecutiveDups = 0;
@@ -1719,6 +1725,156 @@ export class ChatAgent extends Think<Env> {
   }
 
   // ═══════════════════════════════════════════════════════════════════
+  // SIGNAL PIPELINE — proactive agent health detection
+  //
+  // Generates structured signals from agent events, clusters them,
+  // and triggers memory maintenance when patterns emerge.
+  // All stored in DO SQLite via this.sql (SDK primitive).
+  // Evaluation runs on scheduleEvery() (SDK primitive).
+  //
+  // Signal types: tool_failure, loop_detected, topic_recurrence,
+  //               memory_contradiction, budget_warning
+  //
+  // Ported from deploy/runtime/signals.ts + signal-coordinator-do.ts.
+  // ═══════════════════════════════════════════════════════════════════
+
+  private _signalTableReady = false;
+  private _toolSequence: string[] = []; // procedural memory tracker
+
+  private _ensureSignalTable() {
+    if (this._signalTableReady) return;
+    this._signalTableReady = true;
+    // Signal events — append-only log of agent health signals
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agent_signals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        signal_type TEXT NOT NULL,
+        topic TEXT NOT NULL DEFAULT '',
+        severity INTEGER NOT NULL DEFAULT 1,
+        metadata TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT DEFAULT (datetime('now'))
+      )
+    `;
+    // Signal clusters — grouped by type+topic for rule evaluation
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agent_signal_clusters (
+        signal_type TEXT NOT NULL,
+        topic TEXT NOT NULL,
+        count INTEGER NOT NULL DEFAULT 1,
+        last_fired_at TEXT,
+        updated_at TEXT DEFAULT (datetime('now')),
+        PRIMARY KEY (signal_type, topic)
+      )
+    `;
+    // Procedural memory — learned tool sequences with success rates
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agent_procedures (
+        sequence_hash TEXT PRIMARY KEY,
+        tool_sequence TEXT NOT NULL,
+        success_count INTEGER NOT NULL DEFAULT 0,
+        failure_count INTEGER NOT NULL DEFAULT 0,
+        last_used_at TEXT DEFAULT (datetime('now'))
+      )
+    `;
+  }
+
+  /** Record a signal event and update its cluster. */
+  private _recordSignal(type: string, topic: string, severity: number, metadata: Record<string, unknown> = {}) {
+    this._ensureSignalTable();
+    this.sql`
+      INSERT INTO cf_agent_signals (signal_type, topic, severity, metadata)
+      VALUES (${type}, ${topic}, ${severity}, ${JSON.stringify(metadata)})
+    `;
+    this.sql`
+      INSERT INTO cf_agent_signal_clusters (signal_type, topic, count, updated_at)
+      VALUES (${type}, ${topic}, 1, datetime('now'))
+      ON CONFLICT(signal_type, topic) DO UPDATE SET
+        count = cf_agent_signal_clusters.count + 1,
+        updated_at = datetime('now')
+    `;
+  }
+
+  /** Record tool in the current sequence (for procedural memory). */
+  private _trackToolSequence(toolName: string, success: boolean) {
+    this._toolSequence.push(toolName);
+    // Keep last 10 tools in sequence
+    if (this._toolSequence.length > 10) this._toolSequence.shift();
+
+    // On turn completion (3+ tools), record the procedure
+    if (this._toolSequence.length >= 3) {
+      this._ensureSignalTable();
+      const seq = this._toolSequence.join(" → ");
+      const hash = seq.replace(/[^a-z0-9]/gi, "_").slice(0, 64);
+      if (success) {
+        this.sql`
+          INSERT INTO cf_agent_procedures (sequence_hash, tool_sequence, success_count, last_used_at)
+          VALUES (${hash}, ${seq}, 1, datetime('now'))
+          ON CONFLICT(sequence_hash) DO UPDATE SET
+            success_count = cf_agent_procedures.success_count + 1,
+            last_used_at = datetime('now')
+        `;
+      } else {
+        this.sql`
+          INSERT INTO cf_agent_procedures (sequence_hash, tool_sequence, failure_count, last_used_at)
+          VALUES (${hash}, ${seq}, 1, datetime('now'))
+          ON CONFLICT(sequence_hash) DO UPDATE SET
+            failure_count = cf_agent_procedures.failure_count + 1,
+            last_used_at = datetime('now')
+        `;
+      }
+    }
+  }
+
+  /** Scheduled callback: evaluate signal clusters and trigger maintenance. */
+  async evaluateSignals() {
+    this._ensureSignalTable();
+
+    // Check for clusters that exceed thresholds
+    const clusters = this.sql<{
+      signal_type: string; topic: string; count: number; last_fired_at: string | null;
+    }>`
+      SELECT signal_type, topic, count, last_fired_at FROM cf_agent_signal_clusters
+      WHERE count >= 3 AND (last_fired_at IS NULL OR last_fired_at < datetime('now', '-6 hours'))
+    `;
+
+    for (const cluster of clusters) {
+      // Emit telemetry for the cluster trigger
+      emit(this.env as TelemetryBindings, {
+        type: "signal.cluster_triggered",
+        agentName: this.name,
+        signalType: cluster.signal_type,
+        topic: cluster.topic,
+        count: cluster.count,
+      });
+
+      // Mark as fired (cooldown)
+      this.sql`
+        UPDATE cf_agent_signal_clusters SET last_fired_at = datetime('now')
+        WHERE signal_type = ${cluster.signal_type} AND topic = ${cluster.topic}
+      `;
+    }
+
+    // Prune old signals (>7 days)
+    this.sql`DELETE FROM cf_agent_signals WHERE created_at < datetime('now', '-7 days')`;
+
+    // Decay unused procedures (not used in 30 days)
+    this.sql`DELETE FROM cf_agent_procedures WHERE last_used_at < datetime('now', '-30 days')`;
+  }
+
+  /** Get learned procedures for injection into system context. */
+  @callable({ description: "Get learned tool sequences with success rates" })
+  getLearnedProcedures() {
+    this._ensureSignalTable();
+    return this.sql<{ tool_sequence: string; success_count: number; failure_count: number }>`
+      SELECT tool_sequence, success_count, failure_count
+      FROM cf_agent_procedures
+      WHERE success_count >= 3
+      ORDER BY success_count DESC
+      LIMIT 10
+    `;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
   // CONVERSATION ARCHIVAL — tiered lifecycle (DO SQLite → R2 cold storage)
   //
   // Uses SDK's scheduleEvery() to run archival check every 6 hours.
@@ -1732,13 +1888,15 @@ export class ChatAgent extends Think<Env> {
 
   private _archivalScheduled = false;
 
-  /** Called by onStart or first request — sets up recurring archival. */
+  /** Called by onStart or first request — sets up recurring schedules. */
   private async _ensureArchivalSchedule() {
     if (this._archivalScheduled) return;
     this._archivalScheduled = true;
     try {
-      // Run archival check every 6 hours (SDK scheduleEvery, survives hibernation)
+      // Archival check every 6 hours (SDK scheduleEvery, survives hibernation)
       await this.scheduleEvery(6 * 3600, "archiveOldConversations");
+      // Signal evaluation every 45 seconds (matches old coordinator cadence)
+      await this.scheduleEvery(45, "evaluateSignals");
     } catch {}
   }
 
