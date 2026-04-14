@@ -87,6 +87,20 @@ async function getDb(hyperdrive: Hyperdrive) {
   });
 }
 
+// ── DO Name Derivation ────────────────────────────────────────────
+// Must match agent-ws.ts buildDoName() and server.ts routing logic.
+
+function buildDoName(orgId: string, agentName: string, userId: string): string {
+  const shortOrg = orgId.length > 12 ? orgId.slice(-8) : orgId;
+  const shortUser = userId.length > 12 ? userId.slice(-8) : userId;
+  const orgPrefix = shortOrg ? `${shortOrg}-` : "";
+  let name = shortUser
+    ? `${orgPrefix}${agentName}-u-${shortUser}`
+    : `${orgPrefix}${agentName}`;
+  if (name.length > 63) name = name.slice(0, 63);
+  return name;
+}
+
 // ── Auth Middleware (KV-cached) ────────────────────────────────────
 // Pattern A: validate API key from KV first, Postgres on miss.
 
@@ -273,6 +287,105 @@ app.delete("/api/v1/agents/:name", async (c) => {
   return c.json({ deleted: name });
 });
 
+// ═══════════════════════════════════════════════════════════════════
+// AGENT EXECUTION (Pattern D: proxy to Agent Core DO)
+//
+// Two transport modes:
+//   1. SSE: POST /runtime-proxy/runnable/stream → proxy to DO, SSE back
+//   2. WebSocket: client connects directly to DO via routeAgentRequest
+//      (handled by agent-harness server.ts, not this gateway)
+//
+// The SSE path is used by the Svelte UI's chat.ts streamAgent() function.
+// ═══════════════════════════════════════════════════════════════════
+
+// SSE streaming proxy — bridges Svelte UI to Agent Core DO
+app.post("/api/v1/runtime-proxy/runnable/stream", async (c) => {
+  const orgId = c.get("orgId");
+  const userId = c.get("userId");
+  const body = await c.req.json<{
+    agent_name: string;
+    input: string;
+    session_id?: string;
+    plan?: string;
+    conversation_id?: string;
+    history?: Array<{ role: string; content: string }>;
+  }>();
+
+  if (!body.agent_name || !body.input) {
+    return c.json({ error: "agent_name and input required" }, 400);
+  }
+
+  const doName = buildDoName(orgId, body.agent_name, userId);
+
+  // Forward to Agent Core DO as a chat request
+  const resp = await c.env.AGENT_CORE.fetch(
+    new Request(`http://internal/agents/chat-agent/${doName}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "run",
+        input: body.input,
+        agent_name: body.agent_name,
+        org_id: orgId,
+        user_id: userId,
+        session_id: body.session_id,
+        plan: body.plan,
+        conversation_id: body.conversation_id,
+        history: body.history,
+      }),
+    }),
+  );
+
+  // Stream the response back as SSE
+  if (!resp.body) {
+    return c.json({ error: "No response from agent" }, 502);
+  }
+
+  return new Response(resp.body, {
+    status: resp.status,
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+      "Access-Control-Allow-Origin": "*",
+    },
+  });
+});
+
+// Single-shot (non-streaming) agent run
+app.post("/api/v1/runtime-proxy/agent/run", async (c) => {
+  const orgId = c.get("orgId");
+  const userId = c.get("userId");
+  const body = await c.req.json<{
+    agent_name: string;
+    message: string;
+    session_id?: string;
+  }>();
+
+  if (!body.agent_name || !body.message) {
+    return c.json({ error: "agent_name and message required" }, 400);
+  }
+
+  const doName = buildDoName(orgId, body.agent_name, userId);
+
+  const resp = await c.env.AGENT_CORE.fetch(
+    new Request(`http://internal/agents/chat-agent/${doName}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "run",
+        input: body.message,
+        agent_name: body.agent_name,
+        org_id: orgId,
+        user_id: userId,
+        session_id: body.session_id,
+      }),
+    }),
+  );
+
+  return new Response(resp.body, { status: resp.status, headers: resp.headers });
+});
+
 // ── Agent live state (Pattern D: DO RPC via service binding) ──
 
 app.get("/api/v1/agents/:name/state", async (c) => {
@@ -374,9 +487,162 @@ app.get("/api/v1/sessions/active", async (c) => {
   return new Response(resp.body, { status: resp.status, headers: resp.headers });
 });
 
-// ── Conversations (Pattern D: Think Session in DO SQLite) ──
+// ═══════════════════════════════════════════════════════════════════
+// CONVERSATIONS (Pattern E: Postgres — relational source of truth)
+//
+// The Svelte UI expects full conversation CRUD + paginated messages.
+// Postgres is the durable store; the Agent Core DO uses these for
+// context but the gateway owns the lifecycle.
+// ═══════════════════════════════════════════════════════════════════
 
-app.get("/api/v1/conversations/:agentName", async (c) => {
+// List conversations for an agent (cursor-paginated)
+app.get("/api/v1/conversations", async (c) => {
+  const orgId = c.get("orgId");
+  const agentName = c.req.query("agent_name") || "";
+  const limit = Math.min(Number(c.req.query("limit")) || 50, 100);
+  const cursor = c.req.query("cursor"); // ISO timestamp for keyset pagination
+
+  const sql = await getDb(c.env.DB);
+  let rows;
+  if (cursor) {
+    rows = await sql`
+      SELECT id, org_id, user_id, agent_name, channel, title,
+             message_count, total_cost_usd, created_at, updated_at
+      FROM conversations
+      WHERE org_id = ${orgId}
+        AND agent_name = ${agentName}
+        AND is_deleted = false
+        AND created_at < ${cursor}
+      ORDER BY created_at DESC
+      LIMIT ${limit + 1}
+    `;
+  } else {
+    rows = await sql`
+      SELECT id, org_id, user_id, agent_name, channel, title,
+             message_count, total_cost_usd, created_at, updated_at
+      FROM conversations
+      WHERE org_id = ${orgId}
+        AND agent_name = ${agentName}
+        AND is_deleted = false
+      ORDER BY created_at DESC
+      LIMIT ${limit + 1}
+    `;
+  }
+  await sql.end();
+
+  const hasMore = rows.length > limit;
+  const conversations = hasMore ? rows.slice(0, limit) : rows;
+  const nextCursor = hasMore ? conversations[conversations.length - 1].created_at : undefined;
+
+  return c.json({ conversations, has_more: hasMore, cursor: nextCursor });
+});
+
+// Get messages for a conversation (keyset-paginated by id)
+app.get("/api/v1/conversations/:id/messages", async (c) => {
+  const orgId = c.get("orgId");
+  const conversationId = c.req.param("id");
+  const limit = Math.min(Number(c.req.query("limit")) || 100, 200);
+  const afterId = Number(c.req.query("after_id")) || 0;
+
+  const sql = await getDb(c.env.DB);
+
+  // Verify conversation belongs to this org
+  const [conv] = await sql`
+    SELECT id FROM conversations
+    WHERE id = ${conversationId} AND org_id = ${orgId} AND is_deleted = false
+  `;
+  if (!conv) {
+    await sql.end();
+    return c.json({ error: "Conversation not found" }, 404);
+  }
+
+  const rows = afterId
+    ? await sql`
+        SELECT id, conversation_id, role, content, model, token_count,
+               cost_usd, session_id, tool_calls, tool_results, metadata, created_at
+        FROM conversation_messages
+        WHERE conversation_id = ${conversationId} AND id > ${afterId}
+        ORDER BY id ASC
+        LIMIT ${limit + 1}
+      `
+    : await sql`
+        SELECT id, conversation_id, role, content, model, token_count,
+               cost_usd, session_id, tool_calls, tool_results, metadata, created_at
+        FROM conversation_messages
+        WHERE conversation_id = ${conversationId}
+        ORDER BY id ASC
+        LIMIT ${limit + 1}
+      `;
+  await sql.end();
+
+  const hasMore = rows.length > limit;
+  const messages = hasMore ? rows.slice(0, limit) : rows;
+  const nextAfterId = hasMore ? messages[messages.length - 1].id : undefined;
+
+  return c.json({ messages, has_more: hasMore, after_id: nextAfterId });
+});
+
+// Create a new conversation
+app.post("/api/v1/conversations", async (c) => {
+  const orgId = c.get("orgId");
+  const userId = c.get("userId");
+  const body = await c.req.json<{ agent_name: string; channel?: string; title?: string }>();
+
+  if (!body.agent_name) return c.json({ error: "agent_name required" }, 400);
+
+  const sql = await getDb(c.env.DB);
+  const [conv] = await sql`
+    INSERT INTO conversations (org_id, user_id, agent_name, channel, title)
+    VALUES (
+      ${orgId},
+      ${userId},
+      ${body.agent_name},
+      ${body.channel || "portal"},
+      ${body.title || "New conversation"}
+    )
+    RETURNING id, org_id, user_id, agent_name, channel, title,
+              message_count, total_cost_usd, created_at, updated_at
+  `;
+  await sql.end();
+  return c.json(conv, 201);
+});
+
+// Update conversation (title)
+app.put("/api/v1/conversations/:id", async (c) => {
+  const orgId = c.get("orgId");
+  const conversationId = c.req.param("id");
+  const body = await c.req.json<{ title?: string }>();
+
+  const sql = await getDb(c.env.DB);
+  const [conv] = await sql`
+    UPDATE conversations
+    SET title = COALESCE(${body.title || null}, title),
+        updated_at = now()
+    WHERE id = ${conversationId} AND org_id = ${orgId} AND is_deleted = false
+    RETURNING id, org_id, user_id, agent_name, channel, title,
+              message_count, total_cost_usd, created_at, updated_at
+  `;
+  await sql.end();
+  if (!conv) return c.json({ error: "Conversation not found" }, 404);
+  return c.json(conv);
+});
+
+// Soft-delete a conversation
+app.delete("/api/v1/conversations/:id", async (c) => {
+  const orgId = c.get("orgId");
+  const conversationId = c.req.param("id");
+
+  const sql = await getDb(c.env.DB);
+  await sql`
+    UPDATE conversations SET is_deleted = true, updated_at = now()
+    WHERE id = ${conversationId} AND org_id = ${orgId}
+  `;
+  await sql.end();
+  return c.json({ deleted: conversationId });
+});
+
+// Legacy: get conversation history from Agent Core DO (for live session replay)
+app.get("/api/v1/conversations/agent/:agentName/live", async (c) => {
   const orgId = c.get("orgId");
   const name = c.req.param("agentName");
   const resp = await c.env.AGENT_CORE.fetch(
