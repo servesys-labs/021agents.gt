@@ -11,6 +11,7 @@
   import EmptyChat from "$lib/components/chat/EmptyChat.svelte";
   import MetaAgentPanel from "$lib/components/meta-agent/MetaAgentPanel.svelte";
   import WorkspacePanel from "$lib/components/chat/WorkspacePanel.svelte";
+  import ComputerPanel from "$lib/components/chat/ComputerPanel.svelte";
   import { metaAgentStore } from "$lib/stores/meta-agent.svelte";
 
   interface ToolCall {
@@ -121,6 +122,43 @@
             last.toolCalls = newToolCalls.length > 0 ? newToolCalls : last.toolCalls;
             last.segments = newSegments.length > 0 ? newSegments : last.segments;
             scheduleMessageFlush(true);
+
+            // ── Computer Panel: extract workspace data from tool calls ──
+            for (const tc of newToolCalls) {
+              const args = tc.input ? (() => { try { return JSON.parse(tc.input); } catch { return {}; } })() : {};
+              const result = tc.output ? (() => { try { return JSON.parse(tc.output); } catch { return tc.output; } })() : null;
+
+              // File write/edit → show in Code tab
+              if (["write", "write-file", "edit", "edit-file"].includes(tc.name)) {
+                const path = args.path || args.file || "";
+                const content = args.content || args.text || tc.output || "";
+                if (path && content) {
+                  activeFile = { path, content, language: "" };
+                  computerOpen = true;
+                }
+              }
+
+              // Bash/python → show in Terminal tab
+              if (["bash", "python-exec", "execute-code", "start_process", "run_code_persistent"].includes(tc.name)) {
+                const output = typeof result === "string" ? result : (result?.output || result?.stdout || tc.output || "");
+                if (output) {
+                  terminalLines = [...terminalLines, `$ ${args.command || args.code || tc.name}`, output].slice(-200);
+                  computerOpen = true;
+                }
+              }
+
+              // Preview URL → show in Preview tab
+              if (tc.name === "expose_preview" && result?.url) {
+                previewUrl = result.url;
+                computerOpen = true;
+              }
+
+              // Git clone → show in Terminal
+              if (tc.name === "git_clone" && result) {
+                terminalLines = [...terminalLines, `$ git clone ${args.url}`, JSON.stringify(result)].slice(-200);
+                computerOpen = true;
+              }
+            }
           }
         }
 
@@ -152,6 +190,13 @@
   let improveOpen = $state(false);
   let workspaceOpen = $state(false);
   let workspacePanelRef: WorkspacePanel | undefined = $state();
+
+  // ── Computer Panel state (driven by tool call streaming) ──
+  let computerOpen = $state(false);
+  let activeFile = $state<{ path: string; content: string; language: string } | null>(null);
+  let previewUrl = $state("");
+  let terminalLines = $state<string[]>([]);
+  let workspaceFiles = $state<Array<{ path: string; size: number }>>([]);
 
   let messageFlushScheduled = $state(false);
   let messageFlushNeedsScroll = $state(false);
@@ -562,6 +607,16 @@
     {agentName}
     open={workspaceOpen}
     onClose={() => (workspaceOpen = false)}
+  />
+
+  <ComputerPanel
+    open={computerOpen}
+    onClose={() => (computerOpen = false)}
+    toolCalls={messages[messages.length - 1]?.toolCalls || []}
+    {previewUrl}
+    {activeFile}
+    {terminalLines}
+    files={workspaceFiles}
   />
 </div>
 
