@@ -453,9 +453,96 @@ function extractFacts(text: string): Array<{ content: string; category: string }
   return facts;
 }
 
-// ── Vectorize Search Provider with time-decay + hybrid RRF + threat detection ──
+// ── Reciprocal Rank Fusion (ported from deploy/runtime/rag-hybrid.ts) ──
+// Merges vector (semantic) + FTS5 (keyword) results. k=60 is standard.
+// Items appearing in both lists get boosted; items in only one still appear.
 
-function createVectorizeSearchProvider(env: Env) {
+function reciprocalRankFusion(
+  vectorResults: Array<{ key: string; content: string; score: number; timestamp: number }>,
+  ftsResults: Array<{ key: string; content: string }>,
+  k = 60,
+): Array<{ key: string; content: string; rrfScore: number; timestamp: number }> {
+  const scores = new Map<string, { content: string; rrf: number; timestamp: number }>();
+
+  vectorResults.forEach((r, rank) => {
+    const contribution = 1 / (k + rank + 1);
+    const existing = scores.get(r.key);
+    if (existing) { existing.rrf += contribution; }
+    else { scores.set(r.key, { content: r.content, rrf: contribution, timestamp: r.timestamp }); }
+  });
+
+  ftsResults.forEach((r, rank) => {
+    const contribution = 1 / (k + rank + 1);
+    const existing = scores.get(r.key);
+    if (existing) { existing.rrf += contribution; }
+    else { scores.set(r.key, { content: r.content, rrf: contribution, timestamp: 0 }); }
+  });
+
+  return [...scores.entries()]
+    .map(([key, v]) => ({ key, content: v.content, rrfScore: v.rrf, timestamp: v.timestamp }))
+    .sort((a, b) => b.rrfScore - a.rrfScore);
+}
+
+// ── Channel-Specific System Prompts (ported from deploy/runtime/channel-prompts.ts) ──
+// Per-channel formatting rules injected into the soul context block.
+// Voice: no markdown, spell out abbreviations. Slack: mrkdwn. Telegram: short.
+
+type ChannelId = "voice" | "telegram" | "whatsapp" | "web" | "slack" | "instagram" | "messenger" | "email" | "widget" | "portal";
+interface ChannelConfig { prompt: string; maxTokens: number; supportsMarkdown: boolean; }
+
+const CHANNEL_CONFIGS: Record<string, ChannelConfig> = {
+  voice: {
+    prompt: "Channel: Voice. Response read aloud by TTS. NO markdown, no lists, no code blocks. Short natural sentences (<75 words). Spell out abbreviations (API → A-P-I). Give results, not process.",
+    maxTokens: 300, supportsMarkdown: false,
+  },
+  telegram: {
+    prompt: "Channel: Telegram. Keep short and conversational. Use *bold*, _italic_, `code`. Break into short paragraphs. Emoji sparingly.",
+    maxTokens: 600, supportsMarkdown: true,
+  },
+  whatsapp: {
+    prompt: "Channel: WhatsApp. Brief, mobile-first. Max 1-2 short paragraphs. Use *bold* for emphasis. No code blocks.",
+    maxTokens: 600, supportsMarkdown: false,
+  },
+  slack: {
+    prompt: "Channel: Slack. Use Slack mrkdwn: *bold*, _italic_, `code`, ```blocks```. Concise, bullet points not numbers. Thread-aware.",
+    maxTokens: 600, supportsMarkdown: true,
+  },
+  instagram: {
+    prompt: "Channel: Instagram DM. Very short (2-3 sentences). No markdown. Casual tone. Emoji OK.",
+    maxTokens: 400, supportsMarkdown: false,
+  },
+  messenger: {
+    prompt: "Channel: Messenger. Concise, conversational. 1-2 paragraphs max. Limited formatting.",
+    maxTokens: 500, supportsMarkdown: false,
+  },
+  email: {
+    prompt: "Channel: Email. Professional, thorough. Proper greeting/sign-off. Paragraphs, headers, lists OK.",
+    maxTokens: 2000, supportsMarkdown: true,
+  },
+  widget: {
+    prompt: "Channel: Embedded Widget. Concise (<150 words). Markdown OK. Prioritize actionable answers.",
+    maxTokens: 500, supportsMarkdown: true,
+  },
+  web: {
+    prompt: "Channel: Web Chat. Markdown OK. Helpful and concise. Short paragraphs and bullets.",
+    maxTokens: 800, supportsMarkdown: true,
+  },
+  portal: { prompt: "", maxTokens: 4000, supportsMarkdown: true }, // default — no extra instructions
+};
+
+function getChannelConfig(channel: string): ChannelConfig {
+  return CHANNEL_CONFIGS[channel.toLowerCase()] || CHANNEL_CONFIGS.portal;
+}
+
+// ── Embedding dimensions — safety check ──
+// BGE-base-en-v1.5 outputs 768-dim. If the Vectorize index was created with
+// a different dimension (e.g., 1024 for Qwen3), ingesting wrong-dim vectors
+// silently corrupts the index. Query-time mismatch is OK (lower quality).
+const EXPECTED_EMBEDDING_DIM = 768; // BGE-base-en-v1.5
+
+// ── Vectorize Search Provider with RRF fusion + time-decay + threat detection ──
+
+function createVectorizeSearchProvider(env: Env, ftsProvider?: { search(q: string): Promise<string | null> }) {
   return {
     async get(): Promise<string | null> {
       return "Semantic memory available. Use search_context to find past knowledge.";
@@ -463,35 +550,44 @@ function createVectorizeSearchProvider(env: Env) {
 
     async search(query: string): Promise<string | null> {
       try {
-        // Dense vector search via Vectorize
-        const embedding = await env.AI.run("@cf/baai/bge-base-en-v1.5", {
-          text: [query],
-        });
+        // 1. Dense vector search via Vectorize
+        const embedding = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: [query] });
         const vectorResults = await env.VECTORIZE.query(embedding.data[0], {
-          topK: 10,
-          returnMetadata: "all",
+          topK: 10, returnMetadata: "all",
         });
 
-        if (!vectorResults.matches?.length) return null;
+        const vectorItems = (vectorResults.matches || []).map((m: any) => ({
+          key: m.metadata?.key || m.id,
+          content: m.metadata?.content || "",
+          score: effectiveConfidence(m.score || 0, m.metadata?.timestamp || 0),
+          timestamp: m.metadata?.timestamp || 0,
+        })).filter((m: any) => m.score > 0);
 
-        // Apply time-decay confidence scoring
-        const scored = vectorResults.matches
-          .map((m: any) => ({
-            key: m.metadata?.key || m.id,
-            content: m.metadata?.content || "",
-            timestamp: m.metadata?.timestamp || 0,
-            // RRF rank score (1/(k+rank)) merged with vector similarity + time decay
-            score: effectiveConfidence(m.score || 0, m.metadata?.timestamp || 0),
-            freshness: memoryFreshnessNote(m.metadata?.timestamp || 0),
-          }))
-          .filter((m: any) => m.score > 0) // Drop fully decayed memories
-          .sort((a: any, b: any) => b.score - a.score)
-          .slice(0, 5);
+        // 2. FTS5 keyword search (if provider available)
+        let ftsItems: Array<{ key: string; content: string }> = [];
+        if (ftsProvider) {
+          const ftsResult = await ftsProvider.search(query);
+          if (ftsResult) {
+            // Parse FTS results (format: "[key]\ncontent\n\n[key2]\n...")
+            ftsItems = ftsResult.split("\n\n").map(block => {
+              const lines = block.split("\n");
+              const keyMatch = lines[0]?.match(/^\[(.+)\]$/);
+              return {
+                key: keyMatch?.[1] || lines[0] || "",
+                content: lines.slice(1).join("\n"),
+              };
+            }).filter(r => r.content);
+          }
+        }
 
-        if (scored.length === 0) return null;
+        // 3. Reciprocal Rank Fusion — merge vector + FTS5
+        const fused = reciprocalRankFusion(vectorItems, ftsItems);
+        const top = fused.slice(0, 5);
 
-        return scored
-          .map((m: any) => `[${m.key}] (relevance: ${m.score.toFixed(2)}${m.freshness})\n${m.content}`)
+        if (top.length === 0) return null;
+
+        return top
+          .map(m => `[${m.key}] (relevance: ${m.rrfScore.toFixed(3)}${memoryFreshnessNote(m.timestamp)})\n${m.content}`)
           .join("\n\n");
       } catch {
         return null;
@@ -499,24 +595,30 @@ function createVectorizeSearchProvider(env: Env) {
     },
 
     async set(key: string, content: string): Promise<void> {
-      // Threat detection — block adversarial memory writes
+      // Threat detection
       const threat = scanMemoryContent(content);
       if (threat) {
         console.warn(`[memory] ${threat} — key: ${key}`);
-        return; // Silently reject — don't expose threat details to model
+        return;
       }
 
       try {
-        const embedding = await env.AI.run("@cf/baai/bge-base-en-v1.5", {
-          text: [content],
-        });
+        const embedding = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: [content] });
+        const vector = embedding.data[0];
+
+        // Dimension safety check — refuse to ingest wrong-dim vectors
+        if (vector.length !== EXPECTED_EMBEDDING_DIM) {
+          console.error(`[memory] Dimension mismatch: got ${vector.length}, expected ${EXPECTED_EMBEDDING_DIM}. Refusing to ingest — would corrupt index.`);
+          return;
+        }
+
         await env.VECTORIZE.upsert([{
           id: key,
-          values: embedding.data[0],
+          values: vector,
           metadata: { key, content, timestamp: Date.now() },
         }]);
       } catch {
-        // Fail silently — memory write shouldn't block chat
+        // Fail silently
       }
     },
   };
@@ -1278,9 +1380,23 @@ export class ChatAgent extends Think<Env> {
     const config = getTenantConfig(this.name);
 
     let s = session
-      // ── Soul: persistent identity (survives compaction) ──
+      // ── Soul: persistent identity + channel-aware formatting ──
+      // Appends channel-specific formatting rules (voice, Slack, Telegram, etc.)
+      // when the conversation has a channel set. Survives compaction.
       .withContext("soul", {
-        provider: { get: async () => this.getSystemPrompt() },
+        provider: {
+          get: async () => {
+            let prompt = this.getSystemPrompt();
+            // Inject channel-specific formatting rules if available
+            // Channel is derived from the connection context or agent config
+            const channel = (this as any)._activeChannel || (config as any).channel || "portal";
+            const channelConfig = getChannelConfig(channel);
+            if (channelConfig.prompt) {
+              prompt += `\n\n${channelConfig.prompt}`;
+            }
+            return prompt;
+          },
+        },
       })
       // ── Memory: facts learned during conversation ──
       // The LLM has a set_context tool to write to this block.
@@ -1348,13 +1464,14 @@ export class ChatAgent extends Think<Env> {
       provider: new AgentSearchProvider(this as any),
     });
 
-    // ── Vectorize: cross-session semantic memory ──
-    // Wraps Cloudflare Vectorize + Workers AI embeddings for semantic search.
+    // ── Vectorize: cross-session semantic memory with RRF fusion ──
+    // Fuses Vectorize (semantic) + FTS5 (keyword) via Reciprocal Rank Fusion.
     // Falls back gracefully if VECTORIZE binding is not configured.
     if (this.env.VECTORIZE && this.env.AI) {
-      const vectorizeProvider = createVectorizeSearchProvider(this.env);
+      const ftsProvider = new AgentSearchProvider(this as any);
+      const vectorizeProvider = createVectorizeSearchProvider(this.env, ftsProvider);
       s = s.withContext("semantic-memory", {
-        description: "Cross-session memory. Search recalls knowledge from past conversations. Set stores embeddings for future recall.",
+        description: "Cross-session memory with hybrid search (semantic + keyword). Search recalls knowledge from past conversations. Set stores embeddings for future recall.",
         provider: vectorizeProvider,
       });
     }
