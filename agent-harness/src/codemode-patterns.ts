@@ -321,39 +321,43 @@ export function otelMaintenanceTools(env: { AGENT_CORE: Fetcher; AI: Ai; ANALYTI
     // ── Telemetry Analysis (CodeMode-powered bulk queries) ──
 
     analyzeAgentHealth: tool({
-      description: "Analyze an agent's health by examining its recent conversation logs, error patterns, response times, and user satisfaction. Uses CodeMode to run the analysis efficiently in a single call.",
+      description: "Analyze an agent's health: sessions, errors, response times, cost, satisfaction, tool failures, and security events. Queries the supervisor's OTEL tables via CodeMode for efficiency.",
       inputSchema: z.object({
         agentId: z.string().describe("Agent ID to analyze"),
         timeframe: z.string().optional().describe("Timeframe: 'today', 'week', 'month' (default: week)"),
       }),
       execute: async ({ agentId, timeframe }) => {
-        // In production: query Analytics Engine + conversation_log via CodeMode
-        // For now: return the analysis structure that CodeMode would produce
         try {
-          const resp = await env.AGENT_CORE.fetch(new Request("http://internal/api/supervisor/agents"));
-          const agents = await resp.json() as any[];
-          const agent = (agents as any[]).find((a: any) => a.agent_id === agentId);
-          if (!agent) return { error: "Agent not found" };
+          // Query supervisor DO for comprehensive health data
+          const resp = await env.AGENT_CORE.fetch(new Request(`http://internal/api/supervisor/health/${agentId}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ timeframe: timeframe || "week" }),
+          }));
+          if (resp.ok) return await resp.json();
 
+          // Fallback: basic health from agent list
+          const agentsResp = await env.AGENT_CORE.fetch(new Request("http://internal/api/supervisor/agents"));
+          const agents = await agentsResp.json() as any[];
+          const agent = (agents as any[]).find((a: any) => a.agent_id === agentId);
           return {
             agentId,
-            agentName: agent.name,
+            agentName: agent?.name || "unknown",
             timeframe: timeframe || "week",
-            health: {
-              status: "healthy", // Would compute from actual metrics
-              score: 85,
-              breakdown: {
-                availability: 100,  // % of time agent was responsive
-                accuracy: 80,      // % of responses that were helpful (from feedback)
-                speed: 90,         // % of responses under 5s
-                costEfficiency: 70, // cost per successful conversation
-              },
-            },
-            recentIssues: [],
-            topQuestions: [],
-            suggestions: [
-              "Agent is new — needs more conversations to generate meaningful insights.",
-              "Consider running testAgent with common scenarios to build baseline metrics.",
+            status: "needs_data",
+            note: "Health check available after conversations are logged. Tables tracked: sessions, turns, tool_executions, conversation_log, otel_events, runtime_events, security_events, guardrail_events, session_feedback.",
+            tablesMonitored: [
+              "sessions (per-run: cost, tokens, timing, status, termination_reason)",
+              "turns (per-turn: model, tokens, latency, tool_calls, errors, refusals)",
+              "tool_executions (per-tool: input, output, latency, error)",
+              "conversation_log (message-level: user→agent, feedback, sentiment, quality)",
+              "agent_metrics (daily aggregated health scores)",
+              "otel_events (workflow observability: turn_phase, run_phase, query_profile)",
+              "runtime_events (LLM fallbacks, memory ops, signal events, approval protocol)",
+              "delegation_events (agent-to-agent: parent→child with cost tracking)",
+              "security_events (scan findings, anomalies)",
+              "guardrail_events (rule activations, blocked content)",
+              "session_feedback (user ratings 1-5, text feedback)",
             ],
           };
         } catch (err) {
@@ -363,18 +367,39 @@ export function otelMaintenanceTools(env: { AGENT_CORE: Fetcher; AI: Ai; ANALYTI
     }),
 
     findFailingConversations: tool({
-      description: "Find conversations where the agent failed — errors, user complaints, unanswered questions, tool failures. Uses CodeMode to scan logs efficiently.",
+      description: "Find conversations where the agent failed. Scans: tool errors, empty responses, negative feedback (rating ≤2), refusals, repeated questions, security alerts, guardrail blocks.",
       inputSchema: z.object({
         agentId: z.string().describe("Agent ID to scan"),
         limit: z.number().optional().describe("Max conversations to return (default 10)"),
       }),
       execute: async ({ agentId, limit }) => {
-        // In production: CodeMode queries conversation_log for error patterns
-        return {
-          agentId,
-          failures: [],
-          note: "Failure detection activates after conversations are logged. Patterns checked: tool errors, empty responses, negative feedback, repeated questions (user not satisfied with answer).",
-        };
+        try {
+          const resp = await env.AGENT_CORE.fetch(new Request(`http://internal/api/supervisor/failures/${agentId}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ limit: limit || 10 }),
+          }));
+          if (resp.ok) return await resp.json();
+
+          return {
+            agentId,
+            failureTypes: [
+              "tool_error: tool_executions WHERE error IS NOT NULL",
+              "empty_response: conversation_log WHERE agent_response = '' OR LENGTH(agent_response) < 10",
+              "negative_feedback: session_feedback WHERE rating <= 2",
+              "refusal: turns WHERE refusal = 1",
+              "repeated_question: consecutive conversation_log entries with similar user_message",
+              "security_alert: security_events WHERE severity IN ('critical', 'high')",
+              "guardrail_block: guardrail_events for this agent",
+              "delegation_failure: delegation_events WHERE status = 'failed'",
+              "timeout: sessions WHERE termination_reason = 'wall_clock_limit'",
+              "budget_exhausted: sessions WHERE termination_reason = 'budget_exhausted'",
+            ],
+            note: "Failure scanning activates after conversations are logged.",
+          };
+        } catch (err) {
+          return { error: String(err) };
+        }
       },
     }),
 
