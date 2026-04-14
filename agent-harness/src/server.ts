@@ -1303,19 +1303,192 @@ export class ResearchSpecialist extends Think<Env> {
 }
 
 export class CodingSpecialist extends Think<Env> {
+  // SDK pattern: Workspace (SQLite + R2 hybrid filesystem) — same as workspace-chat example
+  workspace = new Workspace({
+    sql: (this as any).ctx.storage.sql,
+    r2: (this as any).env?.STORAGE,
+    r2Prefix: "workspaces/coding/",
+    name: () => (this as any).name,
+  });
+
+  private _git: ReturnType<typeof createGit> | undefined;
+  private git() {
+    this._git ??= createGit(new WorkspaceFileSystem(this.workspace));
+    return this._git;
+  }
+
   getModel() {
-    return createWorkersAI({ binding: this.env.AI })("@cf/moonshotai/kimi-k2.5");
+    return createWorkersAI({ binding: (this as any).env.AI })("@cf/moonshotai/kimi-k2.5");
   }
+
   getSystemPrompt() {
-    return "You are a coding specialist. Write clean, well-tested code. Use the workspace to create files. Run code to verify it works.";
+    return [
+      "You are a coding specialist with a persistent virtual filesystem and git.",
+      "Direct tools: readFile, writeFile, listDirectory, deleteFile, mkdir, glob for file operations.",
+      "Git tools: gitInit, gitStatus, gitAdd, gitCommit, gitLog, gitDiff, gitClone, gitPush, gitBranch, gitCheckout.",
+      "For multi-file refactors, coordinated edits, or transactional updates, use the `runStateCode` tool.",
+      "The runStateCode sandbox has `state.*` (filesystem) and `git.*` available.",
+      "When creating projects, use tools to actually create files — don't just describe them.",
+      "After making changes, verify they work by reading the files back.",
+      STATE_SYSTEM_PROMPT.replace("{{types}}", STATE_TYPES),
+    ].join("\n");
   }
+
   getTools() {
+    const ws = this.workspace;
+    const gitOps = this.git();
+
     return {
-      ...sharedTools(),
-      ...(this.env.Sandbox ? sandboxTools(this.env) : {}),
+      // ── SDK file operations (from workspace-chat pattern) ──
+      readFile: tool({
+        description: "Read the contents of a file at the given path",
+        inputSchema: z.object({ path: z.string().describe("Absolute file path, e.g. /src/index.ts") }),
+        execute: async ({ path }) => {
+          const content = await ws.readFile(path);
+          return content === null ? { error: `File not found: ${path}` } : { path, content };
+        },
+      }),
+      writeFile: tool({
+        description: "Write content to a file. Creates parent directories if needed.",
+        inputSchema: z.object({
+          path: z.string().describe("Absolute file path"),
+          content: z.string().describe("File content"),
+        }),
+        execute: async ({ path, content }) => {
+          await ws.writeFile(path, content);
+          return { path, bytesWritten: content.length };
+        },
+      }),
+      listDirectory: tool({
+        description: "List files and directories at the given path",
+        inputSchema: z.object({ path: z.string().describe("Absolute directory path") }),
+        execute: async ({ path }) => {
+          const entries = await ws.readDir(path);
+          return { path, entries: entries.map(e => ({ name: e.name, type: e.type, size: e.size })) };
+        },
+      }),
+      deleteFile: tool({
+        description: "Delete a file or empty directory",
+        inputSchema: z.object({ path: z.string().describe("Absolute path to delete") }),
+        execute: async ({ path }) => ({ path, deleted: await ws.deleteFile(path) }),
+      }),
+      mkdir: tool({
+        description: "Create a directory (and parent directories)",
+        inputSchema: z.object({ path: z.string().describe("Absolute directory path") }),
+        execute: async ({ path }) => { await ws.mkdir(path, { recursive: true }); return { path, created: true }; },
+      }),
+      glob: tool({
+        description: "Find files matching a glob pattern, e.g. **/*.ts",
+        inputSchema: z.object({ pattern: z.string().describe("Glob pattern") }),
+        execute: async ({ pattern }) => {
+          const files = await ws.glob(pattern);
+          return { pattern, matches: files.map(f => ({ path: f.path, type: f.type, size: f.size })) };
+        },
+      }),
+
+      // ── SDK git operations (from @cloudflare/shell/git) ──
+      gitInit: tool({
+        description: "Initialize a new git repository",
+        inputSchema: z.object({ defaultBranch: z.string().optional() }),
+        execute: async ({ defaultBranch }) => gitOps.init({ defaultBranch }),
+      }),
+      gitStatus: tool({
+        description: "Show working tree status — modified, added, deleted, untracked files",
+        inputSchema: z.object({}),
+        execute: async () => gitOps.status(),
+      }),
+      gitAdd: tool({
+        description: 'Stage files for commit. Use "." for all changes.',
+        inputSchema: z.object({ filepath: z.string().describe('File path or "." for all') }),
+        execute: async ({ filepath }) => gitOps.add({ filepath }),
+      }),
+      gitCommit: tool({
+        description: "Create a commit with staged changes",
+        inputSchema: z.object({
+          message: z.string().describe("Commit message"),
+          authorName: z.string().optional(),
+          authorEmail: z.string().optional(),
+        }),
+        execute: async ({ message, authorName, authorEmail }) => {
+          const author = authorName && authorEmail ? { name: authorName, email: authorEmail } : undefined;
+          return gitOps.commit({ message, author });
+        },
+      }),
+      gitLog: tool({
+        description: "Show commit history",
+        inputSchema: z.object({ depth: z.number().optional().describe("Number of commits (default 20)") }),
+        execute: async ({ depth }) => gitOps.log({ depth }),
+      }),
+      gitDiff: tool({
+        description: "Show which files changed since last commit",
+        inputSchema: z.object({}),
+        execute: async () => gitOps.diff(),
+      }),
+      gitClone: tool({
+        description: "Clone a git repository into the workspace",
+        inputSchema: z.object({
+          url: z.string().describe("Git repository URL"),
+          dir: z.string().optional().describe("Target directory"),
+          branch: z.string().optional(),
+          depth: z.number().optional(),
+        }),
+        execute: async ({ url, dir, branch, depth }) => gitOps.clone({ url, dir, branch, depth }),
+      }),
+      gitPush: tool({
+        description: "Push commits to remote",
+        inputSchema: z.object({
+          remote: z.string().optional().describe("Remote name (default: origin)"),
+          ref: z.string().optional(),
+          force: z.boolean().optional(),
+          token: z.string().optional().describe("GitHub token for auth"),
+        }),
+        execute: async (opts) => gitOps.push(opts),
+      }),
+      gitBranch: tool({
+        description: "List, create, or delete branches",
+        inputSchema: z.object({
+          name: z.string().optional().describe("Branch name to create"),
+          list: z.boolean().optional(),
+          delete: z.string().optional(),
+        }),
+        execute: async (opts) => gitOps.branch(opts),
+      }),
+      gitCheckout: tool({
+        description: "Switch branches or restore files",
+        inputSchema: z.object({
+          ref: z.string().optional().describe("Branch or commit to checkout"),
+          branch: z.string().optional().describe("Create and checkout new branch"),
+        }),
+        execute: async (opts) => gitOps.checkout(opts),
+      }),
+      gitRemote: tool({
+        description: "Manage remotes — list, add, or remove",
+        inputSchema: z.object({
+          list: z.boolean().optional(),
+          add: z.object({ name: z.string(), url: z.string() }).optional(),
+          remove: z.string().optional(),
+        }),
+        execute: async (opts) => gitOps.remote(opts),
+      }),
+
+      // ── SDK codemode (from @cloudflare/codemode) for multi-file operations ──
+      runStateCode: tool({
+        description: "Run JavaScript in an isolated sandbox with state.* (filesystem) and git.* available. Use for multi-file refactors, coordinated edits, or transactional operations.",
+        inputSchema: z.object({
+          code: z.string().describe("Async arrow function: async () => { /* use state.* and git.* */ return result; }. Do NOT use TypeScript syntax."),
+        }),
+        execute: async ({ code }) => {
+          const executor = new DynamicWorkerExecutor({ loader: (this as any).env.LOADER });
+          return executor.execute(code, [
+            resolveProvider(stateTools(ws)),
+            resolveProvider(gitTools(ws)),
+          ]);
+        },
+      }),
     };
   }
-  getMaxSteps() { return 20; }
+
+  getMaxSteps() { return 25; }
 }
 
 // ── ChatAgent ─────────────────────────────────────────────────────────────────
@@ -1333,7 +1506,10 @@ import { Think } from "@cloudflare/think";
 import { AgentSearchProvider, R2SkillProvider } from "agents/experimental/memory/session";
 // Workspace and Session are re-exported by Think in source but not in published dist.
 // Import from their source packages directly.
-import { Workspace } from "@cloudflare/shell";
+import { Workspace, WorkspaceFileSystem, STATE_SYSTEM_PROMPT, STATE_TYPES } from "@cloudflare/shell";
+import { createGit, gitTools } from "@cloudflare/shell/git";
+import { stateTools } from "@cloudflare/shell/workers";
+import { resolveProvider } from "@cloudflare/codemode";
 import { Session } from "agents/experimental/memory/session";
 import { createCompactFunction } from "agents/experimental/memory/utils";
 
