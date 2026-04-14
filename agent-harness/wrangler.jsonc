@@ -58,6 +58,20 @@
     "enabled": true
   },
 
+  // Hyperdrive — Railway Postgres for durable cross-org data
+  // Agent-harness writes: session records, billing, OTEL events
+  // Gateway also connects to the same Postgres for admin queries
+  "hyperdrive": [
+    { "binding": "DB", "id": "PLACEHOLDER_HYPERDRIVE_ID" }
+  ],
+
+  // Queues — async writes to Postgres (non-blocking)
+  "queues": {
+    "producers": [
+      { "binding": "TELEMETRY_QUEUE", "queue": "harness-telemetry" }
+    ]
+  },
+
   // Access code for login protection — set via: wrangler secret put ACCESS_CODE
   // Optional API keys for outbound Workers — also set as secrets
   "vars": {
