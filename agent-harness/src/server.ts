@@ -41,6 +41,7 @@ import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 import puppeteer from "@cloudflare/puppeteer";
 import webpush from "web-push";
 import { metaAgentTools as metaAgentToolSet, META_AGENT_SYSTEM_PROMPT } from "./meta-agent";
+import { buildPersonalAgentPrompt } from "./prompts/personal-agent";
 import { createAgentEmitter, emit, type TelemetryBindings } from "./telemetry";
 
 // Env type is declared globally in env.d.ts via Cloudflare.Env.
@@ -666,10 +667,9 @@ const TENANTS: TenantConfig[] = [
     id: "default",
     name: "Personal Assistant",
     icon: "✦",
-    description: "General purpose AI assistant for everyday tasks",
+    description: "Autonomous AI agent with persistent memory, code sandbox, web access, and marketplace delegation",
     model: "@cf/moonshotai/kimi-k2.5",
-    systemPrompt:
-      "You are a helpful personal assistant. Help with research, writing, analysis, planning, and everyday tasks. Be concise and actionable. You have skills available as context blocks — activate them when the task benefits from structured methodology.",
+    systemPrompt: buildPersonalAgentPrompt(),  // Battle-tested 110-line prompt from old system
     skills: [
       SKILL_LIBRARY.find(s => s.name === "deep-research")!,
       SKILL_LIBRARY.find(s => s.name === "report")!,
@@ -1698,6 +1698,25 @@ export class ChatAgent extends Think<Env> {
     this._telemetry.llmRequest(ctx.sessionId || this.name, ctx.model || "", querySource);
 
     const config: any = {};
+
+    // ── OAuth token expiry check — nudge re-authentication ──
+    try {
+      this._ensureConnectorTable();
+      const expiring = this.sql<{ id: string; name: string; oauth_expires_at: string }>`
+        SELECT id, name, oauth_expires_at FROM cf_agent_connectors
+        WHERE oauth_expires_at IS NOT NULL
+          AND oauth_expires_at < datetime('now', '+1 hour')
+          AND status = 'connected'
+      `;
+      for (const conn of expiring) {
+        this.broadcast(JSON.stringify({
+          type: "auth_expiring",
+          connector: conn.name,
+          expires_at: conn.oauth_expires_at,
+          message: `Connector "${conn.name}" token expires soon. Please re-authenticate.`,
+        }));
+      }
+    } catch {} // never block chat for connector checks
 
     // [3] Budget pre-check — if agent has a budget, check before calling LLM
     const tenantConfig = getTenantConfig(this.name);
@@ -2735,6 +2754,84 @@ export class ChatAgent extends Think<Env> {
         last_used_at TEXT
       )
     `;
+  }
+
+  // ── Secrets: encrypted per-agent credentials for data sources ──
+  // Stored in DO SQLite — never leaves the DO. Injected into tool calls at runtime.
+  // UI manages via @callable methods through gateway proxy.
+
+  private _secretsTableReady = false;
+
+  private _ensureSecretsTable() {
+    if (this._secretsTableReady) return;
+    this._secretsTableReady = true;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agent_secrets (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        category TEXT NOT NULL DEFAULT 'api_key',
+        description TEXT NOT NULL DEFAULT '',
+        expires_at TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      )
+    `;
+  }
+
+  @callable({ description: "Store a secret (API key, DB credential, etc.) securely in the agent's DO" })
+  storeSecret(key: string, value: string, category = "api_key", description = "", expiresInSec?: number) {
+    this._ensureSecretsTable();
+    // Threat scan the key name (not the value — that's the actual secret)
+    if (/[<>"';\-\-]/.test(key)) return { error: "Invalid key name" };
+
+    const expiresAt = expiresInSec
+      ? new Date(Date.now() + expiresInSec * 1000).toISOString()
+      : null;
+
+    this.sql`
+      INSERT INTO cf_agent_secrets (key, value, category, description, expires_at)
+      VALUES (${key}, ${value}, ${category}, ${description}, ${expiresAt})
+      ON CONFLICT(key) DO UPDATE SET
+        value = ${value}, category = ${category}, description = ${description},
+        expires_at = ${expiresAt}, updated_at = datetime('now')
+    `;
+    return { stored: key, category };
+  }
+
+  @callable({ description: "List stored secrets (keys only, not values)" })
+  listSecrets() {
+    this._ensureSecretsTable();
+    return this.sql<{ key: string; category: string; description: string; expires_at: string | null; created_at: string }>`
+      SELECT key, category, description, expires_at, created_at FROM cf_agent_secrets
+      ORDER BY created_at DESC
+    `;
+  }
+
+  @callable({ description: "Delete a stored secret" })
+  deleteSecret(key: string) {
+    this._ensureSecretsTable();
+    this.sql`DELETE FROM cf_agent_secrets WHERE key = ${key}`;
+    return { deleted: key };
+  }
+
+  /** Get a secret value (internal — NOT exposed as @callable to prevent leakage to client) */
+  private _getSecret(key: string): string | null {
+    this._ensureSecretsTable();
+    const [row] = this.sql<{ value: string; expires_at: string | null }>`
+      SELECT value, expires_at FROM cf_agent_secrets WHERE key = ${key}
+    `;
+    if (!row) return null;
+    // Check expiry
+    if (row.expires_at && new Date(row.expires_at) < new Date()) {
+      // Expired — broadcast nudge to re-authenticate
+      this.broadcast(JSON.stringify({
+        type: "secret_expired",
+        key,
+        message: `Credential "${key}" has expired. Please update it in Settings.`,
+      }));
+      return null;
+    }
+    return row.value;
   }
 
   /** SSRF validation — block private/internal URLs. */
