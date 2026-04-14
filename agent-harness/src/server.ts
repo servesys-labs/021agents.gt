@@ -1359,12 +1359,12 @@ export class ChatAgent extends Think<Env> {
       const accountId = "ae92d4bf7c6c448f442d084a2358dcd5";
       const gatewayId = "one-shots";
       const cfAigToken = (this.env as any).CF_AIG_TOKEN || "";
+      // AI Gateway accepts the CF AIG token in the standard Authorization header.
+      // The gateway recognizes it as a gateway token (cfut_ prefix) and uses BYOK
+      // to inject the stored provider API key for the upstream request.
       const openrouter = createOpenAI({
-        apiKey: "byok", // Not used — AI Gateway injects the real key via stored keys
+        apiKey: cfAigToken, // Gateway recognizes cfut_ tokens as gateway auth
         baseURL: `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/openrouter`,
-        headers: {
-          "cf-aig-authorization": `Bearer ${cfAigToken}`,
-        },
       });
       return openrouter(modelId);
     }
