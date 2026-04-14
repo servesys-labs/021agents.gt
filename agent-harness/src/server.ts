@@ -1357,6 +1357,7 @@ export class CodingSpecialist extends Think<Env> {
 // Dynamic import: Think is experimental, import at module level
 // so it fails fast if the package isn't available.
 import { Think } from "@cloudflare/think";
+import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
 import { AgentSearchProvider, R2SkillProvider } from "agents/experimental/memory/session";
 // Workspace and Session are re-exported by Think in source but not in published dist.
 // Import from their source packages directly.
@@ -2024,7 +2025,11 @@ export class ChatAgent extends Think<Env> {
       }),
     } : {};
 
-    return { codemode, ...allTools, ...delegationTools, ...dataSourceTools, ...sandboxGaTools };
+    // Workspace tools (read, write, edit, list, find, grep, delete) — published Think 0.1.2
+    // doesn't auto-inject these yet (feature in source but not in npm), so we add them explicitly.
+    const workspaceTools = createWorkspaceTools(this.workspace);
+
+    return { ...workspaceTools, codemode, ...allTools, ...delegationTools, ...dataSourceTools, ...sandboxGaTools };
   }
 
   getMaxSteps() { return 10; }
