@@ -1377,6 +1377,7 @@ export class ChatAgent extends Think<Env> {
   // SDK's restoreConnectionsFromStorage handles OAuth tokens; we supplement
   // with our cf_agent_connectors table for connections added via @callable.
   private _mcpReconnected = false;
+  private _cachedContextTools: Record<string, unknown> = {};
 
   private async _reconnectMcpServers() {
     if (this._mcpReconnected) return;
@@ -2025,16 +2026,43 @@ export class ChatAgent extends Think<Env> {
       }),
     } : {};
 
-    // Workspace tools (read, write, edit, list, find, grep, delete) — published Think 0.1.2
-    // doesn't auto-inject these yet (feature in source but not in npm), so we add them explicitly.
+    // Published Think 0.1.2 doesn't auto-merge workspace, context, or MCP tools
+    // (feature exists in source _runInferenceLoop but not in npm dist).
+    // Add them explicitly until we upgrade to a published version that includes them.
     const workspaceTools = createWorkspaceTools(this.workspace);
+    const mcpAiTools = this.mcp?.getAITools?.() ?? {};
 
-    return { ...workspaceTools, codemode, ...allTools, ...delegationTools, ...dataSourceTools, ...sandboxGaTools };
+    // Context tools (load_context, set_context) — lazily initialized from session.
+    // Published Think 0.1.2 doesn't call configureSession, so we do it here.
+    // Fire-and-forget: first call initializes, subsequent calls use cache.
+    if (!this._contextToolsInit) void this._initContextTools();
+    const contextTools = this._cachedContextTools ?? {};
+
+    return { ...workspaceTools, ...contextTools, ...mcpAiTools, codemode, ...allTools, ...delegationTools, ...dataSourceTools, ...sandboxGaTools };
   }
 
   getMaxSteps() { return 10; }
 
   // ── Session: context blocks + compaction ──
+  // Published Think 0.1.2 doesn't call configureSession(). The session context
+  // blocks (skills, memory, knowledge) are configured here but context tools
+  // (load_context, set_context) require session.tools() which is async.
+  // We lazy-init them on first getTools() call via _initContextTools().
+
+  private _contextToolsInit = false;
+  private async _initContextTools() {
+    if (this._contextToolsInit) return;
+    this._contextToolsInit = true;
+    try {
+      const { Session } = await import("agents/experimental/memory/session");
+      const baseSession = Session.create(this as any);
+      const configured = await this.configureSession(baseSession);
+      (this as any).session = configured;
+      this._cachedContextTools = await configured.tools();
+    } catch (err) {
+      // Session init failed — context tools won't be available but agent still works
+    }
+  }
 
   configureSession(session: any) {
     const config = getTenantConfig(this.name);
@@ -2124,6 +2152,10 @@ export class ChatAgent extends Think<Env> {
           generateText({ model: this.getModel(), prompt }).then(r => r.text),
       }))
       .compactAfter(8000);
+
+    // Cache context tools (load_context, set_context) for getTools().
+    // Session.tools() is async; getTools() is sync. Resolve eagerly.
+    // Context tools are cached by _initContextTools() — called lazily from getTools().
 
     return s;
   }
