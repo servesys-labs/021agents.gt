@@ -19,7 +19,7 @@
     "@cloudflare/puppeteer": "^1.1.0",
     "@cloudflare/sandbox": "^0.8.11",
     "@cloudflare/shell": "^0.3.2",
-    "@cloudflare/think": "^0.2.2",
+    "@cloudflare/think": "^0.2.4",
     "@cloudflare/voice": "^0.1.0",
     "@modelcontextprotocol/sdk": "^1.25.0",
     "@phosphor-icons/react": "^2.1.10",
