@@ -160,8 +160,8 @@ app.use("/api/v1/*", async (c, next) => {
     const [key] = await sql`
       SELECT org_id, user_id, scopes FROM api_keys
       WHERE key_hash = encode(digest(${token}, 'sha256'), 'hex')
-        AND (revoked = false OR revoked IS NULL)
-        AND is_active = true
+        AND revoked_at IS NULL
+        AND (expires_at IS NULL OR expires_at > NOW())
       LIMIT 1
     `;
     await sql.end();
@@ -1041,25 +1041,91 @@ app.put("/api/v1/agents/:name/voice-config", async (c) => {
   return c.json(updated.config.voice);
 });
 
+// ── Agent suggestions (dynamic prompts for empty chat) ──
+
+app.get("/api/v1/agents/:name/suggestions", async (c) => {
+  const agentName = c.req.param("name");
+  const orgId = c.get("orgId");
+  const suggestions = await kvCached(c.env.CACHE, `suggestions:${orgId}:${agentName}`, 300, async () => {
+    const sql = await getDb(c.env.DB);
+    const [agent] = await sql`
+      SELECT config FROM agents WHERE name = ${agentName} AND org_id = ${orgId}
+    `;
+    await sql.end();
+    const config = agent?.config || {};
+    // Use configured suggestions or return empty (UI falls back to defaults)
+    return config.suggestions || [];
+  });
+  return c.json({ suggestions });
+});
+
 // ── Dashboard (Pattern C: Analytics Engine aggregations) ──
 
 app.get("/api/v1/dashboard/stats", async (c) => {
   const orgId = c.get("orgId");
-  // KV-cached aggregate (30s TTL)
   const stats = await kvCached(c.env.CACHE, `dashboard:${orgId}`, 30, async () => {
     const sql = await getDb(c.env.DB);
-    const [row] = await sql`
+    const [agents] = await sql`
       SELECT
-        COUNT(*) as total_sessions,
-        COALESCE(SUM(cost_total_usd), 0) as total_cost,
-        COUNT(DISTINCT agent_name) as active_agents
+        COUNT(*) AS total_agents,
+        COUNT(*) FILTER (WHERE is_active = true) AS live_agents
+      FROM agents WHERE org_id = ${orgId}
+    `;
+    const [sessions] = await sql`
+      SELECT
+        COUNT(*) AS total_sessions,
+        COUNT(*) FILTER (WHERE status = 'running') AS active_sessions,
+        COALESCE(SUM(cost_usd), 0) AS total_cost_usd,
+        COALESCE(AVG(duration_ms), 0) AS avg_latency_ms,
+        CASE WHEN COUNT(*) > 0
+          THEN ROUND(100.0 * COUNT(*) FILTER (WHERE status = 'failed') / COUNT(*), 2)
+          ELSE 0
+        END AS error_rate_pct
       FROM sessions
       WHERE org_id = ${orgId} AND created_at > now() - interval '24 hours'
     `;
     await sql.end();
-    return row;
+    return {
+      total_agents: Number(agents.total_agents),
+      live_agents: Number(agents.live_agents),
+      total_sessions: Number(sessions.total_sessions),
+      active_sessions: Number(sessions.active_sessions),
+      total_cost_usd: Number(sessions.total_cost_usd),
+      avg_latency_ms: Math.round(Number(sessions.avg_latency_ms)),
+      error_rate_pct: Number(sessions.error_rate_pct),
+    };
   });
   return c.json(stats);
+});
+
+app.get("/api/v1/dashboard/activity", async (c) => {
+  const orgId = c.get("orgId");
+  const limit = Math.min(Number(c.req.query("limit")) || 10, 50);
+  const items = await kvCached(c.env.CACHE, `activity:${orgId}:${limit}`, 15, async () => {
+    const sql = await getDb(c.env.DB);
+    const rows = await sql`
+      SELECT
+        id,
+        CASE status WHEN 'failed' THEN 'error' ELSE 'session' END AS type,
+        CONCAT(agent_name,
+          CASE status
+            WHEN 'completed' THEN ' completed a session'
+            WHEN 'failed'    THEN ' session failed'
+            WHEN 'running'   THEN ' session started'
+            ELSE ' session ' || status
+          END
+        ) AS message,
+        agent_name,
+        created_at
+      FROM sessions
+      WHERE org_id = ${orgId}
+      ORDER BY created_at DESC
+      LIMIT ${limit}
+    `;
+    await sql.end();
+    return rows;
+  });
+  return c.json({ items });
 });
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1104,7 +1170,7 @@ app.get("/api/v1/guardrails", async (c) => {
   const rules = await kvCached(c.env.CACHE, `guardrails:${orgId}`, 60, async () => {
     const sql = await getDb(c.env.DB);
     const rows = await sql`
-      SELECT * FROM guardrail_policies WHERE org_id = ${orgId} AND is_active = true
+      SELECT * FROM guardrail_rules WHERE org_id = ${orgId} AND is_active = true
     `;
     await sql.end();
     return rows;
@@ -1117,8 +1183,8 @@ app.post("/api/v1/guardrails", async (c) => {
   const body = await c.req.json();
   const sql = await getDb(c.env.DB);
   const [rule] = await sql`
-    INSERT INTO guardrail_policies (policy_type, config, org_id)
-    VALUES (${body.type || body.name}, ${JSON.stringify(body.config)}::jsonb, ${orgId})
+    INSERT INTO guardrail_rules (name, type, config, org_id)
+    VALUES (${body.name || ''}, ${body.type || 'input'}, ${JSON.stringify(body.config)}::jsonb, ${orgId})
     RETURNING *
   `;
   await sql.end();
@@ -1132,7 +1198,7 @@ app.put("/api/v1/guardrails/:id", async (c) => {
   const body = await c.req.json<{ name?: string; config?: Record<string, unknown>; is_active?: boolean }>();
   const sql = await getDb(c.env.DB);
   const [rule] = await sql`
-    UPDATE guardrail_policies SET
+    UPDATE guardrail_rules SET
       name = COALESCE(${body.name || null}, name),
       config = COALESCE(${body.config ? JSON.stringify(body.config) : null}::jsonb, config),
       is_active = COALESCE(${body.is_active ?? null}, is_active)
@@ -1149,7 +1215,7 @@ app.delete("/api/v1/guardrails/:id", async (c) => {
   const orgId = c.get("orgId");
   const ruleId = c.req.param("id");
   const sql = await getDb(c.env.DB);
-  await sql`DELETE FROM guardrail_policies WHERE id = ${ruleId} AND org_id = ${orgId}`;
+  await sql`DELETE FROM guardrail_rules WHERE id = ${ruleId} AND org_id = ${orgId}`;
   await sql.end();
   await kvInvalidate(c.env.CACHE, `guardrails:${orgId}`);
   return c.json({ deleted: ruleId });
