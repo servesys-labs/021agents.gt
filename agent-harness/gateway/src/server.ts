@@ -1063,69 +1063,78 @@ app.get("/api/v1/agents/:name/suggestions", async (c) => {
 
 app.get("/api/v1/dashboard/stats", async (c) => {
   const orgId = c.get("orgId");
-  const stats = await kvCached(c.env.CACHE, `dashboard:${orgId}`, 30, async () => {
-    const sql = await getDb(c.env.DB);
-    const [agents] = await sql`
-      SELECT
-        COUNT(*) AS total_agents,
-        COUNT(*) FILTER (WHERE is_active = true) AS live_agents
-      FROM agents WHERE org_id = ${orgId}
-    `;
-    const [sessions] = await sql`
-      SELECT
-        COUNT(*) AS total_sessions,
-        COUNT(*) FILTER (WHERE status = 'running') AS active_sessions,
-        COALESCE(SUM(cost_usd), 0) AS total_cost_usd,
-        COALESCE(AVG(duration_ms), 0) AS avg_latency_ms,
-        CASE WHEN COUNT(*) > 0
-          THEN ROUND(100.0 * COUNT(*) FILTER (WHERE status = 'failed') / COUNT(*), 2)
-          ELSE 0
-        END AS error_rate_pct
-      FROM sessions
-      WHERE org_id = ${orgId} AND created_at > now() - interval '24 hours'
-    `;
-    await sql.end();
-    return {
-      total_agents: Number(agents.total_agents),
-      live_agents: Number(agents.live_agents),
-      total_sessions: Number(sessions.total_sessions),
-      active_sessions: Number(sessions.active_sessions),
-      total_cost_usd: Number(sessions.total_cost_usd),
-      avg_latency_ms: Math.round(Number(sessions.avg_latency_ms)),
-      error_rate_pct: Number(sessions.error_rate_pct),
-    };
-  });
-  return c.json(stats);
+  try {
+    const stats = await kvCached(c.env.CACHE, `dashboard:${orgId}`, 60, async () => {
+      const sql = await getDb(c.env.DB);
+      // Two simple queries — avoids cross-join subselect issues
+      const agentRows = await sql`
+        SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE is_active = true) AS live
+        FROM agents WHERE org_id = ${orgId}
+      `;
+      const sessionRows = await sql`
+        SELECT
+          COUNT(*) AS total_sessions,
+          COUNT(*) FILTER (WHERE status = 'running') AS active_sessions,
+          COALESCE(SUM(cost_total_usd), 0) AS total_cost_usd,
+          COALESCE(AVG(wall_clock_seconds) * 1000, 0) AS avg_latency_ms,
+          CASE WHEN COUNT(*) > 0
+            THEN ROUND(100.0 * COUNT(*) FILTER (WHERE status = 'failed') / COUNT(*), 2)
+            ELSE 0
+          END AS error_rate_pct
+        FROM sessions
+        WHERE org_id = ${orgId} AND created_at > now() - interval '24 hours'
+      `;
+      await sql.end();
+      const a = agentRows[0] || {};
+      const s = sessionRows[0] || {};
+      return {
+        total_agents: Number(a.total ?? 0),
+        live_agents: Number(a.live ?? 0),
+        total_sessions: Number(s.total_sessions ?? 0),
+        active_sessions: Number(s.active_sessions ?? 0),
+        total_cost_usd: Number(s.total_cost_usd ?? 0),
+        avg_latency_ms: Math.round(Number(s.avg_latency_ms ?? 0)),
+        error_rate_pct: Number(s.error_rate_pct ?? 0),
+      };
+    });
+    return c.json(stats);
+  } catch (err) {
+    console.error("[dashboard/stats]", err);
+    return c.json({ error: "Failed to load stats", detail: String(err) }, 500);
+  }
 });
 
 app.get("/api/v1/dashboard/activity", async (c) => {
   const orgId = c.get("orgId");
   const limit = Math.min(Number(c.req.query("limit")) || 10, 50);
-  const items = await kvCached(c.env.CACHE, `activity:${orgId}:${limit}`, 15, async () => {
-    const sql = await getDb(c.env.DB);
-    const rows = await sql`
-      SELECT
-        id,
-        CASE status WHEN 'failed' THEN 'error' ELSE 'session' END AS type,
-        CONCAT(agent_name,
-          CASE status
+  try {
+    const items = await kvCached(c.env.CACHE, `activity:${orgId}:${limit}`, 60, async () => {
+      const sql = await getDb(c.env.DB);
+      const rows = await sql`
+        SELECT
+          session_id AS id,
+          CASE status WHEN 'failed' THEN 'error' ELSE 'session' END AS type,
+          agent_name || CASE status
             WHEN 'completed' THEN ' completed a session'
             WHEN 'failed'    THEN ' session failed'
             WHEN 'running'   THEN ' session started'
             ELSE ' session ' || status
-          END
-        ) AS message,
-        agent_name,
-        created_at
-      FROM sessions
-      WHERE org_id = ${orgId}
-      ORDER BY created_at DESC
-      LIMIT ${limit}
-    `;
-    await sql.end();
-    return rows;
-  });
-  return c.json({ items });
+          END AS message,
+          agent_name,
+          created_at
+        FROM sessions
+        WHERE org_id = ${orgId}
+        ORDER BY created_at DESC
+        LIMIT ${limit}
+      `;
+      await sql.end();
+      return rows;
+    });
+    return c.json({ items });
+  } catch (err) {
+    console.error("[dashboard/activity]", err);
+    return c.json({ items: [], error: String(err) }, 200);
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════════
