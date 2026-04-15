@@ -1562,7 +1562,7 @@ export default {
     // 4. SLO breach detection — check all SLO definitions and raise issues on breach
     try {
       const sloDefs = await sql`
-        SELECT id, org_id, agent_name, metric, target, window_seconds, alert_on_breach
+        SELECT id, org_id, agent_name, metric, threshold, window_seconds, alert_on_breach
         FROM slo_definitions
         WHERE alert_on_breach = true
         LIMIT 100
@@ -1573,7 +1573,7 @@ export default {
           const orgId = String(slo.org_id);
           const agentName = String(slo.agent_name);
           const metric = String(slo.metric);
-          const target = Number(slo.target);
+          const target = Number(slo.threshold);
           const windowSeconds = Number(slo.window_seconds || 3600);
           const windowStart = new Date(Date.now() - windowSeconds * 1000).toISOString();
 
