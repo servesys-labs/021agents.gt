@@ -124,7 +124,20 @@ export type TelemetryEventType =
   | "agent.deleted"
   | "agent.skill_added"
   | "agent.skill_removed"
-  | "agent.channel_deployed";
+  | "agent.channel_deployed"
+  // Extended events (budget, signals, archival, skills, etc.)
+  | "billing.budget_exceeded"
+  | "tool.permission_denied"
+  | "tool.output_truncated"
+  | "tool.loop_detected"
+  | "memory.dream_fired"
+  | "memory.dream_completed"
+  | "session.recovered"
+  | "signal.cluster_triggered"
+  | "skill.overlay_appended"
+  | "skill.overlay_reverted"
+  | "archival.triggered"
+  | "agent.model_changed";
 
 // ── Event Payload ────────────────────────────────────────────────
 
@@ -219,10 +232,16 @@ export interface TelemetryEvent {
   terminationReason?: string;
   compactionCount?: number;
   repairCount?: number;
+  // MCP server details
+  serverName?: string;
+  serverId?: string;
+  // Session cost
+  sessionCost?: number;
   // Generic
   metadata?: Record<string, unknown>;
   error?: string;
   timestamp?: string;
+  [key: string]: unknown;
 }
 
 // ── Telemetry Emitter ────────────────────────────────────────────

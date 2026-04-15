@@ -897,7 +897,7 @@ function Chat() {
             />
           )}
 
-          {messages.map((message, index) => {
+          {messages.map((message: any, index: number) => {
             const isUser = message.role === "user";
             const isLastAssistant =
               message.role === "assistant" && index === messages.length - 1;
@@ -917,9 +917,9 @@ function Chat() {
                 {/* Group consecutive tool calls into a collapsible step group */}
                 {(() => {
                   // Count tool parts for the "N steps" summary
-                  const toolParts = message.parts.filter(p => isToolUIPart(p));
-                  const runningCount = toolParts.filter(p => p.state === "input-available" || p.state === "input-streaming").length;
-                  const doneCount = toolParts.filter(p => p.state === "output-available").length;
+                  const toolParts = message.parts.filter((p: any) => isToolUIPart(p));
+                  const runningCount = toolParts.filter((p: any) => p.state === "input-available" || p.state === "input-streaming").length;
+                  const doneCount = toolParts.filter((p: any) => p.state === "output-available").length;
                   if (toolParts.length > 1 && (runningCount > 0 || doneCount > 0)) {
                     // Show a compact summary line above the steps
                     return (
@@ -943,12 +943,12 @@ function Chat() {
                   }
                   return null;
                 })()}
-                {message.parts.map((part, partIndex) => {
+                {message.parts.map((part: any, partIndex: number) => {
                   if (part.type === "text") {
                     if (!part.text) return null;
                     const isLastTextPart = message.parts
                       .slice(partIndex + 1)
-                      .every((p) => p.type !== "text");
+                      .every((p: any) => p.type !== "text");
                     return (
                       <div key={partIndex} className="flex justify-start">
                         <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-bl-md bg-kumo-base text-kumo-default leading-relaxed">

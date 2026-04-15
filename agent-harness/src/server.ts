@@ -37,6 +37,7 @@ import {
 } from "ai";
 import { z } from "zod";
 import { getSandbox, Sandbox as BaseSandbox } from "@cloudflare/sandbox";
+import { createSandboxTools } from "@cloudflare/think/tools/sandbox";
 import { createCodeTool, generateTypes } from "@cloudflare/codemode/ai";
 import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 import puppeteer from "@cloudflare/puppeteer";
@@ -585,7 +586,7 @@ function createVectorizeSearchProvider(env: Env, ftsProvider?: { search(q: strin
     async search(query: string): Promise<string | null> {
       try {
         // 1. Dense vector search via Vectorize
-        const embedding = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: [query] });
+        const embedding = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: [query] }) as any;
         const vectorResults = await env.VECTORIZE.query(embedding.data[0], {
           topK: 10, returnMetadata: "all",
         });
@@ -645,7 +646,7 @@ function createVectorizeSearchProvider(env: Env, ftsProvider?: { search(q: strin
       }
 
       try {
-        const embedding = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: [content] });
+        const embedding = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: [content] }) as any;
         const vector = embedding.data[0];
 
         // Dimension safety check — refuse to ingest wrong-dim vectors
@@ -1078,7 +1079,7 @@ function browserTools(env: Env) {
 
           const text = await page.evaluate((sel: string) => {
             const el = sel ? document.querySelector(sel) : document.body;
-            return el?.innerText ?? "";
+            return (el as HTMLElement)?.innerText ?? "";
           }, selector ?? "");
 
           const limit = maxLength ?? 8000;
@@ -1756,165 +1757,27 @@ export class ChatAgent extends Think<Env> {
     };
 
     // ═══════════════════════════════════════════════════════════════════
-    // SANDBOX GA TOOLS — Live preview, file watching, checkpoints, git
+    // SANDBOX TOOLS — via @cloudflare/think SDK createSandboxTools()
     //
-    // These use the @cloudflare/sandbox GA APIs (April 2026):
-    // - exposePort: live preview URLs for dev servers
-    // - createBackup/restoreBackup: checkpoint workspace state
-    // - watch: file system monitoring via inotify
-    // - git.checkout: clone repos into workspace
-    // - startProcess: long-running background processes
-    // - createCodeContext: persistent REPL sessions (Jupyter-like)
+    // Uses @cloudflare/sandbox Containers API:
+    //   startProcess — first-class background process with waitForPort/waitForLog
+    //   exposePort   — live preview URLs for dev servers
+    //   exec         — one-shot shell commands
+    //   gitCheckout  — clone repos into workspace
+    //   runCode      — persistent REPL sessions (Jupyter-like)
+    //   createBackup/restoreBackup — checkpoint workspace state
     //
-    // The sandbox has persistent filesystem, networking, and processes.
     // Credentials injected via Outbound Workers — agent never sees secrets.
     // ═══════════════════════════════════════════════════════════════════
+    const sdkSandboxTools = config.enableSandbox ? createSandboxTools(this.env.Sandbox, {
+      hostname: "agent-harness.servesys.workers.dev",
+      sandboxId: "coding-sandbox",
+    }) : {};
+
+    // Deploy & GitHub tools use sandbox.exec() for build/deploy inside the container
+    const sb = () => getSandbox(this.env.Sandbox, "coding-sandbox");
     const sandboxGaTools = config.enableSandbox ? {
-      expose_preview: tool({
-        description: "Expose a port from the sandbox container and get a live preview URL. Use after starting a dev server (npm run dev, python -m http.server, etc). The URL is shareable and persists until unexposed.",
-        inputSchema: z.object({
-          port: z.number().min(1024).max(65535).describe("Port number the server is listening on"),
-          name: z.string().optional().describe("Friendly name for this port (e.g., 'frontend', 'api')"),
-        }),
-        execute: async ({ port, name }) => {
-          try {
-            const sandbox = getSandbox(this.env.Sandbox, "coding-sandbox");
-            const hostname = "agent-harness.servesys.workers.dev";
-            const result = await sandbox.exposePort(port, { hostname, name });
-            return {
-              url: result.url,
-              port: result.port,
-              name: result.name,
-              message: `Preview live at ${result.url}`,
-            };
-          } catch (err: any) {
-            return { error: `Failed to expose port ${port}: ${err.message?.slice(0, 200)}` };
-          }
-        },
-      }),
-
-      unexpose_preview: tool({
-        description: "Stop exposing a port's preview URL",
-        inputSchema: z.object({
-          port: z.number().describe("Port number to unexpose"),
-        }),
-        execute: async ({ port }) => {
-          try {
-            const sandbox = getSandbox(this.env.Sandbox, "coding-sandbox");
-            await sandbox.unexposePort(port);
-            return { unexposed: port };
-          } catch (err: any) {
-            return { error: err.message?.slice(0, 200) };
-          }
-        },
-      }),
-
-      create_checkpoint: tool({
-        description: "Create a backup/snapshot of the workspace. Creates a squashfs archive uploaded to R2. Use before risky operations (major refactors, deleting files) so you can restore if things go wrong. The backup handle is returned — save it to restore later.",
-        inputSchema: z.object({
-          name: z.string().optional().describe("Human-readable checkpoint name"),
-          path: z.string().default("/workspace").describe("Directory to back up"),
-        }),
-        execute: async ({ name, path }) => {
-          try {
-            const sandbox = getSandbox(this.env.Sandbox, "coding-sandbox");
-            const backup = await sandbox.createBackup({
-              path: path || "/workspace",
-              name: name || `checkpoint-${Date.now()}`,
-            });
-            return {
-              backup: backup,
-              message: `Checkpoint "${name || 'checkpoint'}" created. Save the backup handle to restore later.`,
-            };
-          } catch (err: any) {
-            return { error: `Backup failed: ${err.message?.slice(0, 200)}` };
-          }
-        },
-      }),
-
-      restore_checkpoint: tool({
-        description: "Restore a previous workspace checkpoint from a backup handle. Replaces the current directory contents with the backed-up state.",
-        inputSchema: z.object({
-          backup: z.any().describe("The backup handle returned by create_checkpoint"),
-        }),
-        execute: async ({ backup }) => {
-          try {
-            const sandbox = getSandbox(this.env.Sandbox, "coding-sandbox");
-            const result = await sandbox.restoreBackup(backup);
-            return { restored: true, result };
-          } catch (err: any) {
-            return { error: `Restore failed: ${err.message?.slice(0, 200)}` };
-          }
-        },
-      }),
-
-      git_clone: tool({
-        description: "Clone a git repository into the sandbox workspace. Supports public repos and private repos if credentials are stored as secrets.",
-        inputSchema: z.object({
-          url: z.string().describe("Git repository URL (HTTPS)"),
-          path: z.string().default("/workspace/repo").describe("Destination path in sandbox"),
-          branch: z.string().optional().describe("Branch to checkout (default: main)"),
-        }),
-        execute: async ({ url, path, branch }) => {
-          try {
-            const sandbox = getSandbox(this.env.Sandbox, "coding-sandbox");
-            const result = await sandbox.git.checkout({
-              url,
-              dir: path || "/workspace/repo",
-              branch: branch || "main",
-            });
-            return { cloned: true, path: path || "/workspace/repo", result };
-          } catch (err: any) {
-            return { error: `Git clone failed: ${err.message?.slice(0, 200)}` };
-          }
-        },
-      }),
-
-      start_process: tool({
-        description: "Start a long-running background process in the sandbox (dev server, build watcher, test runner). Returns a process handle. Use expose_preview to make the port accessible.",
-        inputSchema: z.object({
-          command: z.string().describe("Command to run (e.g., 'npm run dev', 'python -m http.server 8080')"),
-          cwd: z.string().default("/workspace").describe("Working directory"),
-        }),
-        execute: async ({ command, cwd }) => {
-          try {
-            const sandbox = getSandbox(this.env.Sandbox, "coding-sandbox");
-            const session = await sandbox.createSession();
-            const result = await session.exec(command, { cwd: cwd || "/workspace", background: true } as any);
-            return {
-              process: result,
-              message: `Process started: ${command}. Use expose_preview to make ports accessible.`,
-            };
-          } catch (err: any) {
-            return { error: `Process start failed: ${err.message?.slice(0, 200)}` };
-          }
-        },
-      }),
-
-      run_code_persistent: tool({
-        description: "Run code in a persistent context (like a Jupyter notebook cell). Variables and imports persist across calls. Supports Python, JavaScript, TypeScript.",
-        inputSchema: z.object({
-          code: z.string().describe("Code to execute"),
-          language: z.enum(["python", "javascript", "typescript"]).default("python").describe("Programming language"),
-          context_id: z.string().optional().describe("Reuse an existing context (for persistent variables). Omit for new context."),
-        }),
-        execute: async ({ code, language, context_id }) => {
-          try {
-            const sandbox = getSandbox(this.env.Sandbox, "coding-sandbox");
-            const result = await sandbox.runCode(code, {
-              language: language || "python",
-              contextId: context_id,
-            } as any);
-            return {
-              output: (result as any).output?.slice(0, 10000) || "",
-              error: (result as any).error?.slice(0, 2000) || null,
-              context_id: (result as any).contextId,
-            };
-          } catch (err: any) {
-            return { error: `Code execution failed: ${err.message?.slice(0, 200)}` };
-          }
-        },
-      }),
+      ...sdkSandboxTools,
 
       // ── Deploy Tools (CF Pages / Workers) ──
 
@@ -1929,24 +1792,16 @@ export class ChatAgent extends Think<Env> {
         }),
         execute: async ({ project_path, project_name, build_command, output_dir, framework }) => {
           try {
-            const sandbox = getSandbox(this.env.Sandbox, "coding-sandbox");
+            const sandbox = sb();
             const slug = project_name.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-").slice(0, 63);
 
-            // Step 1: Build
             const buildResult = await sandbox.exec(build_command, { cwd: project_path });
             if ((buildResult as any).exitCode !== 0) {
-              return {
-                success: false,
-                error: `Build failed: ${(buildResult as any).stderr?.slice(0, 1000) || "unknown error"}`,
-                step: "build",
-              };
+              return { success: false, error: `Build failed: ${(buildResult as any).stderr?.slice(0, 1000) || "unknown error"}`, step: "build" };
             }
 
-            // Step 2: Deploy via wrangler pages
             const deployDir = `${project_path}/${output_dir}`;
             let deployCmd = `npx wrangler pages deploy "${deployDir}" --project-name="${slug}" --branch=production --commit-dirty=true`;
-
-            // Framework-specific flags
             if (framework === "nextjs") {
               deployCmd = `npx wrangler pages deploy "${project_path}/.next" --project-name="${slug}" --branch=production --commit-dirty=true --compatibility-date=2025-04-01`;
             }
@@ -1954,28 +1809,14 @@ export class ChatAgent extends Think<Env> {
             const deployResult = await sandbox.exec(deployCmd, { cwd: project_path });
             const stdout = (deployResult as any).stdout || "";
             const stderr = (deployResult as any).stderr || "";
-
-            // Extract URL from wrangler output
             const urlMatch = stdout.match(/https:\/\/[^\s]+\.pages\.dev/) || stderr.match(/https:\/\/[^\s]+\.pages\.dev/);
             const deployUrl = urlMatch ? urlMatch[0] : `https://${slug}.pages.dev`;
 
             if ((deployResult as any).exitCode !== 0) {
-              return {
-                success: false,
-                error: `Deploy failed: ${stderr.slice(0, 1000)}`,
-                step: "deploy",
-                output: stdout.slice(0, 500),
-              };
+              return { success: false, error: `Deploy failed: ${stderr.slice(0, 1000)}`, step: "deploy", output: stdout.slice(0, 500) };
             }
 
-            // Step 3: Record deployment in memory
-            return {
-              success: true,
-              url: deployUrl,
-              project_name: slug,
-              framework,
-              message: `Deployed to ${deployUrl}`,
-            };
+            return { success: true, url: deployUrl, project_name: slug, framework, message: `Deployed to ${deployUrl}` };
           } catch (err: any) {
             return { success: false, error: `Deployment error: ${err.message?.slice(0, 300)}` };
           }
@@ -1991,10 +1832,9 @@ export class ChatAgent extends Think<Env> {
         }),
         execute: async ({ project_path, project_name, entry_point }) => {
           try {
-            const sandbox = getSandbox(this.env.Sandbox, "coding-sandbox");
+            const sandbox = sb();
             const slug = project_name.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-").slice(0, 63);
 
-            // Ensure wrangler.toml exists
             const checkToml = await sandbox.exec("cat wrangler.toml 2>/dev/null || echo '__MISSING__'", { cwd: project_path });
             if ((checkToml as any).stdout?.includes("__MISSING__")) {
               await sandbox.writeFile(`${project_path}/wrangler.toml`,
@@ -2002,7 +1842,6 @@ export class ChatAgent extends Think<Env> {
               );
             }
 
-            // Build if package.json has build script
             const hasBuild = await sandbox.exec("node -e \"const p=require('./package.json'); process.exit(p.scripts?.build ? 0 : 1)\"", { cwd: project_path });
             if ((hasBuild as any).exitCode === 0) {
               const buildResult = await sandbox.exec("npm run build", { cwd: project_path });
@@ -2011,11 +1850,9 @@ export class ChatAgent extends Think<Env> {
               }
             }
 
-            // Deploy
             const deployResult = await sandbox.exec("npx wrangler deploy", { cwd: project_path });
             const stdout = (deployResult as any).stdout || "";
             const stderr = (deployResult as any).stderr || "";
-
             const urlMatch = stdout.match(/https:\/\/[^\s]+\.workers\.dev/) || stderr.match(/https:\/\/[^\s]+\.workers\.dev/);
             const deployUrl = urlMatch ? urlMatch[0] : `https://${slug}.workers.dev`;
 
@@ -2023,12 +1860,7 @@ export class ChatAgent extends Think<Env> {
               return { success: false, error: `Deploy failed: ${stderr.slice(0, 500)}`, step: "deploy" };
             }
 
-            return {
-              success: true,
-              url: deployUrl,
-              project_name: slug,
-              message: `API deployed to ${deployUrl}`,
-            };
+            return { success: true, url: deployUrl, project_name: slug, message: `API deployed to ${deployUrl}` };
           } catch (err: any) {
             return { success: false, error: `Deploy error: ${err.message?.slice(0, 300)}` };
           }
@@ -2045,19 +1877,16 @@ export class ChatAgent extends Think<Env> {
         }),
         execute: async ({ project_path, repo_name, description, is_private }) => {
           try {
-            const sandbox = getSandbox(this.env.Sandbox, "coding-sandbox");
+            const sandbox = sb();
 
-            // Check for GitHub token
             const tokenCheck = await sandbox.exec("echo $GITHUB_TOKEN", { cwd: project_path });
             if (!(tokenCheck as any).stdout?.trim()) {
               return { success: false, error: "GITHUB_TOKEN not configured. Add your GitHub token in Connectors → Custom API → GitHub." };
             }
 
-            // Initialize git if needed
             await sandbox.exec("git init 2>/dev/null || true", { cwd: project_path });
             await sandbox.exec('git add -A && git commit -m "initial commit" --allow-empty 2>/dev/null || true', { cwd: project_path });
 
-            // Create repo and push
             const visibility = is_private ? "--private" : "--public";
             const descFlag = description ? `--description "${description}"` : "";
             const result = await sandbox.exec(
@@ -2072,11 +1901,7 @@ export class ChatAgent extends Think<Env> {
               return { success: false, error: `GitHub error: ${(result as any).stderr?.slice(0, 500)}` };
             }
 
-            return {
-              success: true,
-              repo_url: urlMatch ? urlMatch[0] : `https://github.com/${repo_name}`,
-              message: `Repository created and code pushed`,
-            };
+            return { success: true, repo_url: urlMatch ? urlMatch[0] : `https://github.com/${repo_name}`, message: `Repository created and code pushed` };
           } catch (err: any) {
             return { success: false, error: `GitHub error: ${err.message?.slice(0, 300)}` };
           }
@@ -2094,20 +1919,15 @@ export class ChatAgent extends Think<Env> {
         }),
         execute: async ({ project_path, title, body, base, branch }) => {
           try {
-            const sandbox = getSandbox(this.env.Sandbox, "coding-sandbox");
+            const sandbox = sb();
 
-            // Create branch if specified
             if (branch) {
               await sandbox.exec(`git checkout -b "${branch}" 2>/dev/null || git checkout "${branch}"`, { cwd: project_path });
             }
 
-            // Commit any uncommitted changes
             await sandbox.exec('git add -A && git commit -m "update" --allow-empty 2>/dev/null || true', { cwd: project_path });
-
-            // Push current branch
             await sandbox.exec("git push -u origin HEAD", { cwd: project_path });
 
-            // Create PR
             const bodyEscaped = body.replace(/"/g, '\\"');
             const result = await sandbox.exec(
               `gh pr create --title "${title}" --body "${bodyEscaped}" --base "${base}"`,
@@ -2121,11 +1941,7 @@ export class ChatAgent extends Think<Env> {
               return { success: false, error: `PR creation failed: ${(result as any).stderr?.slice(0, 500)}` };
             }
 
-            return {
-              success: true,
-              pr_url: urlMatch ? urlMatch[0] : stdout.trim(),
-              message: `Pull request created`,
-            };
+            return { success: true, pr_url: urlMatch ? urlMatch[0] : stdout.trim(), message: `Pull request created` };
           } catch (err: any) {
             return { success: false, error: `PR error: ${err.message?.slice(0, 300)}` };
           }
@@ -2334,7 +2150,7 @@ export class ChatAgent extends Think<Env> {
 
     // [1] Query source tagging
     const querySource = ctx.continuation ? "continuation" : "user_chat";
-    this._telemetry.llmRequest(ctx.sessionId || this.name, ctx.model || "", querySource);
+    this._telemetry.llmRequest(ctx.sessionId || this.name, ctx.model || "");
 
     const config: any = {};
 
@@ -2707,7 +2523,7 @@ export class ChatAgent extends Think<Env> {
   //   Broadcast streaming_done to connected clients
   // ═══════════════════════════════════════════════════════════════════
 
-  protected async onChatResponse(result: ChatResponseResult) {
+  async onChatResponse(result: ChatResponseResult) {
     if (result.status === "completed") {
       const costUsd = (result as any).cost || 0;
       const model = (result as any).model || "";
@@ -2906,8 +2722,8 @@ export class ChatAgent extends Think<Env> {
             const lastUser = [...allMsgs].reverse().find((m: any) => m.role === "user");
             if (!lastAssistant || !lastUser) return;
 
-            const userText = typeof lastUser.content === "string" ? lastUser.content : lastUser.parts?.[0]?.text || "";
-            const assistantText = typeof lastAssistant.content === "string" ? lastAssistant.content : lastAssistant.parts?.[0]?.text || "";
+            const userText = (lastUser as any).parts?.find((p: any) => p.type === "text")?.text || "";
+            const assistantText = (lastAssistant as any).parts?.find((p: any) => p.type === "text")?.text || "";
 
             let judgeResult = "";
             await (judge as any).chat(
@@ -4012,7 +3828,7 @@ export class AgentSupervisor extends Think<Env> {
   private _agentConfig: { agent_id: string; name: string; system_prompt: string; model: string; enable_sandbox: number } | null = null;
 
   /** Ensure the agents registry table exists. */
-  private _ensureSchema() {
+  private _ensureSupervisorSchema() {
     this.sql`
       CREATE TABLE IF NOT EXISTS agents (
         agent_id      TEXT PRIMARY KEY,
@@ -4030,7 +3846,7 @@ export class AgentSupervisor extends Think<Env> {
 
   /** Load agent config from SQLite by ID (extracted from DO name or request). */
   private _loadAgentConfig(agentId: string) {
-    this._ensureSchema();
+    this._ensureSupervisorSchema();
     const rows = this.sql<{ agent_id: string; name: string; system_prompt: string; model: string; enable_sandbox: number }>`
       SELECT * FROM agents WHERE agent_id = ${agentId} AND status = 'active'
     `;
@@ -4072,7 +3888,7 @@ export class AgentSupervisor extends Think<Env> {
 
     // ── CRUD: list agents ──
     if (url.pathname === "/agents" && request.method === "GET") {
-      this._ensureSchema();
+      this._ensureSupervisorSchema();
       const rows = this.sql<{ agent_id: string; name: string; icon: string; description: string; model: string; enable_sandbox: number; created_at: string }>`
         SELECT agent_id, name, icon, description, model, enable_sandbox, created_at
         FROM agents WHERE status = 'active' ORDER BY created_at
@@ -4086,7 +3902,7 @@ export class AgentSupervisor extends Think<Env> {
       try { config = await request.json(); } catch {
         return Response.json({ error: "Invalid JSON" }, { status: 400 });
       }
-      this._ensureSchema();
+      this._ensureSupervisorSchema();
       const agentId = config.agent_id || crypto.randomUUID().slice(0, 8);
       const name = config.name || "Custom Agent";
       const icon = config.icon || "✦";
@@ -4103,7 +3919,7 @@ export class AgentSupervisor extends Think<Env> {
 
     // ── CRUD: delete agent ──
     if (url.pathname.startsWith("/agents/") && request.method === "DELETE") {
-      this._ensureSchema();
+      this._ensureSupervisorSchema();
       const agentId = url.pathname.split("/").pop()!;
       this.sql`UPDATE agents SET status = 'deleted' WHERE agent_id = ${agentId}`;
       return Response.json({ deleted: agentId });
@@ -4419,7 +4235,7 @@ export default {
     if (url.pathname.startsWith("/channels/") || url.pathname.startsWith("/webhook/")) {
       try {
         const { routeChannel } = await import("./channels");
-        const channelResp = await routeChannel(request, env);
+        const channelResp = await routeChannel(request, env as any, { waitUntil: () => {} } as any, "");
         if (channelResp) return channelResp;
       } catch (err) {
         console.error(`[channels] Route failed: ${err}`);
@@ -4466,7 +4282,7 @@ export default {
   async queue(batch: MessageBatch, env: Env): Promise<void> {
     // DLQ messages: just log them — operator can replay manually
     if (batch.queue === "harness-telemetry-dlq") {
-      for (const msg of batch) {
+      for (const msg of batch.messages) {
         console.error("[dlq] Dead letter:", JSON.stringify(msg.body).slice(0, 500));
         msg.ack(); // don't retry DLQ
       }
@@ -4482,7 +4298,7 @@ export default {
         idle_timeout: 5, connect_timeout: 3,
       });
 
-      for (const msg of batch) {
+      for (const msg of batch.messages) {
         const evt = msg.body as { type: string; payload: Record<string, unknown> };
         try {
           switch (evt.type) {
@@ -4663,9 +4479,9 @@ export default {
             case "rag_embed": {
               // Chunk document from R2, embed via Workers AI, upsert to Vectorize
               const p = evt.payload;
-              const r2Key = p.r2_key;
-              const orgId = p.org_id || "";
-              const agentName = p.agent_name || "";
+              const r2Key = p.r2_key as string;
+              const orgId = (p.org_id || "") as string;
+              const agentName = (p.agent_name || "") as string;
 
               try {
                 // Fetch document from R2
@@ -4689,10 +4505,10 @@ export default {
                 // Embed + upsert to Vectorize in batches of 8
                 for (let i = 0; i < cappedChunks.length; i += 8) {
                   const batch = cappedChunks.slice(i, i + 8);
-                  const embedding = await env.AI?.run("@cf/baai/bge-base-en-v1.5", { text: batch });
+                  const embedding = await env.AI?.run("@cf/baai/bge-base-en-v1.5", { text: batch }) as any;
                   if (!embedding?.data) continue;
 
-                  const vectors = batch.map((chunk, j) => ({
+                  const vectors: VectorizeVector[] = batch.map((chunk, j) => ({
                     id: `rag:${orgId}:${agentName}:${r2Key}:${i + j}`,
                     values: embedding.data[j],
                     metadata: {

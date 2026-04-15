@@ -19,6 +19,8 @@ declare namespace Cloudflare {
 		EvalJudge: DurableObjectNamespace<import("./src/server").EvalJudge>;
 		/** Browser Rendering API — headless Puppeteer browser */
 		MYBROWSER: Fetcher;
+		/** Service binding to agent-core worker for DO routing */
+		AGENT_CORE: Fetcher;
 		/** Dynamic Worker Loader for CodeMode + extensions */
 		LOADER: any;
 		/** Railway Postgres via Hyperdrive — durable cross-org data */
@@ -49,4 +51,12 @@ type StringifyValues<EnvType extends Record<string, unknown>> = {
 };
 declare namespace NodeJS {
 	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "ACCESS_CODE">> {}
+}
+declare module "postgres" {
+	const postgres: any;
+	export default postgres;
+}
+declare module "web-push" {
+	const webpush: any;
+	export default webpush;
 }
