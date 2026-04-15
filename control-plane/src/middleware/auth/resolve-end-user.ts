@@ -29,10 +29,10 @@ export async function resolveEndUserToken(
 
   return await withOrgDb(env, orgId, async (sql) => {
     const rows = await sql`
-      SELECT token_id, api_key_id, allowed_agents, rate_limit_rpm, rate_limit_rpd, revoked, expires_at
+      SELECT token_id, api_key_id, allowed_agents, rate_limit_rpm, rate_limit_rpd, is_revoked, expires_at
       FROM end_user_tokens
       WHERE end_user_id = ${endUserId} AND api_key_id = ${apiKeyId}
-        AND revoked = false AND expires_at > now()
+        AND is_revoked = false AND expires_at > now()
       ORDER BY created_at DESC LIMIT 1
     `;
 
