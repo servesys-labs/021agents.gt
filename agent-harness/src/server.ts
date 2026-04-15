@@ -37,7 +37,6 @@ import {
 } from "ai";
 import { z } from "zod";
 import { getSandbox, Sandbox as BaseSandbox } from "@cloudflare/sandbox";
-import { createSandboxTools } from "@cloudflare/think/tools/sandbox";
 import { createCodeTool, generateTypes } from "@cloudflare/codemode/ai";
 import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 import puppeteer from "@cloudflare/puppeteer";
@@ -973,7 +972,107 @@ function sharedTools() {
 
 // ── Sandbox tools (only for tenants with enableSandbox) ──────────────────────
 
-// Sandbox tools now provided by createSandboxTools() from @cloudflare/think/tools/sandbox
+// ── Sandbox tools — wraps @cloudflare/sandbox Containers API ─────────────────
+// Follows the GA blog patterns: startProcess + waitForLog + exposePort
+// Every tool has try/catch so container cold starts return errors, not hangs.
+
+function createSandboxTools(binding: DurableObjectNamespace<InstanceType<typeof BaseSandbox>>, opts: { hostname: string; sandboxId: string }) {
+  const sb = () => getSandbox(binding, opts.sandboxId);
+  return {
+    sandbox_exec: tool({
+      description: "Run a shell command in the sandbox container. Returns stdout, stderr, exit code. For long-running servers use start_process instead.",
+      inputSchema: z.object({
+        command: z.string().describe("Shell command (e.g. 'npm install', 'python3 script.py')"),
+        cwd: z.string().default("/workspace").describe("Working directory"),
+      }),
+      execute: async ({ command, cwd }) => {
+        try {
+          const result = await sb().exec(command, { cwd: cwd || "/workspace" });
+          return { exitCode: result.exitCode, stdout: result.stdout?.slice(0, 8000) ?? "", stderr: result.stderr?.slice(0, 4000) ?? "" };
+        } catch (err) { return { error: `Sandbox exec failed: ${String(err).slice(0, 300)}` }; }
+      },
+    }),
+    start_process: tool({
+      description: "Start a long-running background process (dev server, watcher). Use expose_preview after to get a URL.",
+      inputSchema: z.object({
+        command: z.string().describe("Command (e.g. 'npm run dev', 'python3 -m http.server 8080')"),
+        cwd: z.string().default("/workspace").describe("Working directory"),
+      }),
+      execute: async ({ command, cwd }) => {
+        try {
+          const proc = await sb().startProcess(command, { cwd: cwd || "/workspace" });
+          return { processId: proc.id, command: proc.command, status: proc.status, message: `Process started (${proc.id}). Use expose_preview to get a URL.` };
+        } catch (err) { return { error: `Process start failed: ${String(err).slice(0, 300)}` }; }
+      },
+    }),
+    expose_preview: tool({
+      description: "Expose a sandbox port as a live preview URL. Use after start_process.",
+      inputSchema: z.object({
+        port: z.number().min(1024).max(65535).describe("Port the server listens on"),
+        name: z.string().optional().describe("Friendly name (e.g. 'frontend')"),
+      }),
+      execute: async ({ port, name }) => {
+        try {
+          const result = await sb().exposePort(port, { hostname: opts.hostname, name });
+          return { url: result.url, port: result.port, name: result.name, message: `Preview live at ${result.url}` };
+        } catch (err) { return { error: `Failed to expose port ${port}: ${String(err).slice(0, 300)}` }; }
+      },
+    }),
+    unexpose_preview: tool({
+      description: "Stop exposing a port's preview URL.",
+      inputSchema: z.object({ port: z.number().describe("Port to unexpose") }),
+      execute: async ({ port }) => {
+        try { await sb().unexposePort(port); return { unexposed: port }; }
+        catch (err) { return { error: String(err).slice(0, 300) }; }
+      },
+    }),
+    git_clone: tool({
+      description: "Clone a git repository into the sandbox workspace.",
+      inputSchema: z.object({
+        url: z.string().describe("Git repo URL (HTTPS)"),
+        path: z.string().default("/workspace/repo").describe("Destination path"),
+        branch: z.string().optional().describe("Branch (default: main)"),
+      }),
+      execute: async ({ url, path, branch }) => {
+        try {
+          const result = await sb().gitCheckout(url, { targetDir: path || "/workspace/repo", branch: branch || "main", depth: 1 });
+          return { cloned: true, path: path || "/workspace/repo", result };
+        } catch (err) { return { error: `Git clone failed: ${String(err).slice(0, 300)}` }; }
+      },
+    }),
+    run_code: tool({
+      description: "Run code in a persistent context (Jupyter-like). Variables persist across calls.",
+      inputSchema: z.object({
+        code: z.string().describe("Code to execute"),
+        language: z.enum(["python", "javascript", "typescript"]).default("python"),
+      }),
+      execute: async ({ code, language }) => {
+        try {
+          const result = await sb().runCode(code, { language: language || "python" }) as any;
+          return { output: result?.logs?.stdout?.slice(0, 10_000) ?? "", error: result?.logs?.stderr?.slice(0, 2000) ?? null };
+        } catch (err) { return { error: `Code exec failed: ${String(err).slice(0, 300)}` }; }
+      },
+    }),
+    create_checkpoint: tool({
+      description: "Snapshot the workspace. Use before risky operations.",
+      inputSchema: z.object({ name: z.string().optional(), path: z.string().default("/workspace") }),
+      execute: async ({ name, path }) => {
+        try {
+          const backup = await sb().createBackup({ dir: path || "/workspace", name: name || `cp-${Date.now()}` });
+          return { backup, message: `Checkpoint created.` };
+        } catch (err) { return { error: `Backup failed: ${String(err).slice(0, 300)}` }; }
+      },
+    }),
+    restore_checkpoint: tool({
+      description: "Restore a workspace checkpoint.",
+      inputSchema: z.object({ backup: z.any().describe("Backup handle from create_checkpoint") }),
+      execute: async ({ backup }) => {
+        try { const r = await sb().restoreBackup(backup); return { restored: true, result: r }; }
+        catch (err) { return { error: `Restore failed: ${String(err).slice(0, 300)}` }; }
+      },
+    }),
+  };
+}
 
 // ── LEGACY Browser tools — replaced by SDK createBrowserTools() in ChatAgent.getTools()
 // Kept as fallback for ResearchSpecialist which doesn't use Think 0.2.2 browser tools.
@@ -1461,7 +1560,7 @@ export class ChatAgent extends Think<Env> {
   // ── Durability: wrap chat turns in runFiber for crash recovery ──
   // If the DO is evicted mid-turn, onChatRecovery() fires on restart
   // and can resume streaming or persist partial results.
-  override unstable_chatRecovery = true;
+  chatRecovery = true;
 
   // ── Org/agent extraction from DO name (pattern: orgId-agentName-u-userId) ──
   private _getOrgId(): string {
@@ -1707,11 +1806,11 @@ export class ChatAgent extends Think<Env> {
     // ═══════════════════════════════════════════════════════════════════
     const sdkSandboxTools = config.enableSandbox ? createSandboxTools(this.env.Sandbox, {
       hostname: "agent-harness.servesys.workers.dev",
-      sandboxId: "coding-sandbox",
+      sandboxId: "sb-v3",
     }) : {};
 
     // Deploy & GitHub tools use sandbox.exec() for build/deploy inside the container
-    const sb = () => getSandbox(this.env.Sandbox, "coding-sandbox");
+    const sb = () => getSandbox(this.env.Sandbox, "sb-v3");
     const sandboxGaTools = config.enableSandbox ? {
       ...sdkSandboxTools,
 
@@ -3739,7 +3838,7 @@ export class ChatAgent extends Think<Env> {
       ...sharedTools(),
       ...webSearchTools(),
       ...browserTools(this.env),
-      ...(getTenantConfig(this.name).enableSandbox ? createSandboxTools(this.env.Sandbox, { hostname: "agent-harness.servesys.workers.dev", sandboxId: "coding-sandbox" }) : {}),
+      ...(getTenantConfig(this.name).enableSandbox ? createSandboxTools(this.env.Sandbox, { hostname: "agent-harness.servesys.workers.dev", sandboxId: "sb-v3" }) : {}),
     };
     return generateTypes(allTools);
   }
@@ -3808,7 +3907,7 @@ export class AgentSupervisor extends Think<Env> {
       ...browserTools(this.env),
     };
     if (this._agentConfig?.enable_sandbox) {
-      Object.assign(tools, createSandboxTools(this.env.Sandbox, { hostname: "agent-harness.servesys.workers.dev", sandboxId: "coding-sandbox" }));
+      Object.assign(tools, createSandboxTools(this.env.Sandbox, { hostname: "agent-harness.servesys.workers.dev", sandboxId: "sb-v3" }));
     }
     return tools;
   }
@@ -4135,7 +4234,7 @@ export default {
       if (!isAuthenticated(request)) {
         return Response.json({ error: "Unauthorized" }, { status: 401 });
       }
-      const sandbox = getSandbox(env.Sandbox, "coding-sandbox");
+      const sandbox = getSandbox(env.Sandbox, "sb-v3");
       const session = await sandbox.createSession();
       return session.terminal(request, { cols: 120, rows: 40 });
     }

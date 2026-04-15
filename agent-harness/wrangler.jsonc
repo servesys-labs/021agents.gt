@@ -121,6 +121,5 @@
   // Access code for login protection — set via: wrangler secret put ACCESS_CODE
   // Optional API keys for outbound Workers — also set as secrets
   "vars": {
-    "SANDBOX_TRANSPORT": "websocket"
   }
 }
