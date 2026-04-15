@@ -2145,6 +2145,13 @@ export class ChatAgent extends Think<Env> {
   // workspace tools + context tools (load_context, set_context) + MCP tools.
 
   configureSession(session: any) {
+    // Migrate stale DOs: add parent_id column if missing. The SDK's
+    // ensureTable uses CREATE TABLE IF NOT EXISTS which skips re-creation
+    // for DOs that existed before tree-structured messages were added.
+    // ALTER TABLE ADD COLUMN throws "duplicate column" if it already
+    // exists — we catch and ignore.
+    try { this.sql`ALTER TABLE assistant_messages ADD COLUMN parent_id TEXT`; } catch {}
+
     const config = getTenantConfig(this.name);
 
     let s = session
