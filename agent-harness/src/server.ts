@@ -1487,6 +1487,23 @@ export class ChatAgent extends Think<Env> {
   // Wait for MCP connections to restore after hibernation
   waitForMcpConnections = true;
 
+  // ── Stale fiber cleanup ──
+  // If a chat turn crashes mid-stream (e.g. sandbox 503 timeout), the fiber
+  // row stays in cf_agents_runs and chatRecovery tries to resume it forever.
+  // Purge fibers older than 60s on startup so the agent isn't permanently stuck.
+  async onStart() {
+    try {
+      const staleMs = 60_000;
+      const cutoff = Date.now() - staleMs;
+      this.sql`DELETE FROM cf_agents_runs WHERE created_at < ${cutoff}`;
+    } catch {} // table may not exist yet on first boot
+    // Also clear any orphaned stream metadata so stream_resuming doesn't fire
+    try {
+      this.sql`DELETE FROM cf_ai_chat_stream_metadata WHERE 1=1`;
+    } catch {}
+    return super.onStart();
+  }
+
   // ── MCP reconnection from DO SQLite on wake ──
   // After hibernation, re-establish MCP connections from persisted connector table.
   // SDK's restoreConnectionsFromStorage handles OAuth tokens; we supplement
