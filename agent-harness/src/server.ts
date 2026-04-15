@@ -973,45 +973,7 @@ function sharedTools() {
 
 // ── Sandbox tools (only for tenants with enableSandbox) ──────────────────────
 
-// Sandbox tools — ONLY tools that require a container (shell exec).
-// File operations (read, write, edit, list, find, grep, delete) are provided
-// by Think's createWorkspaceTools(this.workspace) automatically — no container needed.
-function sandboxTools(env: Env) {
-  return {
-    // Execute a shell command in the sandbox container (requires container runtime)
-    execCommand: tool({
-      description:
-        "Execute a shell command in a Linux container (e.g., 'npm install', 'python script.py', 'npm run build'). Requires container runtime. For file operations, prefer the workspace tools (read, write, edit) which don't need a container.",
-      inputSchema: z.object({
-        command: z.string().describe("The command to run (e.g., 'npm test')"),
-        args: z
-          .array(z.string())
-          .optional()
-          .describe("Command arguments as array"),
-        cwd: z
-          .string()
-          .optional()
-          .describe("Working directory (default: /workspace)"),
-      }),
-      execute: async ({ command, args, cwd }) => {
-        try {
-          const sandbox = getSandbox(env.Sandbox, "coding-sandbox");
-          const fullCommand = args?.length ? `${command} ${args.join(" ")}` : command;
-          const result = await sandbox.exec(fullCommand, {
-            cwd: cwd ?? "/workspace",
-          });
-          return {
-            exitCode: result.exitCode,
-            stdout: result.stdout?.slice(0, 8000) ?? "",
-            stderr: result.stderr?.slice(0, 4000) ?? "",
-          };
-        } catch (err) {
-          return { error: `Sandbox exec failed: ${String(err)}` };
-        }
-      },
-    }),
-  };
-}
+// Sandbox tools now provided by createSandboxTools() from @cloudflare/think/tools/sandbox
 
 // ── LEGACY Browser tools — replaced by SDK createBrowserTools() in ChatAgent.getTools()
 // Kept as fallback for ResearchSpecialist which doesn't use Think 0.2.2 browser tools.
@@ -1578,19 +1540,18 @@ export class ChatAgent extends Think<Env> {
     const config = getTenantConfig(this.name);
     const mcpTools = this.mcp.getAITools();
 
+    // Domain tools (non-sandbox, non-workspace)
     const allTools = {
       ...mcpTools,
       ...sharedTools(),
       ...webSearchTools(),
-      // SDK browser tools: browser_search (CDP spec query) + browser_execute (CDP commands)
-      // Replaces old puppeteer browserScreenshot/browserGetContent with full CDP access
       ...createBrowserTools({ browser: this.env.MYBROWSER, loader: this.env.LOADER }),
-      ...(config.enableSandbox ? sandboxTools(this.env) : {}),
       ...structuredInputTools(),
       ...metaAgentToolSet({ AGENT_CORE: this.env.AGENT_CORE || this.env as any, AI: this.env.AI, ANALYTICS: this.env.ANALYTICS }),
     };
 
-    // SDK execute tool: sandboxed JS with codemode.* (tools) + state.* (workspace filesystem)
+    // SDK execute tool: LLM writes JS that runs in sandboxed Worker with
+    // codemode.* (tools) + state.* (workspace filesystem) — following SDK example pattern
     const execute = createExecuteTool({
       tools: allTools,
       state: createWorkspaceStateBackend(this.workspace),
@@ -1601,31 +1562,6 @@ export class ChatAgent extends Think<Env> {
     const extTools = this.extensionManager
       ? { ...createExtensionTools({ manager: this.extensionManager }), ...this.extensionManager.getTools() }
       : {};
-
-    // Wrap codemode with telemetry tracking
-    const rawExecutor = new DynamicWorkerExecutor({ loader: this.env.LOADER });
-    const trackedExecutor = {
-      execute: async (code: string, providers: any[]) => {
-        const start = Date.now();
-        try {
-          const result = await rawExecutor.execute(code, providers);
-          this._telemetry.toolCompleted(this.name, "codemode", { latencyMs: Date.now() - start });
-          return result;
-        } catch (err: any) {
-          this._telemetry.toolFailed(this.name, "codemode", err?.message || String(err));
-          emit(this.env as TelemetryBindings, {
-            type: "tool.failed",
-            agentName: this.name,
-            toolName: "codemode",
-            toolError: err?.message || String(err),
-            latencyMs: Date.now() - start,
-            metadata: { codePreview: code.slice(0, 200) },
-          });
-          throw err;
-        }
-      },
-    };
-    const codemode = createCodeTool({ tools: allTools, executor: trackedExecutor as any });
 
     // ── Sub-agent delegation tools ──
     // Each sub-agent runs in its own DO with isolated SQLite.
@@ -1949,9 +1885,9 @@ export class ChatAgent extends Think<Env> {
       }),
     } : {};
 
-    // Think 0.2.2 auto-merges: workspaceTools + contextTools + mcpTools + getTools()
-    // We return custom tools + SDK tools (execute, browser, extensions).
-    return { execute, ...extTools, codemode, ...allTools, ...delegationTools, ...dataSourceTools, ...sandboxGaTools };
+    // Think auto-merges: workspaceTools + contextTools + mcpTools + getTools()
+    // Pattern matches SDK example: execute + extensions + domain tools + sandbox
+    return { execute, ...extTools, ...allTools, ...delegationTools, ...dataSourceTools, ...sandboxGaTools };
   }
 
   getMaxSteps() { return 10; }
@@ -3803,7 +3739,7 @@ export class ChatAgent extends Think<Env> {
       ...sharedTools(),
       ...webSearchTools(),
       ...browserTools(this.env),
-      ...(getTenantConfig(this.name).enableSandbox ? sandboxTools(this.env) : {}),
+      ...(getTenantConfig(this.name).enableSandbox ? createSandboxTools(this.env.Sandbox, { hostname: "agent-harness.servesys.workers.dev", sandboxId: "coding-sandbox" }) : {}),
     };
     return generateTypes(allTools);
   }
@@ -3872,7 +3808,7 @@ export class AgentSupervisor extends Think<Env> {
       ...browserTools(this.env),
     };
     if (this._agentConfig?.enable_sandbox) {
-      Object.assign(tools, sandboxTools(this.env));
+      Object.assign(tools, createSandboxTools(this.env.Sandbox, { hostname: "agent-harness.servesys.workers.dev", sandboxId: "coding-sandbox" }));
     }
     return tools;
   }
