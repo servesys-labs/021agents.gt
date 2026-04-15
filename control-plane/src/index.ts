@@ -1526,7 +1526,7 @@ export default {
     // 3c. Clean up expired idempotency cache and end-user tokens
     try {
       await sql`DELETE FROM idempotency_cache WHERE expires_at < now()`;
-      await sql`DELETE FROM end_user_tokens WHERE expires_at < now() AND revoked = false`;
+      await sql`DELETE FROM end_user_tokens WHERE expires_at < now() AND is_revoked = false`;
     } catch (err) {
       console.error("[cron] Idempotency/token cleanup failed:", err);
     }
