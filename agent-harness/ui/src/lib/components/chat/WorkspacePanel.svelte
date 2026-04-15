@@ -70,6 +70,10 @@
     return imgExts.has(fileExtension(path));
   }
 
+  function isHtmlFile(path: string): boolean {
+    return fileExtension(path) === "html" || fileExtension(path) === "htm";
+  }
+
   function isPdfFile(path: string): boolean {
     return fileExtension(path) === "pdf";
   }
@@ -179,7 +183,7 @@
     previewContent = "";
     previewMime = "";
 
-    if (!isTextFile(file.path) && !isImageFile(file.path) && !isPdfFile(file.path)) {
+    if (!isTextFile(file.path) && !isImageFile(file.path) && !isPdfFile(file.path) && !isHtmlFile(file.path)) {
       return;
     }
 
@@ -330,6 +334,13 @@
               {:else}
                 <img src="data:{previewMime};base64,{previewContent}" alt={selectedFile.path} class="h-auto max-w-full rounded border border-border" />
               {/if}
+            {:else if isHtmlFile(selectedFile.path) && previewContent}
+              <iframe
+                title={selectedFile.path}
+                srcdoc={previewContent}
+                sandbox="allow-scripts allow-same-origin"
+                class="h-[60vh] w-full rounded border border-border bg-white"
+              ></iframe>
             {:else if isPdfFile(selectedFile.path) && previewContent}
               {#if previewContent.startsWith("data:")}
                 <iframe title={selectedFile.path} src={previewContent} class="h-[60vh] w-full rounded border border-border"></iframe>
@@ -513,6 +524,13 @@
             {:else}
               <img src="data:{previewMime};base64,{previewContent}" alt={selectedFile.path} class="h-auto max-w-full rounded border border-border" />
             {/if}
+          {:else if isHtmlFile(selectedFile.path) && previewContent}
+            <iframe
+              title={selectedFile.path}
+              srcdoc={previewContent}
+              sandbox="allow-scripts allow-same-origin"
+              class="h-[85vh] w-full rounded border border-border bg-white"
+            ></iframe>
           {:else if isPdfFile(selectedFile.path) && previewContent}
             {#if previewContent.startsWith("data:")}
               <iframe title={selectedFile.path} src={previewContent} class="h-[85vh] w-full rounded border border-border"></iframe>
