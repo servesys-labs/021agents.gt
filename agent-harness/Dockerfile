@@ -16,7 +16,7 @@
 # ║  Instance: basic (1/4 vCPU, 1 GiB RAM, 4 GB disk)                 ║
 # ╚═══════════════════════════════════════════════════════════════════════╝
 
-FROM docker.io/cloudflare/sandbox:0.8.11-python
+FROM docker.io/cloudflare/sandbox:0.8.10-python
 
 # ─── Build essentials (needed to compile C extensions at runtime) ─────
 # Without these, `pip install scipy`, `scikit-learn`, etc. will fail.
