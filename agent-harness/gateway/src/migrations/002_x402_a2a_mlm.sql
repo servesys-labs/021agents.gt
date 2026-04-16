@@ -1,10 +1,9 @@
 -- x402 Payment Records: tracks all agent-to-agent payments
--- Matches actual 001_init.sql schema: orgs(id TEXT), users(id TEXT)
 CREATE TABLE IF NOT EXISTS x402_payments (
-  id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-  payer_org_id  TEXT REFERENCES orgs(id),
-  payer_user_id TEXT REFERENCES users(id),
-  payee_org_id  TEXT REFERENCES orgs(id),
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  payer_org_id  UUID REFERENCES orgs(org_id),
+  payer_user_id UUID REFERENCES users(user_id),
+  payee_org_id  UUID REFERENCES orgs(org_id),
   agent_name    TEXT NOT NULL,
   tool_name     TEXT NOT NULL,
   amount_wei    BIGINT NOT NULL,
@@ -33,9 +32,9 @@ CREATE TABLE IF NOT EXISTS a2a_tasks (
 
 -- MLM Revenue Sharing: multi-level referral tracking
 CREATE TABLE IF NOT EXISTS referrals (
-  id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-  referrer_id     TEXT NOT NULL REFERENCES users(id),
-  referred_id     TEXT NOT NULL REFERENCES users(id),
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  referrer_id     UUID NOT NULL REFERENCES users(user_id),
+  referred_id     UUID NOT NULL REFERENCES users(user_id),
   referral_code   TEXT NOT NULL,
   tier            INT NOT NULL DEFAULT 1, -- 1 = direct, 2 = second level, 3 = third level
   status          TEXT NOT NULL DEFAULT 'active', -- active, expired, revoked
@@ -48,9 +47,9 @@ CREATE INDEX IF NOT EXISTS idx_referrals_code ON referrals (referral_code);
 
 -- Revenue sharing ledger: tracks commission payments
 CREATE TABLE IF NOT EXISTS revenue_shares (
-  id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-  source_payment_id TEXT REFERENCES x402_payments(id),
-  beneficiary_id  TEXT NOT NULL REFERENCES users(id),
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  source_payment_id UUID REFERENCES x402_payments(id),
+  beneficiary_id  UUID NOT NULL REFERENCES users(user_id),
   tier            INT NOT NULL, -- which referral tier earned this
   share_pct       NUMERIC(5,2) NOT NULL, -- percentage of original payment
   amount_usd      NUMERIC(12,6) NOT NULL,
@@ -62,7 +61,7 @@ CREATE INDEX IF NOT EXISTS idx_revenue_shares_beneficiary ON revenue_shares (ben
 
 -- Referral codes on users
 ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_code TEXT UNIQUE;
-ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by TEXT REFERENCES users(id);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by UUID REFERENCES users(user_id);
 
 -- MLM tier config (platform-level)
 CREATE TABLE IF NOT EXISTS mlm_config (

@@ -97,3 +97,11 @@ declare module "web-push" {
 	const webpush: any;
 	export default webpush;
 }
+declare module "pg" {
+	export class Client {
+		constructor(opts: any);
+		connect(): Promise<void>;
+		query(sql: string, args?: any[]): Promise<{ rows: any[]; rowCount: number }>;
+		end(): Promise<void>;
+	}
+}

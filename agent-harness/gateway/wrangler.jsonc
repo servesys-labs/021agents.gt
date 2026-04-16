@@ -22,8 +22,8 @@
   // Postgres via Hyperdrive (Pattern E): PlanetScale 021agents DB
   // Both DB and DB_ADMIN point to the same DB for now; admin ops use psql-level auth.
   "hyperdrive": [
-    { "binding": "DB", "id": "fe47bb91b8994078b15537a0d023190d" },
-    { "binding": "DB_ADMIN", "id": "fe47bb91b8994078b15537a0d023190d" }
+    { "binding": "DB", "id": "667a6c1a93734b52a4b2b1dc8deb480a" },
+    { "binding": "DB_ADMIN", "id": "667a6c1a93734b52a4b2b1dc8deb480a" }
   ],
 
   // Analytics Engine (Pattern C): audit, telemetry, security events

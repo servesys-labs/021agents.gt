@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 500" width="100%" height="100%" style="background-color: #0f172a; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+  <defs>
+    <!-- Arrowhead marker -->
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#818cf8" />
+    </marker>
+    
+    <!-- Glow effect for the coordinator -->
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <!-- Title -->
+  <text x="550" y="60" fill="#f8fafc" font-size="24" font-weight="bold" text-anchor="middle" letter-spacing="1">Passive Memory Pipeline</text>
+  <text x="550" y="85" fill="#94a3b8" font-size="14" text-anchor="middle">Reversed dependency: Primary agent never triggers memory operations</text>
+
+  <!-- ================= NODES ================= -->
+
+  <!-- 1. Primary Agent -->
+  <g transform="translate(50, 200)">
+    <rect width="180" height="80" rx="12" fill="#1e293b" stroke="#334155" stroke-width="2"/>
+    <text x="90" y="35" fill="#f8fafc" font-size="16" font-weight="bold" text-anchor="middle">Primary Agent</text>
+    <text x="90" y="55" fill="#94a3b8" font-size="13" text-anchor="middle">(Gemma / Kimi)</text>
+  </g>
+
+  <!-- 2. Signal Queue -->
+  <g transform="translate(340, 200)">
+    <rect width="160" height="80" rx="12" fill="#1e293b" stroke="#334155" stroke-width="2"/>
+    <text x="80" y="45" fill="#f8fafc" font-size="16" font-weight="bold" text-anchor="middle">Signal Queue</text>
+  </g>
+
+  <!-- 3. Signal Coordinator DO -->
+  <g transform="translate(610, 190)">
+    <rect width="200" height="100" rx="12" fill="#1e293b" stroke="#818cf8" stroke-width="3" filter="url(#glow)"/>
+    <text x="100" y="40" fill="#f8fafc" font-size="16" font-weight="bold" text-anchor="middle">Signal Coordinator DO</text>
+    <text x="100" y="60" fill="#818cf8" font-size="13" text-anchor="middle">Threshold Detection</text>
+    <text x="100" y="78" fill="#94a3b8" font-size="12" text-anchor="middle">(3+ sessions)</text>
+  </g>
+
+  <!-- 4. Memory Agent -->
+  <g transform="translate(920, 200)">
+    <rect width="140" height="80" rx="12" fill="#1e293b" stroke="#334155" stroke-width="2"/>
+    <text x="70" y="35" fill="#f8fafc" font-size="16" font-weight="bold" text-anchor="middle">Memory Agent</text>
+    <text x="70" y="55" fill="#94a3b8" font-size="13" text-anchor="middle">(Kimi K2.5)</text>
+  </g>
+
+  <!-- 5. Facts Table -->
+  <g transform="translate(485, 380)">
+    <rect width="180" height="80" rx="12" fill="#1e293b" stroke="#334155" stroke-width="2"/>
+    <text x="90" y="35" fill="#f8fafc" font-size="16" font-weight="bold" text-anchor="middle">Facts Table</text>
+    <text x="90" y="55" fill="#94a3b8" font-size="13" text-anchor="middle">(Postgres / Durable)</text>
+  </g>
+
+  <!-- ================= EDGES ================= -->
+
+  <!-- 1 -> 2: Session Events -->
+  <g>
+    <line x1="230" y1="240" x2="330" y2="240" stroke="#818cf8" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="280" y="225" fill="#cbd5e1" font-size="12" text-anchor="middle">session events</text>
+  </g>
+
+  <!-- 2 -> 3: Topic Extraction -->
+  <g>
+    <line x1="500" y1="240" x2="600" y2="240" stroke="#818cf8" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="550" y="225" fill="#cbd5e1" font-size="12" text-anchor="middle">topic + entity extraction</text>
+  </g>
+
+  <!-- 3 -> 4: Threshold Hit -->
+  <g>
+    <line x1="810" y1="240" x2="910" y2="240" stroke="#818cf8" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="860" y="225" fill="#cbd5e1" font-size="12" text-anchor="middle">threshold hit</text>
+  </g>
+
+  <!-- 4 -> 5: Memory Save -->
+  <g>
+    <path d="M 990 280 L 990 420 L 675 420" fill="none" stroke="#818cf8" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="830" y="410" fill="#cbd5e1" font-size="12" text-anchor="middle">memory-save (digest &amp; consolidate)</text>
+  </g>
+
+  <!-- 5 -> 1: Curated Injection -->
+  <g>
+    <path d="M 485 420 L 140 420 L 140 290" fill="none" stroke="#818cf8" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#arrow)"/>
+    <text x="310" y="410" fill="#cbd5e1" font-size="12" text-anchor="middle">curated memory injection (next session context)</text>
+  </g>
+
+</svg>

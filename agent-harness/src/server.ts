@@ -4729,7 +4729,6 @@ export default {
       );
     }
 
-    // ── Direct model TTFT benchmark ──
     // ── DB connectivity smoke test (auth-gated) ──
     if (url.pathname === "/api/db-check" && request.method === "POST") {
       const token = request.headers.get("x-migrate-token");
@@ -4745,11 +4744,72 @@ export default {
           ok: true,
           ms: Date.now() - t,
           postgres_version: version,
-          tables: tables.map((t) => t.tablename),
+          tables: tables.map((t: { tablename: string }) => t.tablename),
           table_count: tables.length,
         });
       } catch (err: any) {
         return Response.json({ ok: false, ms: Date.now() - t, error: err.message?.slice(0, 500) }, { status: 500 });
+      }
+    }
+
+    // ── Run arbitrary SQL (auth-gated, for one-off admin tasks) ──
+    if (url.pathname === "/api/db-exec" && request.method === "POST") {
+      const token = request.headers.get("x-migrate-token");
+      if (token !== env.ACCESS_CODE) return Response.json({ error: "Unauthorized" }, { status: 401 });
+      try {
+        const { sql: sqlText } = await request.json() as { sql: string };
+        if (!sqlText) return Response.json({ error: "Missing sql" }, { status: 400 });
+        const { Client } = await import("pg");
+        const client = new (Client as any)({ connectionString: (env.DB as any).connectionString });
+        await client.connect();
+        const result = await client.query(sqlText);
+        await client.end();
+        return Response.json({ ok: true, rowCount: result.rowCount, rows: result.rows?.slice(0, 50) });
+      } catch (err: any) {
+        return Response.json({ ok: false, error: err.message?.slice(0, 500) }, { status: 500 });
+      }
+    }
+
+    // ── One-shot schema migration (auth-gated, idempotent via IF NOT EXISTS) ──
+    // Runs all 3 migrations in order through Hyperdrive using the role's DDL perms.
+    if (url.pathname === "/api/migrate" && request.method === "POST") {
+      const token = request.headers.get("x-migrate-token");
+      if (token !== env.ACCESS_CODE) return Response.json({ error: "Unauthorized" }, { status: 401 });
+      const t = Date.now();
+      const results: Array<{ file: string; ms: number; ok: boolean; error?: string }> = [];
+      try {
+        const { MIGRATION_001_INIT, MIGRATION_002_X402, MIGRATION_003_EMAIL } = await import("./migrations");
+        const { Client } = await import("pg");
+        const client = new (Client as any)({ connectionString: (env.DB as any).connectionString });
+        await client.connect();
+
+        const migrations = [
+          { name: "001_init.sql", body: MIGRATION_001_INIT },
+          { name: "002_x402_a2a_mlm.sql", body: MIGRATION_002_X402 },
+          { name: "003_agent_email_phone.sql", body: MIGRATION_003_EMAIL },
+        ];
+
+        for (const m of migrations) {
+          const mt = Date.now();
+          try {
+            await client.query(m.body);
+            results.push({ file: m.name, ms: Date.now() - mt, ok: true });
+          } catch (err: any) {
+            results.push({ file: m.name, ms: Date.now() - mt, ok: false, error: err.message?.slice(0, 400) });
+          }
+        }
+
+        const tableRes = await client.query("SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename");
+        await client.end();
+        return Response.json({
+          ok: results.every((r) => r.ok),
+          total_ms: Date.now() - t,
+          migrations: results,
+          tables: tableRes.rows.map((r: any) => r.tablename),
+          table_count: tableRes.rows.length,
+        });
+      } catch (err: any) {
+        return Response.json({ ok: false, ms: Date.now() - t, error: err.message?.slice(0, 500), results }, { status: 500 });
       }
     }
 
@@ -4925,26 +4985,28 @@ export default {
           switch (evt.type) {
             case "session": {
               const p = evt.payload;
+              // Schema 001_init: sessions(id, org_id, agent_name, model, status,
+              // turn_count, tool_call_count, input_tokens, output_tokens, cost_usd,
+              // duration_ms, error, metadata, created_at, completed_at)
               await sql`
-                INSERT INTO sessions (session_id, org_id, agent_name, model, status,
-                  input_text, output_text, cost_total_usd, wall_clock_seconds,
-                  step_count, action_count, channel, trace_id, termination_reason, created_at)
-                VALUES (${p.session_id}, ${p.org_id}, ${p.agent_name}, ${p.model},
-                  ${p.status}, ${String(p.input_text || "").slice(0, 2000)},
-                  ${String(p.output_text || "").slice(0, 4000)},
-                  ${p.cost_usd || 0}, ${p.wall_clock_seconds || 0},
+                INSERT INTO sessions (id, org_id, agent_name, model, status,
+                  cost_usd, duration_ms, turn_count, tool_call_count,
+                  metadata, created_at, completed_at)
+                VALUES (${p.session_id}, ${p.org_id}, ${p.agent_name}, ${p.model || ''},
+                  ${p.status || 'running'},
+                  ${p.cost_usd || 0}, ${Math.round((Number(p.wall_clock_seconds) || 0) * 1000)},
                   ${p.step_count || 0}, ${p.action_count || 0},
-                  ${p.channel || "web"}, ${p.trace_id || ""},
-                  ${p.termination_reason || ""}, ${p.created_at || new Date().toISOString()})
-                ON CONFLICT (session_id) DO UPDATE SET
+                  ${JSON.stringify({ channel: p.channel, trace_id: p.trace_id, termination_reason: p.termination_reason, input_text: String(p.input_text || '').slice(0, 2000), output_text: String(p.output_text || '').slice(0, 4000) })}::jsonb,
+                  ${p.created_at || new Date().toISOString()},
+                  ${p.status === 'completed' || p.status === 'failed' ? (p.completed_at || new Date().toISOString()) : null})
+                ON CONFLICT (id) DO UPDATE SET
                   status = EXCLUDED.status,
-                  output_text = EXCLUDED.output_text,
-                  cost_total_usd = GREATEST(sessions.cost_total_usd, EXCLUDED.cost_total_usd),
-                  wall_clock_seconds = GREATEST(sessions.wall_clock_seconds, EXCLUDED.wall_clock_seconds),
-                  step_count = GREATEST(sessions.step_count, EXCLUDED.step_count),
-                  action_count = GREATEST(sessions.action_count, EXCLUDED.action_count),
-                  termination_reason = COALESCE(EXCLUDED.termination_reason, sessions.termination_reason),
-                  updated_at = now()
+                  cost_usd = GREATEST(sessions.cost_usd, EXCLUDED.cost_usd),
+                  duration_ms = GREATEST(sessions.duration_ms, EXCLUDED.duration_ms),
+                  turn_count = GREATEST(sessions.turn_count, EXCLUDED.turn_count),
+                  tool_call_count = GREATEST(sessions.tool_call_count, EXCLUDED.tool_call_count),
+                  metadata = EXCLUDED.metadata,
+                  completed_at = EXCLUDED.completed_at
               `;
               break;
             }
