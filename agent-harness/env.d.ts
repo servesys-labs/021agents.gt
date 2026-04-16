@@ -23,6 +23,8 @@ declare namespace Cloudflare {
 		MYBROWSER: Fetcher;
 		/** Service binding to agent-core worker for DO routing */
 		AGENT_CORE: Fetcher;
+		/** Workflows binding for durable long-running tasks */
+		TASK_WORKFLOW: Workflow;
 		/** Email Workers send binding for outbound email */
 		EMAIL: SendEmail;
 		/** HMAC secret for secure email reply routing */
