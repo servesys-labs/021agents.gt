@@ -36,7 +36,7 @@ import {
   stepCountIs,
 } from "ai";
 import { z } from "zod";
-import { getSandbox, Sandbox as BaseSandbox } from "@cloudflare/sandbox";
+import { getSandbox, Sandbox as BaseSandbox, ContainerProxy } from "@cloudflare/sandbox";
 import { createCodeTool, generateTypes } from "@cloudflare/codemode/ai";
 import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 import puppeteer from "@cloudflare/puppeteer";
@@ -4062,6 +4062,9 @@ export class TaskWorkflow extends AgentWorkflow<ChatAgent, TaskWorkflowParams> {
 
 // ── Worker fetch handler ─────────────────────────────────────────────────────
 
+// Required for Container outbound interception to work
+export { ContainerProxy };
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -4238,6 +4241,18 @@ export default {
           description,
         }))
       );
+    }
+
+    // ── Direct container test ──
+    if (url.pathname === "/api/test-container") {
+      const t = Date.now();
+      try {
+        const sb = getSandbox(env.Sandbox, "container-test-v2");
+        const r = await sb.exec("echo OK && python3 --version", { timeout: 30_000 } as any);
+        return Response.json({ ok: true, ms: Date.now()-t, stdout: r.stdout, stderr: r.stderr, exit: r.exitCode });
+      } catch (e: any) {
+        return Response.json({ ok: false, ms: Date.now()-t, error: e.message?.slice(0,500) });
+      }
     }
 
     // ── Sandbox terminal PTY (WebSocket) ──
