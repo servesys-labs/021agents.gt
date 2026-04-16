@@ -19,7 +19,8 @@
 import { createWorkersAI } from "workers-ai-provider";
 import { createOpenAI } from "@ai-sdk/openai";
 import { withVoice, WorkersAIFluxSTT, WorkersAINova3STT, WorkersAITTS, type VoiceTurnContext, type Transcriber } from "@cloudflare/voice";
-import { Agent, routeAgentRequest, callable } from "agents";
+import { Agent, routeAgentRequest, callable, routeAgentEmail, getAgentByName } from "agents";
+import { createHeaderBasedEmailResolver, type AgentEmail } from "agents/email";
 import {
   AIChatAgent,
   type OnChatMessageOptions,
@@ -1998,6 +1999,63 @@ export class ChatAgent extends Think<Env> {
   }
 
   getMaxSteps() { return 10; }
+
+  // ── Email channel (SDK pattern: onEmail + sendEmail) ──
+
+  private _ensureEmailTable() {
+    this.sql`CREATE TABLE IF NOT EXISTS agent_emails (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      message_id TEXT,
+      from_addr TEXT NOT NULL,
+      to_addr TEXT NOT NULL,
+      subject TEXT NOT NULL DEFAULT '',
+      body TEXT NOT NULL DEFAULT '',
+      direction TEXT NOT NULL DEFAULT 'inbound',
+      is_read INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    )`;
+  }
+
+  async onEmail(email: AgentEmail) {
+    try {
+      const PostalMime = (await import("postal-mime")).default;
+      const raw = await email.getRaw();
+      const parsed = await PostalMime.parse(raw);
+
+      const subject = parsed.subject || "(no subject)";
+      const body = parsed.text || parsed.html?.replace(/<[^>]*>/g, "") || "";
+
+      // Store inbound email
+      this._ensureEmailTable();
+      this.sql`INSERT INTO agent_emails (message_id, from_addr, to_addr, subject, body, direction, created_at)
+        VALUES (${parsed.messageId || ""}, ${email.from}, ${email.to}, ${subject}, ${body.slice(0, 10000)}, 'inbound', ${new Date().toISOString()})`;
+
+      // Auto-reply using the agent's brain
+      const config = getTenantConfig(this.name);
+      const { generateText: genText } = await import("ai");
+      const result = await genText({
+        model: this.getModel(),
+        system: `${config.systemPrompt}\n\nChannel: Email. Be professional, concise. Plain text only — no markdown. Sign off appropriately.`,
+        messages: [{ role: "user" as const, content: `[Email from ${email.from}]\nSubject: ${subject}\n\n${body.slice(0, 4000)}` }],
+      });
+
+      if (result.text && this.env.EMAIL) {
+        await this.sendEmail({
+          binding: this.env.EMAIL,
+          to: email.from,
+          from: email.to,
+          subject: `Re: ${subject}`,
+          text: result.text,
+        });
+
+        // Store outbound
+        this.sql`INSERT INTO agent_emails (from_addr, to_addr, subject, body, direction, created_at)
+          VALUES (${email.to}, ${email.from}, ${"Re: " + subject}, ${result.text.slice(0, 10000)}, 'outbound', ${new Date().toISOString()})`;
+      }
+    } catch (err) {
+      console.error("[email] onEmail failed:", err);
+    }
+  }
 
   // ── Session: context blocks + compaction ──
   // Think 0.2.2 calls configureSession() in onStart and auto-merges
@@ -4391,6 +4449,40 @@ export default {
   //   → this consumer batches events → Hyperdrive → Postgres INSERT
   // DLQ: failed messages after 5 retries go to harness-telemetry-dlq
   //   → DLQ consumer logs them for manual investigation
+  // ── Email handler — Cloudflare Email Routing delivers inbound email here ──
+  async email(message: ForwardableEmailMessage, env: Env): Promise<void> {
+    try {
+      // Route to the correct ChatAgent DO based on the recipient address
+      // e.g., my-assistant@021agents.ai → ChatAgent DO "orgid-my-assistant"
+      await routeAgentEmail(message, env, {
+        resolver: async (msg: any) => {
+          const toAddr = (msg.to || "").toLowerCase();
+          const handle = toAddr.split("@")[0]?.split("+")[0];
+          if (!handle) return null;
+
+          // Look up agent by email address in Postgres
+          try {
+            const pg = (await import("postgres")).default;
+            const sql = pg((env.DB as any).connectionString, { max: 1, fetch_types: false, prepare: false, idle_timeout: 5, connect_timeout: 3 });
+            const [row] = await sql`SELECT org_id, name FROM agents WHERE email_address = ${toAddr} AND is_active = true LIMIT 1`;
+            await sql.end();
+            if (row) {
+              const shortOrg = row.org_id.length > 12 ? row.org_id.slice(-8) : row.org_id;
+              return { agentName: "ChatAgent", agentId: `${shortOrg}-${row.name}` };
+            }
+          } catch (err) {
+            console.error("[email] DB lookup failed:", err);
+          }
+
+          // Fallback: treat local part as agent name
+          return { agentName: "ChatAgent", agentId: handle };
+        },
+      });
+    } catch (err) {
+      console.error("[email] Routing failed:", err);
+    }
+  },
+
   async queue(batch: MessageBatch, env: Env): Promise<void> {
     // DLQ messages: just log them — operator can replay manually
     if (batch.queue === "harness-telemetry-dlq") {

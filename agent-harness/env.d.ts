@@ -21,6 +21,10 @@ declare namespace Cloudflare {
 		MYBROWSER: Fetcher;
 		/** Service binding to agent-core worker for DO routing */
 		AGENT_CORE: Fetcher;
+		/** Email Workers send binding for outbound email */
+		EMAIL: SendEmail;
+		/** HMAC secret for secure email reply routing */
+		EMAIL_SECRET?: string;
 		/** Dynamic Worker Loader for CodeMode + extensions */
 		LOADER: any;
 		/** Railway Postgres via Hyperdrive — durable cross-org data */

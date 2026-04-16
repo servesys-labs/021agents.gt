@@ -263,10 +263,13 @@ app.get("/api/v1/agents/:name", async (c) => {
 app.post("/api/v1/agents", async (c) => {
   const orgId = c.get("orgId");
   const body = await c.req.json();
+  const handle = (body.name || "").toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-").slice(0, 40);
+  const emailAddress = `${handle}@021agents.ai`;
   const sql = await getDb(c.env.DB);
   const [agent] = await sql`
-    INSERT INTO agents (handle, name, display_name, description, config, org_id)
-    VALUES (${body.name}, ${body.name}, ${body.name}, ${body.description || ""}, ${JSON.stringify(body.config || {})}::jsonb, ${orgId})
+    INSERT INTO agents (handle, name, display_name, description, config, org_id, email_address, phone_number)
+    VALUES (${handle}, ${body.name}, ${body.displayName || body.name}, ${body.description || ""},
+            ${JSON.stringify(body.config || {})}::jsonb, ${orgId}, ${emailAddress}, ${body.phone_number || null})
     RETURNING *
   `;
   await sql.end();
