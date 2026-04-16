@@ -173,7 +173,7 @@
               {#each phase.tools as tc (tc.call_id)}
                 {@const isDone = !!(tc.output || tc.error)}
                 {@const hasError = !!tc.error}
-                {@const summary = getToolSummary(tc.name, tc.input, tc.output)}
+                {@const summary = getToolSummary(tc.name, tc.input, tc.output, tc.error)}
                 <div class="flex items-start gap-2 py-0.5 pl-4">
                   {#if hasError}
                     <span class="mt-0.5 flex h-3 w-3 shrink-0 items-center justify-center text-[8px] text-red-400">✕</span>
@@ -203,7 +203,7 @@
         {#each toolCalls as tc (tc.call_id)}
           {@const isDone = !!(tc.output || tc.error)}
           {@const hasError = !!tc.error}
-          {@const summary = getToolSummary(tc.name, tc.input, tc.output)}
+          {@const summary = getToolSummary(tc.name, tc.input, tc.output, tc.error)}
           <div class="flex items-start gap-2 py-0.5">
             {#if hasError}
               <span class="mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded text-[9px] text-red-400">✕</span>
