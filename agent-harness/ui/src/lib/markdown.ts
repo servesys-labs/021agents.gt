@@ -127,9 +127,9 @@ export function wrapCodeBlocksWithHeader(html: string): string {
         : `<span></span>`;
 
       return `<div class="code-block-wrapper group relative my-3 overflow-hidden rounded-lg border border-border" data-block-id="${blockId}">
-        <div class="flex items-center justify-between bg-muted/50 px-3 py-1.5">
+        <div class="flex items-center justify-between bg-muted/50 px-3 py-1.5 sticky top-0 z-[1]">
           ${label}
-          <button type="button" class="copy-code-btn rounded px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" data-block-id="${blockId}" aria-label="Copy code">Copy</button>
+          <button type="button" class="copy-code-btn rounded-md border border-border/40 px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring" data-block-id="${blockId}" aria-label="Copy code">Copy</button>
         </div>
         <pre class="overflow-x-auto bg-code-background p-4 text-sm leading-relaxed"><code${attrs}>${code}</code></pre>
       </div>`;
