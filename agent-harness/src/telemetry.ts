@@ -296,9 +296,13 @@ export function emit(env: TelemetryBindings, event: TelemetryEvent): void {
     try {
       const queueEvent = mapToQueueEvent(event, ts);
       if (queueEvent) {
-        env.TELEMETRY_QUEUE.send(queueEvent).catch(() => {});
+        env.TELEMETRY_QUEUE.send(queueEvent).catch((err) => {
+          console.error(`[telemetry] queue.send failed for ${event.type}:`, err);
+        });
       }
-    } catch {} // never block
+    } catch (err) {
+      console.error(`[telemetry] queue emit error for ${event.type}:`, err);
+    }
   }
 }
 
