@@ -4730,6 +4730,29 @@ export default {
     }
 
     // ── Direct model TTFT benchmark ──
+    // ── DB connectivity smoke test (auth-gated) ──
+    if (url.pathname === "/api/db-check" && request.method === "POST") {
+      const token = request.headers.get("x-migrate-token");
+      if (token !== env.ACCESS_CODE) return Response.json({ error: "Unauthorized" }, { status: 401 });
+      const t = Date.now();
+      try {
+        const pg = (await import("postgres")).default;
+        const sql = pg((env.DB as any).connectionString, { max: 1, fetch_types: false, prepare: false, idle_timeout: 5, connect_timeout: 8 });
+        const [{ version }] = await sql<{ version: string }>`SHOW server_version`;
+        const tables = await sql<{ tablename: string }>`SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename`;
+        await sql.end();
+        return Response.json({
+          ok: true,
+          ms: Date.now() - t,
+          postgres_version: version,
+          tables: tables.map((t) => t.tablename),
+          table_count: tables.length,
+        });
+      } catch (err: any) {
+        return Response.json({ ok: false, ms: Date.now() - t, error: err.message?.slice(0, 500) }, { status: 500 });
+      }
+    }
+
     if (url.pathname === "/api/test-model") {
       const model = url.searchParams.get("model") || "@cf/moonshotai/kimi-k2.5";
       const prompt = url.searchParams.get("prompt") || "What is 2+2? Answer with just the number.";
