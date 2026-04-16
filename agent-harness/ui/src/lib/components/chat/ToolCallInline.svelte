@@ -23,6 +23,7 @@
   let expanded = $state(false);
   let showArgs = $state(false);
   let showFullResult = $state(false);
+  let toolCallEl: HTMLDivElement | undefined = $state();
 
   let isPending = $derived(!toolCall.output && !toolCall.error);
   let hasError = $derived(!!toolCall.error);
@@ -266,8 +267,25 @@
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
+  bind:this={toolCallEl}
   class={cn("flex items-center gap-1.5 py-0.5 text-xs cursor-pointer", hasError && "text-destructive")}
-  onclick={() => { expanded = !expanded; if (!expanded) { showArgs = false; showFullResult = false; } }}
+  onclick={() => {
+    const wasExpanded = expanded;
+    const scrollContainer = toolCallEl?.closest("[data-chat-scroll]") ?? document.scrollingElement ?? document.documentElement;
+    const savedTop = toolCallEl?.getBoundingClientRect().top ?? 0;
+    expanded = !expanded;
+    if (!expanded) { showArgs = false; showFullResult = false; }
+    // On collapse, restore scroll so the element stays in the same viewport position
+    if (wasExpanded && toolCallEl && scrollContainer) {
+      requestAnimationFrame(() => {
+        const newTop = toolCallEl!.getBoundingClientRect().top;
+        const drift = newTop - savedTop;
+        if (Math.abs(drift) > 2) {
+          scrollContainer.scrollTop -= drift;
+        }
+      });
+    }
+  }}
 >
   <!-- Status icon -->
   {#if isPending}

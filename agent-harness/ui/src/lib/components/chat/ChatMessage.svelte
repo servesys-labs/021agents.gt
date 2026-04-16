@@ -54,6 +54,34 @@
 
   let renderedHtml = $state("");
 
+  // ── Smooth text streaming animation ──
+  // Instead of rendering raw token dumps, reveal characters progressively
+  let displayedContent = $state("");
+  let animationTarget = "";
+  let animFrameId = 0;
+
+  $effect(() => {
+    if (message.role === "assistant" && streaming) {
+      animationTarget = message.content || "";
+      if (displayedContent.length < animationTarget.length) {
+        const animate = () => {
+          const remaining = animationTarget.length - displayedContent.length;
+          const charsPerFrame = Math.max(1, Math.min(8, Math.ceil(remaining / 30)));
+          displayedContent = animationTarget.slice(0, displayedContent.length + charsPerFrame);
+          if (displayedContent.length < animationTarget.length) {
+            animFrameId = requestAnimationFrame(animate);
+          }
+        };
+        animFrameId = requestAnimationFrame(animate);
+      }
+    } else {
+      displayedContent = message.content || "";
+    }
+    return () => {
+      if (animFrameId) cancelAnimationFrame(animFrameId);
+    };
+  });
+
   // ── Spinning verb + timer for streaming state ──
   let verbIdx = $state(randomVerbIndex());
   let streamStart = $state(Date.now());
@@ -91,10 +119,10 @@
     return `\u2193 ${label} tokens`;
   });
 
-  // Render markdown reactively
+  // Render markdown reactively — uses displayedContent for smooth streaming animation
   $effect(() => {
-    if (message.role === "assistant" && message.content) {
-      renderStreamingMarkdown(message.content).then((html) => {
+    if (message.role === "assistant" && displayedContent) {
+      renderStreamingMarkdown(displayedContent).then((html) => {
         renderedHtml = wrapCodeBlocksWithHeader(html);
       });
     }
@@ -257,7 +285,16 @@
         <div class="mb-3 space-y-1.5">
           {#each message.segments as seg}
             {#if seg.type === "thinking"}
-              <p class="whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground/70 italic">{seg.content}</p>
+              <details class="group/thinking rounded-lg border border-border/50 bg-muted/30">
+                <summary class="flex cursor-pointer items-center gap-2 px-3 py-2 text-xs text-muted-foreground select-none">
+                  <svg class="h-3.5 w-3.5 shrink-0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a8 8 0 0 0-8 8c0 3.4 2.1 6.3 5 7.4V19a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1v-1.6c2.9-1.1 5-4 5-7.4a8 8 0 0 0-8-8z"/><path d="M10 22h4"/></svg>
+                  <span>Reasoning</span>
+                  <svg class="ml-auto h-3 w-3 transition-transform group-open/thinking:rotate-180" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+                </summary>
+                <div class="border-t border-border/30 px-3 py-2 text-xs text-muted-foreground/80 leading-relaxed">
+                  <p class="whitespace-pre-wrap">{seg.content}</p>
+                </div>
+              </details>
             {:else if seg.type === "tool_calls"}
               <ToolCallGroup toolCalls={seg.calls} {agentName} compact={seg.calls.length > 1} />
             {/if}
@@ -266,7 +303,16 @@
       {:else}
         <!-- Fallback for messages loaded from history (no segments) -->
         {#if message.thinking}
-          <p class="mb-3 whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground/70 italic">{message.thinking}</p>
+          <details class="mb-3 group/thinking rounded-lg border border-border/50 bg-muted/30">
+            <summary class="flex cursor-pointer items-center gap-2 px-3 py-2 text-xs text-muted-foreground select-none">
+              <svg class="h-3.5 w-3.5 shrink-0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a8 8 0 0 0-8 8c0 3.4 2.1 6.3 5 7.4V19a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1v-1.6c2.9-1.1 5-4 5-7.4a8 8 0 0 0-8-8z"/><path d="M10 22h4"/></svg>
+              <span>Reasoning</span>
+              <svg class="ml-auto h-3 w-3 transition-transform group-open/thinking:rotate-180" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+            </summary>
+            <div class="border-t border-border/30 px-3 py-2 text-xs text-muted-foreground/80 leading-relaxed">
+              <p class="whitespace-pre-wrap">{message.thinking}</p>
+            </div>
+          </details>
         {/if}
         {#if toolTurns.length > 0}
           <div class="mb-3 space-y-1.5">
@@ -289,37 +335,37 @@
         </div>
       {/if}
 
-      <!-- Follow-up suggestions (clickable buttons that pre-fill chat input) -->
-      {#if followUps.length > 0}
-        <div class="mt-4 space-y-2">
-          <p class="text-xs font-semibold text-muted-foreground">Follow-up</p>
-          {#each followUps as suggestion}
+      <!-- Follow-up suggestion pills (compact, inline after every completed turn) -->
+      {#if !streaming && followUps.length > 0}
+        <div class="mt-3 flex flex-wrap gap-1.5">
+          {#each followUps.slice(0, 3) as suggestion}
             <button
-              class="group flex w-full items-start gap-2 rounded-lg border border-border/50 bg-card/30 px-3 py-2.5 text-left text-sm text-primary/80 hover:border-primary/30 hover:bg-primary/5 hover:text-primary transition-all"
+              class="rounded-full border border-border/60 px-3 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
               onclick={() => {
-                // Dispatch event to pre-fill chat input with this suggestion
                 window.dispatchEvent(new CustomEvent("chat:followup", { detail: suggestion }));
               }}
             >
-              <span class="mt-0.5 text-primary/40 group-hover:text-primary/70 transition-colors">↵</span>
-              <span>{suggestion}</span>
+              {suggestion}
             </button>
           {/each}
         </div>
       {/if}
 
-      <!-- Streaming progress (enhanced with phase + tokens/sec + tool progress) -->
+      <!-- Streaming progress (enhanced with pulsing dot + phase + tokens/sec + tool progress) -->
       {#if streaming}
         <div class="mt-3 space-y-2">
-          <!-- Phase indicator -->
+          <!-- Phase indicator with pulsing dot -->
           <div class="flex items-center gap-2">
-            <span class="text-sm">{phaseIcon}</span>
+            <span class="relative flex h-2 w-2">
+              <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary/60"></span>
+              <span class="relative inline-flex h-2 w-2 rounded-full bg-primary"></span>
+            </span>
             <span class="bg-gradient-to-r from-muted-foreground via-foreground to-muted-foreground bg-[length:200%_100%] bg-clip-text text-xs font-medium text-transparent animate-shimmer">
               {phaseLabel}...
             </span>
-            <span class="text-[10px] text-muted-foreground/40">{streamElapsedLabel}</span>
+            <span class="text-[10px] tabular-nums text-muted-foreground/40">{streamElapsedLabel}</span>
             {#if tokensPerSec > 0}
-              <span class="text-[10px] text-muted-foreground/40">{tokensPerSec} tok/s</span>
+              <span class="text-[10px] tabular-nums text-muted-foreground/40">{tokensPerSec} tok/s</span>
             {/if}
           </div>
 
@@ -328,11 +374,11 @@
             <div class="flex items-center gap-2">
               <div class="h-1 flex-1 rounded-full bg-muted overflow-hidden">
                 <div
-                  class="h-full rounded-full bg-primary transition-all duration-300"
+                  class="h-full rounded-full bg-primary transition-all duration-500 ease-out"
                   style="width: {(toolProgress.completed / toolProgress.total) * 100}%"
                 ></div>
               </div>
-              <span class="text-[10px] text-muted-foreground/50">
+              <span class="text-[10px] tabular-nums text-muted-foreground/50">
                 {toolProgress.completed}/{toolProgress.total} tools
               </span>
             </div>
@@ -340,10 +386,10 @@
         </div>
 
         <div class="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
-          <!-- Keep the rotating verb for variety -->
+          <!-- Rotating verb + token count -->
           <span class="text-[10px] text-muted-foreground/30 italic">{streamVerb}</span>
           {#if inlineTokenCount}
-            <span class="text-[10px] text-muted-foreground/30">{inlineTokenCount}</span>
+            <span class="text-[10px] tabular-nums text-muted-foreground/30">{inlineTokenCount}</span>
           {/if}
         </div>
       {/if}
@@ -388,121 +434,5 @@
   </div>
 {/if}
 
-<style>
-  :global(.prose-chat p) {
-    margin-top: 0.5em;
-    margin-bottom: 0.5em;
-  }
-  :global(.prose-chat p:first-child) {
-    margin-top: 0;
-  }
-  :global(.prose-chat p:last-child) {
-    margin-bottom: 0;
-  }
-  :global(.prose-chat a) {
-    color: oklch(0.55 0.15 250);
-    text-decoration: underline;
-    text-underline-offset: 2px;
-  }
-  :global(.dark .prose-chat a) {
-    color: oklch(0.7 0.15 250);
-  }
-  :global(.prose-chat a:hover) {
-    opacity: 0.8;
-  }
-  :global(.prose-chat strong) {
-    font-weight: 600;
-  }
-  :global(.prose-chat em) {
-    font-style: italic;
-  }
-  :global(.prose-chat code:not(pre code)) {
-    background: var(--code-background);
-    color: var(--code-foreground);
-    padding: 0.15em 0.35em;
-    border-radius: 0.25rem;
-    font-size: 0.85em;
-    font-family: var(--font-mono);
-  }
-  :global(.prose-chat pre) {
-    margin: 0;
-  }
-  :global(.prose-chat pre code) {
-    font-family: var(--font-mono);
-    font-size: 0.8125rem;
-    line-height: 1.6;
-  }
-  :global(.prose-chat ul) {
-    list-style-type: disc;
-    padding-left: 1.5em;
-    margin: 0.5em 0;
-  }
-  :global(.prose-chat ol) {
-    list-style-type: decimal;
-    padding-left: 1.5em;
-    margin: 0.5em 0;
-  }
-  :global(.prose-chat li) {
-    margin: 0.25em 0;
-  }
-  :global(.prose-chat blockquote) {
-    border-left: 3px solid var(--border);
-    padding-left: 1em;
-    margin: 0.75em 0;
-    color: var(--muted-foreground);
-    font-style: italic;
-  }
-  :global(.prose-chat h1) {
-    font-size: 1.375rem;
-    font-weight: 600;
-    margin: 1em 0 0.5em;
-    letter-spacing: -0.01em;
-  }
-  :global(.prose-chat h2) {
-    font-size: 1.175rem;
-    font-weight: 600;
-    margin: 0.875em 0 0.375em;
-    letter-spacing: -0.01em;
-  }
-  :global(.prose-chat h3) {
-    font-size: 1rem;
-    font-weight: 600;
-    margin: 0.75em 0 0.25em;
-  }
-  :global(.prose-chat table) {
-    width: 100%;
-    border-collapse: collapse;
-    margin: 0.75em 0;
-    font-size: 0.8125rem;
-  }
-  :global(.prose-chat th) {
-    text-align: left;
-    font-weight: 600;
-    border-bottom: 2px solid var(--border);
-    padding: 0.5em 0.75em;
-  }
-  :global(.prose-chat td) {
-    border-bottom: 1px solid var(--border);
-    padding: 0.5em 0.75em;
-  }
-  :global(.prose-chat hr) {
-    border: none;
-    border-top: 1px solid var(--border);
-    margin: 1.5em 0;
-  }
-
-  /* highlight.js overrides to use design tokens */
-  :global(.prose-chat .hljs) {
-    background: transparent;
-    color: var(--code-foreground);
-  }
-
-  /* Shimmer animation for processing state */
-  @keyframes shimmer {
-    0% { background-position: 200% 0; }
-    100% { background-position: -200% 0; }
-  }
-  :global(.animate-shimmer) {
-    animation: shimmer 2s linear infinite;
-  }
-</style>
+<!-- prose-chat styles are defined globally in app.css -->
+<!-- shimmer + animate-ping animations come from app.css and Tailwind -->
