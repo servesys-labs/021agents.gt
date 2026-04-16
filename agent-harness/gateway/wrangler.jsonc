@@ -19,10 +19,11 @@
     { "binding": "CACHE", "id": "43f9f06e09654bfbb90ce11fb1b2799e" }
   ],
 
-  // Postgres via Hyperdrive (Pattern E): relational admin data
+  // Postgres via Hyperdrive (Pattern E): PlanetScale 021agents DB
+  // Both DB and DB_ADMIN point to the same DB for now; admin ops use psql-level auth.
   "hyperdrive": [
-    { "binding": "DB", "id": "775f7e11ce8c479993855531f728770a" },
-    { "binding": "DB_ADMIN", "id": "6f8984ddd503489895a7c97e6970f634" }
+    { "binding": "DB", "id": "fe47bb91b8994078b15537a0d023190d" },
+    { "binding": "DB_ADMIN", "id": "fe47bb91b8994078b15537a0d023190d" }
   ],
 
   // Analytics Engine (Pattern C): audit, telemetry, security events
