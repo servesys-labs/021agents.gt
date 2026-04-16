@@ -574,7 +574,7 @@ app.get("/api/v1/usage", async (c) => {
     SELECT
       agent_name,
       COUNT(*) as session_count,
-      COALESCE(SUM(cost_total_usd), 0) as total_cost
+      COALESCE(SUM(cost_usd), 0) as total_cost
     FROM sessions
     WHERE org_id = ${orgId} AND created_at > NOW() - (${days} || ' days')::interval
     GROUP BY agent_name
@@ -592,7 +592,7 @@ app.get("/api/v1/sessions", async (c) => {
   const orgId = c.get("orgId");
   const sql = await getDb(c.env.DB);
   const rows = await sql`
-    SELECT session_id, agent_name, status, model, cost_total_usd, created_at
+    SELECT id AS session_id, agent_name, status, model, cost_usd, created_at
     FROM sessions WHERE org_id = ${orgId}
     ORDER BY created_at DESC LIMIT 50
   `;
@@ -605,7 +605,7 @@ app.get("/api/v1/sessions/:id", async (c) => {
   const orgId = c.get("orgId");
   const sql = await getDb(c.env.DB);
   const [session] = await sql`
-    SELECT * FROM sessions WHERE session_id = ${sessionId} AND org_id = ${orgId}
+    SELECT * FROM sessions WHERE id = ${sessionId} AND org_id = ${orgId}
   `;
   await sql.end();
   if (!session) return c.json({ error: "Session not found" }, 404);
@@ -630,7 +630,7 @@ app.get("/api/v1/sessions/:id/turns", async (c) => {
 
   // Verify session belongs to this org
   const [session] = await sql`
-    SELECT session_id FROM sessions WHERE session_id = ${sessionId} AND org_id = ${orgId}
+    SELECT id AS session_id FROM sessions WHERE id = ${sessionId} AND org_id = ${orgId}
   `;
   if (!session) {
     await sql.end();
@@ -643,7 +643,7 @@ app.get("/api/v1/sessions/:id/turns", async (c) => {
   // execution events which we can query from the telemetry tables.
   // For now, return what we have from the session + any tool executions.
   const [detail] = await sql`
-    SELECT * FROM sessions WHERE session_id = ${sessionId}
+    SELECT * FROM sessions WHERE id = ${sessionId}
   `;
   await sql.end();
 
@@ -948,7 +948,7 @@ app.get("/api/v1/sessions/:id/trace", async (c) => {
   const sql = await getDb(c.env.DB);
 
   const [session] = await sql`
-    SELECT * FROM sessions WHERE session_id = ${sessionId} AND org_id = ${orgId}
+    SELECT * FROM sessions WHERE id = ${sessionId} AND org_id = ${orgId}
   `;
   if (!session) {
     await sql.end();
@@ -1078,8 +1078,8 @@ app.get("/api/v1/dashboard/stats", async (c) => {
         SELECT
           COUNT(*) AS total_sessions,
           COUNT(*) FILTER (WHERE status = 'running') AS active_sessions,
-          COALESCE(SUM(cost_total_usd), 0) AS total_cost_usd,
-          COALESCE(AVG(wall_clock_seconds) * 1000, 0) AS avg_latency_ms,
+          COALESCE(SUM(cost_usd), 0) AS total_cost_usd,
+          COALESCE(AVG(duration_ms), 0) AS avg_latency_ms,
           CASE WHEN COUNT(*) > 0
             THEN ROUND(100.0 * COUNT(*) FILTER (WHERE status = 'failed') / COUNT(*), 2)
             ELSE 0
