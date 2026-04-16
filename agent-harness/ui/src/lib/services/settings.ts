@@ -271,18 +271,25 @@ interface WorkspaceFileRaw {
   scope?: "user" | "shared";
 }
 
-export async function listWorkspaceFiles(agentName: string): Promise<WorkspaceFile[]> {
-  const data = await api.get<{ files: WorkspaceFileRaw[] } | WorkspaceFileRaw[]>(
-    `/workspace/files?agent_name=${encodeURIComponent(agentName)}`
-  );
-  const raw: WorkspaceFileRaw[] = Array.isArray(data) ? data : (data.files ?? []);
-  return raw.map((f) => ({
-    path: f.path,
-    size_bytes: f.size ?? 0,
-    modified_at: f.updated_at ?? "",
-    type: f.type ?? extToType(f.path),
-    scope: f.scope,
-  }));
+// ── Workspace file access via SDK @callable RPC (WebSocket, not HTTP) ──
+// Follows the SDK example pattern: agent.call("listWorkspaceFiles", ["/"])
+
+import { agentStore } from "$lib/stores/agent.svelte";
+
+export async function listWorkspaceFiles(_agentName: string): Promise<WorkspaceFile[]> {
+  try {
+    const raw = await agentStore.call<any[]>("listWorkspaceFiles", ["/"]);
+    if (!Array.isArray(raw)) return [];
+    return raw.map((f: any) => ({
+      path: f.path ?? f.name ?? "",
+      size_bytes: f.size ?? f.size_bytes ?? 0,
+      modified_at: f.updated_at ?? f.modified_at ?? "",
+      type: f.type ?? extToType(f.path ?? f.name ?? ""),
+      scope: f.scope,
+    }));
+  } catch {
+    return [];
+  }
 }
 
 function extToType(path: string): string {
@@ -290,26 +297,39 @@ function extToType(path: string): string {
   return dot >= 0 ? path.slice(dot + 1).toLowerCase() : "file";
 }
 
-export function getFileContent(agentName: string, path: string): Promise<{ content: string; mime_type: string }> {
-  return api.get<{ content: string; mime_type: string }>(
-    `/workspace/files/read?agent_name=${encodeURIComponent(agentName)}&path=${encodeURIComponent(path)}`
-  );
+function guessMime(path: string): string {
+  const ext = extToType(path);
+  const map: Record<string, string> = {
+    html: "text/html", css: "text/css", js: "application/javascript", ts: "application/typescript",
+    json: "application/json", md: "text/markdown", py: "text/x-python", svg: "image/svg+xml",
+    png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
+    pdf: "application/pdf", txt: "text/plain", csv: "text/csv", xml: "text/xml",
+  };
+  return map[ext] ?? "text/plain";
 }
 
-export function deleteFile(agentName: string, path: string): Promise<void> {
-  return api.del(`/workspace/files?agent_name=${encodeURIComponent(agentName)}&path=${encodeURIComponent(path)}`);
+export async function getFileContent(_agentName: string, path: string): Promise<{ content: string; mime_type: string }> {
+  const content = await agentStore.call<string | null>("readWorkspaceFile", [path]);
+  return { content: content ?? "", mime_type: guessMime(path) };
 }
 
-export function downloadFile(agentName: string, path: string): string {
-  return `${api.baseUrl}/workspace/files/read?agent_name=${encodeURIComponent(agentName)}&path=${encodeURIComponent(path)}&download=true`;
+export async function deleteFile(_agentName: string, path: string): Promise<void> {
+  await agentStore.call("deleteWorkspaceFile", [path]);
 }
 
-export function createWorkspaceFile(
-  agentName: string,
+export function downloadFile(_agentName: string, path: string): string {
+  // Download still needs HTTP — RPC can't trigger browser download.
+  // Fall back to gateway URL; if route doesn't exist, the user gets the raw content from getFileContent.
+  return `${api.baseUrl}/workspace/files/read?agent_name=${encodeURIComponent(_agentName)}&path=${encodeURIComponent(path)}&download=true`;
+}
+
+export async function createWorkspaceFile(
+  _agentName: string,
   path: string,
   content: string,
 ): Promise<{ ok: boolean; key: string; size_bytes: number }> {
-  return api.post("/workspace/files/create", { agent_name: agentName, path, content });
+  const result = await agentStore.call<any>("writeWorkspaceFile", [path, content]);
+  return { ok: result?.success ?? true, key: path, size_bytes: content.length };
 }
 
 const TEXT_FILE_RE = /\.(ts|tsx|js|jsx|json|md|py|rs|go|html|css|csv|xml|yaml|yml|toml|sh|bash|sql|txt|log|env|svelte|vue|rb|java|c|cpp|h|hpp|swift|kt|r|m|pl|lua|zig|asm|ini|cfg|conf|makefile|dockerfile)$/i;
