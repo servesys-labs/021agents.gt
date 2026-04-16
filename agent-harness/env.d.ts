@@ -10,6 +10,8 @@ declare namespace Cloudflare {
 		ACCESS_CODE: string;
 		SANDBOX_TRANSPORT?: string;
 		ChatAgent: DurableObjectNamespace<import("./src/server").ChatAgent>;
+		ResearchSpecialist: DurableObjectNamespace<import("./src/server").ResearchSpecialist>;
+		CodingSpecialist: DurableObjectNamespace<import("./src/server").CodingSpecialist>;
 		Sandbox: DurableObjectNamespace<import("./src/server").Sandbox>;
 		AgentSupervisor: DurableObjectNamespace<import("./src/server").AgentSupervisor>;
 		ReminderAgent: DurableObjectNamespace<import("./src/server").ReminderAgent>;
