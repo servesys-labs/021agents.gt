@@ -2458,24 +2458,25 @@ export class ChatAgent extends Think<Env> {
     const lastUser = [...msgs].reverse().find((m: any) => m.role === "user");
     const text = (lastUser?.parts?.find((p: any) => p.type === "text")?.text || "").toLowerCase();
 
-    // Heavy coding task → Kimi K2.5 (best SWE-bench, 256K context)
-    const codingCues = /\b(refactor|implement|fix bug|build app|write .* function|deploy|git commit|typescript|python|npm run|npx|docker)\b/;
-    const totalTokens = msgs.reduce((sum: number, m: any) => {
-      const content = typeof m.content === "string" ? m.content : JSON.stringify(m.parts || m.content || "");
-      return sum + Math.ceil(content.length / 4);
-    }, 0);
-    if (codingCues.test(text) && totalTokens > 4000) {
-      return workersai("@cf/moonshotai/kimi-k2.5" as any, { sessionAffinity: this.sessionAffinity });
+    // Quick non-tool queries → gpt-oss-120b (2s, best general knowledge)
+    // Only route here if no tools will be needed (pure Q&A, no file/sandbox ops)
+    const toolHints = /\b(read|write|edit|run|execute|deploy|search|fetch|screenshot|file|workspace|sandbox|server|git)\b/;
+    const mathHints = /\b(calculate|compute|solve|prove|theorem|equation|optimize)\b/;
+    const isShortMessage = text.length < 150 && !toolHints.test(text);
+
+    if (isShortMessage && !mathHints.test(text)) {
+      return workersai("@cf/openai/gpt-oss-120b" as any, { sessionAffinity: this.sessionAffinity });
     }
 
-    // Math/logic-heavy → DeepSeek-R1 distill (best GPQA)
-    const reasoningCues = /\b(calculate|solve|prove|theorem|integral|derivative|equation|probability|optimize)\b/;
-    if (reasoningCues.test(text)) {
+    // Math/logic-heavy (no tools needed) → DeepSeek-R1 distill
+    if (mathHints.test(text) && !toolHints.test(text)) {
       return workersai("@cf/deepseek-ai/deepseek-r1-distill-qwen-32b" as any, { sessionAffinity: this.sessionAffinity });
     }
 
-    // Default: gpt-oss-120b — best balance for general personal agent
-    return workersai("@cf/openai/gpt-oss-120b" as any, { sessionAffinity: this.sessionAffinity });
+    // Default for anything with tools or complex tasks: Kimi K2.5
+    // It's slow (~30s) but has proven native tool-calling in the AI SDK + 256K context.
+    // gpt-oss-* outputs tool calls as raw JSON text in workers-ai-provider, unusable for agents.
+    return undefined; // fall through to getModel() default (kimi-k2.5)
   }
 
   beforeTurn(ctx: any) {
@@ -4069,6 +4070,32 @@ export class ChatAgent extends Think<Env> {
   @callable({ description: "Get response branch versions for a message" })
   async getResponseVersions(userMessageId: string) {
     return this.session.getBranches(userMessageId);
+  }
+
+  // ── Workflows: durable execution for long-running tasks ──
+  // SDK pattern: this.runWorkflow() starts a checkpointed background task.
+  // Survives DO eviction, retries failed steps, can pause for approval.
+  // Use for: deep research, eval runs, RAG indexing, anything >30s.
+
+  @callable({ description: "Start a long-running background task via Workflows (durable, checkpointed, survives eviction). Returns workflow instance ID." })
+  async startBackgroundTask(
+    taskType: "eval" | "rag_embed" | "research",
+    payload: Record<string, unknown> = {},
+  ): Promise<{ workflowId: string; status: string }> {
+    const workflowId = await this.runWorkflow("TASK_WORKFLOW" as any, { taskType, payload });
+    return { workflowId, status: "started" };
+  }
+
+  @callable({ description: "Get status of a background workflow by ID" })
+  async getBackgroundTaskStatus(workflowId: string) {
+    const info = await this.getWorkflowStatus("TASK_WORKFLOW" as any, workflowId);
+    return info || { error: "Workflow not found" };
+  }
+
+  @callable({ description: "Cancel a running background workflow" })
+  async cancelBackgroundTask(workflowId: string) {
+    await this.terminateWorkflow(workflowId);
+    return { cancelled: workflowId };
   }
 
   @callable({ description: "Connect to an external MCP server. Set portal=true for Enterprise MCP Portal mode (collapses all tools into a single code tool — 94% token reduction for servers with many tools)." })

@@ -61,6 +61,12 @@
     { "binding": "ANALYTICS", "dataset": "agent_harness_telemetry" }
   ],
 
+  // Workflows — durable execution for long-running agent tasks
+  // (deep research, eval runs, RAG indexing, multi-step pipelines)
+  "workflows": [
+    { "name": "agent-task-workflow", "binding": "TASK_WORKFLOW", "class_name": "TaskWorkflow" }
+  ],
+
   // Cloudflare Container for Sandbox (code execution environment)
   "containers": [
     {
