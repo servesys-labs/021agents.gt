@@ -1564,7 +1564,11 @@ export class ChatAgent extends Think<Env> {
   // ── Durability: wrap chat turns in runFiber for crash recovery ──
   // If the DO is evicted mid-turn, onChatRecovery() fires on restart
   // and can resume streaming or persist partial results.
-  chatRecovery = true;
+  // Disabled: chatRecovery fibers from crashed container turns permanently jam the DO.
+  // The SDK's recovery flow has a race condition: _notifyStreamResuming excludes the
+  // connection before onChatRecovery runs, and pending tool calls block new turns.
+  // Re-enable once @cloudflare/think handles orphaned fibers gracefully.
+  chatRecovery = false;
 
   // ── Org/agent extraction from DO name (pattern: orgId-agentName-u-userId) ──
   private _getOrgId(): string {
@@ -2877,13 +2881,16 @@ export class ChatAgent extends Think<Env> {
       sessionCost: this._sessionCostUsd,
     });
 
-    // Persist partial results so they're not lost
-    if (partialText.length > 0) {
-      return { persist: true, continue: false };
-    }
+    // Force-clear the active stream and pending resume connections.
+    // Without this, _notifyStreamResuming adds new connections to the
+    // exclusion set BEFORE recovery runs, so they never receive messages.
+    try {
+      (this as any)._resumableStream?.clearAll();
+      (this as any)._pendingResumeConnections?.clear();
+    } catch {}
 
-    // No partial text — nothing to save, don't continue
-    return { persist: false, continue: false };
+    // Persist partial text if any, but never continue the dead turn
+    return { persist: partialText.length > 0, continue: false };
   }
 
   // ═══════════════════════════════════════════════════════════════════
