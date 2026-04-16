@@ -588,6 +588,7 @@
     <div
       bind:this={messagesEl}
       class="relative flex-1 overflow-y-auto"
+      data-chat-scroll
       onscroll={handleContainerScroll}
     >
       {#if !agent && !agentListStore.loading && agentListStore.agents.length > 0}
@@ -683,6 +684,7 @@
         <button
           class="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
           onclick={() => (historyOpen = false)}
+          aria-label="Close history"
         >
           <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
             <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
@@ -707,6 +709,7 @@
             <button
               class="shrink-0 text-muted-foreground hover:text-foreground"
               onclick={() => (conversationStore.searchQuery = "")}
+              aria-label="Clear search"
             >
               <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
@@ -755,6 +758,7 @@
                     />
                     <button
                       class="rounded p-0.5 text-xs text-primary hover:bg-primary/10"
+                      aria-label="Save rename"
                       onclick={() => {
                         if (renameValue.trim()) {
                           conversationStore.renameConversation(conv.id, renameValue.trim());
@@ -793,6 +797,7 @@
                     <!-- Context menu trigger -->
                     <button
                       class="shrink-0 rounded p-0.5 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-muted-foreground/10"
+                      aria-label="Conversation options"
                       onclick={(e) => { e.stopPropagation(); contextMenuId = contextMenuId === conv.id ? null : conv.id; }}
                     >
                       <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">

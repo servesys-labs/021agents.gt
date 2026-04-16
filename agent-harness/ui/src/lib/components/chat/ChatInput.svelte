@@ -104,8 +104,11 @@
 </script>
 
 <div class="bg-background px-4 pb-4 pt-3 shadow-[0_-1px_3px_0_rgba(0,0,0,0.06)]">
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="relative mx-auto max-w-4xl"
+    role="region"
+    aria-label="Message composer with file drop"
     ondragover={handleDragOver}
     ondragleave={handleDragLeave}
     ondrop={handleDrop}
