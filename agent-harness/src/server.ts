@@ -1599,12 +1599,48 @@ export class ChatAgent extends Think<Env> {
   // This avoids replaying stale tool states after container-level failures.
   chatRecovery = true;
 
-  // ── Org/agent extraction from DO name (pattern: orgId-agentName-u-userId) ──
-  private _getOrgId(): string {
+  // ── Identity: full org_id + user_id extracted from JWT on first connect ──
+  // Stored in DO SQLite so subsequent turns don't re-parse JWT.
+  // DO name format: {shortOrg}-{agentName}-u-{shortUser} — short suffixes only, for DO
+  // naming constraints. Never use DO name parts as DB keys; always use persisted identity.
+
+  private _ensureIdentityTable() {
+    this.sql`CREATE TABLE IF NOT EXISTS cf_agent_identity (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    )`;
+  }
+
+  /** Persist the identity extracted from the first authenticated request. */
+  private _persistIdentity(orgId: string, userId: string, agentHandle: string) {
+    try {
+      this._ensureIdentityTable();
+      this.sql`INSERT OR REPLACE INTO cf_agent_identity (key, value) VALUES ('org_id', ${orgId})`;
+      this.sql`INSERT OR REPLACE INTO cf_agent_identity (key, value) VALUES ('user_id', ${userId})`;
+      this.sql`INSERT OR REPLACE INTO cf_agent_identity (key, value) VALUES ('agent_handle', ${agentHandle})`;
+    } catch {}
+  }
+
+  /** Read the full org_id from persisted identity. Returns null if not yet set. */
+  private _readPersistedOrgId(): string | null {
+    try {
+      this._ensureIdentityTable();
+      const [row] = this.sql<{ value: string }>`SELECT value FROM cf_agent_identity WHERE key = 'org_id'`;
+      return row?.value || null;
+    } catch { return null; }
+  }
+
+  /** Short suffix from DO name — ONLY for logging / DO name references. Never a DB key. */
+  private _getShortOrgSuffix(): string {
     try {
       const parts = this.name?.split("-u-")?.[0]?.split("-") || [];
       return parts.length > 1 ? parts[0] : "default";
     } catch { return "default"; }
+  }
+
+  /** The authoritative org_id for this DO. Used for all DB writes. */
+  private _getOrgId(): string {
+    return this._readPersistedOrgId() || this._getShortOrgSuffix();
   }
 
   private _getAgentHandle(): string {
@@ -1715,6 +1751,25 @@ export class ChatAgent extends Think<Env> {
 
   async onConnect(connection: any, ctx: any) {
     try { this._scrubStaleRecoveryState("connect_guard"); } catch {}
+
+    // Extract identity from JWT on first connect (one-time setup per DO).
+    // The JWT lives in the query string: ?token=eyJ...
+    // Payload: { user_id, org_id, email, iat, exp }
+    try {
+      if (!this._readPersistedOrgId()) {
+        const request: Request | undefined = ctx?.request;
+        const url = request ? new URL(request.url) : null;
+        const token = url?.searchParams.get("token") || url?.searchParams.get("_pk") || "";
+        if (token && token.split(".").length === 3) {
+          const payload = JSON.parse(
+            atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(token.split(".")[1].length / 4) * 4, "="))
+          );
+          if (payload.org_id && payload.user_id) {
+            this._persistIdentity(payload.org_id, payload.user_id, this._getAgentHandle());
+          }
+        }
+      }
+    } catch {}
   }
 
   // ── Think overrides ──
@@ -2274,7 +2329,7 @@ export class ChatAgent extends Think<Env> {
 
   // ── Telemetry emitter ──
   private get _telemetry() {
-    return createAgentEmitter(this.env as TelemetryBindings, this.name);
+    return createAgentEmitter(this.env as TelemetryBindings, this.name, this._getOrgId());
   }
 
   // ── Platform state (per-DO instance, survives across turns) ──
