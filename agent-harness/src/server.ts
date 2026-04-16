@@ -3662,6 +3662,57 @@ export class ChatAgent extends Think<Env> {
     }
   }
 
+  // ── Workspace file access (SDK pattern: @callable over WebSocket RPC) ──
+
+  @callable({ description: "List files in the agent's workspace" })
+  async listWorkspaceFiles(path: string = "/") {
+    try {
+      return await this.workspace.readDir(path);
+    } catch {
+      return [];
+    }
+  }
+
+  @callable({ description: "Read a file from the agent's workspace" })
+  async readWorkspaceFile(path: string) {
+    try {
+      return await this.workspace.readFile(path);
+    } catch {
+      return null;
+    }
+  }
+
+  @callable({ description: "Write a file to the agent's workspace" })
+  async writeWorkspaceFile(path: string, content: string) {
+    try {
+      await this.workspace.writeFile(path, content);
+      return { success: true, path };
+    } catch (err: any) {
+      return { error: err.message };
+    }
+  }
+
+  @callable({ description: "Delete a file from the agent's workspace" })
+  async deleteWorkspaceFile(path: string) {
+    try {
+      await this.workspace.rm(path);
+      return { deleted: true, path };
+    } catch (err: any) {
+      return { error: err.message };
+    }
+  }
+
+  @callable({ description: "List extensions loaded in this agent" })
+  async listExtensions() {
+    if (!this.extensionManager) return [];
+    return this.extensionManager.list();
+  }
+
+  @callable({ description: "Get response branch versions for a message" })
+  async getResponseVersions(userMessageId: string) {
+    return this.session.getBranches(userMessageId);
+  }
+
   @callable({ description: "Connect to an external MCP server. Set portal=true for Enterprise MCP Portal mode (collapses all tools into a single code tool — 94% token reduction for servers with many tools)." })
   async addServer(name: string, url: string, portal = false) {
     // SSRF validation
