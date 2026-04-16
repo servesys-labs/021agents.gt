@@ -88,9 +88,20 @@
   ],
 
   // Vectorize — semantic memory (cross-session embeddings)
+  // Kept for backwards compat; new code should use AI_SEARCH below.
   "vectorize": [
     { "binding": "VECTORIZE", "index_name": "agent-harness-memory" }
   ],
+
+  // AI Search — managed hybrid semantic + keyword search primitive
+  // Replaces custom Vectorize + FTS5 RAG. Agents create per-user/org instances at runtime.
+  "ai_search_namespaces": [
+    { "binding": "AI_SEARCH", "namespace": "agent-harness" }
+  ],
+
+  // Artifacts — Git-for-agents (BETA: wrangler config not yet supported, requires
+  // dashboard enablement). Once GA, uncomment:
+  // "artifacts": [{ "binding": "ARTIFACTS", "namespace": "agent-sessions" }]
 
   // Hyperdrive — Railway Postgres for durable cross-org data
   // Agent-harness writes: session records, billing, OTEL events

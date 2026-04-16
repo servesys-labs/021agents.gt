@@ -1732,26 +1732,11 @@ export class ChatAgent extends Think<Env> {
       if (override?.value) modelId = override.value;
     } catch {} // Fall back to config model if table doesn't exist yet
 
-    // OpenRouter models (via AI Gateway): model IDs contain "/" (e.g., "minimax/minimax-m2.7")
-    // Workers AI models: prefixed with "@cf/" (e.g., "@cf/moonshotai/kimi-k2.5")
-    if (modelId && !modelId.startsWith("@cf/") && modelId.includes("/")) {
-      // Route through Cloudflare AI Gateway → OpenRouter
-      // AI Gateway uses BYOK (stored keys) — provider API key injected at runtime.
-      // Auth: cf-aig-authorization header with CF_AIG_TOKEN
-      const accountId = "ae92d4bf7c6c448f442d084a2358dcd5";
-      const gatewayId = "one-shots";
-      const cfAigToken = (this.env as any).CF_AIG_TOKEN || "";
-      // AI Gateway accepts the CF AIG token in the standard Authorization header.
-      // The gateway recognizes it as a gateway token (cfut_ prefix) and uses BYOK
-      // to inject the stored provider API key for the upstream request.
-      const openrouter = createOpenAI({
-        apiKey: cfAigToken, // Gateway recognizes cfut_ tokens as gateway auth
-        baseURL: `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/openrouter`,
-      });
-      return openrouter(modelId);
-    }
-
-    // Default: Workers AI (free, no API key needed)
+    // Unified AI Gateway: env.AI.run("provider/model") routes to any of 70+ models
+    // across 12+ providers with automatic failover, BYOK, unified billing.
+    // - Workers AI:    "@cf/..." (e.g., "@cf/moonshotai/kimi-k2.5")
+    // - Unified:       "provider/model" (e.g., "anthropic/claude-opus-4-6")
+    // Both flow through env.AI — Cloudflare handles provider routing + cost attribution.
     const workersai = createWorkersAI({ binding: this.env.AI });
     return workersai(modelId as Parameters<typeof workersai>[0], {
       sessionAffinity: this.sessionAffinity,
@@ -4096,6 +4081,71 @@ export class ChatAgent extends Think<Env> {
   async cancelBackgroundTask(workflowId: string) {
     await this.terminateWorkflow(workflowId);
     return { cancelled: workflowId };
+  }
+
+  // ── AI Search: managed hybrid retrieval per user/org ──
+  // Each agent gets an isolated AI Search instance for its knowledge base.
+  // Replaces the custom Vectorize + FTS5 + RAG embed pipeline.
+
+  private _aiSearchInstanceId(): string {
+    return `${this._getOrgId()}-${this._getAgentHandle()}`;
+  }
+
+  @callable({ description: "Upload documents to this agent's knowledge base (AI Search)" })
+  async uploadToKnowledgeBase(files: Array<{ path: string; content: string }>) {
+    if (!this.env.AI_SEARCH) return { error: "AI_SEARCH binding not configured" };
+    const instance_id = this._aiSearchInstanceId();
+    try {
+      await this.env.AI_SEARCH.create({ instance_id, description: `KB for ${this.name}` }).catch(() => {}); // ignore if exists
+      const result = await this.env.AI_SEARCH.upload(instance_id, files);
+      return { instance_id, uploaded: result.uploaded };
+    } catch (err: any) {
+      return { error: err.message };
+    }
+  }
+
+  @callable({ description: "Search this agent's knowledge base" })
+  async searchKnowledgeBase(query: string, top_k = 5) {
+    if (!this.env.AI_SEARCH) return { matches: [], error: "AI_SEARCH not configured" };
+    try {
+      const instance_id = this._aiSearchInstanceId();
+      const result = await this.env.AI_SEARCH.search({
+        query,
+        ai_search_options: { instance_ids: [instance_id], top_k },
+      });
+      return { matches: result.matches };
+    } catch (err: any) {
+      return { matches: [], error: err.message };
+    }
+  }
+
+  // ── Artifacts: Git-for-agents session versioning ──
+  // Each session gets its own artifacts repo so users can time-travel,
+  // fork to collaborate, or `git clone` the session state externally.
+
+  @callable({ description: "Create a Git-versioned snapshot repo of this agent's session" })
+  async snapshotSession() {
+    if (!this.env.ARTIFACTS) return { error: "ARTIFACTS binding not configured" };
+    const repoName = `${this._getOrgId()}-${this._getAgentHandle()}-${Date.now()}`;
+    try {
+      const repo = await this.env.ARTIFACTS.create(repoName, {
+        description: `Session snapshot for ${this.name}`,
+      });
+      return { repo: repo.name, clone_url: repo.remote, token: repo.token };
+    } catch (err: any) {
+      return { error: err.message };
+    }
+  }
+
+  @callable({ description: "Fork a session artifacts repo (time-travel + collaborative debugging)" })
+  async forkSession(sourceRepo: string, targetName: string, readonly = false) {
+    if (!this.env.ARTIFACTS) return { error: "ARTIFACTS binding not configured" };
+    try {
+      const fork = await this.env.ARTIFACTS.fork(sourceRepo, { target: targetName, readonly });
+      return { repo: fork.name, clone_url: fork.remote, token: fork.token };
+    } catch (err: any) {
+      return { error: err.message };
+    }
   }
 
   @callable({ description: "Connect to an external MCP server. Set portal=true for Enterprise MCP Portal mode (collapses all tools into a single code tool — 94% token reduction for servers with many tools)." })
