@@ -120,6 +120,11 @@
 
   // Access code for login protection — set via: wrangler secret put ACCESS_CODE
   // Optional API keys for outbound Workers — also set as secrets
+  // Email Workers — outbound email via send_email binding
+  "send_email": [
+    { "name": "EMAIL" }
+  ],
+
   "vars": {
   }
 }
