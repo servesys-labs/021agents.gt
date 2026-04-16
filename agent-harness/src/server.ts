@@ -2427,6 +2427,57 @@ export class ChatAgent extends Think<Env> {
   //   [8] Cost-aware model routing
   // ═══════════════════════════════════════════════════════════════════
 
+  // ── Intent-based model router ─────────────────────────────────────
+  // Picks the optimal Workers AI model based on turn context:
+  //   - Explicit user override (set via UI)    → honor it
+  //   - Continuation / follow-up                → fast 20b
+  //   - Long context / complex coding           → kimi-k2.5 (best coding)
+  //   - Math/logic-heavy (numeric reasoning)    → deepseek-r1-distill
+  //   - Default personal agent (multi-skill)    → gpt-oss-120b (best general)
+  //
+  // Benchmarks (our Workers AI test, 2026-04-16):
+  //   gpt-oss-20b      1.6s median — fast responses, good instruction following
+  //   gpt-oss-120b     2.1s median — best general-purpose (90% MMLU-Pro, 97% AIME)
+  //   deepseek-r1-32b  6.8s median — 81% GPQA, best for math/logic
+  //   qwq-32b          7.8s median — reasoning specialist
+  //   nemotron-3-120b  5.4s median — multi-agent workflows
+  //   kimi-k2.5       62.8s median — best coding (65.8% SWE-bench, 256K ctx)
+  //   gemma-4-26b     42.0s median — strong but slow
+  private _routeModel(ctx: any): any | undefined {
+    // Skip routing if user set an explicit model override
+    try {
+      this._ensureSecretsTable();
+      const [override] = this.sql<{ value: string }>`
+        SELECT value FROM cf_agent_secrets WHERE key = '_model_override'
+      `;
+      if (override?.value) return undefined; // honor user choice, don't re-route
+    } catch {}
+
+    const workersai = createWorkersAI({ binding: this.env.AI });
+    const msgs = ctx.messages || [];
+    const lastUser = [...msgs].reverse().find((m: any) => m.role === "user");
+    const text = (lastUser?.parts?.find((p: any) => p.type === "text")?.text || "").toLowerCase();
+
+    // Heavy coding task → Kimi K2.5 (best SWE-bench, 256K context)
+    const codingCues = /\b(refactor|implement|fix bug|build app|write .* function|deploy|git commit|typescript|python|npm run|npx|docker)\b/;
+    const totalTokens = msgs.reduce((sum: number, m: any) => {
+      const content = typeof m.content === "string" ? m.content : JSON.stringify(m.parts || m.content || "");
+      return sum + Math.ceil(content.length / 4);
+    }, 0);
+    if (codingCues.test(text) && totalTokens > 4000) {
+      return workersai("@cf/moonshotai/kimi-k2.5" as any, { sessionAffinity: this.sessionAffinity });
+    }
+
+    // Math/logic-heavy → DeepSeek-R1 distill (best GPQA)
+    const reasoningCues = /\b(calculate|solve|prove|theorem|integral|derivative|equation|probability|optimize)\b/;
+    if (reasoningCues.test(text)) {
+      return workersai("@cf/deepseek-ai/deepseek-r1-distill-qwen-32b" as any, { sessionAffinity: this.sessionAffinity });
+    }
+
+    // Default: gpt-oss-120b — best balance for general personal agent
+    return workersai("@cf/openai/gpt-oss-120b" as any, { sessionAffinity: this.sessionAffinity });
+  }
+
   beforeTurn(ctx: any) {
     if (!ctx.continuation) {
       const ingress = this._pendingIngress.shift();
@@ -2522,18 +2573,25 @@ export class ChatAgent extends Think<Env> {
         }));
       }
 
-      // [8] Cost-aware model routing — if budget is low, use cheapest model
+      // [8a] Cost-aware model routing — if budget is low, use fastest cheapest model
       const remaining = budget - this._sessionCostUsd;
       if (remaining < budget * 0.2 && !ctx.continuation) {
         const workersai = createWorkersAI({ binding: this.env.AI });
-        config.model = workersai("@cf/moonshotai/kimi-k2.5" as any);
+        config.model = workersai("@cf/openai/gpt-oss-20b" as any);
       }
     }
 
-    // [8] Model routing — use cheaper model for continuation turns regardless
+    // [8b] Intent-based model routing — pick the right tool for the job.
+    // Applied unless beforeTurn already chose a model (budget/continuation).
+    if (!config.model) {
+      const routed = this._routeModel(ctx);
+      if (routed) config.model = routed;
+    }
+
+    // [8c] Continuation turns use the fast small model regardless
     if (ctx.continuation && !config.model) {
       const workersai = createWorkersAI({ binding: this.env.AI });
-      config.model = workersai("@cf/moonshotai/kimi-k2.5" as any);
+      config.model = workersai("@cf/openai/gpt-oss-20b" as any);
     }
 
     // ── Reliability signals: user_correction detection ──
@@ -4592,6 +4650,23 @@ export default {
           description,
         }))
       );
+    }
+
+    // ── Direct model TTFT benchmark ──
+    if (url.pathname === "/api/test-model") {
+      const model = url.searchParams.get("model") || "@cf/moonshotai/kimi-k2.5";
+      const prompt = url.searchParams.get("prompt") || "What is 2+2? Answer with just the number.";
+      const t = Date.now();
+      try {
+        const result = await env.AI.run(model as any, {
+          messages: [{ role: "user", content: prompt }],
+          stream: false,
+        }) as any;
+        const text = result.response || result.result?.response || result.choices?.[0]?.message?.content || JSON.stringify(result).slice(0, 200);
+        return Response.json({ model, ms: Date.now() - t, response: String(text).slice(0, 200) });
+      } catch (e: any) {
+        return Response.json({ model, ms: Date.now() - t, error: e.message?.slice(0, 200) });
+      }
     }
 
     // ── Direct container test ──
