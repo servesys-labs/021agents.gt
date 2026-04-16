@@ -1485,6 +1485,9 @@ import { Session } from "agents/experimental/memory/session";
 import { createCompactFunction } from "agents/experimental/memory/utils";
 
 export class ChatAgent extends Think<Env> {
+  private static readonly CHAT_FIBER_PREFIX = "__cf_internal_chat_turn:";
+  private static readonly RECOVERY_STALE_CUTOFF_MS = 120_000;
+
   // Wait for MCP connections to restore after hibernation
   waitForMcpConnections = true;
 
@@ -1562,14 +1565,11 @@ export class ChatAgent extends Think<Env> {
     }
   }
 
-  // ── Durability: wrap chat turns in runFiber for crash recovery ──
-  // If the DO is evicted mid-turn, onChatRecovery() fires on restart
-  // and can resume streaming or persist partial results.
-  // Disabled: chatRecovery fibers from crashed container turns permanently jam the DO.
-  // The SDK's recovery flow has a race condition: _notifyStreamResuming excludes the
-  // connection before onChatRecovery runs, and pending tool calls block new turns.
-  // Re-enable once @cloudflare/think handles orphaned fibers gracefully.
-  chatRecovery = false;
+  // ── Durability: guarded chat recovery ─────────────────────────────
+  // Keep fiber durability enabled so interrupted turns are surfaced via
+  // onChatRecovery(), but never auto-continue a recovered turn.
+  // This avoids replaying stale tool states after container-level failures.
+  chatRecovery = true;
 
   // ── Org/agent extraction from DO name (pattern: orgId-agentName-u-userId) ──
   private _getOrgId(): string {
@@ -1597,6 +1597,97 @@ export class ChatAgent extends Think<Env> {
 
   // ── Extensions: LLM can create tools at runtime ──
   extensionLoader = this.env.LOADER;
+
+  private _nowMs(): number {
+    return Date.now();
+  }
+
+  private _scrubStaleRecoveryState(reason: string): {
+    staleFiberRows: number;
+    staleStreamRows: number;
+    staleChunkRows: number;
+  } {
+    const cutoff = this._nowMs() - ChatAgent.RECOVERY_STALE_CUTOFF_MS;
+    const cutoffIso = new Date(cutoff).toISOString();
+    const cutoffSec = Math.floor(cutoff / 1000);
+
+    // Each block wrapped in try/catch — tables may not exist on fresh DOs
+    let staleFiberRows = 0;
+    try {
+      staleFiberRows = this.sql<{ cnt: number }>`
+        SELECT COUNT(*) as cnt FROM cf_agents_runs
+        WHERE name LIKE ${`${ChatAgent.CHAT_FIBER_PREFIX}%`} AND created_at < ${cutoff}
+      `[0]?.cnt || 0;
+      if (staleFiberRows > 0) {
+        this.sql`DELETE FROM cf_agents_runs
+          WHERE name LIKE ${`${ChatAgent.CHAT_FIBER_PREFIX}%`} AND created_at < ${cutoff}`;
+      }
+    } catch {} // table doesn't exist yet
+
+    let staleStreamRows = 0;
+    let staleChunkRows = 0;
+    try {
+      const staleStreams = this.sql<{ id: string }>`
+        SELECT id FROM cf_ai_chat_stream_metadata
+        WHERE status = 'streaming' AND created_at < ${cutoff}
+      `;
+      staleStreamRows = staleStreams.length;
+      if (staleStreamRows > 0) {
+        for (const s of staleStreams) {
+          try {
+            staleChunkRows += this.sql<{ cnt: number }>`
+              SELECT COUNT(*) as cnt FROM cf_ai_chat_stream_chunks WHERE stream_id = ${s.id}
+            `[0]?.cnt || 0;
+          } catch {}
+        }
+        try {
+          this.sql`DELETE FROM cf_ai_chat_stream_chunks
+            WHERE stream_id IN (SELECT id FROM cf_ai_chat_stream_metadata WHERE status = 'streaming' AND created_at < ${cutoff})`;
+        } catch {}
+        this.sql`DELETE FROM cf_ai_chat_stream_metadata WHERE status = 'streaming' AND created_at < ${cutoff}`;
+      }
+    } catch {} // tables don't exist yet
+
+    // Clear stale "running" markers on schedules
+    try {
+      this.sql`UPDATE cf_agents_schedules SET running = 0, execution_started_at = NULL
+        WHERE running = 1 AND coalesce(execution_started_at, 0) < ${cutoffSec}`;
+    } catch {};
+
+    if (staleFiberRows > 0 || staleStreamRows > 0) {
+      emit(this.env as TelemetryBindings, {
+        type: "runtime.recovery_scrubbed",
+        agentName: this.name,
+        reason,
+        staleFiberRows,
+        staleStreamRows,
+        staleChunkRows,
+        cutoffIso,
+      });
+    }
+
+    return { staleFiberRows, staleStreamRows, staleChunkRows };
+  }
+
+  @callable({ description: "Repair stale chat recovery state (orphaned fibers/streams) to unstick a poisoned agent instance." })
+  repairRecoveryState() {
+    this.resetTurnState();
+    try {
+      (this as any)._resumableStream?.clearAll();
+      (this as any)._pendingResumeConnections?.clear();
+    } catch {}
+    const stats = this._scrubStaleRecoveryState("manual_repair");
+    this.broadcast(JSON.stringify({
+      type: "agent_recovery_repaired",
+      ...stats,
+      repaired_at: new Date().toISOString(),
+    }));
+    return { ok: true, ...stats };
+  }
+
+  async onConnect(connection: any, ctx: any) {
+    try { this._scrubStaleRecoveryState("connect_guard"); } catch {}
+  }
 
   // ── Think overrides ──
 
@@ -2942,10 +3033,12 @@ export class ChatAgent extends Think<Env> {
     // Force-clear the active stream and pending resume connections.
     // Without this, _notifyStreamResuming adds new connections to the
     // exclusion set BEFORE recovery runs, so they never receive messages.
+    this.resetTurnState();
     try {
       (this as any)._resumableStream?.clearAll();
       (this as any)._pendingResumeConnections?.clear();
     } catch {}
+    this._scrubStaleRecoveryState("chat_recovery");
 
     // Persist partial text if any, but never continue the dead turn
     return { persist: partialText.length > 0, continue: false };
