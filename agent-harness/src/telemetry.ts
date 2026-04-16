@@ -125,7 +125,8 @@ export type TelemetryEventType =
   | "agent.skill_added"
   | "agent.skill_removed"
   | "agent.channel_deployed"
-  // Extended events (budget, signals, archival, skills, etc.)
+  // Extended events (budget, signals, archival, skills, runtime, etc.)
+  | "runtime.recovery_scrubbed"
   | "billing.budget_exceeded"
   | "tool.permission_denied"
   | "tool.output_truncated"
