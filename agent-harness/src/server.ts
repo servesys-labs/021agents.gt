@@ -1514,6 +1514,7 @@ import { createCompactFunction } from "agents/experimental/memory/utils";
 export class ChatAgent extends Think<Env> {
   private static readonly CHAT_FIBER_PREFIX = "__cf_internal_chat_turn:";
   private static readonly RECOVERY_STALE_CUTOFF_MS = 120_000;
+  private static readonly PERF_TRACE_PREFIX = "[perf.trace]";
 
   // Wait for MCP connections to restore after hibernation
   waitForMcpConnections = true;
@@ -1919,7 +1920,7 @@ export class ChatAgent extends Think<Env> {
     // Credentials injected via Outbound Workers — agent never sees secrets.
     // ═══════════════════════════════════════════════════════════════════
     const sdkSandboxTools = config.enableSandbox ? createSandboxTools(this.env.Sandbox, {
-      hostname: "agent-harness.servesys.workers.dev",
+      hostname: "app.021agents.ai",
       sandboxId: "sb-v3",
     }) : {};
 
@@ -2298,6 +2299,20 @@ export class ChatAgent extends Think<Env> {
   private _consecutiveDups = 0;                            // loop detection
   private _sessionCostUsd = 0;                             // cost accumulator (loaded from DO SQLite)
   private _costTableReady = false;
+  private _pendingIngress: Array<{
+    requestId: string;
+    receivedAt: number;
+    channel: "ws" | "http";
+    path: string;
+  }> = [];
+  private _activePerfTrace: {
+    traceId: string;
+    requestId: string;
+    ingressAt: number;
+    turnStartAt: number;
+    firstStepLogged: boolean;
+  } | null = null;
+  private _perfCounter = 0;
 
   /** Load persisted session cost from DO SQLite (survives hibernation). */
   private _loadPersistedCost() {
@@ -2339,6 +2354,70 @@ export class ChatAgent extends Think<Env> {
   private static readonly TOOL_OUTPUT_MAX_CHARS = 30_000;  // ~10K tokens
   private static readonly BUDGET_WARNING_THRESHOLD = 0.8;  // warn at 80% of budget
 
+  private _nextPerfTraceId(): string {
+    this._perfCounter += 1;
+    return `${Date.now()}-${this._perfCounter}`;
+  }
+
+  private _tracePerf(
+    stage: string,
+    data: Record<string, unknown>,
+  ): void {
+    console.log(
+      `${ChatAgent.PERF_TRACE_PREFIX} ${JSON.stringify({
+        agent: this.name,
+        stage,
+        at: new Date().toISOString(),
+        ...data,
+      })}`,
+    );
+  }
+
+  private _recordIngress(
+    requestId: string,
+    channel: "ws" | "http",
+    path: string,
+  ): void {
+    const receivedAt = Date.now();
+    this._pendingIngress.push({ requestId, receivedAt, channel, path });
+    if (this._pendingIngress.length > 32) this._pendingIngress.shift();
+    this._tracePerf("ingress_received", { requestId, channel, path });
+  }
+
+  async onStart() {
+    const baseOnMessage = this.onMessage.bind(this);
+    this.onMessage = async (connection: any, message: any) => {
+      if (typeof message === "string") {
+        try {
+          const parsed = JSON.parse(message) as { type?: string; id?: string };
+          if (
+            parsed?.type === "cf_agent_use_chat_request" &&
+            typeof parsed?.id === "string" &&
+            parsed.id.length > 0
+          ) {
+            this._recordIngress(parsed.id, "ws", "ws://chat");
+          }
+        } catch {}
+      }
+      return baseOnMessage(connection, message);
+    };
+
+    const baseOnRequest = this.onRequest.bind(this);
+    this.onRequest = async (request: Request) => {
+      if (request.method === "POST") {
+        const url = new URL(request.url);
+        if (url.pathname.startsWith("/chat/")) {
+          const requestId =
+            request.headers.get("x-request-id") ||
+            request.headers.get("cf-ray") ||
+            `http-${crypto.randomUUID()}`;
+          this._recordIngress(requestId, "http", url.pathname);
+        }
+      }
+      return baseOnRequest(request);
+    };
+  }
+
   // ═══════════════════════════════════════════════════════════════════
   // beforeTurn — runs BEFORE every inference call
   //
@@ -2349,6 +2428,38 @@ export class ChatAgent extends Think<Env> {
   // ═══════════════════════════════════════════════════════════════════
 
   beforeTurn(ctx: any) {
+    if (!ctx.continuation) {
+      const ingress = this._pendingIngress.shift();
+      const turnStartAt = Date.now();
+      const traceId = this._nextPerfTraceId();
+      if (ingress) {
+        const queueWaitMs = turnStartAt - ingress.receivedAt;
+        this._activePerfTrace = {
+          traceId,
+          requestId: ingress.requestId,
+          ingressAt: ingress.receivedAt,
+          turnStartAt,
+          firstStepLogged: false,
+        };
+        this._tracePerf("turn_started", {
+          traceId,
+          requestId: ingress.requestId,
+          channel: ingress.channel,
+          path: ingress.path,
+          queueWaitMs,
+        });
+      } else {
+        this._activePerfTrace = {
+          traceId,
+          requestId: "unknown",
+          ingressAt: turnStartAt,
+          turnStartAt,
+          firstStepLogged: false,
+        };
+        this._tracePerf("turn_started_no_ingress", { traceId });
+      }
+    }
+
     // Load persisted cost from DO SQLite (survives hibernation)
     this._loadPersistedCost();
     // Reconnect MCP servers from DO SQLite (after hibernation)
@@ -2662,6 +2773,18 @@ export class ChatAgent extends Think<Env> {
   // ═══════════════════════════════════════════════════════════════════
 
   onStepFinish(ctx: any) {
+    if (this._activePerfTrace && !this._activePerfTrace.firstStepLogged) {
+      this._activePerfTrace.firstStepLogged = true;
+      const now = Date.now();
+      this._tracePerf("first_step_finished", {
+        traceId: this._activePerfTrace.traceId,
+        requestId: this._activePerfTrace.requestId,
+        firstStepDurationMs: ctx.duration || 0,
+        sinceTurnStartMs: now - this._activePerfTrace.turnStartAt,
+        sinceIngressMs: now - this._activePerfTrace.ingressAt,
+      });
+    }
+
     const usage = ctx.usage || {};
     const costUsd = ctx.cost || 0;
 
@@ -2730,6 +2853,18 @@ export class ChatAgent extends Think<Env> {
   // ═══════════════════════════════════════════════════════════════════
 
   async onChatResponse(result: ChatResponseResult) {
+    if (this._activePerfTrace) {
+      const now = Date.now();
+      this._tracePerf("turn_response", {
+        traceId: this._activePerfTrace.traceId,
+        requestId: this._activePerfTrace.requestId,
+        status: result.status,
+        totalSinceTurnStartMs: now - this._activePerfTrace.turnStartAt,
+        totalSinceIngressMs: now - this._activePerfTrace.ingressAt,
+      });
+      this._activePerfTrace = null;
+    }
+
     if (result.status === "completed") {
       const costUsd = (result as any).cost || 0;
       const model = (result as any).model || "";
@@ -4065,7 +4200,7 @@ export class ChatAgent extends Think<Env> {
       ...sharedTools(),
       ...webSearchTools(),
       ...browserTools(this.env),
-      ...(getTenantConfig(this.name).enableSandbox ? createSandboxTools(this.env.Sandbox, { hostname: "agent-harness.servesys.workers.dev", sandboxId: "sb-v3" }) : {}),
+      ...(getTenantConfig(this.name).enableSandbox ? createSandboxTools(this.env.Sandbox, { hostname: "app.021agents.ai", sandboxId: "sb-v3" }) : {}),
     };
     return generateTypes(allTools);
   }
@@ -4134,7 +4269,7 @@ export class AgentSupervisor extends Think<Env> {
       ...browserTools(this.env),
     };
     if (this._agentConfig?.enable_sandbox) {
-      Object.assign(tools, createSandboxTools(this.env.Sandbox, { hostname: "agent-harness.servesys.workers.dev", sandboxId: "sb-v3" }));
+      Object.assign(tools, createSandboxTools(this.env.Sandbox, { hostname: "app.021agents.ai", sandboxId: "sb-v3" }));
     }
     return tools;
   }
