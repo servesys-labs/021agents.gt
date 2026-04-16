@@ -1257,6 +1257,20 @@ export class ResearchSpecialist extends Think<Env> {
     };
   }
   getMaxSteps() { return 15; }
+
+  // Handle delegated tasks via @callable RPC (avoids I/O isolation and partyserver routing)
+  @callable({ description: "Run a task using this specialist's tools and return the result" })
+  async handleTask(task: string): Promise<string> {
+    const { generateText: gen } = await import("ai");
+    const result = await gen({
+      model: this.getModel(),
+      system: this.getSystemPrompt(),
+      messages: [{ role: "user" as const, content: task }],
+      tools: this.getTools(),
+      stopWhen: stepCountIs(this.getMaxSteps()),
+    });
+    return result.text || "(no result)";
+  }
 }
 
 // ── Memory Specialist — passive memory pipeline ──
@@ -1456,6 +1470,19 @@ export class CodingSpecialist extends Think<Env> {
   }
 
   getMaxSteps() { return 25; }
+
+  @callable({ description: "Run a coding task using this specialist's tools and return the result" })
+  async handleTask(task: string): Promise<string> {
+    const { generateText: gen } = await import("ai");
+    const result = await gen({
+      model: this.getModel(),
+      system: this.getSystemPrompt(),
+      messages: [{ role: "user" as const, content: task }],
+      tools: this.getTools(),
+      stopWhen: stepCountIs(this.getMaxSteps()),
+    });
+    return result.text || "(no result)";
+  }
 }
 
 // ── ChatAgent ─────────────────────────────────────────────────────────────────
@@ -1775,18 +1802,13 @@ export class ChatAgent extends Think<Env> {
           this._telemetry.delegationStarted(this.name, "research-specialist");
           const start = Date.now();
           try {
-            const researcher = await this.subAgent(ResearchSpecialist, "researcher");
-            let result = "";
-            await researcher.chat(task, {
-              onEvent: (json: string) => {
-                const evt = JSON.parse(json);
-                if (evt.type === "text-delta") result += evt.textDelta ?? "";
-              },
-              onDone: () => {},
-              onError: (err: string) => { result = `Research error: ${err}`; },
-            });
+            // Use getAgentByName RPC — avoids both I/O isolation (subAgent streaming)
+            // and partyserver routing (DO fetch). The specialist's handleTask() callable
+            // runs generateText and returns the result as a string.
+            const specialist = await getAgentByName(this.env.ResearchSpecialist, `${this._getOrgId()}-researcher`);
+            const result = await (specialist as any).handleTask(task);
             this._telemetry.delegationCompleted(this.name, "research-specialist", 0);
-            return { task, result, latencyMs: Date.now() - start };
+            return { task, result: result.slice(0, 8000), latencyMs: Date.now() - start };
           } catch (err) {
             this._telemetry.toolFailed(this.name, "delegateResearch", String(err));
             return { task, error: `Sub-agent failed: ${String(err)}` };
@@ -1803,18 +1825,10 @@ export class ChatAgent extends Think<Env> {
           this._telemetry.delegationStarted(this.name, "coding-specialist");
           const start = Date.now();
           try {
-            const coder = await this.subAgent(CodingSpecialist, "coder");
-            let result = "";
-            await coder.chat(task, {
-              onEvent: (json: string) => {
-                const evt = JSON.parse(json);
-                if (evt.type === "text-delta") result += evt.textDelta ?? "";
-              },
-              onDone: () => {},
-              onError: (err: string) => { result = `Coding error: ${err}`; },
-            });
+            const specialist = await getAgentByName(this.env.CodingSpecialist, `${this._getOrgId()}-coder`);
+            const result = await (specialist as any).handleTask(task);
             this._telemetry.delegationCompleted(this.name, "coding-specialist", 0);
-            return { task, result, latencyMs: Date.now() - start };
+            return { task, result: result.slice(0, 8000), latencyMs: Date.now() - start };
           } catch (err) {
             this._telemetry.toolFailed(this.name, "delegateCoding", String(err));
             return { task, error: `Sub-agent failed: ${String(err)}` };
